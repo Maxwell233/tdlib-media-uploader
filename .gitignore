@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# TDLib local login/database/cache
+/tdlib_data/
+/tdlib_files/
+
+# Uploader state/cache
+/.state/
+/.image_state/
+/.thumb_cache/
+
+# Local tools/binaries
+/tools/exiftool.exe
+/tools/exiftool_files/
+*.exe
+*.dll
+
+# Local overrides / secrets
+config.local.toml
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
