@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""TDLib Media Uploader V1.6 的 Rich 终端界面。"""
+"""TDLib Media Uploader V1.6.2 的 Rich 终端界面。"""
 
 from __future__ import annotations
 
@@ -52,40 +52,64 @@ class PrettyConsoleUI:
         self.enabled = bool(enabled)
         self.console = Console(highlight=False)
         self.live = None
+        self._terminal_size = self._read_terminal_size()
+
+    def _read_terminal_size(self) -> tuple[int, int]:
+        size = self.console.size
+        return int(size.width), int(size.height)
 
     def _stop_live_unlocked(self):
         if self.live is not None:
-            self.live.stop()
-            self.live = None
+            try:
+                self.live.stop()
+            finally:
+                self.live = None
+
+    def _handle_terminal_resize_unlocked(self) -> bool:
+        """窗口尺寸变化时重建 Live 区域，避免 Windows 终端留下残影。"""
+        current = self._read_terminal_size()
+        if current == self._terminal_size:
+            return False
+
+        self._terminal_size = current
+        self._stop_live_unlocked()
+        self.console.clear()
+        return True
 
     def log(self, text=""):
         with self.lock:
             self._stop_live_unlocked()
+            self._terminal_size = self._read_terminal_size()
             self.console.print(str(text), markup=False, highlight=False)
 
     def info(self, text):
         with self.lock:
             self._stop_live_unlocked()
+            self._terminal_size = self._read_terminal_size()
             self.console.print(f"[bold cyan]ℹ[/] {text}")
 
     def success(self, text):
         with self.lock:
             self._stop_live_unlocked()
+            self._terminal_size = self._read_terminal_size()
             self.console.print(f"[bold green]✓[/] {text}")
 
     def warning(self, text):
         with self.lock:
             self._stop_live_unlocked()
+            self._terminal_size = self._read_terminal_size()
             self.console.print(f"[bold yellow]![/] {text}")
 
     def error(self, text):
         with self.lock:
             self._stop_live_unlocked()
+            self._terminal_size = self._read_terminal_size()
             self.console.print(f"[bold red]✗[/] {text}")
 
     def banner(self, title: str, subtitle: str = "", *, accent="cyan"):
         with self.lock:
             self._stop_live_unlocked()
+            self._terminal_size = self._read_terminal_size()
             body = Text()
             body.append(title, style=f"bold bright_{accent}")
             if subtitle:
@@ -97,6 +121,7 @@ class PrettyConsoleUI:
                     border_style=f"bright_{accent}",
                     box=box.ROUNDED,
                     padding=(0, 2),
+                    expand=True,
                 )
             )
 
@@ -114,6 +139,7 @@ class PrettyConsoleUI:
             table.add_row(str(key), str(value))
         with self.lock:
             self._stop_live_unlocked()
+            self._terminal_size = self._read_terminal_size()
             self.console.print(
                 Panel(
                     table,
@@ -122,6 +148,7 @@ class PrettyConsoleUI:
                     border_style=f"bright_{accent}",
                     box=box.ROUNDED,
                     padding=(0, 1),
+                    expand=True,
                 )
             )
 
@@ -151,6 +178,7 @@ class PrettyConsoleUI:
             table.add_row(*(str(value) for value in row))
         with self.lock:
             self._stop_live_unlocked()
+            self._terminal_size = self._read_terminal_size()
             self.console.print(table)
 
     def groups(self, title: str, rows: Iterable[Iterable[object]], *, kind="VIDEO"):
@@ -171,6 +199,7 @@ class PrettyConsoleUI:
             table.add_row(*(str(value) for value in row))
         with self.lock:
             self._stop_live_unlocked()
+            self._terminal_size = self._read_terminal_size()
             self.console.print(table)
 
     def target(self, chat_title, topic_name, chat_id, topic_id):
@@ -202,18 +231,21 @@ class PrettyConsoleUI:
                 body.append(str(row), style="white")
         with self.lock:
             self._stop_live_unlocked()
+            self._terminal_size = self._read_terminal_size()
             self.console.print(
                 Panel(
                     body,
                     border_style=f"bright_{accent}",
                     box=box.ROUNDED,
                     padding=(0, 1),
+                    expand=True,
                 )
             )
 
     def confirm_upload(self) -> bool:
         with self.lock:
             self._stop_live_unlocked()
+            self._terminal_size = self._read_terminal_size()
             answer = self.console.input(
                 "\n[bold cyan]确认开始上传？[/] 输入 [bold green]y[/] 继续："
             )
@@ -238,8 +270,10 @@ class PrettyConsoleUI:
         total_bytes,
     ):
         ratio = max(0.0, min(float(ratio), 1.0))
-        filled = int(round(self.bar_width * ratio))
-        empty = self.bar_width - filled
+        terminal_width = max(40, self._read_terminal_size()[0])
+        responsive_bar_width = min(self.bar_width, max(12, terminal_width - 46))
+        filled = int(round(responsive_bar_width * ratio))
+        empty = responsive_bar_width - filled
 
         if kind.upper() == "VIDEO":
             title = " VIDEO · TDLib 上传 "
@@ -282,6 +316,7 @@ class PrettyConsoleUI:
             border_style=accent,
             box=box.ROUNDED,
             padding=(0, 1),
+            expand=True,
         )
 
     def progress(
@@ -311,6 +346,8 @@ class PrettyConsoleUI:
                 )
                 return
 
+            self._handle_terminal_resize_unlocked()
+
             renderable = self._render_progress(
                 kind=kind,
                 ratio=ratio,
@@ -331,14 +368,18 @@ class PrettyConsoleUI:
                     console=self.console,
                     refresh_per_second=self.refresh_hz,
                     transient=self.transient,
-                    auto_refresh=True,
+                    auto_refresh=False,
+                    vertical_overflow="crop",
+                    redirect_stdout=False,
+                    redirect_stderr=False,
                 )
-                self.live.start()
+                self.live.start(refresh=True)
             else:
                 self.live.update(renderable, refresh=True)
 
     def finish(self):
         with self.lock:
             self._stop_live_unlocked()
+            self._terminal_size = self._read_terminal_size()
             if not self.enabled:
                 self.console.print()
