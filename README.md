@@ -68,19 +68,14 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 3. 检查并固定 `tdjson==1.8.64.post1`；
 4. 如果本地还没有 `config.toml`，自动从 `config.example.toml` 创建；
 5. 检查 Python / pip 命令退出码，安装失败时直接显示具体错误；
-6. 安装完成或失败后等待 Enter，不会自动关闭窗口。
+6. 安装完成或失败后等待。
 
 已有 `config.toml` 时不会覆盖。
 
-如需在自动化脚本中运行而不等待 Enter，可以使用：
-
-```powershell
-.\setup.ps1 -NoPause
-```
 
 ## 创建和修改配置文件
 
-仓库只提交：
+配置文件模板：
 
 ```text
 config.example.toml
@@ -299,47 +294,10 @@ tdlib-media-uploader\
 └─ .thumb_cache\
 ```
 
-## 常见问题
-
-### setup 一闪而过
-
-优先双击：
-
-```text
-setup.cmd
-```
-
-或者在已经打开的 PowerShell 中执行：
-
-```powershell
-.\setup.ps1
-```
-
-V1.6 当前版本的 `setup.ps1` 会在成功和失败后都等待 Enter。如果仍然出现问题，可以直接看到安装错误。
-
-### run 一闪而过
-
-优先双击：
-
-```text
-run.cmd
-```
-
-如果 `run.ps1` 发生异常，`run.cmd` 会停留并显示退出代码。正常从菜单选择退出时则会直接关闭窗口。
-
-### .venv 损坏或 Python 路径异常
-
-确认已安装 Python 3.13 x64。如果 `.venv` 已损坏，可以删除后重新安装：
-
-```powershell
-Remove-Item -Recurse -Force .\.venv
-.\setup.ps1
-```
 
 ## 注意事项
 
 - 不要同时运行图片和视频上传任务；两个 `run_*.ps1` 已使用 Windows Named Mutex 防止并发启动。
-- 不要公开 `config.toml` 中的 `api_hash`。
 - 不建议手动升级 `tdjson`，除非确认新版本兼容。
 - 本项目用于个人 Telegram 媒体整理和批量上传；请遵守 Telegram 的使用条款和目标群组规则。
 - 本项目与 Telegram 官方无隶属关系。
