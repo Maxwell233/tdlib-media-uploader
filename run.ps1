@@ -3,10 +3,11 @@ Set-Location $PSScriptRoot
 
 function Show-Banner {
     Clear-Host
-    Write-Host "╭────────────────────────────────────────────────────────────╮" -ForegroundColor Cyan
-    Write-Host "│              TDLib Media Uploader  V1.6                    │" -ForegroundColor Cyan
-    Write-Host "│           Telegram 批量图片 / 视频 Album 上传              │" -ForegroundColor DarkCyan
-    Write-Host "╰────────────────────────────────────────────────────────────╯" -ForegroundColor Cyan
+    $line = "─" * 64
+    Write-Host $line -ForegroundColor Cyan
+    Write-Host "  TDLib Media Uploader  V1.6.2" -ForegroundColor Cyan
+    Write-Host "  Telegram 批量图片 / 视频 Album 上传" -ForegroundColor DarkCyan
+    Write-Host $line -ForegroundColor Cyan
     Write-Host ""
 }
 
@@ -45,8 +46,7 @@ function Invoke-Uploader {
     Write-Host "→ 启动 $DisplayName" -ForegroundColor Yellow
     Write-Host ""
 
-    # 关键修复：上传脚本在独立 PowerShell 子进程中运行。
-    # 这样 run_video.ps1 / run_image.ps1 内部的 exit 不会把主菜单一起关闭。
+    # 上传脚本在独立 PowerShell 子进程中运行，避免子脚本 exit 关闭主菜单。
     & powershell.exe `
         -NoLogo `
         -NoProfile `
@@ -130,10 +130,9 @@ try {
 }
 catch {
     Write-Host ""
-    Write-Host "╭────────────────────── 运行失败 ────────────────────────────╮" -ForegroundColor Red
-    Write-Host "│ 主菜单未能正常启动。请查看下方错误。                     │" -ForegroundColor Red
-    Write-Host "╰────────────────────────────────────────────────────────────╯" -ForegroundColor Red
-    Write-Host ""
+    Write-Host ("─" * 64) -ForegroundColor Red
+    Write-Host "运行失败" -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host ("─" * 64) -ForegroundColor Red
     exit 1
 }
