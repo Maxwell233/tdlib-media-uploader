@@ -36,7 +36,7 @@ try {
     Write-Host "╰────────────────────────────────────────────────────────────╯" -ForegroundColor Cyan
     Write-Host ""
 
-    & ".\.venv\Scripts\python.exe" ".\tdlib_video_album_uploader.py"
+    & ".\.venv\Scripts\python.exe" ".\tdlib_video_app.py"
 }
 finally {
     if ($hasLock) {

@@ -252,7 +252,8 @@ tdlib-media-uploader\
 ├─ app_config.py
 ├─ pretty_ui.py
 ├─ tdlib_common.py
-├─ tdlib_video_album_uploader.py
+├─ tdlib_video_app.py            # V1.6 视频入口 / UI
+├─ tdlib_video_album_uploader.py # 视频上传核心
 ├─ tdlib_image_album_uploader.py
 ├─ run.ps1
 ├─ run_video.ps1
