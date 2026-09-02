@@ -1,25 +1,15 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
-    Write-Host ""
-    Write-Host "还没有创建虚拟环境，请先运行：" -ForegroundColor Yellow
-    Write-Host ".\setup.ps1"
+    Write-Host "✗ 尚未安装运行环境，请先运行 .\setup.ps1" -ForegroundColor Red
     exit 1
 }
 
-# ------------------------------------------------------------
-# 共享 TDLib 数据库互斥锁
-#
-# 视频脚本和图片脚本都使用同一个：
-#   tdlib_data
-#   tdlib_files
-#
-# 因此绝对不要同时启动。
-#
-# 这里使用同一个 Windows Named Mutex。
-# 如果另一个上传脚本已经在运行，本脚本会直接退出。
-# ------------------------------------------------------------
+if (-not (Test-Path ".\config.toml")) {
+    Write-Host "✗ 找不到 config.toml，请先运行 .\run.ps1 创建配置。" -ForegroundColor Red
+    exit 1
+}
 
 $mutexName = "Local\TDLibMediaUploader_Telegram"
 $mutex = New-Object System.Threading.Mutex($false, $mutexName)
@@ -30,33 +20,27 @@ try {
         $hasLock = $mutex.WaitOne(0)
     }
     catch [System.Threading.AbandonedMutexException] {
-        # 上一次脚本被强制关闭后，Windows 会把锁判为 abandoned。
-        # 此时当前进程已经获得锁，可以继续。
         $hasLock = $true
     }
 
     if (-not $hasLock) {
         Write-Host ""
-        Write-Host "另一个 TDLib 上传脚本正在运行。" -ForegroundColor Red
-        Write-Host "视频脚本和图片脚本不能同时使用同一个 tdlib_data / tdlib_files。"
-        Write-Host "请先关闭另一个上传窗口，再运行。"
+        Write-Host "✗ 另一个 TDLib 上传任务正在运行。" -ForegroundColor Red
+        Write-Host "  图片和视频脚本共享 tdlib_data / tdlib_files，不能同时运行。" -ForegroundColor DarkGray
         exit 2
     }
 
     Write-Host ""
-    Write-Host "=== 启动：视频按月 Album 上传 ===" -ForegroundColor Cyan
+    Write-Host "╭────────────────────────────────────────────────────────────╮" -ForegroundColor Cyan
+    Write-Host "│  VIDEO · 按月份 Album 上传 · V1.6                               │" -ForegroundColor Cyan
+    Write-Host "╰────────────────────────────────────────────────────────────╯" -ForegroundColor Cyan
     Write-Host ""
 
     & ".\.venv\Scripts\python.exe" ".\tdlib_video_album_uploader.py"
 }
 finally {
     if ($hasLock) {
-        try {
-            $mutex.ReleaseMutex()
-        }
-        catch {
-        }
+        try { $mutex.ReleaseMutex() } catch {}
     }
-
     $mutex.Dispose()
 }
