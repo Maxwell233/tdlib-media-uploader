@@ -1,3 +1,7 @@
+# Local configuration / credentials
+/config.toml
+/config.local.toml
+
 # Python
 .venv/
 __pycache__/
@@ -7,19 +11,16 @@ __pycache__/
 /tdlib_data/
 /tdlib_files/
 
-# Uploader state/cache
+# Upload state / cache
 /.state/
 /.image_state/
 /.thumb_cache/
 
-# Local tools/binaries
+# Optional local tools / binaries
 /tools/exiftool.exe
 /tools/exiftool_files/
 *.exe
 *.dll
-
-# Local overrides / secrets
-config.local.toml
 
 # OS / editor
 .DS_Store

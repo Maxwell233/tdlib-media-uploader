@@ -1,0 +1,115 @@
+# ============================================================
+# TDLib Media Uploader V1.6
+#
+# 首次使用：
+#   1. 复制本文件为 config.toml
+#   2. 填写 Telegram API、目标群/Topic 和本地目录
+#
+# setup.ps1 / run.ps1 在发现 config.toml 不存在时也会自动创建。
+#
+# Windows 路径建议使用单引号：
+# video_dir = 'F:\Videos'
+# 这样反斜杠不需要写成 \\。
+# ============================================================
+
+
+[telegram]
+
+# 在 https://my.telegram.org/ 获取
+api_id = 12345678
+api_hash = "YOUR_API_HASH"
+
+# Telegram 超级群 Chat ID，例如 -1001234567890
+chat_id = -1001234567890
+
+# Forum Topic ID
+forum_topic_id = 12345
+
+
+[paths]
+
+# 会递归扫描所有子文件夹
+video_dir = 'F:\Videos'
+image_dir = 'F:\Images'
+
+# 可选：ExifTool 路径
+# 如果 tools\exiftool.exe 不存在，且 missing_date_policy = "mtime"，
+# 视频脚本会直接使用 Windows 修改时间，不会报错。
+exiftool_path = 'tools\exiftool.exe'
+
+
+[video]
+
+extensions = [".mp4", ".mov", ".m4v"]
+
+# 默认 mtime：
+# - 安装 ExifTool 时：优先 EXIF/QuickTime 内部时间，缺失时用 Windows 修改时间
+# - 未安装 ExifTool 时：全部使用 Windows 修改时间
+#
+# "error"：
+# - 必须安装 ExifTool
+# - 找不到内部日期的视频会停止上传
+missing_date_policy = "mtime"
+
+quicktime_utc_target_zone = ""
+
+# Telegram 一个媒体组最多 10 个
+album_size = 10
+
+# 2 -> 21-5
+# 4 -> 2021-5
+caption_year_digits = 2
+
+generate_thumbnail = true
+thumb_max_edge = 320
+thumb_target_kib = 80
+
+show_file_list = true
+verify_all_metadata_before_upload = false
+
+# 仅在需要清空视频断点时临时改为 true
+reset_state = false
+
+
+[image]
+
+extensions = [".jpg", ".jpeg", ".png", ".webp"]
+
+album_size = 10
+
+# "mtime" = 按 Windows 修改时间从旧到新
+# "path"  = 按目录/文件名排序
+sort_mode = "mtime"
+
+show_file_list = true
+verify_all_images_before_upload = false
+
+# 仅在需要清空图片断点时临时改为 true
+reset_state = false
+
+
+[tdlib]
+
+# 一般无需修改
+log_verbosity = 1
+request_timeout_seconds = 120
+message_send_timeout_seconds = 86400
+
+database_encryption_key = ""
+
+use_file_database = true
+use_chat_info_database = true
+use_message_database = false
+
+
+[ui]
+
+rich_progress = true
+refresh_hz = 8
+bar_width = 32
+
+# 同时显示 MiB/s 和 Mbps
+show_mbps = true
+
+# true：Album 完成后动态进度面板消失，终端更整洁
+transient_progress = true

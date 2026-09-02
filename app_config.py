@@ -6,8 +6,11 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+APP_VERSION = "1.6"
+
 PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
+TEMPLATE_CONFIG_PATH = PROJECT_DIR / "config.example.toml"
 
 
 def _load():
@@ -15,7 +18,7 @@ def _load():
         raise RuntimeError(
             "找不到配置文件：\n"
             f"{CONFIG_PATH}\n\n"
-            "请确认 config.toml 与上传脚本位于同一目录。"
+            "请先复制 config.example.toml 为 config.toml，或运行 .\\setup.ps1 / .\\run.ps1 自动创建。"
         )
 
     try:
@@ -149,7 +152,7 @@ VIDEO_EXTENSIONS = _extensions(
 VIDEO_MISSING_DATE_POLICY = str(
     video.get(
         "missing_date_policy",
-        "error"
+        "mtime"
     )
 ).strip().lower()
 
