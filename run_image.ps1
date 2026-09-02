@@ -29,9 +29,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host "╭────────────────────────────────────────────────────────────╮" -ForegroundColor Magenta
-    Write-Host "│  IMAGE · 10 张一组 Album 上传 · V1.6                      │" -ForegroundColor Magenta
-    Write-Host "╰────────────────────────────────────────────────────────────╯" -ForegroundColor Magenta
+    Write-Host "→ IMAGE · Album 上传" -ForegroundColor Magenta
     Write-Host ""
 
     & ".\.venv\Scripts\python.exe" ".\tdlib_image_album_uploader.py"
