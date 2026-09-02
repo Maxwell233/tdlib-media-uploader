@@ -14,6 +14,14 @@ try {
         throw "找不到 config.toml，请先运行 .\run.ps1 创建配置。"
     }
 
+    # 先独立检查 TOML，避免配置错误时刷出整段 Python Traceback。
+    & ".\.venv\Scripts\python.exe" ".\config_check.py"
+    $configExitCode = $LASTEXITCODE
+
+    if ($configExitCode -ne 0) {
+        throw "config.toml 检查失败。请按上方提示修改配置后重试。"
+    }
+
     $mutexName = "Local\TDLibMediaUploader_Telegram"
     $mutex = New-Object System.Threading.Mutex($false, $mutexName)
 
@@ -35,7 +43,6 @@ try {
     Write-Host ""
 
     # 视频断点固定写入 .video_state。
-    # 不做任何旧 .state 自动迁移；如需保留旧断点，请手动复制。
     $env:TDLIB_VIDEO_STATE_DIR = "$PSScriptRoot\.video_state"
 
     $pythonCode = @'
