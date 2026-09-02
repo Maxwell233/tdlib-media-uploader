@@ -115,7 +115,7 @@ run.cmd
 [4] 退出
 ```
 
-V1.6 的启动器会一直保留主菜单。视频 / 图片上传器在独立 PowerShell 子进程中运行，因此子脚本中的 `exit` 或 Python 异常不会再把主菜单窗口一起关闭。上传器结束后按 Enter 返回主菜单。
+V1.6 的启动器会一直保留主菜单。视频 / 图片上传器在独立 PowerShell 子进程中运行，因此子脚本中的 `exit` 或 Python 异常不会把主菜单窗口一起关闭。上传器结束后按 Enter 返回主菜单。
 
 如果主启动器本身异常退出，`run.cmd` 会保留窗口并显示退出代码，便于查看报错。
 
@@ -202,20 +202,12 @@ sort_mode = "path"
 
 ## 断点续传
 
-视频和图片现在分别使用：
+视频和图片分别使用独立断点目录：
 
 ```text
 .video_state\
 .image_state\
 ```
-
-V1.6 之前的视频断点目录是：
-
-```text
-.state\
-```
-
-第一次使用新版视频入口时，程序会自动把旧 `.state\upload_state_*.json` 中尚未迁移的断点复制到 `.video_state\`，因此无需重新上传已经完成的视频。旧 `.state` 会保留作为兼容备份。
 
 一个 Album 只有在 TDLib 确认全部消息发送成功后才写入断点。因此中途 `Ctrl + C` 后重新运行：
 
@@ -231,6 +223,8 @@ reset_state = true
 ```
 
 运行一次后请改回 `false`。
+
+> 如果你从更早的本地版本升级，旧视频断点需要时可自行手动复制到 `.video_state\`。项目不会自动迁移旧断点。
 
 ## TDLib 登录
 
@@ -256,7 +250,6 @@ tdlib-media-uploader\
 ├─ tdlib_common.py
 ├─ tdlib_video_app.py             # V1.6 视频 UI / 流程
 ├─ tdlib_video_album_uploader.py  # 视频上传核心
-├─ video_bootstrap.py             # .video_state / 旧断点迁移入口
 ├─ tdlib_image_album_uploader.py
 ├─ run.cmd                        # 推荐双击运行
 ├─ run.ps1
@@ -271,7 +264,6 @@ tdlib-media-uploader\
 ├─ tdlib_files\
 ├─ .video_state\                 # 视频断点
 ├─ .image_state\                 # 图片断点
-├─ .state\                       # 旧版视频断点，仅兼容迁移
 └─ .thumb_cache\
 ```
 
