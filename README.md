@@ -4,7 +4,6 @@
 
 一个用于向 **Telegram 超级群 / Forum Topic** 批量上传图片和视频的脚本项目。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 主要负责文件扫描、分组、断点和终端界面。
 
-
 ## 功能
 
 - **视频**：递归读取目录及全部子目录；按月份组成 Album；一个 Album 最多 10 个视频；每个 Album 仅第一条显示 `yy-m`，例如 `21-5`。
@@ -38,13 +37,25 @@ git clone https://github.com/Maxwell233/tdlib-media-uploader.git
 cd tdlib-media-uploader
 ```
 
+### 推荐方式：直接运行 setup.cmd
+
+Windows 下可以直接双击：
+
+```text
+setup.cmd
+```
+
+它会以 PowerShell 启动 `setup.ps1`，安装完成或发生错误后都会停留在结果页面，按 Enter 后才关闭，因此不会出现“执行完直接闪退、看不到报错”的情况。
+
+### PowerShell 方式
+
 当前 PowerShell 会话允许执行本地脚本：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
-安装环境：
+然后运行：
 
 ```powershell
 .\setup.ps1
@@ -54,10 +65,18 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 1. 创建 `.venv`；
 2. 安装依赖；
-3. 固定安装 `tdjson==1.8.64.post1`；
-4. 如果本地还没有 `config.toml`，自动从 `config.example.toml` 创建。
+3. 检查并固定 `tdjson==1.8.64.post1`；
+4. 如果本地还没有 `config.toml`，自动从 `config.example.toml` 创建；
+5. 检查 Python / pip 命令的退出码，安装失败时直接显示具体错误；
+6. 安装完成或失败后等待 Enter，不会自动关闭窗口。
 
 已有 `config.toml` 时不会覆盖。
+
+如需在自动化脚本中运行而不等待 Enter，可以使用：
+
+```powershell
+.\setup.ps1 -NoPause
+```
 
 ## 创建和修改配置文件
 
@@ -236,7 +255,6 @@ tdlib_data\
 tdlib_files\
 ```
 
-
 正常登录完成后，后续上传 **不需要打开 Telegram Desktop 或手机 App**。
 
 ## 目录结构
@@ -248,12 +266,13 @@ tdlib-media-uploader\
 ├─ app_config.py
 ├─ pretty_ui.py
 ├─ tdlib_common.py
-├─ tdlib_video_app.py            # V1.6 视频入口 / UI
+├─ tdlib_video_app.py         # V1.6 视频入口 / UI
 ├─ tdlib_video_album_uploader.py # 视频上传核心
 ├─ tdlib_image_album_uploader.py
 ├─ run.ps1
 ├─ run_video.ps1
 ├─ run_image.ps1
+├─ setup.cmd                  # 推荐双击运行的安装入口
 ├─ setup.ps1
 ├─ requirements.txt
 ├─ tools\
@@ -263,6 +282,33 @@ tdlib-media-uploader\
 ├─ .state\
 ├─ .image_state\
 └─ .thumb_cache\
+```
+
+## 常见问题
+
+### setup 一闪而过
+
+优先双击：
+
+```text
+setup.cmd
+```
+
+或者在已经打开的 PowerShell 中执行：
+
+```powershell
+.\setup.ps1
+```
+
+V1.6 当前版本的 `setup.ps1` 会在成功和失败后都等待 Enter。如果仍然出现问题，可以直接看到安装错误，不需要截图闪退窗口。
+
+### .venv 损坏或 Python 路径异常
+
+确认已安装 Python 3.13 x64。如果 `.venv` 已损坏，可以删除后重新安装：
+
+```powershell
+Remove-Item -Recurse -Force .\.venv
+.\setup.ps1
 ```
 
 ## 注意事项
