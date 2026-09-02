@@ -2,7 +2,7 @@
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-title TDLib Media Uploader V1.6
+title TDLib Media Uploader V1.6.2
 
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1"
 set "exitcode=%errorlevel%"
