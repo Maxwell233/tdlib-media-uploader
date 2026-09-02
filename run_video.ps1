@@ -29,9 +29,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host "╭────────────────────────────────────────────────────────────╮" -ForegroundColor Cyan
-    Write-Host "│  VIDEO · 按月份 Album 上传 · V1.6                         │" -ForegroundColor Cyan
-    Write-Host "╰────────────────────────────────────────────────────────────╯" -ForegroundColor Cyan
+    Write-Host "→ VIDEO · 按月份 Album 上传" -ForegroundColor Cyan
     Write-Host ""
 
     # 视频断点固定写入 .video_state。
