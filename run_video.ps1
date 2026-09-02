@@ -34,7 +34,22 @@ try {
     Write-Host "╰────────────────────────────────────────────────────────────╯" -ForegroundColor Cyan
     Write-Host ""
 
-    & ".\.venv\Scripts\python.exe" ".\video_bootstrap.py"
+    # 视频断点固定写入 .video_state。
+    # 不做任何旧 .state 自动迁移；如需保留旧断点，请手动复制。
+    $env:TDLIB_VIDEO_STATE_DIR = "$PSScriptRoot\.video_state"
+
+    $pythonCode = @'
+import os
+from pathlib import Path
+import tdlib_video_album_uploader as core
+
+core.STATE_DIR = Path(os.environ["TDLIB_VIDEO_STATE_DIR"])
+
+import tdlib_video_app
+tdlib_video_app.main()
+'@
+
+    & ".\.venv\Scripts\python.exe" -c $pythonCode
     $exitCode = $LASTEXITCODE
 
     if ($exitCode -ne 0) {
@@ -51,6 +66,8 @@ catch {
     }
 }
 finally {
+    Remove-Item Env:TDLIB_VIDEO_STATE_DIR -ErrorAction SilentlyContinue
+
     if ($hasLock -and $null -ne $mutex) {
         try { $mutex.ReleaseMutex() } catch {}
     }
