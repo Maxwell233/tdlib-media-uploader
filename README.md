@@ -45,7 +45,7 @@ Windows 下可以直接双击：
 setup.cmd
 ```
 
-它会以 PowerShell 启动 `setup.ps1`，安装完成或发生错误后都会停留在结果页面，按 Enter 后才关闭，因此不会出现“执行完直接闪退、看不到报错”的情况。
+它会以 PowerShell 启动 `setup.ps1`。安装完成或发生错误后都会停留在结果页面，按 Enter 后才关闭，因此不会出现执行完直接闪退、看不到报错的情况。
 
 ### PowerShell 方式
 
@@ -67,7 +67,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 2. 安装依赖；
 3. 检查并固定 `tdjson==1.8.64.post1`；
 4. 如果本地还没有 `config.toml`，自动从 `config.example.toml` 创建；
-5. 检查 Python / pip 命令的退出码，安装失败时直接显示具体错误；
+5. 检查 Python / pip 命令退出码，安装失败时直接显示具体错误；
 6. 安装完成或失败后等待 Enter，不会自动关闭窗口。
 
 已有 `config.toml` 时不会覆盖。
@@ -155,7 +155,21 @@ missing_date_policy = "error"
 
 ## 运行
 
-以后通常只需要：
+### 推荐：直接双击 run.cmd
+
+安装和配置完成后，Windows 下可以直接双击：
+
+```text
+run.cmd
+```
+
+`run.cmd` 会自动切换到项目目录，并以允许执行本地脚本的方式启动 `run.ps1`，无需手动修改 PowerShell ExecutionPolicy。
+
+如果 `run.ps1` 异常退出，`run.cmd` 会保留错误信息并等待按键，不会让错误窗口直接消失。
+
+### PowerShell 方式
+
+也可以继续运行：
 
 ```powershell
 .\run.ps1
@@ -262,22 +276,23 @@ tdlib_files\
 ```text
 tdlib-media-uploader\
 ├─ config.example.toml
-├─ config.toml                # 本地生成，不提交 Git
+├─ config.toml                   # 本地生成，不提交 Git
 ├─ app_config.py
 ├─ pretty_ui.py
 ├─ tdlib_common.py
-├─ tdlib_video_app.py         # V1.6 视频入口 / UI
+├─ tdlib_video_app.py            # V1.6 视频入口 / UI
 ├─ tdlib_video_album_uploader.py # 视频上传核心
 ├─ tdlib_image_album_uploader.py
-├─ run.ps1
+├─ run.cmd                       # 推荐双击运行的主入口
+├─ run.ps1                       # PowerShell 主菜单
 ├─ run_video.ps1
 ├─ run_image.ps1
-├─ setup.cmd                  # 推荐双击运行的安装入口
+├─ setup.cmd                     # 推荐双击运行的安装入口
 ├─ setup.ps1
 ├─ requirements.txt
 ├─ tools\
-│  └─ exiftool.exe            # 可选，不提交 Git
-├─ tdlib_data\                # 本地登录数据，不提交 Git
+│  └─ exiftool.exe               # 可选，不提交 Git
+├─ tdlib_data\                   # 本地登录数据，不提交 Git
 ├─ tdlib_files\
 ├─ .state\
 ├─ .image_state\
@@ -300,7 +315,17 @@ setup.cmd
 .\setup.ps1
 ```
 
-V1.6 当前版本的 `setup.ps1` 会在成功和失败后都等待 Enter。如果仍然出现问题，可以直接看到安装错误，不需要截图闪退窗口。
+V1.6 当前版本的 `setup.ps1` 会在成功和失败后都等待 Enter。如果仍然出现问题，可以直接看到安装错误。
+
+### run 一闪而过
+
+优先双击：
+
+```text
+run.cmd
+```
+
+如果 `run.ps1` 发生异常，`run.cmd` 会停留并显示退出代码。正常从菜单选择退出时则会直接关闭窗口。
 
 ### .venv 损坏或 Python 路径异常
 
