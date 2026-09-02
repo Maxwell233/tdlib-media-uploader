@@ -12,8 +12,9 @@ __pycache__/
 /tdlib_files/
 
 # Upload state / cache
-/.state/
+/.video_state/
 /.image_state/
+/.state/          # legacy video state; V1.6 auto-migrates it
 /.thumb_cache/
 
 # Optional local tools / binaries
