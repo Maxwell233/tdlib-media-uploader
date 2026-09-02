@@ -177,7 +177,7 @@ class TDJsonClient:
                     except Exception:
                         pass
             except Exception as exc:
-                self.ui.log(f"TDLib receiver 异常：{type(exc).__name__}: {exc}")
+                self.ui.warning(f"TDLib receiver 异常：{type(exc).__name__}: {exc}")
                 time.sleep(1)
 
     def login(self):
@@ -194,7 +194,7 @@ class TDJsonClient:
 
             state_type = state.get("@type")
             if state_type == "authorizationStateWaitTdlibParameters":
-                self.ui.log("正在初始化 TDLib...")
+                self.ui.info("正在初始化 TDLib…")
                 self.request({
                     "@type": "setTdlibParameters",
                     "use_test_dc": False,
@@ -210,7 +210,7 @@ class TDJsonClient:
                     "system_language_code": "zh-Hans",
                     "device_model": self.device_model,
                     "system_version": "Windows",
-                    "application_version": "5.0",
+                    "application_version": cfg.APP_VERSION,
                 })
             elif state_type == "authorizationStateWaitPhoneNumber":
                 phone = input("请输入 Telegram 手机号（国际格式，例如 +491234...）：").strip()
@@ -231,11 +231,11 @@ class TDJsonClient:
                     "code": {"@type": "emailAddressAuthenticationCode", "code": code},
                 })
             elif state_type == "authorizationStateWaitOtherDeviceConfirmation":
-                self.ui.log("请在已经登录 Telegram 的设备确认此次登录：")
+                self.ui.warning("请在已经登录 Telegram 的设备确认此次登录：")
                 if state.get("link"):
                     self.ui.log(state["link"])
             elif state_type == "authorizationStateReady":
-                self.ui.log("TDLib 登录成功。")
+                self.ui.success("TDLib 登录成功。")
                 return
             elif state_type == "authorizationStateClosed":
                 raise RuntimeError("TDLib 已关闭。")
@@ -249,11 +249,11 @@ class TDJsonClient:
             raise
 
     def _load_chat_list_until_found(self, chat_list, label: str, max_rounds: int = 100):
-        self.ui.log(f"正在加载 Telegram {label}，以定位目标群...")
+        self.ui.info(f"正在加载 Telegram {label}，以定位目标群…")
         for index in range(1, max_rounds + 1):
             chat = self._try_get_chat(cfg.CHAT_ID)
             if chat is not None:
-                self.ui.log(f"已在{label}中找到目标聊天。")
+                self.ui.success(f"已在{label}中找到目标聊天。")
                 return chat
             try:
                 self.request({
@@ -268,7 +268,7 @@ class TDJsonClient:
             time.sleep(0.05)
             chat = self._try_get_chat(cfg.CHAT_ID)
             if chat is not None:
-                self.ui.log(f"已在{label}中找到目标聊天（第 {index} 批）。")
+                self.ui.success(f"已在{label}中找到目标聊天（第 {index} 批）。")
                 return chat
         return None
 
@@ -276,7 +276,7 @@ class TDJsonClient:
         chat = self._try_get_chat(cfg.CHAT_ID)
         if chat is not None:
             return chat
-        self.ui.log("当前 TDLib 数据库尚未加载目标群，开始加载聊天列表。")
+        self.ui.info("当前 TDLib 数据库尚未加载目标群，开始加载聊天列表。")
         chat = self._load_chat_list_until_found(None, "主聊天列表")
         if chat is not None:
             return chat
@@ -299,7 +299,6 @@ class TDJsonClient:
 
     def validate_target(self):
         chat = self.ensure_target_chat()
-        self.ui.log(f"目标聊天：{chat.get('title', '')} ({cfg.CHAT_ID})")
         try:
             topic = self.request({
                 "@type": "getForumTopic",
@@ -311,7 +310,12 @@ class TDJsonClient:
                 f"CHAT_ID 已找到，但 Topic 无法解析。FORUM_TOPIC_ID={cfg.FORUM_TOPIC_ID}；{exc}"
             ) from exc
         topic_name = topic.get("info", {}).get("name", "")
-        self.ui.log(f"目标 Topic：{topic_name} ({cfg.FORUM_TOPIC_ID})")
+        self.ui.target(
+            chat.get("title", ""),
+            topic_name,
+            cfg.CHAT_ID,
+            cfg.FORUM_TOPIC_ID,
+        )
         return chat, topic
 
     def set_fast_options(self):

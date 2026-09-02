@@ -294,16 +294,55 @@ class ImageUploadProgress:
         UI.finish()
 
 
-def print_plan(images, state):
-    print("\n" + "=" * 104)
-    print("图片上传计划：递归扫描全部子目录；不添加 Caption；每 10 张一个 Album")
-    print("=" * 104)
+def show_file_list(images, state):
+    rows = []
     for index, path in enumerate(images, 1):
         stat = path.stat()
-        status = "已完成" if state.is_completed(path) else "待上传"
-        mtime = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-        print(f"{index:>5}. [{status}] {mtime}  {format_size(stat.st_size):>10}  {relative_name(path)}")
+        rows.append((
+            index,
+            "✓ 已完成" if state.is_completed(path) else "• 待上传",
+            datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            format_size(stat.st_size),
+            relative_name(path),
+        ))
 
+    UI.files(
+        f"图片文件 · 共 {len(images)} 张",
+        [
+            ("#", {"justify": "right", "width": 5}),
+            ("状态", {"no_wrap": True, "width": 10}),
+            ("修改时间", {"no_wrap": True, "width": 19}),
+            ("大小", {"justify": "right", "no_wrap": True, "width": 11}),
+            ("文件", {"overflow": "fold"}),
+        ],
+        rows,
+        kind="IMAGE",
+        caption="图片不添加日期/月份 Caption；文件顺序即计划处理顺序。",
+    )
+
+
+def show_upload_summary(images, state, completed, pending, total_albums):
+    total_bytes = sum(path.stat().st_size for path in images)
+    pending_bytes = sum(path.stat().st_size for path in pending)
+
+    UI.summary(
+        f"上传前确认 · TDLib Media Uploader V{cfg.APP_VERSION}",
+        [
+            ("上传引擎", "TDLib 原生 C++ / tdjson"),
+            ("图片目录", cfg.IMAGE_DIR),
+            ("扫描图片", len(images)),
+            ("排序方式", cfg.IMAGE_SORT_MODE),
+            ("全部大小", format_size(total_bytes)),
+            ("断点已完成", f"{len(completed)}/{len(images)}"),
+            ("本次待上传", f"{len(pending)} · {format_size(pending_bytes)}"),
+            ("本次 Album", total_albums),
+            ("Album 规则", f"每组最多 {cfg.IMAGE_ALBUM_SIZE} 张；无 Caption"),
+            ("CHAT_ID", cfg.CHAT_ID),
+            ("FORUM_TOPIC_ID", cfg.FORUM_TOPIC_ID),
+            ("状态文件", state.path),
+        ],
+        kind="IMAGE",
+    )
 
 def validate_config():
     if cfg.API_ID == 12345678 or cfg.API_HASH == "YOUR_API_HASH":
@@ -315,11 +354,17 @@ def validate_config():
 def main():
     validate_config()
     version = verify_tdjson_version()
-    UI.log(f"tdjson：{version}")
 
+    UI.banner(
+        f"TDLib Media Uploader V{cfg.APP_VERSION}",
+        f"图片模式 · tdjson {version}",
+        accent="magenta",
+    )
+
+    UI.info(f"扫描图片目录：{cfg.IMAGE_DIR}")
     images = scan_images()
     if not images:
-        UI.log("没有找到支持的图片。")
+        UI.warning("没有找到支持的图片。")
         return
 
     state = UploadState()
@@ -327,29 +372,25 @@ def main():
     pending = [p for p in images if not state.is_completed(p)]
     total_albums = math.ceil(len(pending) / cfg.IMAGE_ALBUM_SIZE) if pending else 0
 
-    print("\n" + "=" * 82)
-    print(f"图片目录：{cfg.IMAGE_DIR}")
-    print(f"扫描到：{len(images)} 张")
-    print(f"断点已完成：{len(completed)}/{len(images)}")
-    print(f"本次待上传：{len(pending)} 张 | {format_size(sum(p.stat().st_size for p in pending))}")
-    print(f"本次 Album：{total_albums} | Caption：无")
-    print(f"状态文件：{state.path}")
-    print("=" * 82)
-
+    # V1.6：先展示文件清单，最后展示摘要，再询问 y。
     if cfg.IMAGE_SHOW_FILE_LIST:
-        print_plan(images, state)
+        show_file_list(images, state)
+
+    show_upload_summary(images, state, completed, pending, total_albums)
+
     if not pending:
-        print("\n所有图片都已经上传完成。")
+        UI.success("所有图片都已上传完成。")
         return
 
     if cfg.IMAGE_VERIFY_ALL_IMAGES:
+        UI.info("开始预检本次待上传图片…")
         for index, path in enumerate(pending, 1):
-            print(f"\r预检图片 {index}/{len(pending)}：{path.name}", end="", flush=True)
+            UI.info(f"预检 {index}/{len(pending)} · {path.name}")
             image_info(path)
-        print()
+        UI.success("图片预检完成。")
 
-    if input("\n确认开始上传？输入 y 继续：").strip().lower() != "y":
-        print("已取消。")
+    if not UI.confirm_upload():
+        UI.cancelled()
         return
 
     client = TDJsonClient(UI, "TDLib Image Album Uploader")
@@ -365,24 +406,31 @@ def main():
             album_paths = pending[start:start + cfg.IMAGE_ALBUM_SIZE]
             album_number = start // cfg.IMAGE_ALBUM_SIZE + 1
             progress.begin_album(album_paths, album_number, total_albums)
-            UI.log("")
-            UI.log(f"[{album_number}/{total_albums}] Album {len(album_paths)} 张 | Caption=无")
-            for path in album_paths:
-                UI.log(f"  {format_size(path.stat().st_size):>10}  {relative_name(path)}")
+            UI.album(
+                kind="IMAGE",
+                title=f"Album {album_number}/{total_albums}",
+                subtitle=f"{len(album_paths)} 张图片 · Caption=无",
+                rows=[
+                    f"{format_size(path.stat().st_size):>10}  {relative_name(path)}"
+                    for path in album_paths
+                ],
+            )
             try:
                 contents = [input_photo(path) for path in album_paths]
                 message_ids = client.send_contents(contents, progress, album_paths)
             except Exception:
                 UI.finish()
-                UI.log("当前图片 Album 未写入断点。")
+                UI.error("当前图片 Album 未写入断点；下次会重新处理这一组。")
                 raise
             state.mark_album_completed(album_paths, message_ids)
             progress.finish_album(album_paths)
-            UI.log("图片 Album 发送成功，断点已保存。")
+            UI.success("图片 Album 发送成功 · 断点已保存。")
 
-        UI.log("\n" + "=" * 82)
-        UI.log("全部图片上传完成。")
-        UI.log("=" * 82)
+        UI.banner(
+            "全部图片上传完成",
+            f"共完成 {total_albums} 个 Album · 断点已保存",
+            accent="green",
+        )
     finally:
         client.remove_update_callback(progress.handle_update)
         client.close()
@@ -393,10 +441,8 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         UI.finish()
-        UI.log("\n已手动停止。已完成 Album 下次自动跳过；当前未完成 Album 下次重新处理。")
+        UI.warning("已手动停止。已完成 Album 下次自动跳过；当前未完成 Album 下次重新处理。")
     except Exception as exc:
         UI.finish()
-        UI.log("\n" + "=" * 82)
-        UI.log(f"程序停止：{type(exc).__name__}: {exc}")
-        UI.log("=" * 82)
+        UI.error(f"程序停止：{type(exc).__name__}: {exc}")
         raise
