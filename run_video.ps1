@@ -36,9 +36,25 @@ try {
     # 不做旧 .state 自动迁移。
     $env:TDLIB_VIDEO_STATE_DIR = "$PSScriptRoot\.video_state"
 
-    # Windows PowerShell 调用原生程序时会处理双引号。
-    # Python 代码中的环境变量键使用单引号，避免传给 python -c 后丢失引号。
-    $pythonCode = "import os; from pathlib import Path; import tdlib_video_album_uploader as core; core.STATE_DIR = Path(os.environ['TDLIB_VIDEO_STATE_DIR']); import tdlib_video_app; tdlib_video_app.main()"
+    # 使用内嵌 Python 入口设置视频断点目录。
+    # Ctrl+C 在这里捕获，避免 Python 输出 KeyboardInterrupt Traceback。
+    $pythonCode = @'
+import os
+from pathlib import Path
+import tdlib_video_album_uploader as core
+
+core.STATE_DIR = Path(os.environ['TDLIB_VIDEO_STATE_DIR'])
+
+import tdlib_video_app
+
+try:
+    tdlib_video_app.main()
+except KeyboardInterrupt:
+    core.UI.finish()
+    core.UI.warning(
+        '已手动停止。已完成 Album 下次自动跳过；当前未完成 Album 下次重新处理。'
+    )
+'@
 
     & ".\.venv\Scripts\python.exe" -c $pythonCode
     $exitCode = $LASTEXITCODE
