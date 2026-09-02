@@ -4,7 +4,6 @@
 
 一个用于向 **Telegram 超级群 / Forum Topic** 批量上传图片和视频的脚本项目。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点、缩略图和终端界面。
 
-仓库：<https://github.com/Maxwell233/tdlib-media-uploader>
 
 ## 功能
 
@@ -115,9 +114,6 @@ run.cmd
 [4] 退出
 ```
 
-V1.6 的启动器会一直保留主菜单。视频 / 图片上传器在独立 PowerShell 子进程中运行，因此子脚本中的 `exit` 或 Python 异常不会把主菜单窗口一起关闭。上传器结束后按 Enter 返回主菜单。
-
-如果主启动器本身异常退出，`run.cmd` 会保留窗口并显示退出代码，便于查看报错。
 
 ## ExifTool（可选）
 
@@ -224,8 +220,6 @@ reset_state = true
 
 运行一次后请改回 `false`。
 
-> 如果你从更早的本地版本升级，旧视频断点需要时可自行手动复制到 `.video_state\`。项目不会自动迁移旧断点。
-
 ## TDLib 登录
 
 第一次运行时 TDLib 可能要求 Telegram 手机号、验证码、两步验证密码或另一台已登录设备确认。
@@ -267,24 +261,6 @@ tdlib-media-uploader\
 └─ .thumb_cache\
 ```
 
-## 常见问题
-
-### run.cmd 一闪而过
-
-当前 V1.6 已修正启动流程：
-
-- `run.ps1` 使用循环主菜单，不会在一个上传任务返回后直接结束；
-- 视频 / 图片脚本使用独立 PowerShell 子进程；
-- Python 非零退出代码会向上传启动器传播；
-- `run.cmd` 在主启动器异常退出时会自动 `pause`，错误不会消失。
-
-如果仍有问题，可在已经打开的 PowerShell 中运行：
-
-```powershell
-.\run.ps1
-```
-
-这样可以完整查看错误。
 
 ### .venv 损坏或 Python 路径异常
 
@@ -300,6 +276,5 @@ Remove-Item -Recurse -Force .\.venv
 - 不要同时运行图片和视频上传任务。
 - 不要公开 `config.toml` 中的 `api_hash`。
 - 不建议手动升级 `tdjson`，除非确认新版本兼容。
-- `tdlib_data`、`tdlib_files`、`.video_state` 和 `.image_state` 都是本地运行数据，不应提交到 Git。
 - 本项目用于个人 Telegram 媒体整理和批量上传，请遵守 Telegram 使用条款和目标群组规则。
 - 本项目与 Telegram 官方无隶属关系。
