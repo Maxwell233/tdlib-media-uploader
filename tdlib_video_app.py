@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 
 import app_config as cfg
 import tdlib_video_album_uploader as core
@@ -33,41 +34,84 @@ def read_metadata():
     return core.read_exif_metadata(), True
 
 
+def _source_label(item):
+    return "mtime" if item["fallback"] else item["date_tag"]
+
+
 def show_file_list(items, state):
-    rows = []
+    """按月份分组显示视频文件，避免几百个文件堆在同一张表中。"""
+    groups = core.make_groups(items)
+    global_index = {
+        item["path"]: index
+        for index, item in enumerate(items, 1)
+    }
 
-    for index, item in enumerate(items, 1):
-        path = item["path"]
-        completed = state.is_completed(path)
-        source = "mtime" if item["fallback"] else item["date_tag"]
+    UI.info(
+        f"视频文件：共 {len(items)} 个，"
+        f"按 {len(groups)} 个月份分组展示。"
+    )
 
-        rows.append(
-            (
-                index,
-                "✓ 已完成" if completed else "• 待上传",
-                item["capture_time"].strftime("%Y-%m-%d %H:%M:%S"),
-                item["month_key"],
-                core.format_size(path.stat().st_size),
-                source,
-                core.relative_name(path),
-            )
+    columns = [
+        ("#", {"justify": "right", "width": 5}),
+        ("状态", {"no_wrap": True, "width": 10}),
+        ("日期时间", {"no_wrap": True, "width": 14}),
+        ("大小", {"justify": "right", "no_wrap": True, "width": 11}),
+        ("文件", {"overflow": "fold"}),
+    ]
+
+    for month_key in sorted(groups):
+        month_items = groups[month_key]
+        completed_count = sum(
+            1
+            for item in month_items
+            if state.is_completed(item["path"])
+        )
+        pending_count = len(month_items) - completed_count
+        month_bytes = sum(
+            item["path"].stat().st_size
+            for item in month_items
         )
 
-    UI.files(
-        f"视频文件 · 共 {len(items)} 个",
-        [
-            ("#", {"justify": "right", "width": 5}),
-            ("状态", {"no_wrap": True, "width": 10}),
-            ("时间", {"no_wrap": True, "width": 19}),
-            ("月份", {"no_wrap": True, "width": 8}),
-            ("大小", {"justify": "right", "no_wrap": True, "width": 11}),
-            ("日期来源", {"no_wrap": True, "width": 24, "overflow": "ellipsis"}),
-            ("文件", {"overflow": "fold"}),
-        ],
-        rows,
-        kind="VIDEO",
-        caption="文件顺序即计划处理顺序；已完成项会由断点自动跳过。",
-    )
+        source_counts = Counter(
+            _source_label(item)
+            for item in month_items
+        )
+        source_summary = " / ".join(
+            f"{source} × {count}"
+            for source, count in source_counts.most_common()
+        )
+
+        rows = []
+
+        for item in month_items:
+            path = item["path"]
+            completed = state.is_completed(path)
+
+            rows.append(
+                (
+                    global_index[path],
+                    "✓ 已完成" if completed else "• 待上传",
+                    item["capture_time"].strftime("%m-%d %H:%M:%S"),
+                    core.format_size(path.stat().st_size),
+                    core.relative_name(path),
+                )
+            )
+
+        UI.files(
+            (
+                f"{month_key} · {len(month_items)} 个 · "
+                f"已完成 {completed_count} · "
+                f"待上传 {pending_count} · "
+                f"{core.format_size(month_bytes)}"
+            ),
+            columns,
+            rows,
+            kind="VIDEO",
+            caption=(
+                f"日期来源：{source_summary}    "
+                "月份内按时间排序；已完成项由断点自动跳过。"
+            ),
+        )
 
 
 def show_group_plan(items, state):
@@ -236,7 +280,7 @@ def main():
     )
 
     # V1.6：
-    # 1. 先显示完整文件列表。
+    # 1. 按月份分组显示完整文件列表。
     # 2. 再显示月份/Album 计划。
     # 3. 最后显示上传摘要。
     # 4. 摘要之后才询问 y。
