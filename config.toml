@@ -1,0 +1,138 @@
+# ============================================================
+# TDLib Media Uploader 统一配置
+#
+# 以后正常使用时，只需要修改这个文件。
+# Python 主脚本不需要再打开。
+#
+# Windows 路径建议使用单引号：
+# video_dir = 'G:\Videos'
+# 这样反斜杠不需要写成 \\。
+# ============================================================
+
+
+[telegram]
+
+# 在 my.telegram.org 获取
+api_id = 12345678
+api_hash = "YOUR_API_HASH"
+
+# Telegram 超级群 Chat ID
+# 例如：-1001234567890
+chat_id = -1001234567890
+
+# Forum Topic ID
+forum_topic_id = 12345
+
+
+[paths]
+
+# 视频根目录。
+# 会递归读取所有子文件夹。
+video_dir = 'G:\mega\test\Videos'
+
+# 图片根目录。
+# 会递归读取所有子文件夹。
+image_dir = 'G:\mega\test\Images'
+
+# ExifTool。
+# 相对路径会自动按本项目目录解析。
+exiftool_path = 'tools\exiftool.exe'
+
+
+[video]
+
+# 支持的视频扩展名
+extensions = [".mp4", ".mov", ".m4v"]
+
+# 没有内部 EXIF / QuickTime 日期时：
+# "error" = 停止，不上传
+# "mtime" = 使用 Windows 修改时间兜底
+missing_date_policy = "error"
+
+# QuickTime UTC 型日期需要时区转换时填写，例如：
+# "Asia/Shanghai"
+# "Europe/Berlin"
+# 不需要转换就保持空字符串
+quicktime_utc_target_zone = ""
+
+# Telegram Album 最多 10 个媒体
+album_size = 10
+
+# 月份 Caption：
+# 2 -> 21-5
+# 4 -> 2021-5
+caption_year_digits = 2
+
+# 自动生成视频缩略图
+generate_thumbnail = true
+thumb_max_edge = 320
+thumb_target_kib = 80
+
+# 启动时显示完整视频列表
+show_file_list = true
+
+# true 会在正式上传前读取所有视频媒体属性，启动会明显变慢
+verify_all_metadata_before_upload = false
+
+# true 会清空“视频脚本自己的上传断点”
+# 只在需要全部重新上传时临时改成 true；
+# 运行一次之后一定改回 false
+reset_state = false
+
+
+[image]
+
+# 支持的静态图片格式
+extensions = [".jpg", ".jpeg", ".png", ".webp"]
+
+# 每个 Album 最多 10 张
+album_size = 10
+
+# "mtime" = Windows 修改时间从旧到新
+# "path"  = 按目录/文件名排序
+sort_mode = "mtime"
+
+# 图片不添加月份，不添加文件名，不添加 Caption
+show_file_list = true
+
+# true 会在正式上传前尝试打开所有图片
+verify_all_images_before_upload = false
+
+# true 会清空“图片脚本自己的上传断点”
+reset_state = false
+
+
+[tdlib]
+
+# 一般不需要改
+log_verbosity = 1
+request_timeout_seconds = 120
+message_send_timeout_seconds = 86400
+
+database_encryption_key = ""
+
+use_file_database = true
+use_chat_info_database = true
+use_message_database = false
+
+
+[ui]
+
+# 新版漂亮进度面板
+rich_progress = true
+
+# 每秒刷新次数
+refresh_hz = 8
+
+# 进度条宽度
+bar_width = 32
+
+# 同时显示 MiB/s 和 Mbps。
+# 例如：
+# 11.92 MiB/s · 100.0 Mbps
+show_mbps = true
+
+# true：
+# 一个 Album 完成后，动态进度面板自动消失，
+# 只保留“Album 发送成功”日志，终端更干净。
+transient_progress = true
