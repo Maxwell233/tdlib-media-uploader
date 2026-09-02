@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
+
+from config_check import load_config
 
 APP_VERSION = "1.6"
 
@@ -13,25 +14,7 @@ CONFIG_PATH = PROJECT_DIR / "config.toml"
 TEMPLATE_CONFIG_PATH = PROJECT_DIR / "config.example.toml"
 
 
-def _load():
-    if not CONFIG_PATH.exists():
-        raise RuntimeError(
-            "找不到配置文件：\n"
-            f"{CONFIG_PATH}\n\n"
-            "请先复制 config.example.toml 为 config.toml，或运行 .\\setup.ps1 / .\\run.ps1 自动创建。"
-        )
-
-    try:
-        with CONFIG_PATH.open("rb") as file:
-            return tomllib.load(file)
-    except tomllib.TOMLDecodeError as error:
-        raise RuntimeError(
-            "config.toml 格式错误：\n"
-            f"{error}"
-        ) from error
-
-
-CONFIG = _load()
+CONFIG = load_config(CONFIG_PATH)
 
 
 def _section(name: str):
