@@ -2,6 +2,9 @@
 
 **V1.6.2 · Windows**
 
+作者：**Maximum**  
+Copyright © 2026 Maximum. All rights reserved.
+
 一个用于向 **Telegram 超级群 / Forum Topic** 批量上传图片和视频的脚本项目。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点、缩略图和终端界面。
 
 ## 功能
@@ -236,6 +239,7 @@ tdlib_files\
 
 ```text
 tdlib-media-uploader\
+├─ COPYRIGHT                      # 版权声明
 ├─ config.example.toml
 ├─ config.toml                    # 本地生成，不提交 Git
 ├─ app_config.py
@@ -268,6 +272,12 @@ tdlib-media-uploader\
 Remove-Item -Recurse -Force .\.venv
 .\setup.ps1
 ```
+
+## 版权
+
+Copyright © 2026 **Maximum**. All rights reserved.
+
+仓库中另附 `COPYRIGHT` 文件作为版权声明。本项目未因此自动授予额外的复制、修改或再分发许可。
 
 ## 注意事项
 
