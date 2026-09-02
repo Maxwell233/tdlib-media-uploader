@@ -6,7 +6,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-APP_VERSION = "1.6"
+APP_VERSION = "1.6.2"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
