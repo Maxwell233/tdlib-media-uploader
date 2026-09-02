@@ -14,14 +14,6 @@ try {
         throw "找不到 config.toml，请先运行 .\run.ps1 创建配置。"
     }
 
-    # 先独立检查 TOML，避免配置错误时刷出整段 Python Traceback。
-    & ".\.venv\Scripts\python.exe" ".\config_check.py"
-    $configExitCode = $LASTEXITCODE
-
-    if ($configExitCode -ne 0) {
-        throw "config.toml 检查失败。请按上方提示修改配置后重试。"
-    }
-
     $mutexName = "Local\TDLibMediaUploader_Telegram"
     $mutex = New-Object System.Threading.Mutex($false, $mutexName)
 
@@ -43,18 +35,12 @@ try {
     Write-Host ""
 
     # 视频断点固定写入 .video_state。
+    # 不做旧 .state 自动迁移。
     $env:TDLIB_VIDEO_STATE_DIR = "$PSScriptRoot\.video_state"
 
-    $pythonCode = @'
-import os
-from pathlib import Path
-import tdlib_video_album_uploader as core
-
-core.STATE_DIR = Path(os.environ["TDLIB_VIDEO_STATE_DIR"])
-
-import tdlib_video_app
-tdlib_video_app.main()
-'@
+    # Windows PowerShell 调用原生程序时会处理双引号。
+    # Python 代码中的环境变量键使用单引号，避免传给 python -c 后丢失引号。
+    $pythonCode = "import os; from pathlib import Path; import tdlib_video_album_uploader as core; core.STATE_DIR = Path(os.environ['TDLIB_VIDEO_STATE_DIR']); import tdlib_video_app; tdlib_video_app.main()"
 
     & ".\.venv\Scripts\python.exe" -c $pythonCode
     $exitCode = $LASTEXITCODE
