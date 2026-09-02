@@ -1,9 +1,8 @@
 # TDLib Media Uploader
 
-**V1.6 · Windows**
+**V1.6.2 · Windows**
 
 一个用于向 **Telegram 超级群 / Forum Topic** 批量上传图片和视频的脚本项目。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点、缩略图和终端界面。
-
 
 ## 功能
 
@@ -13,6 +12,7 @@
 - **断点续传**：只有完整发送成功的 Album 才写入断点；重启后自动跳过已完成项。
 - **统一配置**：日常只修改 `config.toml`，无需编辑 Python 主脚本。
 - **Rich 终端界面**：文件列表、上传计划、确认摘要、实时速度和 Album 状态均使用格式化面板显示。
+- **窗口缩放适配**：V1.6.2 会检测终端尺寸变化并重建实时进度区域，避免 CMD / PowerShell 缩放窗口后留下多份进度面板残影。
 - **互斥保护**：图片和视频上传器共享同一份 TDLib 登录数据库，不允许同时运行。
 
 ## 环境
@@ -114,7 +114,6 @@ run.cmd
 [4] 退出
 ```
 
-
 ## ExifTool（可选）
 
 默认：
@@ -155,7 +154,7 @@ missing_date_policy = "error"
 
 ## 视频规则
 
-程序会先显示完整文件列表和月份 / Album 计划，最后在输入 `y` 之前显示上传摘要，包括待上传数量、总大小、Album 数量、目标 Chat / Topic 和断点文件。
+程序会先按月份分组显示视频文件，再显示月份 / Album 计划，最后在输入 `y` 之前显示上传摘要，包括待上传数量、总大小、Album 数量、目标 Chat / Topic 和断点文件。
 
 例如某个月有 17 个视频：
 
@@ -242,7 +241,7 @@ tdlib-media-uploader\
 ├─ app_config.py
 ├─ pretty_ui.py
 ├─ tdlib_common.py
-├─ tdlib_video_app.py             # V1.6 视频 UI / 流程
+├─ tdlib_video_app.py             # V1.6.2 视频 UI / 流程
 ├─ tdlib_video_album_uploader.py  # 视频上传核心
 ├─ tdlib_image_album_uploader.py
 ├─ run.cmd                        # 推荐双击运行
@@ -254,13 +253,12 @@ tdlib-media-uploader\
 ├─ requirements.txt
 ├─ tools\
 │  └─ exiftool.exe                # 可选，不提交 Git
-├─ tdlib_data\                    # 本地登录数据，不提交 Git
+├─ tdlib_data\                   # 本地登录数据，不提交 Git
 ├─ tdlib_files\
 ├─ .video_state\                 # 视频断点
 ├─ .image_state\                 # 图片断点
 └─ .thumb_cache\
 ```
-
 
 ### .venv 损坏或 Python 路径异常
 
