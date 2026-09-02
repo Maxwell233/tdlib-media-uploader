@@ -1,20 +1,15 @@
 @echo off
+chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-
-echo.
-echo ==========================================
-echo        TDLib Media Uploader V1.6
-echo ==========================================
-echo.
 
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1"
 set "exitcode=%errorlevel%"
 
 if not "%exitcode%"=="0" (
     echo.
-    echo [ERROR] run.ps1 exited with code %exitcode%.
-    echo Please check the error message above.
+    echo run.ps1 运行异常，退出代码：%exitcode%
+    echo 请查看上方错误信息。
     echo.
     pause
 )
