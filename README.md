@@ -4,7 +4,6 @@
 
 一个用于向 **Telegram 超级群 / Forum Topic** 批量上传图片和视频的脚本项目。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 主要负责文件扫描、分组、断点和终端界面。
 
-仓库：<https://github.com/Maxwell233/tdlib-media-uploader>
 
 ## 功能
 
@@ -239,7 +238,6 @@ tdlib_data\
 tdlib_files\
 ```
 
-这些目录均被 `.gitignore` 排除。
 
 正常登录完成后，后续上传 **不需要打开 Telegram Desktop 或手机 App**。
 
