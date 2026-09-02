@@ -2,14 +2,19 @@
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
+title TDLib Media Uploader V1.6
 
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1"
 set "exitcode=%errorlevel%"
 
 if not "%exitcode%"=="0" (
     echo.
-    echo run.ps1 运行异常，退出代码：%exitcode%
-    echo 请查看上方错误信息。
+    echo ==========================================
+    echo  TDLib Media Uploader exited unexpectedly
+    echo ==========================================
+    echo Exit code: %exitcode%
+    echo.
+    echo The window will stay open so you can read the error above.
     echo.
     pause
 )
