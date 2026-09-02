@@ -26,9 +26,10 @@ $setupFailed = $false
 try {
     Clear-Host
 
-    Write-Host "╭────────────────────────────────────────────────────────────╮" -ForegroundColor Cyan
-    Write-Host "│        TDLib Media Uploader V1.6 · 初始环境安装            │" -ForegroundColor Cyan
-    Write-Host "╰────────────────────────────────────────────────────────────╯" -ForegroundColor Cyan
+    $line = "─" * 64
+    Write-Host $line -ForegroundColor Cyan
+    Write-Host "  TDLib Media Uploader V1.6.2 · 初始环境安装" -ForegroundColor Cyan
+    Write-Host $line -ForegroundColor Cyan
     Write-Host ""
 
     if (-not (Test-Path ".venv")) {
@@ -82,11 +83,12 @@ try {
     }
 
     Write-Host ""
-    Write-Host "╭────────────────────── 安装完成 ────────────────────────────╮" -ForegroundColor Green
-    Write-Host "│  1. 编辑 config.toml                                      │" -ForegroundColor Green
-    Write-Host "│  2. 如需读取 EXIF/QuickTime，可安装 tools\exiftool.exe    │" -ForegroundColor Green
-    Write-Host "│  3. 运行 .\run.ps1                                        │" -ForegroundColor Green
-    Write-Host "╰────────────────────────────────────────────────────────────╯" -ForegroundColor Green
+    Write-Host ("─" * 64) -ForegroundColor Green
+    Write-Host "安装完成" -ForegroundColor Green
+    Write-Host "  1. 编辑 config.toml"
+    Write-Host "  2. 如需读取 EXIF/QuickTime，可安装 tools\exiftool.exe"
+    Write-Host "  3. 双击 run.cmd，或运行 .\run.ps1"
+    Write-Host ("─" * 64) -ForegroundColor Green
     Write-Host ""
     Write-Host "提示：默认 missing_date_policy = `"mtime`"，没有 ExifTool 也可上传视频。" -ForegroundColor DarkGray
 }
@@ -94,11 +96,10 @@ catch {
     $setupFailed = $true
 
     Write-Host ""
-    Write-Host "╭────────────────────── 安装失败 ────────────────────────────╮" -ForegroundColor Red
-    Write-Host "│ setup.ps1 没有完成，请查看下方错误信息。                  │" -ForegroundColor Red
-    Write-Host "╰────────────────────────────────────────────────────────────╯" -ForegroundColor Red
-    Write-Host ""
+    Write-Host ("─" * 64) -ForegroundColor Red
+    Write-Host "安装失败" -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host ("─" * 64) -ForegroundColor Red
     Write-Host ""
     Write-Host "常见处理：确认 Python 3.13 x64 已安装，或删除损坏的 .venv 后重试。" -ForegroundColor DarkYellow
 }
