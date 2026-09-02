@@ -73,8 +73,6 @@ config.example.toml
 config.toml
 ```
 
-已加入 `.gitignore`，避免把 `api_hash` 等本地配置提交到 GitHub。
-
 如果没有运行 `setup.ps1`，也可以手动创建：
 
 ```powershell
