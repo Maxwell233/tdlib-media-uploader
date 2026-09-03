@@ -10,7 +10,7 @@
 - **图片**：递归读取目录及全部子目录；每 10 张组成一个 Album；不添加月份、文件名或 Caption。
 - **TDLib 原生上传**：上传期间不需要打开 Telegram Desktop。
 - **断点续传**：只有完整发送成功的 Album 才写入断点；重启后自动跳过已完成项。
-- **统一配置**：日常只修改 `config.toml`，无需编辑 Python 主脚本。
+- **统一配置**：日常优先在 GUI“设置与诊断 → 编辑配置”中修改 `config.toml`，无需编辑 Python 主脚本。
 - **PySide6 GUI**：提供概览、目录扫描、Album 预览、任务中心、历史记录、配置编辑、Telegram 目标编辑、缓存清理和环境诊断。
 - **互斥保护**：图片和视频上传器共享同一份 TDLib 登录数据库，不允许同时运行。
 
@@ -77,13 +77,17 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ### 2. 配置
 
-真实配置文件是：
+普通使用不需要手动打开配置文件。启动 GUI 后，在左侧进入“设置与诊断”，点击“配置入口”中的“编辑配置”，填写并保存 Telegram、目录、日期策略、Album 大小和缩略图选项即可。
+
+视频 / 图片上传页面中的“编辑目标”按钮也可以直接修改群组 Chat ID 和 Forum Topic ID。
+
+配置实际保存在：
 
 ```text
 config.toml
 ```
 
-源码安装后编辑：
+只有在 GUI 无法启动或需要自动化部署时，才需要手动编辑（源码方式示例）：
 
 ```powershell
 notepad .\config.toml
