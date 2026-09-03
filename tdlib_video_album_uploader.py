@@ -27,6 +27,55 @@ STATE_DIR = PROJECT_DIR / ".state"
 THUMB_CACHE_DIR = PROJECT_DIR / ".thumb_cache"
 
 
+def _hidden_subprocess_kwargs() -> dict:
+    """Return Windows process flags that prevent a console window flash."""
+
+    if os.name != "nt":
+        return {}
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "startupinfo": startupinfo,
+    }
+
+
+def _patch_imageio_process_flags() -> None:
+    """Make imageio-ffmpeg child processes inherit the same hidden flags."""
+
+    if os.name != "nt":
+        return
+
+    try:
+        import imageio_ffmpeg._io as imageio_io
+        import imageio_ffmpeg._utils as imageio_utils
+    except (ImportError, AttributeError):
+        return
+
+    original = getattr(imageio_io, "_popen_kwargs", None)
+    if not callable(original) or getattr(original, "_tdlib_hidden", False):
+        return
+
+    def hidden_imageio_kwargs(prevent_sigint=False):
+        result = dict(original(prevent_sigint))
+        hidden = _hidden_subprocess_kwargs()
+        result["startupinfo"] = hidden["startupinfo"]
+        result["creationflags"] = int(result.get("creationflags") or 0) | int(
+            hidden["creationflags"]
+        )
+        return result
+
+    hidden_imageio_kwargs._tdlib_hidden = True
+    imageio_io._popen_kwargs = hidden_imageio_kwargs
+    if getattr(imageio_utils, "_popen_kwargs", None) is original:
+        imageio_utils._popen_kwargs = hidden_imageio_kwargs
+
+
+_patch_imageio_process_flags()
+
+
 def _find_ffmpeg_override() -> str | None:
     """Find the LGPL FFmpeg supplied by a portable build or the user.
 
@@ -155,6 +204,7 @@ def read_exif_metadata() -> dict[str, dict]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        **_hidden_subprocess_kwargs(),
     )
     if result.returncode not in (0, 1):
         raise RuntimeError("ExifTool 执行失败：\n" + result.stderr.strip())
@@ -269,7 +319,7 @@ def build_thumbnail(path: Path):
             return final_path, image.width, image.height
 
     ffmpeg = _FFMPEG_OVERRIDE or imageio_ffmpeg.get_ffmpeg_exe()
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    process_kwargs = _hidden_subprocess_kwargs()
 
     def extract(second: float):
         result = subprocess.run(
@@ -281,7 +331,7 @@ def build_thumbnail(path: Path):
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
+            **process_kwargs,
         )
         return result.returncode == 0 and temp_path.exists() and temp_path.stat().st_size > 0
 

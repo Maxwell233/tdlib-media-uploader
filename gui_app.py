@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.7.1.
+"""PySide6 desktop interface for TDLib Media Uploader V1.7.2.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -19,7 +19,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -58,7 +58,9 @@ PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
 TEMPLATE_CONFIG_PATH = PROJECT_DIR / "config.example.toml"
 HISTORY_PATH = PROJECT_DIR / ".gui_history.json"
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
+ICON_PATH = PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"
+APP_ICON = QIcon(str(ICON_PATH)) if ICON_PATH.is_file() else QIcon()
 
 
 def _ensure_config_file() -> bool:
@@ -645,7 +647,7 @@ class HomePage(QWidget):
         task_layout.addStretch(1)
         layout.addWidget(task_box)
 
-        note = QGroupBox("V1.7.1 运行提示")
+        note = QGroupBox("V1.7.2 运行提示")
         note_layout = QVBoxLayout(note)
         note_body = QLabel(
             "GUI 与上传核心共用 TDLib 登录数据和断点文件。一次只能运行一个图片或视频任务；"
@@ -1065,7 +1067,7 @@ class TargetDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑 Telegram 目标 · V1.7.1")
+        self.setWindowTitle("编辑 Telegram 目标 · V1.7.2")
         self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -1116,7 +1118,7 @@ class TargetDialog(QDialog):
 class ConfigDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑配置 · V1.7.1")
+        self.setWindowTitle("编辑配置 · V1.7.2")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -1256,6 +1258,7 @@ QMenu::item:selected { background: #2d6fa9; color: #ffffff; }
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setWindowIcon(APP_ICON)
         self.setWindowTitle(f"TDLib Media Uploader · V{APP_VERSION} · Maximum 2026")
         self.setMinimumSize(1060, 700)
         self.resize(1240, 800)
@@ -1572,6 +1575,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("TDLib Media Uploader")
     app.setApplicationVersion(APP_VERSION)
+    app.setWindowIcon(APP_ICON)
     app.setStyle("Fusion")
     app.setStyleSheet(APP_STYLE)
     window = MainWindow()

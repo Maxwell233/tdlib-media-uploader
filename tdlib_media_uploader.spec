@@ -41,6 +41,7 @@ datas = [
     (str(PROJECT_DIR / "LICENSE"), "."),
     (str(PROJECT_DIR / "ATTRIBUTION"), "."),
     (str(PROJECT_DIR / "THIRD_PARTY_LICENSES.md"), "."),
+    (str(PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"), "assets"),
     (str(PROJECT_DIR / "tools" / "README.txt"), "tools"),
 ]
 binaries = []

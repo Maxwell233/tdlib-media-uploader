@@ -1,8 +1,8 @@
 # TDLib Media Uploader
 
-**V1.7.1 · Windows**
+**V1.7.2 · Windows**
 
-一个用于向 **Telegram 超级群 / Forum Topic** 批量上传图片和视频的 Windows GUI 工具。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点和缩略图；V1.7.1 仅保留 PySide6 桌面 GUI，并继续提供缓存清理与任务管理。
+一个用于向 **Telegram 超级群 / Forum Topic** 批量上传图片和视频的 Windows GUI 工具。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点和缩略图；V1.7.2 仅保留 PySide6 桌面 GUI，并继续提供缓存清理与任务管理。
 
 ## 功能
 
@@ -12,6 +12,7 @@
 - **断点续传**：只有完整发送成功的 Album 才写入断点；重启后自动跳过已完成项。
 - **统一配置**：日常优先在 GUI“设置与诊断 → 编辑配置”中修改 `config.toml`，无需编辑 Python 主脚本。
 - **PySide6 GUI**：提供概览、目录扫描、Album 预览、任务中心、历史记录、配置编辑、Telegram 目标编辑、缓存清理和环境诊断。
+- **后台命令无弹窗**：扫描、视频预检和封面生成调用 ExifTool / FFmpeg 时隐藏 Windows 控制台窗口，不打断 GUI 操作。
 - **互斥保护**：图片和视频上传器共享同一份 TDLib 登录数据库，不允许同时运行。
 
 ## 环境
@@ -32,7 +33,7 @@
 
 ### 推荐：直接下载 Release ZIP（普通使用）
 
-Windows 用户建议直接使用已经编译好的稳定版：[TDLib Media Uploader v1.7.1 Release](https://github.com/Maxwell233/tdlib-media-uploader/releases/tag/v1.7.1)，或直接下载 [Windows x64 ZIP](https://github.com/Maxwell233/tdlib-media-uploader/releases/download/v1.7.1/TDLib.Media.Uploader-v1.7.1-windows-x64.zip)。解压后即可使用。
+Windows 用户建议直接使用已经编译好的稳定版：[TDLib Media Uploader v1.7.2 Release](https://github.com/Maxwell233/tdlib-media-uploader/releases/tag/v1.7.2)，或直接下载 [Windows x64 ZIP](https://github.com/Maxwell233/tdlib-media-uploader/releases/download/v1.7.2/TDLib.Media.Uploader-v1.7.2-windows-x64.zip)。解压后即可使用。
 
 1. 解压整个 ZIP 文件夹，不要只复制或移动其中的 EXE；
 2. 双击 `TDLib Media Uploader.exe`；
@@ -125,7 +126,7 @@ run.cmd
 
 `run.cmd` / `run.ps1` 会直接启动 GUI。GUI 与上传核心使用相同的 `config.toml`、TDLib 登录数据和断点文件。GUI 中的“安全停止”会立即取消正在上传的文件，不会删除断点；重新扫描后，完整发送成功的 Album 会自动跳过。
 
-## V1.7.1 GUI
+## V1.7.2 GUI
 
 GUI 使用 PySide6 构建，包含：
 
@@ -156,16 +157,10 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ```text
 dist\TDLib Media Uploader\TDLib Media Uploader.exe
-dist\TDLib Media Uploader-v1.7.1-windows-x64.zip
+dist\TDLib Media Uploader-v1.7.2-windows-x64.zip
 ```
 
 本地构建会使用独立的 `.build_venv`，不会修改日常运行的 `.venv`。构建脚本会自动下载固定的 BtbN Windows x64 LGPL FFmpeg，校验 SHA-256 和 `-version` 构建标志，再交给 PyInstaller；发现 `--enable-gpl` 或 `--enable-nonfree` 时会停止发布，避免把 GPL/nonfree FFmpeg 混入便携包。源码运行时，安装脚本只安装 imageio-ffmpeg 的 Python wrapper；若不使用 Release 便携包，请自行提供 LGPL `ffmpeg.exe`（放入 `tools\ffmpeg\ffmpeg.exe` 或加入 PATH）。EXE 构建不需要上传 `config.toml`，也不会包含 `.video_state`、`.image_state`、`.thumb_cache` 或 `tdlib_data`。
-
-## 项目许可与署名
-
-本项目的原创代码、文档和界面资源采用 [Creative Commons BY-NC 4.0 国际许可](https://creativecommons.org/licenses/by-nc/4.0/) 发布：允许分享、复制、修改和再创作，但必须保留作者署名 Maximum、提供许可链接、说明修改内容，并且禁止商业用途。CC BY-NC 4.0 不是 OSI 定义的软件开源许可证，本项目采用它是为了明确非商业使用条件。
-
-完整许可文本见根目录的 `LICENSE`，作者署名见 `ATTRIBUTION`，第三方组件清单见 `THIRD_PARTY_LICENSES.md`。本项目为独立社区项目，与 Telegram 官方无隶属关系；TDLib、PySide6、Pillow、imageio-ffmpeg、FFmpeg、PyInstaller、Python 及其他第三方组件分别遵循各自许可证，根目录许可中的非商业条件不会限制这些上游许可证授予的权利。源码包和编译包均包含上述三个许可/署名文件，请勿将 `config.toml`、Telegram API 凭据、登录数据或本地断点状态随包分发。
 
 ## ExifTool（可选）
 
@@ -347,3 +342,9 @@ Remove-Item -Recurse -Force .\.venv
 - 不建议手动升级 `tdjson`，除非确认新版本兼容。
 - 本项目用于个人 Telegram 媒体整理和批量上传，请遵守 Telegram 使用条款和目标群组规则。
 - 本项目与 Telegram 官方无隶属关系。
+
+## 项目许可与署名
+
+本项目的原创代码、文档和界面资源采用 [Creative Commons BY-NC 4.0 国际许可](https://creativecommons.org/licenses/by-nc/4.0/) 发布：允许分享、复制、修改和再创作，但必须保留作者署名 Maximum、提供许可链接、说明修改内容，并且禁止商业用途。CC BY-NC 4.0 不是 OSI 定义的软件开源许可证，本项目采用它是为了明确非商业使用条件。
+
+完整许可文本见根目录的 `LICENSE`，作者署名见 `ATTRIBUTION`，第三方组件清单见 `THIRD_PARTY_LICENSES.md`。本项目为独立社区项目，与 Telegram 官方无隶属关系；TDLib、PySide6、Pillow、imageio-ffmpeg、FFmpeg、PyInstaller、Python 及其他第三方组件分别遵循各自许可证，根目录许可中的非商业条件不会限制这些上游许可证授予的权利。源码包和编译包均包含上述三个许可/署名文件，请勿将 `config.toml`、Telegram API 凭据、登录数据或本地断点状态随包分发。

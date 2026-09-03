@@ -93,6 +93,8 @@ jobs:
             ""
             "- Includes TDLib, a verified BtbN Windows x64 LGPL FFmpeg build, and Qt runtime dependencies."
             "- FFmpeg asset: autobuild-2026-09-03-13-17; no --enable-gpl/nonfree build flags."
+            "- Hides Windows console windows while scanning, pre-checking videos, and generating covers."
+            "- Registers the application icon in the GUI and taskbar."
             "- Includes the CC BY-NC 4.0 license and Maximum attribution."
             "- Includes THIRD_PARTY_LICENSES.md with upstream license and redistribution notes."
             "- `config.toml` and Telegram login data are not included."

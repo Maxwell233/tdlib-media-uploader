@@ -28,7 +28,7 @@ try {
 
     $line = "─" * 64
     Write-Host $line -ForegroundColor Cyan
-    Write-Host "  TDLib Media Uploader V1.7.1 · 初始环境安装" -ForegroundColor Cyan
+    Write-Host "  TDLib Media Uploader V1.7.2 · 初始环境安装" -ForegroundColor Cyan
     Write-Host $line -ForegroundColor Cyan
     Write-Host ""
 
