@@ -12,7 +12,6 @@
 - **断点续传**：只有完整发送成功的 Album 才写入断点；重启后自动跳过已完成项。
 - **统一配置**：日常只修改 `config.toml`，无需编辑 Python 主脚本。
 - **Rich 终端界面**：文件列表、上传计划、确认摘要、实时速度和 Album 状态均使用格式化面板显示。
-- **稳定进度显示**：V1.6.4 已取消 alternate screen / 全屏缓冲区方案，恢复普通终端缓冲区中的 Rich Live 实现，避免 Album 切换时原文件列表闪回。上传时频繁改变 CMD / PowerShell 窗口大小仍可能触发 Rich 自身的重绘残影，建议上传过程中保持窗口尺寸稳定。
 - **互斥保护**：图片和视频上传器共享同一份 TDLib 登录数据库，不允许同时运行。
 
 ## 环境
@@ -69,7 +68,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 config.toml
 ```
 
-它不会提交到 GitHub。首次安装后编辑：
+首次安装后编辑：
 
 ```powershell
 notepad .\config.toml
@@ -280,12 +279,6 @@ tdlib-media-uploader\
 Remove-Item -Recurse -Force .\.venv
 .\setup.ps1
 ```
-
-## 版权
-
-Copyright © 2026 **Maximum**. All rights reserved.
-
-仓库中另附 `COPYRIGHT` 文件作为版权声明。本项目未因此自动授予额外的复制、修改或再分发许可。
 
 ## 注意事项
 
