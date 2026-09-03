@@ -97,6 +97,18 @@ try {
         throw "构建完成但没有找到 EXE：$exePath"
     }
 
+    # Keep the human-readable copyright notice beside the executable even if
+    # a future PyInstaller version changes how extensionless data files are
+    # collected from the spec file.
+    $copyrightSource = Join-Path $PSScriptRoot "COPYRIGHT"
+    $copyrightPath = Join-Path $distDir "COPYRIGHT"
+    if (-not (Test-Path -LiteralPath $copyrightPath)) {
+        Copy-Item -LiteralPath $copyrightSource -Destination $copyrightPath -Force
+    }
+    if (-not (Test-Path -LiteralPath $copyrightPath)) {
+        throw "构建完成但没有找到版权声明：$copyrightPath"
+    }
+
     $archivePath = Join-Path $PSScriptRoot "dist\TDLib Media Uploader-v$version-windows-x64.zip"
     if (Test-Path -LiteralPath $archivePath) {
         Remove-Item -LiteralPath $archivePath -Force
