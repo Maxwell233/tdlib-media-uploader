@@ -5,7 +5,7 @@ function Show-Banner {
     Clear-Host
     $line = "─" * 64
     Write-Host $line -ForegroundColor Cyan
-    Write-Host "  TDLib Media Uploader  V1.7.0" -ForegroundColor Cyan
+    Write-Host "  TDLib Media Uploader  V1.7.1" -ForegroundColor Cyan
     Write-Host "  Telegram 批量图片 / 视频 Album GUI" -ForegroundColor DarkCyan
     Write-Host "  Copyright © 2026 Maximum. All rights reserved." -ForegroundColor DarkGray
     Write-Host $line -ForegroundColor Cyan

@@ -1,8 +1,8 @@
 # TDLib Media Uploader
 
-**V1.7.0 · Windows**
+**V1.7.1 · Windows**
 
-一个用于向 **Telegram 超级群 / Forum Topic** 批量上传图片和视频的 Windows GUI 工具。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点和缩略图；V1.7.0 仅保留 PySide6 桌面 GUI，并继续提供缓存清理与任务管理。
+一个用于向 **Telegram 超级群 / Forum Topic** 批量上传图片和视频的 Windows GUI 工具。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点和缩略图；V1.7.1 仅保留 PySide6 桌面 GUI，并继续提供缓存清理与任务管理。
 
 ## 功能
 
@@ -108,7 +108,7 @@ run.cmd
 
 `run.cmd` / `run.ps1` 会直接启动 GUI。GUI 与上传核心使用相同的 `config.toml`、TDLib 登录数据和断点文件。GUI 中的“安全停止”会立即取消正在上传的文件，不会删除断点；重新扫描后，完整发送成功的 Album 会自动跳过。
 
-## V1.7.0 GUI
+## V1.7.1 GUI
 
 GUI 使用 PySide6 构建，包含：
 
@@ -124,7 +124,7 @@ GUI 仍然只运行一个上传任务，以保护共享的 TDLib 登录数据库
 
 ## Windows EXE 构建
 
-项目提供 PyInstaller one-folder 构建方案。推荐使用 GitHub Actions 的 Windows runner：每次推送 `main`、推送 `v*` 标签，或在仓库的 **Actions → Build Windows EXE → Run workflow** 手动运行，都会生成 Windows x64 构建产物。完成后在对应工作流页面的 **Artifacts** 下载 ZIP。
+项目提供 PyInstaller one-folder 构建方案。推荐使用 GitHub Actions 的 Windows runner：每次推送 `main`、推送 `v*` 标签，或在仓库的 **Actions → Build Windows EXE → Run workflow** 手动运行，都会生成 Windows x64 构建产物。完成后可在对应工作流页面的 **Artifacts** 下载 ZIP；推送版本标签时，工作流还会自动创建 GitHub Release 并附加同一个 ZIP。
 
 构建产物包含 `TDLib Media Uploader.exe` 及其依赖 DLL / Qt 插件。采用 one-folder 形式是为了让 TDLib 原生库和 FFmpeg 依赖稳定工作；首次启动时 GUI 会在 EXE 所在目录创建 `config.toml`，不会把你的配置或 Telegram 登录数据打进包里。
 
@@ -139,10 +139,16 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ```text
 dist\TDLib Media Uploader\TDLib Media Uploader.exe
-dist\TDLib Media Uploader-v1.7.0-windows-x64.zip
+dist\TDLib Media Uploader-v1.7.1-windows-x64.zip
 ```
 
 本地构建会使用独立的 `.build_venv`，不会修改日常运行的 `.venv`。EXE 构建不需要上传 `config.toml`，也不会包含 `.video_state`、`.image_state`、`.thumb_cache` 或 `tdlib_data`。
+
+## 版权
+
+Copyright © 2026 Maximum. All rights reserved.
+
+本项目为独立社区项目，与 Telegram 官方无隶属关系。TDLib、PySide6、Pillow、imageio-ffmpeg 及其他第三方组件分别遵循各自许可证。源码包和编译包均包含根目录的 `COPYRIGHT` 声明；请勿将 `config.toml`、Telegram API 凭据、登录数据或本地断点状态随包分发。
 
 ## ExifTool（可选）
 

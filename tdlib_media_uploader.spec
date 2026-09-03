@@ -23,6 +23,7 @@ def collect_package(name: str):
 datas = [
     (str(PROJECT_DIR / "config.example.toml"), "."),
     (str(PROJECT_DIR / "VERSION"), "."),
+    (str(PROJECT_DIR / "COPYRIGHT"), "."),
     (str(PROJECT_DIR / "tools" / "README.txt"), "tools"),
 ]
 binaries = []

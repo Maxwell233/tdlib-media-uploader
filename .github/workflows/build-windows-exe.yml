@@ -9,7 +9,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -45,6 +45,10 @@ jobs:
           if (-not (Test-Path -LiteralPath $exe)) {
             throw "EXE not found: $exe"
           }
+          $copyright = "dist\TDLib Media Uploader\COPYRIGHT"
+          if (-not (Test-Path -LiteralPath $copyright)) {
+            throw "COPYRIGHT notice not found: $copyright"
+          }
           $archive = Get-ChildItem -LiteralPath "dist" -Filter "*.zip" | Select-Object -First 1
           if ($null -eq $archive) {
             throw "Portable ZIP not found in dist"
@@ -55,7 +59,36 @@ jobs:
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v7
         with:
-          name: tdlib-media-uploader-v1.7.0-windows-x64
+          name: tdlib-media-uploader-${{ github.ref_name }}-windows-x64
           path: dist/TDLib Media Uploader-v*.zip
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content -Raw -LiteralPath ".\VERSION").Trim()
+          $archive = Get-ChildItem -LiteralPath "dist" -Filter "TDLib Media Uploader-v*.zip" | Select-Object -First 1
+          if ($null -eq $archive) {
+            throw "Portable ZIP not found in dist"
+          }
+          $notes = @(
+            "## TDLib Media Uploader v$version"
+            ""
+            "Windows x64 PySide6 one-folder build."
+            ""
+            "- Includes TDLib, FFmpeg and Qt runtime dependencies."
+            "- Includes the `COPYRIGHT` notice."
+            "- `config.toml` and Telegram login data are not included."
+            "- Unzip the package and run `TDLib Media Uploader.exe`."
+            ""
+            "Copyright © 2026 Maximum. All rights reserved."
+          )
+          $notes | Set-Content -LiteralPath ".\release-notes.md" -Encoding utf8
+          gh release create $env:GITHUB_REF_NAME $archive.FullName `
+            --title "TDLib Media Uploader v$version" `
+            --notes-file ".\release-notes.md" `
+            --latest

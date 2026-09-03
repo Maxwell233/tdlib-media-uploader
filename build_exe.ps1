@@ -65,7 +65,7 @@ function Resolve-PythonCommand {
 
 try {
     $python = Resolve-PythonCommand -RequestedPath $PythonPath
-    Write-Host "TDLib Media Uploader V1.7.0 · Windows EXE 构建" -ForegroundColor Cyan
+    Write-Host "TDLib Media Uploader V1.7.1 · Windows EXE 构建" -ForegroundColor Cyan
     Write-Host "使用 Python：$python" -ForegroundColor DarkGray
 
     if (-not $SkipInstall) {
