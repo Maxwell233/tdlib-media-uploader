@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""TDLib Media Uploader V1.6.2 的 Rich 终端界面。"""
+"""TDLib Media Uploader V1.6.3 的 Rich 终端界面。"""
 
 from __future__ import annotations
 
@@ -39,6 +39,16 @@ def _format_eta(seconds) -> str:
 
 
 class PrettyConsoleUI:
+    """
+    Rich 终端 UI。
+
+    上传进度一旦进入 alternate screen，就由一次完整上传会话持有。
+    Album 切换、普通日志以及 Album 完成事件都不能主动关闭该屏幕；
+    只有最终 banner、warning、error 或显式 force stop 才退出。
+
+    这样可以避免每完成一个 Album 时短暂恢复原终端缓冲区造成闪屏。
+    """
+
     def __init__(
         self,
         *,
@@ -54,20 +64,63 @@ class PrettyConsoleUI:
         self.bar_width = max(12, int(bar_width))
         self.transient = bool(transient)
         self.enabled = bool(enabled)
-        self.console = Console(highlight=False)
-        self.live = None
 
-    def _stop_live_unlocked(self):
+        self.console = Console(highlight=False)
+        self.live: Live | None = None
+        self._upload_session_active = False
+
+    def _stop_live_unlocked(self, *, force: bool = False):
         if self.live is None:
+            self._upload_session_active = False
             return
 
+        if self._upload_session_active and not force:
+            return
+
+        live = self.live
+        self.live = None
+        self._upload_session_active = False
+
         try:
-            self.live.stop()
-        finally:
+            live.stop()
+        except Exception:
+            pass
+
+    def _start_progress_live_unlocked(self, renderable):
+        if self.live is not None:
+            return
+
+        self._upload_session_active = True
+
+        live = Live(
+            renderable,
+            console=self.console,
+            screen=True,
+            auto_refresh=False,
+            refresh_per_second=self.refresh_hz,
+            vertical_overflow="crop",
+            redirect_stdout=False,
+            redirect_stderr=False,
+        )
+
+        self.live = live
+
+        try:
+            live.start(refresh=True)
+        except Exception:
             self.live = None
+            self._upload_session_active = False
+            raise
+
+    def end_upload_session(self):
+        with self.lock:
+            self._stop_live_unlocked(force=True)
 
     def log(self, text=""):
         with self.lock:
+            if self._upload_session_active:
+                return
+
             self._stop_live_unlocked()
             self.console.print(
                 str(text),
@@ -77,36 +130,29 @@ class PrettyConsoleUI:
 
     def info(self, text):
         with self.lock:
-            self._stop_live_unlocked()
-            self.console.print(
-                f"[bold cyan]ℹ[/] {text}"
-            )
-
-    def success(self, text):
-        with self.lock:
-            # 上传 Live 正在 alternate screen 中运行时，不退出动态界面。
-            # Album 级成功信息由进度面板本身反映，避免恢复主缓冲区造成闪屏。
-            if self.enabled and self.live is not None:
+            if self._upload_session_active:
                 return
 
             self._stop_live_unlocked()
-            self.console.print(
-                f"[bold green]✓[/] {text}"
-            )
+            self.console.print(f"[bold cyan]ℹ[/] {text}")
+
+    def success(self, text):
+        with self.lock:
+            if self._upload_session_active:
+                return
+
+            self._stop_live_unlocked()
+            self.console.print(f"[bold green]✓[/] {text}")
 
     def warning(self, text):
         with self.lock:
-            self._stop_live_unlocked()
-            self.console.print(
-                f"[bold yellow]![/] {text}"
-            )
+            self._stop_live_unlocked(force=True)
+            self.console.print(f"[bold yellow]![/] {text}")
 
     def error(self, text):
         with self.lock:
-            self._stop_live_unlocked()
-            self.console.print(
-                f"[bold red]✗[/] {text}"
-            )
+            self._stop_live_unlocked(force=True)
+            self.console.print(f"[bold red]✗[/] {text}")
 
     def banner(
         self,
@@ -129,7 +175,8 @@ class PrettyConsoleUI:
             )
 
         with self.lock:
-            self._stop_live_unlocked()
+            self._stop_live_unlocked(force=True)
+
             self.console.print(
                 Panel(
                     body,
@@ -147,11 +194,7 @@ class PrettyConsoleUI:
         *,
         kind="VIDEO",
     ):
-        accent = (
-            "cyan"
-            if kind.upper() == "VIDEO"
-            else "magenta"
-        )
+        accent = "cyan" if kind.upper() == "VIDEO" else "magenta"
 
         table = Table(
             box=None,
@@ -178,11 +221,15 @@ class PrettyConsoleUI:
             )
 
         with self.lock:
+            if self._upload_session_active:
+                return
+
             self._stop_live_unlocked()
+
             self.console.print(
                 Panel(
                     table,
-                    title=f"[bold] {title} [/]",
+                    title=f"[bold] {title} [/]","+"
                     title_align="left",
                     border_style=f"bright_{accent}",
                     box=box.ROUNDED,
@@ -200,11 +247,7 @@ class PrettyConsoleUI:
         kind="VIDEO",
         caption: str | None = None,
     ):
-        accent = (
-            "cyan"
-            if kind.upper() == "VIDEO"
-            else "magenta"
-        )
+        accent = "cyan" if kind.upper() == "VIDEO" else "magenta"
 
         table = Table(
             title=title,
@@ -218,17 +261,15 @@ class PrettyConsoleUI:
         )
 
         for name, kwargs in columns:
-            table.add_column(
-                name,
-                **kwargs,
-            )
+            table.add_column(name, **kwargs)
 
         for row in rows:
-            table.add_row(
-                *(str(value) for value in row)
-            )
+            table.add_row(*(str(value) for value in row))
 
         with self.lock:
+            if self._upload_session_active:
+                return
+
             self._stop_live_unlocked()
             self.console.print(table)
 
@@ -239,11 +280,7 @@ class PrettyConsoleUI:
         *,
         kind="VIDEO",
     ):
-        accent = (
-            "cyan"
-            if kind.upper() == "VIDEO"
-            else "magenta"
-        )
+        accent = "cyan" if kind.upper() == "VIDEO" else "magenta"
 
         table = Table(
             title=title,
@@ -252,33 +289,19 @@ class PrettyConsoleUI:
             box=box.SIMPLE,
             expand=False,
         )
-        table.add_column(
-            "月份",
-            no_wrap=True,
-        )
-        table.add_column(
-            "Caption",
-            no_wrap=True,
-        )
-        table.add_column(
-            "总数",
-            justify="right",
-        )
-        table.add_column(
-            "待上传",
-            justify="right",
-        )
-        table.add_column(
-            "Album",
-            justify="right",
-        )
+        table.add_column("月份", no_wrap=True)
+        table.add_column("Caption", no_wrap=True)
+        table.add_column("总数", justify="right")
+        table.add_column("待上传", justify="right")
+        table.add_column("Album", justify="right")
 
         for row in rows:
-            table.add_row(
-                *(str(value) for value in row)
-            )
+            table.add_row(*(str(value) for value in row))
 
         with self.lock:
+            if self._upload_session_active:
+                return
+
             self._stop_live_unlocked()
             self.console.print(table)
 
@@ -292,22 +315,10 @@ class PrettyConsoleUI:
         self.summary(
             "Telegram 目标已确认",
             [
-                (
-                    "聊天",
-                    chat_title or "(未命名)",
-                ),
-                (
-                    "CHAT_ID",
-                    chat_id,
-                ),
-                (
-                    "Topic",
-                    topic_name or "(未命名)",
-                ),
-                (
-                    "FORUM_TOPIC_ID",
-                    topic_id,
-                ),
+                ("聊天", chat_title or "(未命名)"),
+                ("CHAT_ID", chat_id),
+                ("Topic", topic_name or "(未命名)"),
+                ("FORUM_TOPIC_ID", topic_id),
             ],
             kind="VIDEO",
         )
@@ -320,11 +331,7 @@ class PrettyConsoleUI:
         subtitle="",
         rows=None,
     ):
-        accent = (
-            "cyan"
-            if kind.upper() == "VIDEO"
-            else "magenta"
-        )
+        accent = "cyan" if kind.upper() == "VIDEO" else "magenta"
 
         body = Text()
         body.append(
@@ -348,12 +355,11 @@ class PrettyConsoleUI:
                 )
 
         with self.lock:
-            # 第一个 Album 开始上传后，Live 会占用 alternate screen。
-            # 后续 Album 切换时保持同一动态屏幕，不临时恢复文件列表。
-            if self.enabled and self.live is not None:
+            if self._upload_session_active:
                 return
 
             self._stop_live_unlocked()
+
             self.console.print(
                 Panel(
                     body,
@@ -366,23 +372,17 @@ class PrettyConsoleUI:
 
     def confirm_upload(self) -> bool:
         with self.lock:
-            self._stop_live_unlocked()
+            self._stop_live_unlocked(force=True)
+
             answer = self.console.input(
                 "\n[bold cyan]确认开始上传？[/] "
                 "输入 [bold green]y[/] 继续："
             )
 
-        return (
-            answer
-            .strip()
-            .lower()
-            == "y"
-        )
+        return answer.strip().lower() == "y"
 
     def cancelled(self):
-        self.warning(
-            "已取消，没有开始上传。"
-        )
+        self.warning("已取消，没有开始上传。")
 
     def _build_progress_panel(
         self,
@@ -401,10 +401,7 @@ class PrettyConsoleUI:
     ):
         ratio = max(
             0.0,
-            min(
-                float(ratio),
-                1.0,
-            ),
+            min(float(ratio), 1.0),
         )
 
         terminal_width = max(
@@ -427,11 +424,7 @@ class PrettyConsoleUI:
                 ratio
             )
         )
-        empty = (
-            responsive_bar_width
-            -
-            filled
-        )
+        empty = responsive_bar_width - filled
 
         if kind.upper() == "VIDEO":
             title = " VIDEO · TDLib 上传 "
@@ -465,13 +458,7 @@ class PrettyConsoleUI:
         )
 
         if self.show_mbps:
-            mbps = (
-                float(speed)
-                *
-                8
-                /
-                1_000_000
-            )
+            mbps = float(speed) * 8 / 1_000_000
             line2.append(
                 f"  ·  {mbps:,.1f} Mbps",
                 style="bold white",
@@ -538,16 +525,7 @@ class PrettyConsoleUI:
         )
 
     def _build_progress_screen(self, **kwargs):
-        """
-        上传期间使用独立的 alternate screen。
-
-        Screen 会按“当前”终端宽高填满整个缓冲区。
-        因此 CMD / Windows Terminal 改变窗口尺寸时，
-        旧宽度下产生的边框和换行不会残留在新画面中。
-        """
-        panel = self._build_progress_panel(
-            **kwargs
-        )
+        panel = self._build_progress_panel(**kwargs)
 
         return Screen(
             panel,
@@ -587,24 +565,13 @@ class PrettyConsoleUI:
                     *
                     max(
                         0.0,
-                        min(
-                            float(ratio),
-                            1.0,
-                        ),
+                        min(float(ratio), 1.0),
                     )
                 )
                 bar = (
-                    "#"
-                    *
-                    filled
+                    "#" * filled
                     +
-                    "-"
-                    *
-                    (
-                        bar_width
-                        -
-                        filled
-                    )
+                    "-" * (bar_width - filled)
                 )
 
                 self.console.print(
@@ -619,36 +586,22 @@ class PrettyConsoleUI:
                 )
                 return
 
-            renderable = (
-                self._build_progress_screen(
-                    kind=kind,
-                    ratio=ratio,
-                    speed=speed,
-                    eta=eta,
-                    detail=detail,
-                    album_number=album_number,
-                    album_total=album_total,
-                    done_files=done_files,
-                    total_files=total_files,
-                    done_bytes=done_bytes,
-                    total_bytes=total_bytes,
-                )
+            renderable = self._build_progress_screen(
+                kind=kind,
+                ratio=ratio,
+                speed=speed,
+                eta=eta,
+                detail=detail,
+                album_number=album_number,
+                album_total=album_total,
+                done_files=done_files,
+                total_files=total_files,
+                done_bytes=done_bytes,
+                total_bytes=total_bytes,
             )
 
             if self.live is None:
-                self.live = Live(
-                    renderable,
-                    console=self.console,
-                    screen=True,
-                    auto_refresh=False,
-                    refresh_per_second=self.refresh_hz,
-                    vertical_overflow="crop",
-                    redirect_stdout=False,
-                    redirect_stderr=False,
-                )
-                self.live.start(
-                    refresh=True
-                )
+                self._start_progress_live_unlocked(renderable)
             else:
                 self.live.update(
                     renderable,
@@ -657,10 +610,7 @@ class PrettyConsoleUI:
 
     def finish(self):
         with self.lock:
-            # finish() 也会在每个 Album 完成时调用。Rich 模式下保持
-            # alternate screen 持续存在，直到 banner / warning / error
-            # 真正结束上传会话，避免每 10 个媒体恢复主缓冲区闪一下。
-            if self.enabled and self.live is not None:
+            if self.enabled and self._upload_session_active:
                 return
 
             self._stop_live_unlocked()
