@@ -1,15 +1,23 @@
 # -*- coding: utf-8 -*-
 """TDLib Media Uploader V1.6.3 Rich terminal UI."""
 from __future__ import annotations
+import logging
 import threading
 from typing import Iterable
 from rich import box
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
-from rich.screen import Screen
 from rich.table import Table
 from rich.text import Text
+
+
+class _ImageIOFFmpegStopWarningFilter(logging.Filter):
+    def filter(self, record):
+        return "We had to kill ffmpeg to stop it." not in record.getMessage()
+
+
+logging.getLogger("imageio_ffmpeg").addFilter(_ImageIOFFmpegStopWarningFilter())
 
 
 def _format_size(v):
@@ -332,27 +340,24 @@ class PrettyConsoleUI:
                 )
                 return
 
-            screen = Screen(
-                self._panel(
-                    kind=kind,
-                    ratio=ratio,
-                    speed=speed,
-                    eta=eta,
-                    detail=detail,
-                    album_number=album_number,
-                    album_total=album_total,
-                    done_files=done_files,
-                    total_files=total_files,
-                    done_bytes=done_bytes,
-                    total_bytes=total_bytes,
-                ),
-                application_mode=True,
+            renderable = self._panel(
+                kind=kind,
+                ratio=ratio,
+                speed=speed,
+                eta=eta,
+                detail=detail,
+                album_number=album_number,
+                album_total=album_total,
+                done_files=done_files,
+                total_files=total_files,
+                done_bytes=done_bytes,
+                total_bytes=total_bytes,
             )
 
             if self.live is None:
-                self._start_live_unlocked(screen)
+                self._start_live_unlocked(renderable)
             else:
-                self.live.update(screen, refresh=True)
+                self.live.update(renderable, refresh=True)
 
     def finish(self):
         with self.lock:
