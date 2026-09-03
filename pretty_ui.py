@@ -84,6 +84,11 @@ class PrettyConsoleUI:
 
     def success(self, text):
         with self.lock:
+            # 上传 Live 正在 alternate screen 中运行时，不退出动态界面。
+            # Album 级成功信息由进度面板本身反映，避免恢复主缓冲区造成闪屏。
+            if self.enabled and self.live is not None:
+                return
+
             self._stop_live_unlocked()
             self.console.print(
                 f"[bold green]✓[/] {text}"
@@ -343,6 +348,11 @@ class PrettyConsoleUI:
                 )
 
         with self.lock:
+            # 第一个 Album 开始上传后，Live 会占用 alternate screen。
+            # 后续 Album 切换时保持同一动态屏幕，不临时恢复文件列表。
+            if self.enabled and self.live is not None:
+                return
+
             self._stop_live_unlocked()
             self.console.print(
                 Panel(
@@ -647,6 +657,12 @@ class PrettyConsoleUI:
 
     def finish(self):
         with self.lock:
+            # finish() 也会在每个 Album 完成时调用。Rich 模式下保持
+            # alternate screen 持续存在，直到 banner / warning / error
+            # 真正结束上传会话，避免每 10 个媒体恢复主缓冲区闪一下。
+            if self.enabled and self.live is not None:
+                return
+
             self._stop_live_unlocked()
 
             if not self.enabled:
