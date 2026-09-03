@@ -4,8 +4,13 @@
 
 # Python
 .venv/
+.build_venv/
 __pycache__/
 *.py[cod]
+
+# PyInstaller build output
+/build/
+/dist/
 
 # TDLib local login/database/cache
 /tdlib_data/

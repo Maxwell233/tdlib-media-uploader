@@ -122,6 +122,28 @@ GUI 仍然只运行一个上传任务，以保护共享的 TDLib 登录数据库
 
 缓存管理中的“清理所有”会清空 `.video_state`、旧版 `.state`、`.image_state`、`.thumb_cache` 和 `.gui_history.json` 的内容，但保留缓存目录；“仅清理视频封面”只清空 `.thumb_cache` 内容。两项操作都不会删除 `config.toml` 或 `tdlib_data` / `tdlib_files` 登录数据库。
 
+## Windows EXE 构建
+
+项目提供 PyInstaller one-folder 构建方案。推荐使用 GitHub Actions 的 Windows runner：每次推送 `main`、推送 `v*` 标签，或在仓库的 **Actions → Build Windows EXE → Run workflow** 手动运行，都会生成 Windows x64 构建产物。完成后在对应工作流页面的 **Artifacts** 下载 ZIP。
+
+构建产物包含 `TDLib Media Uploader.exe` 及其依赖 DLL / Qt 插件。采用 one-folder 形式是为了让 TDLib 原生库和 FFmpeg 依赖稳定工作；首次启动时 GUI 会在 EXE 所在目录创建 `config.toml`，不会把你的配置或 Telegram 登录数据打进包里。
+
+如果需要在本机使用同一套构建流程，需安装 Python 3.13 x64，然后运行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\build_exe.ps1 -Clean
+```
+
+输出位置：
+
+```text
+dist\TDLib Media Uploader\TDLib Media Uploader.exe
+dist\TDLib Media Uploader-v1.7.0-windows-x64.zip
+```
+
+本地构建会使用独立的 `.build_venv`，不会修改日常运行的 `.venv`。EXE 构建不需要上传 `config.toml`，也不会包含 `.video_state`、`.image_state`、`.thumb_cache` 或 `tdlib_data`。
+
 ## ExifTool（可选）
 
 默认：
@@ -269,6 +291,9 @@ tdlib-media-uploader\
 ├─ setup.cmd                      # 推荐双击安装
 ├─ setup.ps1
 ├─ requirements.txt
+├─ requirements-build.txt         # PyInstaller 构建依赖
+├─ tdlib_media_uploader.spec      # one-folder 打包配置
+├─ build_exe.ps1                  # 本机构建脚本
 ├─ tools\
 │  └─ exiftool.exe                # 可选，不提交 Git
 ├─ tdlib_data\                   # 本地登录数据，不提交 Git

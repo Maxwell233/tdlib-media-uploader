@@ -1,0 +1,61 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: PyInstaller Windows build
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir --upgrade -r requirements-build.txt
+
+      - name: Build one-folder EXE
+        shell: pwsh
+        run: .\build_exe.ps1 -SkipInstall -Clean -PythonPath "python"
+
+      - name: Validate build output
+        shell: pwsh
+        run: |
+          $exe = "dist\TDLib Media Uploader\TDLib Media Uploader.exe"
+          if (-not (Test-Path -LiteralPath $exe)) {
+            throw "EXE not found: $exe"
+          }
+          $archive = Get-ChildItem -LiteralPath "dist" -Filter "*.zip" | Select-Object -First 1
+          if ($null -eq $archive) {
+            throw "Portable ZIP not found in dist"
+          }
+          Write-Host "Validated: $exe"
+          Write-Host "Validated: $($archive.FullName)"
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tdlib-media-uploader-v1.7.0-windows-x64
+          path: dist/TDLib Media Uploader-v*.zip
+          if-no-files-found: error
+          retention-days: 30
