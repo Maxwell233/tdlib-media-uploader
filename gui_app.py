@@ -60,7 +60,6 @@ TEMPLATE_CONFIG_PATH = PROJECT_DIR / "config.example.toml"
 HISTORY_PATH = PROJECT_DIR / ".gui_history.json"
 APP_VERSION = "1.7.2"
 ICON_PATH = PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"
-APP_ICON = QIcon(str(ICON_PATH)) if ICON_PATH.is_file() else QIcon()
 
 
 def _ensure_config_file() -> bool:
@@ -1258,7 +1257,9 @@ QMenu::item:selected { background: #2d6fa9; color: #ffffff; }
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowIcon(APP_ICON)
+        application = QApplication.instance()
+        if application is not None:
+            self.setWindowIcon(application.windowIcon())
         self.setWindowTitle(f"TDLib Media Uploader · V{APP_VERSION} · Maximum 2026")
         self.setMinimumSize(1060, 700)
         self.resize(1240, 800)
@@ -1575,7 +1576,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("TDLib Media Uploader")
     app.setApplicationVersion(APP_VERSION)
-    app.setWindowIcon(APP_ICON)
+    app.setWindowIcon(QIcon(str(ICON_PATH)) if ICON_PATH.is_file() else QIcon())
     app.setStyle("Fusion")
     app.setStyleSheet(APP_STYLE)
     window = MainWindow()
