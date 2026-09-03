@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-"""TDLib Media Uploader V1.6.3 Rich terminal UI."""
+"""TDLib Media Uploader V1.6.4 的 Rich 终端界面。"""
+
 from __future__ import annotations
+
 import logging
 import threading
 from typing import Iterable
+
 from rich import box
 from rich.console import Console, Group
 from rich.live import Live
@@ -20,25 +23,36 @@ class _ImageIOFFmpegStopWarningFilter(logging.Filter):
 logging.getLogger("imageio_ffmpeg").addFilter(_ImageIOFFmpegStopWarningFilter())
 
 
-def _format_size(v):
-    v = float(v)
-    for u in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if v < 1024 or u == "TiB":
-            return f"{v:.0f} {u}" if u == "B" else f"{v:.2f} {u}"
-        v /= 1024
+def _format_size(value: float) -> str:
+    value = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.2f} {unit}"
+        value /= 1024
+    return f"{value:.2f} TiB"
 
 
-def _format_eta(s):
-    if s is None:
+def _format_eta(seconds) -> str:
+    if seconds is None:
         return "--:--"
-    s = max(0, int(s))
-    h, r = divmod(s, 3600)
-    m, s = divmod(r, 60)
-    return f"{h:02}:{m:02}:{s:02}" if h else f"{m:02}:{s:02}"
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02}:{minutes:02}:{seconds:02}"
+    return f"{minutes:02}:{seconds:02}"
 
 
 class PrettyConsoleUI:
-    def __init__(self, *, refresh_hz=8, show_mbps=True, bar_width=32, transient=True, enabled=True):
+    def __init__(
+        self,
+        *,
+        refresh_hz=8,
+        show_mbps=True,
+        bar_width=32,
+        transient=True,
+        enabled=True,
+    ):
         self.lock = threading.RLock()
         self.refresh_hz = max(1, int(refresh_hz))
         self.show_mbps = bool(show_mbps)
@@ -47,206 +61,181 @@ class PrettyConsoleUI:
         self.enabled = bool(enabled)
         self.console = Console(highlight=False)
         self.live = None
-        self._upload_session_active = False
 
-    def _stop_live_unlocked(self, force=False):
-        if self.live is None:
-            self._upload_session_active = False
-            return
-        if self._upload_session_active and not force:
-            return
-        live = self.live
-        self.live = None
-        self._upload_session_active = False
-        try:
-            live.stop()
-        except Exception:
-            pass
-
-    def _start_live_unlocked(self, renderable):
+    def _stop_live_unlocked(self):
         if self.live is not None:
-            return
-        self._upload_session_active = True
-        live = Live(
-            renderable,
-            console=self.console,
-            screen=True,
-            auto_refresh=False,
-            refresh_per_second=self.refresh_hz,
-            vertical_overflow="crop",
-            redirect_stdout=False,
-            redirect_stderr=False,
-        )
-        self.live = live
-        try:
-            live.start(refresh=True)
-        except Exception:
+            self.live.stop()
             self.live = None
-            self._upload_session_active = False
-            raise
 
     def end_upload_session(self):
         with self.lock:
-            self._stop_live_unlocked(force=True)
+            self._stop_live_unlocked()
 
     def log(self, text=""):
         with self.lock:
-            if self._upload_session_active:
-                return
+            self._stop_live_unlocked()
             self.console.print(str(text), markup=False, highlight=False)
 
     def info(self, text):
         with self.lock:
-            if self._upload_session_active:
-                return
+            self._stop_live_unlocked()
             self.console.print(f"[bold cyan]ℹ[/] {text}")
 
     def success(self, text):
         with self.lock:
-            if self._upload_session_active:
-                return
+            self._stop_live_unlocked()
             self.console.print(f"[bold green]✓[/] {text}")
 
     def warning(self, text):
         with self.lock:
-            self._stop_live_unlocked(force=True)
+            self._stop_live_unlocked()
             self.console.print(f"[bold yellow]![/] {text}")
 
     def error(self, text):
         with self.lock:
-            self._stop_live_unlocked(force=True)
+            self._stop_live_unlocked()
             self.console.print(f"[bold red]✗[/] {text}")
 
-    def banner(self, title, subtitle="", *, accent="cyan"):
-        b = Text()
-        b.append(title, style=f"bold bright_{accent}")
-        if subtitle:
-            b.append("\n")
-            b.append(subtitle, style="grey70")
+    def banner(self, title: str, subtitle: str = "", *, accent="cyan"):
         with self.lock:
-            self._stop_live_unlocked(force=True)
+            self._stop_live_unlocked()
+            body = Text()
+            body.append(title, style=f"bold bright_{accent}")
+            if subtitle:
+                body.append("\n")
+                body.append(subtitle, style="grey70")
             self.console.print(
                 Panel(
-                    b,
+                    body,
                     border_style=f"bright_{accent}",
                     box=box.ROUNDED,
                     padding=(0, 2),
-                    expand=True,
                 )
             )
 
-    def summary(self, title, rows: Iterable[tuple[str, object]], *, kind="VIDEO"):
-        if self._upload_session_active:
-            return
-        a = "cyan" if kind.upper() == "VIDEO" else "magenta"
-        t = Table(box=None, show_header=False, pad_edge=False, expand=True)
-        t.add_column("key", style="grey70", width=18, no_wrap=True)
-        t.add_column("value", style="bold white", overflow="fold")
-        for k, v in rows:
-            t.add_row(str(k), str(v))
+    def summary(self, title: str, rows: Iterable[tuple[str, object]], *, kind="VIDEO"):
+        accent = "cyan" if kind.upper() == "VIDEO" else "magenta"
+        table = Table(
+            box=None,
+            show_header=False,
+            pad_edge=False,
+            expand=True,
+        )
+        table.add_column("key", style="grey70", width=18, no_wrap=True)
+        table.add_column("value", style="bold white", overflow="fold")
+        for key, value in rows:
+            table.add_row(str(key), str(value))
         with self.lock:
+            self._stop_live_unlocked()
             self.console.print(
                 Panel(
-                    t,
+                    table,
                     title=f"[bold] {title} [/]",
                     title_align="left",
-                    border_style=f"bright_{a}",
+                    border_style=f"bright_{accent}",
                     box=box.ROUNDED,
                     padding=(0, 1),
-                    expand=True,
                 )
             )
 
-    def files(self, title, columns, rows, *, kind="VIDEO", caption=None):
-        if self._upload_session_active:
-            return
-        a = "cyan" if kind.upper() == "VIDEO" else "magenta"
-        t = Table(
+    def files(
+        self,
+        title: str,
+        columns: list[tuple[str, dict]],
+        rows: Iterable[Iterable[object]],
+        *,
+        kind="VIDEO",
+        caption: str | None = None,
+    ):
+        accent = "cyan" if kind.upper() == "VIDEO" else "magenta"
+        table = Table(
             title=title,
-            title_style=f"bold bright_{a}",
-            header_style=f"bold bright_{a}",
+            title_style=f"bold bright_{accent}",
+            header_style=f"bold bright_{accent}",
             box=box.SIMPLE_HEAVY,
             show_lines=False,
             expand=True,
             caption=caption,
             caption_style="grey58",
         )
-        for n, kw in columns:
-            t.add_column(n, **kw)
-        for r in rows:
-            t.add_row(*(str(v) for v in r))
+        for name, kwargs in columns:
+            table.add_column(name, **kwargs)
+        for row in rows:
+            table.add_row(*(str(value) for value in row))
         with self.lock:
-            self.console.print(t)
+            self._stop_live_unlocked()
+            self.console.print(table)
 
-    def groups(self, title, rows, *, kind="VIDEO"):
-        if self._upload_session_active:
-            return
-        a = "cyan" if kind.upper() == "VIDEO" else "magenta"
-        t = Table(
+    def groups(self, title: str, rows: Iterable[Iterable[object]], *, kind="VIDEO"):
+        accent = "cyan" if kind.upper() == "VIDEO" else "magenta"
+        table = Table(
             title=title,
-            title_style=f"bold bright_{a}",
-            header_style=f"bold bright_{a}",
+            title_style=f"bold bright_{accent}",
+            header_style=f"bold bright_{accent}",
             box=box.SIMPLE,
             expand=False,
         )
-        t.add_column("月份", no_wrap=True)
-        t.add_column("Caption", no_wrap=True)
-        t.add_column("总数", justify="right")
-        t.add_column("待上传", justify="right")
-        t.add_column("Album", justify="right")
-        for r in rows:
-            t.add_row(*(str(v) for v in r))
+        table.add_column("月份", no_wrap=True)
+        table.add_column("Caption", no_wrap=True)
+        table.add_column("总数", justify="right")
+        table.add_column("待上传", justify="right")
+        table.add_column("Album", justify="right")
+        for row in rows:
+            table.add_row(*(str(value) for value in row))
         with self.lock:
-            self.console.print(t)
+            self._stop_live_unlocked()
+            self.console.print(table)
 
     def target(self, chat_title, topic_name, chat_id, topic_id):
-        self.summary(
-            "Telegram 目标已确认",
-            [
-                ("聊天", chat_title or "(未命名)"),
-                ("CHAT_ID", chat_id),
-                ("Topic", topic_name or "(未命名)"),
-                ("FORUM_TOPIC_ID", topic_id),
-            ],
-            kind="VIDEO",
-        )
+        rows = [
+            ("聊天", chat_title or "(未命名)"),
+            ("CHAT_ID", chat_id),
+            ("Topic", topic_name or "(未命名)"),
+            ("FORUM_TOPIC_ID", topic_id),
+        ]
+        self.summary("Telegram 目标已确认", rows, kind="VIDEO")
 
-    def album(self, *, kind, title, subtitle="", rows=None):
-        if self._upload_session_active:
-            return
-        a = "cyan" if kind.upper() == "VIDEO" else "magenta"
-        b = Text()
-        b.append(title, style=f"bold bright_{a}")
+    def album(
+        self,
+        *,
+        kind,
+        title,
+        subtitle="",
+        rows=None,
+    ):
+        accent = "cyan" if kind.upper() == "VIDEO" else "magenta"
+        body = Text()
+        body.append(title, style=f"bold bright_{accent}")
         if subtitle:
-            b.append("\n")
-            b.append(subtitle, style="grey70")
+            body.append("\n")
+            body.append(subtitle, style="grey70")
         if rows:
-            for r in rows:
-                b.append("\n")
-                b.append(str(r), style="white")
+            for row in rows:
+                body.append("\n")
+                body.append(str(row), style="white")
         with self.lock:
+            self._stop_live_unlocked()
             self.console.print(
                 Panel(
-                    b,
-                    border_style=f"bright_{a}",
+                    body,
+                    border_style=f"bright_{accent}",
                     box=box.ROUNDED,
                     padding=(0, 1),
-                    expand=True,
                 )
             )
 
-    def confirm_upload(self):
+    def confirm_upload(self) -> bool:
         with self.lock:
-            self._stop_live_unlocked(force=True)
-            ans = self.console.input(
+            self._stop_live_unlocked()
+            answer = self.console.input(
                 "\n[bold cyan]确认开始上传？[/] 输入 [bold green]y[/] 继续："
             )
-        return ans.strip().lower() == "y"
+        return answer.strip().lower() == "y"
 
     def cancelled(self):
         self.warning("已取消，没有开始上传。")
 
-    def _panel(
+    def _render_progress(
         self,
         *,
         kind,
@@ -262,55 +251,50 @@ class PrettyConsoleUI:
         total_bytes,
     ):
         ratio = max(0.0, min(float(ratio), 1.0))
-        tw = max(40, int(self.console.size.width))
-        bw = min(self.bar_width, max(12, tw - 46))
-        f = int(round(bw * ratio))
-        e = bw - f
+        filled = int(round(self.bar_width * ratio))
+        empty = self.bar_width - filled
 
         if kind.upper() == "VIDEO":
             title = " VIDEO · TDLib 上传 "
-            a = "bright_cyan"
+            accent = "bright_cyan"
         else:
             title = " IMAGE · TDLib 上传 "
-            a = "bright_magenta"
+            accent = "bright_magenta"
 
-        l1 = Text()
-        l1.append("━" * f, style=f"bold {a}")
-        l1.append("─" * e, style="grey50")
-        l1.append(f"  {ratio * 100:6.2f}%", style="bold white")
+        line1 = Text()
+        line1.append("━" * filled, style=f"bold {accent}")
+        line1.append("─" * empty, style="grey50")
+        line1.append(f"  {ratio * 100:6.2f}%", style="bold white")
 
-        l2 = Text()
-        l2.append("速度  ", style="grey70")
-        l2.append(f"{_format_size(speed)}/s", style=f"bold {a}")
+        line2 = Text()
+        line2.append("速度  ", style="grey70")
+        line2.append(f"{_format_size(speed)}/s", style=f"bold {accent}")
         if self.show_mbps:
-            l2.append(
-                f"  ·  {float(speed) * 8 / 1_000_000:,.1f} Mbps",
-                style="bold white",
-            )
-        l2.append("    ETA  ", style="grey70")
-        l2.append(_format_eta(eta), style="bold white")
+            mbps = float(speed) * 8 / 1_000_000
+            line2.append(f"  ·  {mbps:,.1f} Mbps", style="bold white")
+        line2.append("    ETA  ", style="grey70")
+        line2.append(_format_eta(eta), style="bold white")
 
-        l3 = Text()
+        line3 = Text()
         if detail:
-            l3.append(f"{detail}  ·  ", style="bold white")
-        l3.append("Album ", style="grey70")
-        l3.append(f"{album_number}/{album_total}", style="bold white")
-        l3.append("  ·  文件 ", style="grey70")
-        l3.append(f"{done_files}/{total_files}", style="bold white")
-        l3.append("  ·  已传 ", style="grey70")
-        l3.append(
+            line3.append(f"{detail}  ·  ", style="bold white")
+        line3.append("Album ", style="grey70")
+        line3.append(f"{album_number}/{album_total}", style="bold white")
+        line3.append("  ·  文件 ", style="grey70")
+        line3.append(f"{done_files}/{total_files}", style="bold white")
+        line3.append("  ·  已传 ", style="grey70")
+        line3.append(
             f"{_format_size(done_bytes)} / {_format_size(total_bytes)}",
             style="bold white",
         )
 
         return Panel(
-            Group(l1, l2, l3),
+            Group(line1, line2, line3),
             title=title,
             title_align="left",
-            border_style=a,
+            border_style=accent,
             box=box.ROUNDED,
             padding=(0, 1),
-            expand=True,
         )
 
     def progress(
@@ -330,17 +314,17 @@ class PrettyConsoleUI:
     ):
         with self.lock:
             if not self.enabled:
-                bw = 20
-                f = int(bw * max(0, min(float(ratio), 1)))
+                filled = int(20 * max(0.0, min(float(ratio), 1.0)))
+                bar = "#" * filled + "-" * (20 - filled)
                 self.console.print(
-                    f"\r[{'#' * f}{'-' * (bw - f)}] {ratio * 100:6.2f}% "
+                    f"\r[{bar}] {ratio * 100:6.2f}% "
                     f"{_format_size(speed)}/s ETA {_format_eta(eta)}",
                     end="",
                     soft_wrap=False,
                 )
                 return
 
-            renderable = self._panel(
+            renderable = self._render_progress(
                 kind=kind,
                 ratio=ratio,
                 speed=speed,
@@ -355,14 +339,21 @@ class PrettyConsoleUI:
             )
 
             if self.live is None:
-                self._start_live_unlocked(renderable)
+                self.live = Live(
+                    renderable,
+                    console=self.console,
+                    refresh_per_second=self.refresh_hz,
+                    transient=self.transient,
+                    auto_refresh=True,
+                    redirect_stdout=False,
+                    redirect_stderr=False,
+                )
+                self.live.start()
             else:
                 self.live.update(renderable, refresh=True)
 
     def finish(self):
         with self.lock:
-            if self.enabled and self._upload_session_active:
-                return
             self._stop_live_unlocked()
             if not self.enabled:
                 self.console.print()
