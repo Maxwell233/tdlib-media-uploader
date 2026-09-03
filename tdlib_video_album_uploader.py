@@ -19,20 +19,13 @@ import imageio_ffmpeg
 from PIL import Image
 
 import app_config as cfg
-from pretty_ui import PrettyConsoleUI
-from tdlib_common import TDJsonClient, formatted_text, verify_tdjson_version
+from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 
 PROJECT_DIR = Path(__file__).resolve().parent
 STATE_DIR = PROJECT_DIR / ".state"
 THUMB_CACHE_DIR = PROJECT_DIR / ".thumb_cache"
 
-UI = PrettyConsoleUI(
-    refresh_hz=cfg.UI_REFRESH_HZ,
-    show_mbps=cfg.UI_SHOW_MBPS,
-    bar_width=cfg.UI_BAR_WIDTH,
-    transient=cfg.UI_TRANSIENT_PROGRESS,
-    enabled=cfg.UI_RICH_PROGRESS,
-)
+UI = HeadlessUI()
 
 
 def format_size(value: float) -> str:
@@ -622,17 +615,3 @@ def main():
     finally:
         client.remove_update_callback(progress.handle_update)
         client.close()
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        UI.finish()
-        UI.log("\n已手动停止。已完整发送成功的 Album 下次自动跳过；当前未完成 Album 下次重新处理。")
-    except Exception as exc:
-        UI.finish()
-        UI.log("\n" + "=" * 82)
-        UI.log(f"程序停止：{type(exc).__name__}: {exc}")
-        UI.log("=" * 82)
-        raise

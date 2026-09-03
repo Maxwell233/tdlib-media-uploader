@@ -1,17 +1,17 @@
 # TDLib Media Uploader
 
-**V1.6.4 · Windows**
+**V1.7.0 · Windows**
 
-一个用于向 **Telegram 超级群 / Forum Topic** 批量上传图片和视频的脚本项目。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点、缩略图和终端界面。
+一个用于向 **Telegram 超级群 / Forum Topic** 批量上传图片和视频的 Windows GUI 工具。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点和缩略图；V1.7.0 仅保留 PySide6 桌面 GUI，并继续提供缓存清理与任务管理。
 
 ## 功能
 
-- **视频**：递归读取目录及全部子目录；按月份组成 Album；一个 Album 最多 10 个视频；每个 Album 仅第一条显示 `yy-m`，例如 `21-5`。
+- **视频**：递归读取目录及全部子目录；按月份组成 Album；一个 Album 最多 10 个视频；每个 Album 仅第一条显示 `yy-m`，例如 `21-5`。视频封面生成默认开启，可在配置中关闭。
 - **图片**：递归读取目录及全部子目录；每 10 张组成一个 Album；不添加月份、文件名或 Caption。
 - **TDLib 原生上传**：上传期间不需要打开 Telegram Desktop。
 - **断点续传**：只有完整发送成功的 Album 才写入断点；重启后自动跳过已完成项。
 - **统一配置**：日常只修改 `config.toml`，无需编辑 Python 主脚本。
-- **Rich 终端界面**：文件列表、上传计划、确认摘要、实时速度和 Album 状态均使用格式化面板显示。
+- **PySide6 GUI**：提供概览、目录扫描、Album 预览、任务中心、历史记录、配置编辑、Telegram 目标编辑、缓存清理和环境诊断。
 - **互斥保护**：图片和视频上传器共享同一份 TDLib 登录数据库，不允许同时运行。
 
 ## 环境
@@ -24,7 +24,7 @@
 - `tdjson==1.8.64.post1`
 - Pillow
 - imageio-ffmpeg
-- Rich
+- PySide6
 
 > 项目固定 `tdjson==1.8.64.post1`，用于规避部分较新 TDLib Python 构建中出现过的 `InputFile is not specified` 问题。
 
@@ -53,6 +53,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
 `setup.ps1` 会创建 `.venv`、安装依赖、固定 `tdjson==1.8.64.post1`，并在本地不存在 `config.toml` 时从 `config.example.toml` 自动创建。
+
+安装完成后，双击 `run.cmd`，或运行 `.\run.ps1` 即可打开 PySide6 GUI。项目不再提供独立的终端上传界面。
 
 安装成功或失败后都会等待 Enter，不会一闪而过。自动化环境可使用：
 
@@ -104,14 +106,21 @@ run.cmd
 .\run.ps1
 ```
 
-菜单：
+`run.cmd` / `run.ps1` 会直接启动 GUI。GUI 与上传核心使用相同的 `config.toml`、TDLib 登录数据和断点文件。GUI 中的“安全停止”会立即取消正在上传的文件，不会删除断点；重新扫描后，完整发送成功的 Album 会自动跳过。
 
-```text
-[1] 上传视频
-[2] 上传图片
-[3] 编辑 config.toml
-[4] 退出
-```
+## V1.7.0 GUI
+
+GUI 使用 PySide6 构建，包含：
+
+- 概览页：连接状态、扫描统计和快速开始；
+- 视频 / 图片上传页：目录扫描、文件清单和 Album 预览；
+- 任务中心：当前文件、Album、速度、Mbps、ETA 和运行日志；
+- 历史记录：本地保存最近任务的结果；
+- 设置与诊断：编辑主要 `config.toml` 参数、检查运行依赖并清理应用缓存；视频 / 图片页面也可直接编辑群组 Chat ID 和 Forum Topic ID。
+
+GUI 仍然只运行一个上传任务，以保护共享的 TDLib 登录数据库。当前版本使用“立即停止 + 断点恢复”，暂不提供多账号、定时任务和并发上传。
+
+缓存管理中的“清理所有”会清空 `.video_state`、旧版 `.state`、`.image_state`、`.thumb_cache` 和 `.gui_history.json` 的内容，但保留缓存目录；“仅清理视频封面”只清空 `.thumb_cache` 内容。两项操作都不会删除 `config.toml` 或 `tdlib_data` / `tdlib_files` 登录数据库。
 
 ## ExifTool（可选）
 
@@ -203,7 +212,7 @@ sort_mode = "path"
 .image_state\
 ```
 
-一个 Album 只有在 TDLib 确认全部消息发送成功后才写入断点。因此中途 `Ctrl + C` 后重新运行：
+一个 Album 只有在 TDLib 确认全部消息发送成功后才写入断点。因此在 GUI 中途点击“安全停止”后重新扫描：
 
 - 已成功并写入断点的 Album：自动跳过；
 - 当前尚未完成的 Album：重新处理。
@@ -250,15 +259,13 @@ tdlib-media-uploader\
 ├─ config.example.toml
 ├─ config.toml                    # 本地生成，不提交 Git
 ├─ app_config.py
-├─ pretty_ui.py
 ├─ tdlib_common.py
-├─ tdlib_video_app.py             # 视频 UI / 流程
+├─ tdlib_video_app.py             # 视频扫描与上传流程
 ├─ tdlib_video_album_uploader.py  # 视频上传核心
 ├─ tdlib_image_album_uploader.py
+├─ gui_app.py                     # PySide6 GUI
 ├─ run.cmd                        # 推荐双击运行
 ├─ run.ps1
-├─ run_video.ps1
-├─ run_image.ps1
 ├─ setup.cmd                      # 推荐双击安装
 ├─ setup.ps1
 ├─ requirements.txt

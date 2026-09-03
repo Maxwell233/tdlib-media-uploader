@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""TDLib Media Uploader V1.6 视频入口。
+"""TDLib Media Uploader V1.7.0 视频上传流程。
 
 核心上传/断点/缩略图逻辑复用 tdlib_video_album_uploader.py；
-本文件负责 V1.6 的文件展示、mtime 默认策略和 Rich 终端流程。
+本文件负责视频扫描、mtime 日期策略和 GUI 使用的上传流程。
 """
 
 from __future__ import annotations
@@ -279,7 +279,7 @@ def main():
         for group in pending_groups.values()
     )
 
-    # V1.6：
+    # GUI 调用的扫描与上传流程：
     # 1. 按月份分组显示完整文件列表。
     # 2. 再显示月份/Album 计划。
     # 3. 最后显示上传摘要。
@@ -503,28 +503,3 @@ def main():
         )
 
         client.close()
-
-
-if __name__ == "__main__":
-    try:
-        main()
-
-    except KeyboardInterrupt:
-        UI.finish()
-
-        UI.warning(
-            "已手动停止。"
-            "已完成 Album 下次自动跳过；"
-            "当前未完成 Album 下次重新处理。"
-        )
-
-    except Exception as exc:
-        UI.finish()
-
-        UI.error(
-            f"程序停止："
-            f"{type(exc).__name__}: "
-            f"{exc}"
-        )
-
-        raise

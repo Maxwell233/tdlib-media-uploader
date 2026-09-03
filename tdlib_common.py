@@ -29,6 +29,10 @@ class TDLibError(RuntimeError):
         super().__init__(f"TDLib error {self.code}: {self.message}")
 
 
+class TDLibCancelled(RuntimeError):
+    """Raised when a GUI or caller requests an immediate upload stop."""
+
+
 def verify_tdjson_version() -> str:
     try:
         installed = importlib.metadata.version("tdjson")
@@ -45,6 +49,67 @@ def verify_tdjson_version() -> str:
 
 def formatted_text(text: str = "") -> dict:
     return {"@type": "formattedText", "text": text, "entities": []}
+
+
+class HeadlessUI:
+    """Minimal internal adapter used until the GUI binds its own signals.
+
+    Upload modules still call a small presentation interface while scanning
+    and sending.  Keeping this no-op implementation in the backend lets the
+    project ship a GUI-only entry point without carrying a second terminal UI
+    implementation or an extra display dependency.
+    """
+
+    def register_client(self, client):
+        self.client = client
+
+    def log(self, text=""):
+        pass
+
+    def info(self, text):
+        pass
+
+    def success(self, text):
+        pass
+
+    def warning(self, text):
+        pass
+
+    def error(self, text):
+        pass
+
+    def banner(self, title, subtitle="", *, accent="cyan"):
+        pass
+
+    def summary(self, title, rows, *, kind="VIDEO"):
+        pass
+
+    def files(self, title, columns, rows, *, kind="VIDEO", caption=None):
+        pass
+
+    def groups(self, title, rows, *, kind="VIDEO"):
+        pass
+
+    def target(self, chat_title, topic_name, chat_id, topic_id):
+        pass
+
+    def album(self, *, kind, title, subtitle="", rows=None):
+        pass
+
+    def progress(self, **kwargs):
+        pass
+
+    def finish(self):
+        pass
+
+    def cancelled(self):
+        pass
+
+    def confirm_upload(self):
+        return True
+
+    def prompt(self, text: str, *, password: bool = False):
+        return getpass.getpass(text) if password else input(text)
 
 
 def topic_object() -> dict:
@@ -74,8 +139,16 @@ class TDJsonClient:
         self.auth_queue: queue.Queue = queue.Queue()
         self.send_events: dict[int, tuple[str, dict]] = {}
         self.send_condition = threading.Condition()
+        # Keep close idempotent because a stop request can arrive while a
+        # sendMessage request is still waiting for its response.
+        self.close_lock = threading.Lock()
+        self.close_sent = False
         self.update_callbacks = []
         self.stop_event = threading.Event()
+        self.cancel_event = threading.Event()
+        register_client = getattr(self.ui, "register_client", None)
+        if callable(register_client):
+            register_client(self)
         self.receiver_thread = threading.Thread(
             target=self._receiver_loop,
             name="TDLibReceiver",
@@ -103,7 +176,36 @@ class TDJsonClient:
     def send_raw(self, query: dict):
         tdjson.td_send(self.client_id, self._encode(query))
 
+    def cancel(self):
+        """Stop promptly and cooperatively, including an active TDLib upload."""
+        self.cancel_event.set()
+        # TDLib 1.8.64 does not expose a generic cancelUploadFile method for
+        # media sent through sendMessage/sendMessageAlbum.  Closing the client
+        # is the supported way to abort the in-flight transfer; send it here
+        # immediately instead of waiting for the worker's finally block.
+        self._send_close_now()
+        with self.send_condition:
+            self.send_condition.notify_all()
+
+    def _send_close_now(self):
+        """Send TDLib's close command once, without a cancellable waiter."""
+        with self.close_lock:
+            if self.close_sent:
+                return
+            try:
+                self.send_raw({"@type": "close"})
+            except Exception:
+                # Let a later finally/close call retry if the first send raced
+                # TDLib teardown or failed before reaching the native client.
+                return
+            self.close_sent = True
+
+    def _raise_if_cancelled(self):
+        if self.cancel_event.is_set():
+            raise TDLibCancelled("上传任务已立即停止")
+
     def request(self, query: dict, timeout: int | float | None = None):
+        self._raise_if_cancelled()
         if timeout is None:
             timeout = cfg.TDLIB_REQUEST_TIMEOUT
         extra = "req:" + uuid.uuid4().hex
@@ -113,11 +215,22 @@ class TDJsonClient:
         with self.pending_lock:
             self.pending[extra] = waiter
         self.send_raw(payload)
+        deadline = time.monotonic() + float(timeout)
         try:
-            response = waiter.get(timeout=timeout)
-        except queue.Empty as exc:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"TDLib 请求超时：{query.get('@type')}")
+                try:
+                    response = waiter.get(timeout=min(1.0, remaining))
+                    break
+                except queue.Empty:
+                    self._raise_if_cancelled()
+        except (queue.Empty, TimeoutError, TDLibCancelled) as exc:
             with self.pending_lock:
                 self.pending.pop(extra, None)
+            if isinstance(exc, TDLibCancelled):
+                raise
             raise TimeoutError(f"TDLib 请求超时：{query.get('@type')}") from exc
         if response.get("@type") == "error":
             raise TDLibError(response.get("code", 0), response.get("message", "unknown error"))
@@ -170,7 +283,6 @@ class TDJsonClient:
                     with self.send_condition:
                         self.send_events[old_id] = ("failed", obj)
                         self.send_condition.notify_all()
-
                 for callback in list(self.update_callbacks):
                     try:
                         callback(obj)
@@ -187,10 +299,15 @@ class TDJsonClient:
             pass
 
         while True:
+            self._raise_if_cancelled()
+            auth_deadline = time.monotonic() + 120
+            remaining = auth_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("等待 TDLib 授权状态超时")
             try:
-                state = self.auth_queue.get(timeout=120)
-            except queue.Empty as exc:
-                raise TimeoutError("等待 TDLib 授权状态超时") from exc
+                state = self.auth_queue.get(timeout=min(1, remaining))
+            except queue.Empty:
+                continue
 
             state_type = state.get("@type")
             if state_type == "authorizationStateWaitTdlibParameters":
@@ -213,19 +330,21 @@ class TDJsonClient:
                     "application_version": cfg.APP_VERSION,
                 })
             elif state_type == "authorizationStateWaitPhoneNumber":
-                phone = input("请输入 Telegram 手机号（国际格式，例如 +491234...）：").strip()
+                phone = self._prompt(
+                    "请输入 Telegram 手机号（国际格式，例如 +491234...）："
+                )
                 self.request({"@type": "setAuthenticationPhoneNumber", "phone_number": phone})
             elif state_type == "authorizationStateWaitCode":
-                code = input("请输入 Telegram 登录验证码：").strip()
+                code = self._prompt("请输入 Telegram 登录验证码：")
                 self.request({"@type": "checkAuthenticationCode", "code": code})
             elif state_type == "authorizationStateWaitPassword":
-                password = getpass.getpass("请输入 Telegram 两步验证密码：")
+                password = self._prompt("请输入 Telegram 两步验证密码：", password=True)
                 self.request({"@type": "checkAuthenticationPassword", "password": password})
             elif state_type == "authorizationStateWaitEmailAddress":
-                email = input("请输入 Telegram 要求的邮箱地址：").strip()
+                email = self._prompt("请输入 Telegram 要求的邮箱地址：")
                 self.request({"@type": "setAuthenticationEmailAddress", "email_address": email})
             elif state_type == "authorizationStateWaitEmailCode":
-                code = input("请输入邮箱验证码：").strip()
+                code = self._prompt("请输入邮箱验证码：")
                 self.request({
                     "@type": "checkAuthenticationEmailCode",
                     "code": {"@type": "emailAddressAuthenticationCode", "code": code},
@@ -239,6 +358,19 @@ class TDJsonClient:
                 return
             elif state_type == "authorizationStateClosed":
                 raise RuntimeError("TDLib 已关闭。")
+
+    def _prompt(self, text: str, *, password: bool = False) -> str:
+        prompt = getattr(self.ui, "prompt", None)
+        if callable(prompt):
+            value = prompt(text, password=password)
+        elif password:
+            value = getpass.getpass(text)
+        else:
+            value = input(text)
+        value = str(value).strip()
+        if not value:
+            self._raise_if_cancelled()
+        return value
 
     def _try_get_chat(self, chat_id: int):
         try:
@@ -330,6 +462,7 @@ class TDJsonClient:
                 pass
 
     def wait_for_send_results(self, messages, timeout: int | None = None):
+        self._raise_if_cancelled()
         if timeout is None:
             timeout = cfg.TDLIB_MESSAGE_SEND_TIMEOUT
         pending_ids = []
@@ -351,6 +484,7 @@ class TDJsonClient:
         results = {}
         with self.send_condition:
             while len(results) < len(pending_ids):
+                self._raise_if_cancelled()
                 for old_id in pending_ids:
                     if old_id in results:
                         continue
@@ -370,7 +504,7 @@ class TDJsonClient:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("等待 Telegram 确认发送成功超时")
-                self.send_condition.wait(min(5, remaining))
+                self.send_condition.wait(min(1, remaining))
 
         sent_ids = list(final_ids)
         for old_id in pending_ids:
@@ -411,9 +545,18 @@ class TDJsonClient:
 
     def close(self):
         try:
-            self.request({"@type": "close"}, timeout=30)
+            if self.cancel_event.is_set():
+                self._send_close_now()
+            elif self.close_sent:
+                pass
+            else:
+                self.request({"@type": "close"}, timeout=30)
+                with self.close_lock:
+                    self.close_sent = True
         except Exception:
             pass
         self.stop_event.set()
+        with self.send_condition:
+            self.send_condition.notify_all()
         if self.receiver_thread.is_alive():
             self.receiver_thread.join(timeout=3)

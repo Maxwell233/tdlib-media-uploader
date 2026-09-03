@@ -13,8 +13,10 @@ __pycache__/
 
 # Upload state / cache
 /.video_state/
+/.state/
 /.image_state/
 /.thumb_cache/
+/.gui_history.json
 
 # Optional local tools / binaries
 /tools/exiftool.exe

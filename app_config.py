@@ -6,7 +6,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-APP_VERSION = "1.6.4"
+APP_VERSION = "1.7.0"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
@@ -103,7 +103,6 @@ paths = _section("paths")
 video = _section("video")
 image = _section("image")
 tdlib = _section("tdlib")
-ui = _section("ui")
 
 
 # Telegram
@@ -116,7 +115,6 @@ FORUM_TOPIC_ID = int(
         "forum_topic_id"
     )
 )
-
 
 # 路径
 VIDEO_DIR = _resolve_path(
@@ -357,51 +355,5 @@ TDLIB_USE_MESSAGE_DATABASE = bool(
     tdlib.get(
         "use_message_database",
         False
-    )
-)
-
-
-# UI
-UI_RICH_PROGRESS = bool(
-    ui.get(
-        "rich_progress",
-        True
-    )
-)
-
-UI_REFRESH_HZ = max(
-    1,
-    int(
-        ui.get(
-            "refresh_hz",
-            8
-        )
-    )
-)
-
-UI_BAR_WIDTH = max(
-    12,
-    min(
-        60,
-        int(
-            ui.get(
-                "bar_width",
-                32
-            )
-        ),
-    )
-)
-
-UI_SHOW_MBPS = bool(
-    ui.get(
-        "show_mbps",
-        True
-    )
-)
-
-UI_TRANSIENT_PROGRESS = bool(
-    ui.get(
-        "transient_progress",
-        True
     )
 )

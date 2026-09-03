@@ -16,19 +16,12 @@ from pathlib import Path
 from PIL import Image
 
 import app_config as cfg
-from pretty_ui import PrettyConsoleUI
-from tdlib_common import TDJsonClient, formatted_text, verify_tdjson_version
+from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 
 PROJECT_DIR = Path(__file__).resolve().parent
 STATE_DIR = PROJECT_DIR / ".image_state"
 
-UI = PrettyConsoleUI(
-    refresh_hz=cfg.UI_REFRESH_HZ,
-    show_mbps=cfg.UI_SHOW_MBPS,
-    bar_width=cfg.UI_BAR_WIDTH,
-    transient=cfg.UI_TRANSIENT_PROGRESS,
-    enabled=cfg.UI_RICH_PROGRESS,
-)
+UI = HeadlessUI()
 
 
 def format_size(value: float) -> str:
@@ -372,7 +365,7 @@ def main():
     pending = [p for p in images if not state.is_completed(p)]
     total_albums = math.ceil(len(pending) / cfg.IMAGE_ALBUM_SIZE) if pending else 0
 
-    # V1.6：先展示文件清单，最后展示摘要，再询问 y。
+    # GUI 调用的扫描与上传流程：保留原有 Album 与断点逻辑。
     if cfg.IMAGE_SHOW_FILE_LIST:
         show_file_list(images, state)
 
@@ -434,15 +427,3 @@ def main():
     finally:
         client.remove_update_callback(progress.handle_update)
         client.close()
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        UI.finish()
-        UI.warning("已手动停止。已完成 Album 下次自动跳过；当前未完成 Album 下次重新处理。")
-    except Exception as exc:
-        UI.finish()
-        UI.error(f"程序停止：{type(exc).__name__}: {exc}")
-        raise

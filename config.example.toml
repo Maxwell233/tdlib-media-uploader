@@ -1,5 +1,5 @@
 # ============================================================
-# TDLib Media Uploader V1.6.4
+# TDLib Media Uploader V1.7.0
 #
 # 首次使用：
 #   1. 复制本文件为 config.toml
@@ -100,16 +100,3 @@ database_encryption_key = ""
 use_file_database = true
 use_chat_info_database = true
 use_message_database = false
-
-
-[ui]
-
-rich_progress = true
-refresh_hz = 8
-bar_width = 32
-
-# 同时显示 MiB/s 和 Mbps
-show_mbps = true
-
-# true：Album 完成后动态进度面板消失，终端更整洁
-transient_progress = true

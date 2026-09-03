@@ -28,7 +28,7 @@ try {
 
     $line = "─" * 64
     Write-Host $line -ForegroundColor Cyan
-    Write-Host "  TDLib Media Uploader V1.6.4 · 初始环境安装" -ForegroundColor Cyan
+    Write-Host "  TDLib Media Uploader V1.7.0 · 初始环境安装" -ForegroundColor Cyan
     Write-Host $line -ForegroundColor Cyan
     Write-Host ""
 
@@ -50,7 +50,7 @@ try {
     Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--upgrade", "pip")
 
     Write-Host "→ 安装项目依赖" -ForegroundColor Yellow
-    Write-Host "  tdjson 1.8.64.post1 / Pillow / imageio-ffmpeg / Rich" -ForegroundColor DarkGray
+    Write-Host "  tdjson 1.8.64.post1 / Pillow / imageio-ffmpeg / PySide6" -ForegroundColor DarkGray
     Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--upgrade", "-r", "requirements.txt")
 
     Write-Host "→ 检查 tdjson 固定版本" -ForegroundColor Yellow
@@ -88,9 +88,11 @@ try {
     Write-Host "  1. 编辑 config.toml"
     Write-Host "  2. 如需读取 EXIF/QuickTime，可安装 tools\exiftool.exe"
     Write-Host "  3. 双击 run.cmd，或运行 .\run.ps1"
+    Write-Host "  4. 项目现已仅保留 GUI 界面，上传核心由 GUI 调用。"
     Write-Host ("─" * 64) -ForegroundColor Green
     Write-Host ""
     Write-Host "提示：默认 missing_date_policy = `"mtime`"，没有 ExifTool 也可上传视频。" -ForegroundColor DarkGray
+    Write-Host "提示：视频封面默认开启，如需关闭请在 config.toml 设置 generate_thumbnail = false。" -ForegroundColor DarkGray
 }
 catch {
     $setupFailed = $true
