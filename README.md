@@ -30,14 +30,27 @@
 
 ## 初次使用
 
-克隆仓库：
+### 推荐：直接下载 Release ZIP（普通使用）
+
+Windows 用户建议直接使用已经编译好的稳定版：[TDLib Media Uploader v1.7.1 Release](https://github.com/Maxwell233/tdlib-media-uploader/releases/tag/v1.7.1)，或直接下载 [Windows x64 ZIP](https://github.com/Maxwell233/tdlib-media-uploader/releases/download/v1.7.1/TDLib.Media.Uploader-v1.7.1-windows-x64.zip)。解压后即可使用。
+
+1. 解压整个 ZIP 文件夹，不要只复制或移动其中的 EXE；
+2. 双击 `TDLib Media Uploader.exe`；
+3. 首次启动后，在 GUI 的“设置与诊断”中填写 Telegram 目标和本地媒体目录；
+4. 配置会保存在 EXE 所在目录的 `config.toml`，不需要安装 Python 或运行 `setup.cmd`。
+
+### 可选：使用 Git 克隆源码
+
+如果需要修改代码、查看最新提交，或希望从源码运行，可以克隆仓库：
 
 ```powershell
 git clone https://github.com/Maxwell233/tdlib-media-uploader.git
 cd tdlib-media-uploader
 ```
 
-### 1. 安装
+然后按下面的源码安装步骤创建 Python 环境。普通用户无需执行此步骤。
+
+### 1. 源码方式安装运行环境
 
 Windows 下推荐直接双击：
 
@@ -70,7 +83,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 config.toml
 ```
 
-首次安装后编辑：
+源码安装后编辑：
 
 ```powershell
 notepad .\config.toml
@@ -94,7 +107,7 @@ image_dir = 'F:\Images'
 
 ### 3. 运行
 
-推荐直接双击：
+源码方式推荐直接双击：
 
 ```text
 run.cmd
