@@ -1,7 +1,6 @@
 # TDLib Media Uploader
 
-**V1.6.2 · Windows**
-
+**V1.6.3 · Windows**
 
 一个用于向 **Telegram 超级群 / Forum Topic** 批量上传图片和视频的脚本项目。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点、缩略图和终端界面。
 
@@ -13,7 +12,7 @@
 - **断点续传**：只有完整发送成功的 Album 才写入断点；重启后自动跳过已完成项。
 - **统一配置**：日常只修改 `config.toml`，无需编辑 Python 主脚本。
 - **Rich 终端界面**：文件列表、上传计划、确认摘要、实时速度和 Album 状态均使用格式化面板显示。
-- **窗口缩放适配**：V1.6.2 会检测终端尺寸变化并重建实时进度区域，避免 CMD / PowerShell 缩放窗口后留下多份进度面板残影。
+- **窗口缩放适配**：动态上传界面使用独立屏幕缓冲区，降低 CMD / PowerShell 改变窗口尺寸时出现重绘残影的概率。
 - **互斥保护**：图片和视频上传器共享同一份 TDLib 登录数据库，不允许同时运行。
 
 ## 环境
@@ -233,17 +232,28 @@ tdlib_files\
 
 正常登录后，后续上传无需打开 Telegram Desktop 或手机 App。
 
+## 版本规则
+
+项目采用 `主版本.功能版本.修订版本` 的三段式版本号。
+
+- 一般修复、UI 调整、小功能修改或其他日常更新：最后一位加 1，例如 `1.6.3 → 1.6.4`。
+- 较大的功能更新或结构性更新：中间一位加 1，并将最后一位重置为 0，例如 `1.6.3 → 1.7.0`。
+- 第一位仅保留给项目整体发生重大不兼容变化时使用。
+
+每次提交实际功能或行为更新时都必须同步更新 `VERSION`、`app_config.py` 和用户可见版本信息。
+
 ## 目录结构
 
 ```text
 tdlib-media-uploader\
 ├─ COPYRIGHT                      # 版权声明
+├─ VERSION                        # 当前版本号
 ├─ config.example.toml
 ├─ config.toml                    # 本地生成，不提交 Git
 ├─ app_config.py
 ├─ pretty_ui.py
 ├─ tdlib_common.py
-├─ tdlib_video_app.py             # V1.6.2 视频 UI / 流程
+├─ tdlib_video_app.py             # 视频 UI / 流程
 ├─ tdlib_video_album_uploader.py  # 视频上传核心
 ├─ tdlib_image_album_uploader.py
 ├─ run.cmd                        # 推荐双击运行
