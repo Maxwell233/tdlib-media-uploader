@@ -1,0 +1,20 @@
+Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+
+本文件只适用于 TDLib Media Uploader 的原创代码、文档和界面资源。
+这些原创内容依据 Creative Commons Attribution-NonCommercial 4.0
+International（CC BY-NC 4.0）许可发布：允许分享、复制、修改和再创作，
+但必须保留作者署名 Maximum、提供许可链接、说明修改内容，并且不得用于
+商业目的。
+
+许可摘要（非完整法律条款）：
+https://creativecommons.org/licenses/by-nc/4.0/
+
+完整法律文本：
+https://creativecommons.org/licenses/by-nc/4.0/legalcode
+
+第三方代码、二进制文件、运行库和工具不属于本文件的许可范围。它们继续
+按照各自的上游许可证使用；任何人根据第三方许可证享有的权利，不因本项目
+的非商业条件而被限制。完整清单和分发注意事项见 THIRD_PARTY_LICENSES.md。
+
+说明：CC BY-NC 4.0 不是 OSI 定义的软件开源许可证，本项目采用它是为了
+明确非商业使用条件；这不改变第三方组件各自的许可证。

@@ -143,7 +143,7 @@ GUI 仍然只运行一个上传任务，以保护共享的 TDLib 登录数据库
 
 项目提供 PyInstaller one-folder 构建方案。推荐使用 GitHub Actions 的 Windows runner：每次推送 `main`、推送 `v*` 标签，或在仓库的 **Actions → Build Windows EXE → Run workflow** 手动运行，都会生成 Windows x64 构建产物。完成后可在对应工作流页面的 **Artifacts** 下载 ZIP；推送版本标签时，工作流还会自动创建 GitHub Release 并附加同一个 ZIP。
 
-构建产物包含 `TDLib Media Uploader.exe` 及其依赖 DLL / Qt 插件。采用 one-folder 形式是为了让 TDLib 原生库和 FFmpeg 依赖稳定工作；首次启动时 GUI 会在 EXE 所在目录创建 `config.toml`，不会把你的配置或 Telegram 登录数据打进包里。
+构建产物包含 `TDLib Media Uploader.exe` 及其依赖 DLL / Qt 插件，并嵌入 `assets\tdlib_media_uploader_icon.ico` 应用图标。采用 one-folder 形式是为了让 TDLib 原生库和 FFmpeg 依赖稳定工作；首次启动时 GUI 会在 EXE 所在目录创建 `config.toml`，不会把你的配置或 Telegram 登录数据打进包里。
 
 如果需要在本机使用同一套构建流程，需安装 Python 3.13 x64，然后运行：
 
@@ -159,13 +159,13 @@ dist\TDLib Media Uploader\TDLib Media Uploader.exe
 dist\TDLib Media Uploader-v1.7.1-windows-x64.zip
 ```
 
-本地构建会使用独立的 `.build_venv`，不会修改日常运行的 `.venv`。EXE 构建不需要上传 `config.toml`，也不会包含 `.video_state`、`.image_state`、`.thumb_cache` 或 `tdlib_data`。
+本地构建会使用独立的 `.build_venv`，不会修改日常运行的 `.venv`。构建脚本会在 PyInstaller 前检查 imageio-ffmpeg 找到的 FFmpeg 是否报告 `--enable-gpl` 或 `--enable-nonfree`；发现这类构建时会停止发布，避免把 GPL/nonfree FFmpeg 混入便携包。EXE 构建不需要上传 `config.toml`，也不会包含 `.video_state`、`.image_state`、`.thumb_cache` 或 `tdlib_data`。
 
-## 版权
+## 项目许可与署名
 
-Copyright © 2026 Maximum. All rights reserved.
+本项目的原创代码、文档和界面资源采用 [Creative Commons BY-NC 4.0 国际许可](https://creativecommons.org/licenses/by-nc/4.0/) 发布：允许分享、复制、修改和再创作，但必须保留作者署名 Maximum、提供许可链接、说明修改内容，并且禁止商业用途。CC BY-NC 4.0 不是 OSI 定义的软件开源许可证，本项目采用它是为了明确非商业使用条件。
 
-本项目为独立社区项目，与 Telegram 官方无隶属关系。TDLib、PySide6、Pillow、imageio-ffmpeg 及其他第三方组件分别遵循各自许可证。源码包和编译包均包含根目录的 `COPYRIGHT` 声明；请勿将 `config.toml`、Telegram API 凭据、登录数据或本地断点状态随包分发。
+完整许可文本见根目录的 `LICENSE`，作者署名见 `ATTRIBUTION`，第三方组件清单见 `THIRD_PARTY_LICENSES.md`。本项目为独立社区项目，与 Telegram 官方无隶属关系；TDLib、PySide6、Pillow、imageio-ffmpeg、FFmpeg、PyInstaller、Python 及其他第三方组件分别遵循各自许可证，根目录许可中的非商业条件不会限制这些上游许可证授予的权利。源码包和编译包均包含上述三个许可/署名文件，请勿将 `config.toml`、Telegram API 凭据、登录数据或本地断点状态随包分发。
 
 ## ExifTool（可选）
 
@@ -299,7 +299,9 @@ tdlib_files\
 
 ```text
 tdlib-media-uploader\
-├─ COPYRIGHT                      # 版权声明
+├─ LICENSE                        # CC BY-NC 4.0 许可
+├─ ATTRIBUTION                    # 作者署名
+├─ THIRD_PARTY_LICENSES.md        # 第三方许可清单
 ├─ VERSION                        # 当前版本号
 ├─ config.example.toml
 ├─ config.toml                    # 本地生成，不提交 Git
@@ -309,6 +311,9 @@ tdlib-media-uploader\
 ├─ tdlib_video_album_uploader.py  # 视频上传核心
 ├─ tdlib_image_album_uploader.py
 ├─ gui_app.py                     # PySide6 GUI
+├─ assets\
+│  ├─ tdlib_media_uploader_icon.ico # Windows 应用图标
+│  └─ tdlib_media_uploader_icon.png # 图标源图
 ├─ run.cmd                        # 推荐双击运行
 ├─ run.ps1
 ├─ setup.cmd                      # 推荐双击安装

@@ -1,9 +1,0 @@
-TDLib Media Uploader
-Copyright (c) 2026 Maximum.
-All rights reserved.
-
-This project is an independent community project and is not affiliated with Telegram.
-Third-party components remain under their own licenses.
-
-Do not distribute config.toml, Telegram API credentials, session data, or local upload
-state together with source or compiled packages.

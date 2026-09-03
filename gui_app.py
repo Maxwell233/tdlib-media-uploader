@@ -994,6 +994,18 @@ class SettingsPage(QWidget):
         config_layout.addStretch(1)
         layout.addWidget(config_box)
 
+        license_box = QGroupBox("许可与署名")
+        license_layout = QVBoxLayout(license_box)
+        license_hint = QLabel(
+            "原创内容采用 CC BY-NC 4.0（非商业）许可；TDLib、Qt/PySide6、"
+            "Pillow、FFmpeg、PyInstaller 和 Python 仍按各自上游许可证使用。"
+            "完整许可清单随程序放在 THIRD_PARTY_LICENSES.md。"
+        )
+        license_hint.setObjectName("mutedLabel")
+        license_hint.setWordWrap(True)
+        license_layout.addWidget(license_hint)
+        layout.addWidget(license_box)
+
         cache_box = QGroupBox("缓存管理")
         cache_layout = QVBoxLayout(cache_box)
         self.cache_status = QLabel()
@@ -1244,9 +1256,7 @@ QMenu::item:selected { background: #2d6fa9; color: #ffffff; }
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(
-            f"TDLib Media Uploader · V{APP_VERSION} · Copyright © 2026 Maximum"
-        )
+        self.setWindowTitle(f"TDLib Media Uploader · V{APP_VERSION} · Maximum 2026")
         self.setMinimumSize(1060, 700)
         self.resize(1240, 800)
         self.worker: UploadWorker | None = None

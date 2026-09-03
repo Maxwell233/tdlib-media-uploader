@@ -23,7 +23,9 @@ def collect_package(name: str):
 datas = [
     (str(PROJECT_DIR / "config.example.toml"), "."),
     (str(PROJECT_DIR / "VERSION"), "."),
-    (str(PROJECT_DIR / "COPYRIGHT"), "."),
+    (str(PROJECT_DIR / "LICENSE"), "."),
+    (str(PROJECT_DIR / "ATTRIBUTION"), "."),
+    (str(PROJECT_DIR / "THIRD_PARTY_LICENSES.md"), "."),
     (str(PROJECT_DIR / "tools" / "README.txt"), "tools"),
 ]
 binaries = []
@@ -72,6 +74,7 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
+    icon=str(PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"),
 )
 
 coll = COLLECT(

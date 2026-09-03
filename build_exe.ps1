@@ -68,11 +68,30 @@ try {
     Write-Host "TDLib Media Uploader V1.7.1 · Windows EXE 构建" -ForegroundColor Cyan
     Write-Host "使用 Python：$python" -ForegroundColor DarkGray
 
+    $iconPath = Join-Path $PSScriptRoot "assets\tdlib_media_uploader_icon.ico"
+    if (-not (Test-Path -LiteralPath $iconPath)) {
+        throw "找不到应用图标：$iconPath"
+    }
+
     if (-not $SkipInstall) {
         Write-Host "→ 安装运行与构建依赖" -ForegroundColor Yellow
         Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--upgrade", "pip")
         Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--upgrade", "-r", "requirements-build.txt")
     }
+
+    Write-Host "→ 检查 FFmpeg 构建许可标志" -ForegroundColor Yellow
+    $ffmpegPath = (& $python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())" 2>&1 | Select-Object -Last 1).ToString().Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($ffmpegPath) -or -not (Test-Path -LiteralPath $ffmpegPath)) {
+        throw "无法定位 imageio-ffmpeg 使用的 FFmpeg 可执行文件：$ffmpegPath"
+    }
+    $ffmpegVersion = (& $ffmpegPath "-version" 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw "无法读取 FFmpeg 构建信息：$ffmpegPath"
+    }
+    if ($ffmpegVersion -match "--enable-gpl" -or $ffmpegVersion -match "--enable-nonfree") {
+        throw "检测到 FFmpeg 启用了 GPL 或 nonfree 构建选项。请改用可再分发的 LGPL 构建后再发布。"
+    }
+    Write-Host "✓ FFmpeg 未报告 GPL/nonfree 构建标志" -ForegroundColor Green
 
     $buildDir = Join-Path $PSScriptRoot "build\tdlib_media_uploader"
     $distDir = Join-Path $PSScriptRoot "dist\TDLib Media Uploader"
@@ -97,16 +116,18 @@ try {
         throw "构建完成但没有找到 EXE：$exePath"
     }
 
-    # Keep the human-readable copyright notice beside the executable even if
-    # a future PyInstaller version changes how extensionless data files are
-    # collected from the spec file.
-    $copyrightSource = Join-Path $PSScriptRoot "COPYRIGHT"
-    $copyrightPath = Join-Path $distDir "COPYRIGHT"
-    if (-not (Test-Path -LiteralPath $copyrightPath)) {
-        Copy-Item -LiteralPath $copyrightSource -Destination $copyrightPath -Force
-    }
-    if (-not (Test-Path -LiteralPath $copyrightPath)) {
-        throw "构建完成但没有找到版权声明：$copyrightPath"
+    # Keep the project license, author attribution and third-party index beside
+    # the executable even if a future PyInstaller version changes how
+    # extensionless data files are collected from the spec file.
+    foreach ($noticeName in @("LICENSE", "ATTRIBUTION", "THIRD_PARTY_LICENSES.md")) {
+        $noticeSource = Join-Path $PSScriptRoot $noticeName
+        $noticePath = Join-Path $distDir $noticeName
+        if (-not (Test-Path -LiteralPath $noticePath)) {
+            Copy-Item -LiteralPath $noticeSource -Destination $noticePath -Force
+        }
+        if (-not (Test-Path -LiteralPath $noticePath)) {
+            throw "构建完成但没有找到许可/署名清单文件：$noticePath"
+        }
     }
 
     $archivePath = Join-Path $PSScriptRoot "dist\TDLib Media Uploader-v$version-windows-x64.zip"
