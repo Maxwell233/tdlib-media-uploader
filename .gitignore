@@ -26,6 +26,7 @@ __pycache__/
 # Optional local tools / binaries
 /tools/exiftool.exe
 /tools/exiftool_files/
+/tools/ffmpeg/
 *.exe
 *.dll
 

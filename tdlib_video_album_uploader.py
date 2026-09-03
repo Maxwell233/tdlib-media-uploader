@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -24,6 +25,42 @@ from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson
 PROJECT_DIR = Path(__file__).resolve().parent
 STATE_DIR = PROJECT_DIR / ".state"
 THUMB_CACHE_DIR = PROJECT_DIR / ".thumb_cache"
+
+
+def _find_ffmpeg_override() -> str | None:
+    """Find the LGPL FFmpeg supplied by a portable build or the user.
+
+    imageio-ffmpeg's Windows wheel contains its own FFmpeg executable.  That
+    binary is intentionally not used by our release build because its build
+    flags may enable GPL components.  Prefer the verified portable binary,
+    then an explicit environment override, then a system executable.  The
+    environment variable is also how imageio-ffmpeg's reader API receives the
+    selected executable.
+    """
+
+    configured = os.environ.get("IMAGEIO_FFMPEG_EXE", "").strip()
+    if configured and Path(configured).is_file():
+        return str(Path(configured).resolve())
+
+    names = ("ffmpeg.exe", "ffmpeg") if os.name == "nt" else ("ffmpeg",)
+    candidates = [
+        PROJECT_DIR / "tools" / "ffmpeg" / names[0],
+        PROJECT_DIR / "tools" / names[0],
+        PROJECT_DIR / names[0],
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate.resolve())
+
+    return shutil.which("ffmpeg")
+
+
+_FFMPEG_OVERRIDE = _find_ffmpeg_override()
+if _FFMPEG_OVERRIDE:
+    # read_frames()/count_frames_and_secs() resolve their executable through
+    # imageio-ffmpeg, so expose the selected binary through its supported
+    # environment-variable override without changing the public API.
+    os.environ["IMAGEIO_FFMPEG_EXE"] = _FFMPEG_OVERRIDE
 
 UI = HeadlessUI()
 
@@ -231,7 +268,7 @@ def build_thumbnail(path: Path):
         with Image.open(final_path) as image:
             return final_path, image.width, image.height
 
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg = _FFMPEG_OVERRIDE or imageio_ffmpeg.get_ffmpeg_exe()
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
     def extract(second: float):

@@ -15,7 +15,7 @@ jobs:
   build:
     name: PyInstaller Windows build
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Check out source
@@ -32,7 +32,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --no-cache-dir --upgrade -r requirements-build.txt
+          python -m pip install --no-cache-dir --upgrade --force-reinstall --no-binary imageio-ffmpeg -r requirements-build.txt
 
       - name: Build one-folder EXE
         shell: pwsh
@@ -50,6 +50,15 @@ jobs:
             if (-not (Test-Path -LiteralPath $notice)) {
               throw "License/attribution manifest not found: $notice"
             }
+          }
+          $ffmpeg = Get-ChildItem -LiteralPath "dist\TDLib Media Uploader" -Filter "ffmpeg.exe" -File -Recurse | Select-Object -First 1
+          $ffmpegLicense = Get-ChildItem -LiteralPath "dist\TDLib Media Uploader" -Filter "LICENSE.txt" -File -Recurse | Select-Object -First 1
+          if ($null -eq $ffmpeg -or $null -eq $ffmpegLicense) {
+            throw "LGPL FFmpeg or its license file was not included in the portable build"
+          }
+          $ffmpegVersion = (& $ffmpeg.FullName "-version" 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $ffmpegVersion -match "--enable-gpl" -or $ffmpegVersion -match "--enable-nonfree") {
+            throw "Portable build contains an invalid GPL/nonfree FFmpeg binary"
           }
           $archive = Get-ChildItem -LiteralPath "dist" -Filter "*.zip" | Select-Object -First 1
           if ($null -eq $archive) {
@@ -82,7 +91,8 @@ jobs:
             ""
             "Windows x64 PySide6 one-folder build."
             ""
-            "- Includes TDLib, FFmpeg and Qt runtime dependencies."
+            "- Includes TDLib, a verified BtbN Windows x64 LGPL FFmpeg build, and Qt runtime dependencies."
+            "- FFmpeg asset: autobuild-2026-09-03-13-17; no --enable-gpl/nonfree build flags."
             "- Includes the CC BY-NC 4.0 license and Maximum attribution."
             "- Includes THIRD_PARTY_LICENSES.md with upstream license and redistribution notes."
             "- `config.toml` and Telegram login data are not included."

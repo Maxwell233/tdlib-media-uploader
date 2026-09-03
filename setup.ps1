@@ -51,7 +51,7 @@ try {
 
     Write-Host "→ 安装项目依赖" -ForegroundColor Yellow
     Write-Host "  tdjson 1.8.64.post1 / Pillow / imageio-ffmpeg / PySide6" -ForegroundColor DarkGray
-    Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--upgrade", "-r", "requirements.txt")
+    Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--upgrade", "--force-reinstall", "--no-binary", "imageio-ffmpeg", "-r", "requirements.txt")
 
     Write-Host "→ 检查 tdjson 固定版本" -ForegroundColor Yellow
     $tdjsonVersion = & $python -c "import importlib.metadata; print(importlib.metadata.version('tdjson'))"
@@ -87,8 +87,9 @@ try {
     Write-Host "安装完成" -ForegroundColor Green
     Write-Host "  1. 编辑 config.toml"
     Write-Host "  2. 如需读取 EXIF/QuickTime，可安装 tools\exiftool.exe"
-    Write-Host "  3. 双击 run.cmd，或运行 .\run.ps1"
-    Write-Host "  4. 项目现已仅保留 GUI 界面，上传核心由 GUI 调用。"
+    Write-Host "  3. 源码运行视频功能需准备 LGPL FFmpeg：放入 tools\ffmpeg\ffmpeg.exe 或加入 PATH"
+    Write-Host "  4. 双击 run.cmd，或运行 .\run.ps1"
+    Write-Host "  5. 项目现已仅保留 GUI 界面，上传核心由 GUI 调用。"
     Write-Host ("─" * 64) -ForegroundColor Green
     Write-Host ""
     Write-Host "提示：默认 missing_date_policy = `"mtime`"，没有 ExifTool 也可上传视频。" -ForegroundColor DarkGray

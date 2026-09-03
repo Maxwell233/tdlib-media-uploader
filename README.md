@@ -143,7 +143,7 @@ GUI 仍然只运行一个上传任务，以保护共享的 TDLib 登录数据库
 
 项目提供 PyInstaller one-folder 构建方案。推荐使用 GitHub Actions 的 Windows runner：每次推送 `main`、推送 `v*` 标签，或在仓库的 **Actions → Build Windows EXE → Run workflow** 手动运行，都会生成 Windows x64 构建产物。完成后可在对应工作流页面的 **Artifacts** 下载 ZIP；推送版本标签时，工作流还会自动创建 GitHub Release 并附加同一个 ZIP。
 
-构建产物包含 `TDLib Media Uploader.exe` 及其依赖 DLL / Qt 插件，并嵌入 `assets\tdlib_media_uploader_icon.ico` 应用图标。采用 one-folder 形式是为了让 TDLib 原生库和 FFmpeg 依赖稳定工作；首次启动时 GUI 会在 EXE 所在目录创建 `config.toml`，不会把你的配置或 Telegram 登录数据打进包里。
+构建产物包含 `TDLib Media Uploader.exe` 及其依赖 DLL / Qt 插件，并嵌入 `assets\tdlib_media_uploader_icon.ico` 应用图标。便携包还内置经过 SHA-256 和构建标志检查的 LGPL FFmpeg 及其 `LICENSE.txt`。采用 one-folder 形式是为了让 TDLib 原生库和 FFmpeg 依赖稳定工作；首次启动时 GUI 会在 EXE 所在目录创建 `config.toml`，不会把你的配置或 Telegram 登录数据打进包里。
 
 如果需要在本机使用同一套构建流程，需安装 Python 3.13 x64，然后运行：
 
@@ -159,7 +159,7 @@ dist\TDLib Media Uploader\TDLib Media Uploader.exe
 dist\TDLib Media Uploader-v1.7.1-windows-x64.zip
 ```
 
-本地构建会使用独立的 `.build_venv`，不会修改日常运行的 `.venv`。构建脚本会在 PyInstaller 前检查 imageio-ffmpeg 找到的 FFmpeg 是否报告 `--enable-gpl` 或 `--enable-nonfree`；发现这类构建时会停止发布，避免把 GPL/nonfree FFmpeg 混入便携包。EXE 构建不需要上传 `config.toml`，也不会包含 `.video_state`、`.image_state`、`.thumb_cache` 或 `tdlib_data`。
+本地构建会使用独立的 `.build_venv`，不会修改日常运行的 `.venv`。构建脚本会自动下载固定的 BtbN Windows x64 LGPL FFmpeg，校验 SHA-256 和 `-version` 构建标志，再交给 PyInstaller；发现 `--enable-gpl` 或 `--enable-nonfree` 时会停止发布，避免把 GPL/nonfree FFmpeg 混入便携包。源码运行时，安装脚本只安装 imageio-ffmpeg 的 Python wrapper；若不使用 Release 便携包，请自行提供 LGPL `ffmpeg.exe`（放入 `tools\ffmpeg\ffmpeg.exe` 或加入 PATH）。EXE 构建不需要上传 `config.toml`，也不会包含 `.video_state`、`.image_state`、`.thumb_cache` 或 `tdlib_data`。
 
 ## 项目许可与署名
 

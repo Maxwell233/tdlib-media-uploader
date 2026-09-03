@@ -63,6 +63,64 @@ function Resolve-PythonCommand {
     return $buildPython
 }
 
+$FfmpegReleaseTag = "autobuild-2026-09-03-13-17"
+$FfmpegArchiveName = "ffmpeg-N-126390-g9fc8c785e2-win64-lgpl.zip"
+$FfmpegArchiveSha256 = "ba8bf7dec00022c2dbf2cbeb9a601d7e0d131990e276b8c5f88954775735ec8a"
+$FfmpegArchiveUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FfmpegReleaseTag/$FfmpegArchiveName"
+
+function Ensure-LgplFfmpeg {
+    $ffmpegDirectory = Join-Path $PSScriptRoot "tools\ffmpeg"
+    $ffmpegPath = Join-Path $ffmpegDirectory "ffmpeg.exe"
+    $licensePath = Join-Path $ffmpegDirectory "LICENSE.txt"
+
+    if ((Test-Path -LiteralPath $ffmpegPath) -and (Test-Path -LiteralPath $licensePath)) {
+        return (Resolve-Path -LiteralPath $ffmpegPath).Path
+    }
+
+    Write-Host "→ 下载固定版本 LGPL FFmpeg（BtbN $FfmpegReleaseTag）" -ForegroundColor Yellow
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "tdlib-media-uploader-ffmpeg"
+    $archivePath = Join-Path $tempRoot $FfmpegArchiveName
+    $extractPath = Join-Path $tempRoot ("extract-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
+
+    try {
+        $download = $true
+        if (Test-Path -LiteralPath $archivePath) {
+            $existingHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+            $download = $existingHash -ne $FfmpegArchiveSha256
+            if ($download) {
+                Remove-Item -LiteralPath $archivePath -Force
+            }
+        }
+
+        if ($download) {
+            Invoke-WebRequest -Uri $FfmpegArchiveUrl -OutFile $archivePath -UseBasicParsing
+        }
+
+        $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        if ($archiveHash -ne $FfmpegArchiveSha256) {
+            throw "FFmpeg 压缩包 SHA-256 校验失败：$archiveHash"
+        }
+
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $extractPath -Force
+        $sourceFfmpeg = Get-ChildItem -LiteralPath $extractPath -Filter "ffmpeg.exe" -File -Recurse | Select-Object -First 1
+        $sourceLicense = Get-ChildItem -LiteralPath $extractPath -Filter "LICENSE.txt" -File -Recurse | Select-Object -First 1
+        if ($null -eq $sourceFfmpeg -or $null -eq $sourceLicense) {
+            throw "FFmpeg 压缩包缺少 ffmpeg.exe 或 LICENSE.txt"
+        }
+
+        New-Item -ItemType Directory -Force -Path $ffmpegDirectory | Out-Null
+        Copy-Item -LiteralPath $sourceFfmpeg.FullName -Destination $ffmpegPath -Force
+        Copy-Item -LiteralPath $sourceLicense.FullName -Destination $licensePath -Force
+        return (Resolve-Path -LiteralPath $ffmpegPath).Path
+    }
+    finally {
+        if (Test-Path -LiteralPath $extractPath) {
+            Remove-Item -LiteralPath $extractPath -Recurse -Force
+        }
+    }
+}
+
 try {
     $python = Resolve-PythonCommand -RequestedPath $PythonPath
     Write-Host "TDLib Media Uploader V1.7.1 · Windows EXE 构建" -ForegroundColor Cyan
@@ -76,14 +134,11 @@ try {
     if (-not $SkipInstall) {
         Write-Host "→ 安装运行与构建依赖" -ForegroundColor Yellow
         Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--upgrade", "pip")
-        Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--upgrade", "-r", "requirements-build.txt")
+        Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--upgrade", "--force-reinstall", "--no-binary", "imageio-ffmpeg", "-r", "requirements-build.txt")
     }
 
-    Write-Host "→ 检查 FFmpeg 构建许可标志" -ForegroundColor Yellow
-    $ffmpegPath = (& $python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())" 2>&1 | Select-Object -Last 1).ToString().Trim()
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($ffmpegPath) -or -not (Test-Path -LiteralPath $ffmpegPath)) {
-        throw "无法定位 imageio-ffmpeg 使用的 FFmpeg 可执行文件：$ffmpegPath"
-    }
+    $ffmpegPath = Ensure-LgplFfmpeg
+    Write-Host "→ 检查 FFmpeg 构建许可标志：$ffmpegPath" -ForegroundColor Yellow
     $ffmpegVersion = (& $ffmpegPath "-version" 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0) {
         throw "无法读取 FFmpeg 构建信息：$ffmpegPath"
@@ -91,7 +146,12 @@ try {
     if ($ffmpegVersion -match "--enable-gpl" -or $ffmpegVersion -match "--enable-nonfree") {
         throw "检测到 FFmpeg 启用了 GPL 或 nonfree 构建选项。请改用可再分发的 LGPL 构建后再发布。"
     }
-    Write-Host "✓ FFmpeg 未报告 GPL/nonfree 构建标志" -ForegroundColor Green
+    $ffmpegLicensePath = Join-Path $PSScriptRoot "tools\ffmpeg\LICENSE.txt"
+    $ffmpegLicense = Get-Content -Raw -LiteralPath $ffmpegLicensePath
+    if ($ffmpegLicense -notmatch "LESSER GENERAL PUBLIC LICENSE") {
+        throw "FFmpeg 许可文件不是 LGPL 文本：$ffmpegLicensePath"
+    }
+    Write-Host "✓ 已验证 LGPL FFmpeg，未报告 GPL/nonfree 构建标志" -ForegroundColor Green
 
     $buildDir = Join-Path $PSScriptRoot "build\tdlib_media_uploader"
     $distDir = Join-Path $PSScriptRoot "dist\TDLib Media Uploader"

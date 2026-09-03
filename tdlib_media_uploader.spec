@@ -20,6 +20,21 @@ def collect_package(name: str):
         return [], [], []
 
 
+def is_embedded_ffmpeg(item) -> bool:
+    """Exclude imageio-ffmpeg's wheel binary from the portable build.
+
+    The Python wrapper remains useful, but the wheel's bundled executable is
+    not trusted for redistribution because its codec build flags can enable
+    GPL components.  build_exe.ps1 stages a separately verified LGPL build.
+    """
+
+    for value in item[:2]:
+        path = Path(str(value))
+        if path.suffix.lower() == ".exe" and "ffmpeg" in path.name.lower():
+            return True
+    return False
+
+
 datas = [
     (str(PROJECT_DIR / "config.example.toml"), "."),
     (str(PROJECT_DIR / "VERSION"), "."),
@@ -29,6 +44,14 @@ datas = [
     (str(PROJECT_DIR / "tools" / "README.txt"), "tools"),
 ]
 binaries = []
+
+packaged_ffmpeg = PROJECT_DIR / "tools" / "ffmpeg" / "ffmpeg.exe"
+packaged_ffmpeg_license = PROJECT_DIR / "tools" / "ffmpeg" / "LICENSE.txt"
+if packaged_ffmpeg.is_file():
+    binaries.append((str(packaged_ffmpeg), "tools/ffmpeg"))
+if packaged_ffmpeg_license.is_file():
+    datas.append((str(packaged_ffmpeg_license), "tools/ffmpeg"))
+
 hiddenimports = [
     "app_config",
     "tdlib_common",
@@ -42,8 +65,8 @@ hiddenimports = [
 
 for package_name in ("tdjson", "imageio_ffmpeg"):
     package_datas, package_binaries, package_hiddenimports = collect_package(package_name)
-    datas.extend(package_datas)
-    binaries.extend(package_binaries)
+    datas.extend(item for item in package_datas if not is_embedded_ffmpeg(item))
+    binaries.extend(item for item in package_binaries if not is_embedded_ffmpeg(item))
     hiddenimports.extend(package_hiddenimports)
 
 
