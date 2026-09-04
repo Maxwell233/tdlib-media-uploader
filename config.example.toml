@@ -1,5 +1,5 @@
 # ============================================================
-# TDLib Media Uploader V1.8.0
+# TDLib Media Uploader V1.8.1
 #
 # 首次使用：
 #   1. 复制本文件为 config.toml
@@ -30,6 +30,22 @@ target_mode = "forum_topic"
 
 # 频道 Chat ID。选择 channel 时必须填写；选择 forum_topic 时可保持 0。
 channel_chat_id = 0
+
+# 可选：分别为视频和图片覆盖 Telegram 目标。
+# 未填写对应小节时，该上传类型继承上面 [telegram] 的公共目标。
+# GUI 的“视频上传”和“图片上传”页面也可以分别编辑这里的目标。
+#
+# [telegram.video]
+# target_mode = "forum_topic"
+# chat_id = -1001234567890
+# channel_chat_id = 0
+# forum_topic_id = 12345
+#
+# [telegram.image]
+# target_mode = "channel"
+# chat_id = -1001234567890
+# channel_chat_id = -1009876543210
+# forum_topic_id = 0
 
 
 [proxy]

@@ -395,6 +395,9 @@ def build_album_plans(images: list[Path], state=None) -> list[dict]:
 
 
 def main():
+    activate = getattr(cfg, "activate_target", None)
+    if callable(activate):
+        activate("image")
     validate_config()
     version = verify_tdjson_version()
 

@@ -6,7 +6,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
@@ -117,22 +117,79 @@ proxy = _optional_section("proxy")
 # Telegram
 API_ID = int(_required(telegram, "api_id"))
 API_HASH = str(_required(telegram, "api_hash"))
-GROUP_CHAT_ID = int(telegram.get("chat_id", 0) or 0)
-CHANNEL_CHAT_ID = int(telegram.get("channel_chat_id", 0) or 0)
-TARGET_MODE = str(telegram.get("target_mode", "forum_topic")).strip().lower()
-if TARGET_MODE not in {"forum_topic", "channel"}:
-    raise RuntimeError('[telegram].target_mode 只能是 "forum_topic" 或 "channel"。')
-if TARGET_MODE == "channel":
-    if CHANNEL_CHAT_ID == 0:
-        raise RuntimeError("频道模式必须填写 [telegram].channel_chat_id。")
-    CHAT_ID = CHANNEL_CHAT_ID
-else:
+
+
+def _target_section(name: str):
+    value = telegram.get(name, {})
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise RuntimeError(f"config.toml 中的 [telegram.{name}] 配置段必须是表格。")
+    return value
+
+
+def _int_target_value(source, fallback, key: str) -> int:
+    try:
+        return int(source.get(key, fallback) or 0)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Telegram 目标配置中的 {key} 必须是整数。") from exc
+
+
+def _parse_target(source: dict, fallback: dict | None = None) -> dict:
+    fallback = fallback or {}
+    mode = str(source.get("target_mode", fallback.get("target_mode", "forum_topic"))).strip().lower()
+    if mode not in {"forum_topic", "channel"}:
+        raise RuntimeError('[telegram].target_mode 只能是 "forum_topic" 或 "channel"。')
+    group_chat_id = _int_target_value(source, fallback.get("group_chat_id", 0), "chat_id")
+    channel_chat_id = _int_target_value(source, fallback.get("channel_chat_id", 0), "channel_chat_id")
+    forum_topic_id = _int_target_value(source, fallback.get("forum_topic_id", 0), "forum_topic_id")
+    return {
+        "target_mode": mode,
+        "group_chat_id": group_chat_id,
+        "channel_chat_id": channel_chat_id,
+        "forum_topic_id": forum_topic_id,
+        "chat_id": channel_chat_id if mode == "channel" else group_chat_id,
+    }
+
+
+_BASE_TARGET = _parse_target(telegram)
+if _BASE_TARGET["target_mode"] == "channel" and _BASE_TARGET["channel_chat_id"] == 0:
+    raise RuntimeError("频道模式必须填写 [telegram].channel_chat_id。")
+if _BASE_TARGET["target_mode"] == "forum_topic":
     if "chat_id" not in telegram:
         raise RuntimeError("config.toml 缺少配置项：chat_id")
-    CHAT_ID = GROUP_CHAT_ID
-FORUM_TOPIC_ID = int(telegram.get("forum_topic_id", 0) or 0)
-if TARGET_MODE == "forum_topic" and "forum_topic_id" not in telegram:
-    raise RuntimeError("config.toml 缺少配置项：forum_topic_id")
+    if "forum_topic_id" not in telegram:
+        raise RuntimeError("config.toml 缺少配置项：forum_topic_id")
+
+_TARGETS = {
+    "video": _parse_target(_target_section("video"), _BASE_TARGET),
+    "image": _parse_target(_target_section("image"), _BASE_TARGET),
+}
+
+
+def target_for(kind: str) -> dict:
+    """Return the effective target for an image or video upload."""
+    return dict(_TARGETS.get(str(kind).lower(), _BASE_TARGET))
+
+
+def activate_target(kind: str) -> dict:
+    """Activate a media-specific target for the synchronous upload core."""
+    target = target_for(kind)
+    globals()["GROUP_CHAT_ID"] = target["group_chat_id"]
+    globals()["CHANNEL_CHAT_ID"] = target["channel_chat_id"]
+    globals()["TARGET_MODE"] = target["target_mode"]
+    globals()["CHAT_ID"] = target["chat_id"]
+    globals()["FORUM_TOPIC_ID"] = target["forum_topic_id"]
+    return target
+
+
+# Keep the historical flat constants available for callers that do not select
+# a media type explicitly. GUI workers activate the relevant media target.
+GROUP_CHAT_ID = _BASE_TARGET["group_chat_id"]
+CHANNEL_CHAT_ID = _BASE_TARGET["channel_chat_id"]
+TARGET_MODE = _BASE_TARGET["target_mode"]
+CHAT_ID = _BASE_TARGET["chat_id"]
+FORUM_TOPIC_ID = _BASE_TARGET["forum_topic_id"]
 
 # 路径
 VIDEO_DIR = _resolve_path(

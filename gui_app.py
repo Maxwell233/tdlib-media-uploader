@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.8.0.
+"""PySide6 desktop interface for TDLib Media Uploader V1.8.1.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -60,7 +60,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
 TEMPLATE_CONFIG_PATH = PROJECT_DIR / "config.example.toml"
 HISTORY_PATH = PROJECT_DIR / ".gui_history.json"
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 ICON_PATH = PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"
 
 
@@ -97,6 +97,18 @@ def _reload_config() -> str:
 
 def _cfg(name: str, default=None):
     return getattr(cfg, name, default) if cfg is not None else default
+
+
+def _target_for(kind: str) -> dict:
+    if cfg is not None and callable(getattr(cfg, "target_for", None)):
+        return cfg.target_for(kind)
+    return {
+        "target_mode": "forum_topic",
+        "group_chat_id": _cfg("GROUP_CHAT_ID", _cfg("CHAT_ID", 0)),
+        "channel_chat_id": _cfg("CHANNEL_CHAT_ID", 0),
+        "forum_topic_id": _cfg("FORUM_TOPIC_ID", 0),
+        "chat_id": _cfg("CHAT_ID", 0),
+    }
 
 
 def _fmt_size(value: float | int | None) -> str:
@@ -293,6 +305,9 @@ def _scan_result(kind: str) -> dict:
     """Scan using the existing core when available, with a preview fallback."""
     if cfg is None:
         raise RuntimeError(_CONFIG_ERROR or "配置不可用。")
+    activate = getattr(cfg, "activate_target", None)
+    if callable(activate):
+        activate(kind)
 
     core = None
     warning = ""
@@ -443,6 +458,7 @@ def _scan_result(kind: str) -> dict:
         "state_path": str(state.path) if state is not None else "",
         "core_available": core is not None,
         "warning": warning,
+        "target": _target_for(kind),
     }
 
 
@@ -498,9 +514,10 @@ class GuiConsoleUI(QObject):
     album_changed = Signal(object)
     target_changed = Signal(object)
 
-    def __init__(self, auth_bridge: AuthBridge):
+    def __init__(self, auth_bridge: AuthBridge, kind: str = ""):
         super().__init__()
         self.auth_bridge = auth_bridge
+        self.kind = kind
         self._client = None
         self._client_lock = threading.Lock()
         self._stop_requested = threading.Event()
@@ -567,6 +584,8 @@ class GuiConsoleUI(QObject):
 
     def target(self, chat_title, topic_name, chat_id, topic_id):
         payload = {
+            "kind": self.kind,
+            "target_mode": str(_cfg("TARGET_MODE", "forum_topic")),
             "chat_title": chat_title or "(未命名)",
             "topic_name": topic_name or "",
             "chat_id": chat_id,
@@ -603,13 +622,16 @@ class UploadWorker(QThread):
     def __init__(self, kind: str, auth_bridge: AuthBridge):
         super().__init__()
         self.kind = kind
-        self.ui = GuiConsoleUI(auth_bridge)
+        self.ui = GuiConsoleUI(auth_bridge, kind)
 
     def request_stop(self):
         self.ui.request_stop()
 
     def run(self):
         try:
+            activate = getattr(cfg, "activate_target", None)
+            if callable(activate):
+                activate(self.kind)
             if self.kind == "video":
                 import tdlib_video_album_uploader as core
                 import tdlib_video_app as entry
@@ -694,11 +716,12 @@ class HomePage(QWidget):
         task_layout.addStretch(1)
         layout.addWidget(task_box)
 
-        note = QGroupBox("V1.8.0 运行提示")
+        note = QGroupBox("V1.8.1 运行提示")
         note_layout = QVBoxLayout(note)
         note_body = QLabel(
             "GUI 与上传核心共用 TDLib 登录数据和断点文件。一次只能运行一个图片或视频任务；"
             "图片 Album 默认按组编号，视频 Album 保留日期标题；双击预览中的 Album 可编辑标题。"
+            "视频和图片页面分别使用各自的 Telegram 目标，未单独配置时继承公共目标。"
             "频道模式不使用 Topic；点击“安全停止”会立即取消正在上传的文件，完整发送成功的 Album 会在下次自动跳过。"
         )
         note_body.setWordWrap(True)
@@ -726,7 +749,7 @@ class UploadPage(QWidget):
     start_requested = Signal(str)
     path_selected = Signal(str, str)
     scan_requested = Signal(str)
-    edit_target_requested = Signal()
+    edit_target_requested = Signal(str)
 
     def __init__(self, kind: str):
         super().__init__()
@@ -769,10 +792,10 @@ class UploadPage(QWidget):
         preview_layout.addWidget(self.summary_label)
         layout.addWidget(preview_box, 1)
 
-        target_box = QGroupBox("3 · Telegram 目标")
+        target_box = QGroupBox(f"3 · Telegram 目标（{accent}上传）")
         target_layout = QGridLayout(target_box)
-        target_layout.addWidget(QLabel("目标"), 0, 0)
-        target_layout.addWidget(QLabel("Topic"), 1, 0)
+        target_layout.addWidget(QLabel(f"{accent}目标"), 0, 0)
+        target_layout.addWidget(QLabel("Forum Topic"), 1, 0)
         self.chat_label = QLabel("未配置")
         self.topic_label = QLabel("未配置")
         self.chat_label.setObjectName("valueLabel")
@@ -781,7 +804,7 @@ class UploadPage(QWidget):
         target_layout.addWidget(self.topic_label, 1, 1)
         edit_target = QPushButton("编辑目标")
         edit_target.setObjectName("secondaryButton")
-        edit_target.clicked.connect(lambda: self.edit_target_requested.emit())
+        edit_target.clicked.connect(lambda: self.edit_target_requested.emit(self.kind))
         target_layout.addWidget(edit_target, 0, 2, 2, 1)
         layout.addWidget(target_box)
 
@@ -805,13 +828,14 @@ class UploadPage(QWidget):
     def refresh_config(self):
         path_name = "VIDEO_DIR" if self.kind == "video" else "IMAGE_DIR"
         self.source_edit.setText(_path_text(_cfg(path_name, "")))
-        mode = str(_cfg("TARGET_MODE", "forum_topic"))
+        target = _target_for(self.kind)
+        mode = str(target.get("target_mode", "forum_topic"))
         target_name = "频道" if mode == "channel" else "超级群组"
-        self.chat_label.setText(f"{target_name} · {str(_cfg('CHAT_ID', '未配置'))}")
+        self.chat_label.setText(f"{target_name} · {str(target.get('chat_id', '未配置'))}")
         self.topic_label.setText(
             "不适用（频道不使用 Topic）"
             if mode == "channel"
-            else str(_cfg("FORUM_TOPIC_ID", "未配置"))
+            else str(target.get("forum_topic_id", "未配置"))
         )
 
     def _browse(self):
@@ -1117,7 +1141,7 @@ class SettingsPage(QWidget):
         edit.setObjectName("primaryButton")
         edit.clicked.connect(self.open_editor)
         config_layout.addWidget(edit)
-        config_layout.addWidget(QLabel("GUI 会保留现有 config.toml 注释与其他未修改字段。"))
+        config_layout.addWidget(QLabel("GUI 会保留现有 config.toml 注释；视频和图片目标可分别设置。"))
         config_layout.addStretch(1)
         layout.addWidget(config_box)
 
@@ -1203,25 +1227,32 @@ class SettingsPage(QWidget):
 
 
 class TargetDialog(QDialog):
-    """Focused editor for a Forum Topic target or a Channel target."""
+    """Edit the Telegram target used by the selected media uploader."""
 
-    def __init__(self, parent=None):
+    def __init__(self, kind="video", parent=None):
+        # Keep the old TargetDialog(parent) call shape usable for extensions.
+        if not isinstance(kind, str):
+            parent = kind if parent is None else parent
+            kind = "video"
         super().__init__(parent)
-        self.setWindowTitle("编辑 Telegram 目标 · V1.8.0")
+        self.kind = kind if kind in {"video", "image"} else "video"
+        self._update_window_title()
         self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.form = form
+        self.media_kind = QComboBox()
+        self.media_kind.addItem("视频上传", "video")
+        self.media_kind.addItem("图片上传", "image")
+        self.media_kind.setCurrentIndex(self.media_kind.findData(self.kind))
+        form.addRow("适用上传类型", self.media_kind)
         self.target_mode = QComboBox()
         self.target_mode.addItem("超级群组 Forum Topic", "forum_topic")
         self.target_mode.addItem("Channel 频道", "channel")
-        mode = str(_cfg("TARGET_MODE", "forum_topic"))
-        index = self.target_mode.findData(mode)
-        self.target_mode.setCurrentIndex(index if index >= 0 else 0)
         form.addRow("目标类型", self.target_mode)
-        self.chat_id = QLineEdit(str(_cfg("GROUP_CHAT_ID", _cfg("CHAT_ID", -1001234567890))) )
-        self.channel_chat_id = QLineEdit(str(_cfg("CHANNEL_CHAT_ID", 0) or ""))
-        self.topic_id = QLineEdit(str(_cfg("FORUM_TOPIC_ID", 12345)))
+        self.chat_id = QLineEdit()
+        self.channel_chat_id = QLineEdit()
+        self.topic_id = QLineEdit()
         form.addRow("群组 Chat ID", self.chat_id)
         form.addRow("频道 Chat ID", self.channel_chat_id)
         form.addRow("Forum Topic ID", self.topic_id)
@@ -1241,7 +1272,31 @@ class TargetDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.media_kind.currentIndexChanged.connect(self._kind_changed)
         self.target_mode.currentIndexChanged.connect(self._update_fields)
+        self._load_target()
+        self._update_fields()
+
+    def _kind_changed(self):
+        value = self.media_kind.currentData()
+        if value in {"video", "image"}:
+            self.kind = value
+            self._update_window_title()
+            self._load_target()
+
+    def _update_window_title(self):
+        accent = "视频" if self.kind == "video" else "图片"
+        self.setWindowTitle(f"编辑{accent}上传 Telegram 目标 · V1.8.1")
+
+    def _load_target(self):
+        target = _target_for(self.kind)
+        self.target_mode.blockSignals(True)
+        index = self.target_mode.findData(target.get("target_mode", "forum_topic"))
+        self.target_mode.setCurrentIndex(index if index >= 0 else 0)
+        self.target_mode.blockSignals(False)
+        self.chat_id.setText(str(target.get("group_chat_id", 0) or ""))
+        self.channel_chat_id.setText(str(target.get("channel_chat_id", 0) or ""))
+        self.topic_id.setText(str(target.get("forum_topic_id", 0) or ""))
         self._update_fields()
 
     def _update_fields(self):
@@ -1258,7 +1313,7 @@ class TargetDialog(QDialog):
 
     def _save(self):
         try:
-            group_id = int(self.chat_id.text().strip())
+            group_id = int(self.chat_id.text().strip() or "0")
             channel_id = int(self.channel_chat_id.text().strip() or "0")
             topic_id = int(self.topic_id.text().strip() or "0")
         except ValueError:
@@ -1277,10 +1332,10 @@ class TargetDialog(QDialog):
                 QMessageBox.critical(self, "保存失败", "Forum Topic ID 必须大于 0。")
                 return
         error = _write_config_values({
-            ("telegram", "target_mode"): mode,
-            ("telegram", "chat_id"): group_id,
-            ("telegram", "channel_chat_id"): channel_id,
-            ("telegram", "forum_topic_id"): topic_id,
+            (f"telegram.{self.kind}", "target_mode"): mode,
+            (f"telegram.{self.kind}", "chat_id"): group_id,
+            (f"telegram.{self.kind}", "channel_chat_id"): channel_id,
+            (f"telegram.{self.kind}", "forum_topic_id"): topic_id,
         })
         if error:
             QMessageBox.critical(self, "保存失败", error)
@@ -1291,10 +1346,11 @@ class TargetDialog(QDialog):
 class ConfigDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑配置 · V1.8.0")
+        self.setWindowTitle("编辑配置 · V1.8.1")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()
+        self.form = form
         self.fields = {}
 
         def field(key: str, value, password=False):
@@ -1306,16 +1362,25 @@ class ConfigDialog(QDialog):
 
         form.addRow("API ID", field("api_id", _cfg("API_ID", 12345678)))
         form.addRow("API Hash", field("api_hash", _cfg("API_HASH", "YOUR_API_HASH"), True))
+        self.target_kind = QComboBox()
+        self.target_kind.addItem("视频上传", "video")
+        self.target_kind.addItem("图片上传", "image")
+        form.addRow("编辑哪种上传目标", self.target_kind)
+
         self.target_mode = QComboBox()
         self.target_mode.addItem("超级群组 Forum Topic", "forum_topic")
         self.target_mode.addItem("Channel 频道", "channel")
-        target_mode = str(_cfg("TARGET_MODE", "forum_topic"))
+        target = _target_for("video")
+        target_mode = str(target.get("target_mode", "forum_topic"))
         mode_index = self.target_mode.findData(target_mode)
         self.target_mode.setCurrentIndex(mode_index if mode_index >= 0 else 0)
         form.addRow("Telegram 目标类型", self.target_mode)
-        form.addRow("群组 Chat ID", field("chat_id", _cfg("GROUP_CHAT_ID", _cfg("CHAT_ID", -1001234567890))))
-        form.addRow("频道 Chat ID", field("channel_chat_id", _cfg("CHANNEL_CHAT_ID", "")))
-        form.addRow("Forum Topic ID", field("forum_topic_id", _cfg("FORUM_TOPIC_ID", 12345)))
+        form.addRow("群组 Chat ID", field("chat_id", target.get("group_chat_id", -1001234567890)))
+        form.addRow("频道 Chat ID", field("channel_chat_id", target.get("channel_chat_id", 0)))
+        form.addRow("Forum Topic ID", field("forum_topic_id", target.get("forum_topic_id", 12345)))
+        self.target_kind.currentIndexChanged.connect(self._load_target_fields)
+        self.target_mode.currentIndexChanged.connect(self._update_target_fields)
+        self._update_target_fields()
         form.addRow("视频目录", field("video_dir", _cfg("VIDEO_DIR", "")))
         form.addRow("图片目录", field("image_dir", _cfg("IMAGE_DIR", "")))
         form.addRow("ExifTool 路径", field("exiftool_path", _cfg("EXIFTOOL_PATH", "tools/exiftool.exe")))
@@ -1415,6 +1480,7 @@ class ConfigDialog(QDialog):
         layout.addWidget(proxy_box)
 
         hint = QLabel(
+            "视频和图片目标分别保存；未单独设置时继承 [telegram] 公共目标。"
             "API Hash、代理认证信息和 MTProto Secret 只写入本地 config.toml，不会写入 GUI 日志。"
             "代理由 TDLib 原生支持；tdjson 版本仍由项目固定要求控制。"
         )
@@ -1426,6 +1492,35 @@ class ConfigDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _load_target_fields(self):
+        """Load the effective target for the selected media type."""
+        kind = self.target_kind.currentData() or "video"
+        target = _target_for(kind)
+        mode = str(target.get("target_mode", "forum_topic"))
+        self.target_mode.blockSignals(True)
+        index = self.target_mode.findData(mode)
+        self.target_mode.setCurrentIndex(index if index >= 0 else 0)
+        self.target_mode.blockSignals(False)
+        self.fields["chat_id"].setText(str(target.get("group_chat_id", 0) or ""))
+        self.fields["channel_chat_id"].setText(str(target.get("channel_chat_id", 0) or ""))
+        self.fields["forum_topic_id"].setText(str(target.get("forum_topic_id", 0) or ""))
+        self._update_target_fields()
+
+    def _update_target_fields(self):
+        channel = self.target_mode.currentData() == "channel"
+        for key, visible in (
+            ("chat_id", not channel),
+            ("channel_chat_id", channel),
+            ("forum_topic_id", not channel),
+        ):
+            widget = self.fields[key]
+            widget.setVisible(visible)
+            # QFormLayout labels are not direct parents, so locate the label
+            # through the form layout and keep it in sync with its field.
+            label = self.form.labelForField(widget)
+            if label is not None:
+                label.setVisible(visible)
 
     def _update_proxy_fields(self):
         enabled = self.proxy_enabled.isChecked()
@@ -1456,13 +1551,29 @@ class ConfigDialog(QDialog):
             except ValueError:
                 return fallback
 
+        target_kind = self.target_kind.currentData() or "video"
+        target_mode = self.target_mode.currentData() or "forum_topic"
+        group_id = integer("chat_id", 0)
+        channel_id = integer("channel_chat_id", 0)
+        topic_id = integer("forum_topic_id", 0)
+        if target_mode == "channel":
+            if channel_id == 0:
+                QMessageBox.critical(self, "保存失败", "频道 Chat ID 不能为 0。")
+                return
+        elif group_id == 0:
+            QMessageBox.critical(self, "保存失败", "群组 Chat ID 不能为 0。")
+            return
+        elif topic_id <= 0:
+            QMessageBox.critical(self, "保存失败", "Forum Topic ID 必须大于 0。")
+            return
+
         values = {
             ("telegram", "api_id"): integer("api_id", 12345678),
             ("telegram", "api_hash"): self.fields["api_hash"].text().strip(),
-            ("telegram", "target_mode"): self.target_mode.currentData() or "forum_topic",
-            ("telegram", "chat_id"): integer("chat_id", -1001234567890),
-            ("telegram", "channel_chat_id"): integer("channel_chat_id", 0),
-            ("telegram", "forum_topic_id"): integer("forum_topic_id", 12345),
+            (f"telegram.{target_kind}", "target_mode"): target_mode,
+            (f"telegram.{target_kind}", "chat_id"): group_id,
+            (f"telegram.{target_kind}", "channel_chat_id"): channel_id,
+            (f"telegram.{target_kind}", "forum_topic_id"): topic_id,
             ("paths", "video_dir"): self.fields["video_dir"].text().strip(),
             ("paths", "image_dir"): self.fields["image_dir"].text().strip(),
             ("paths", "exiftool_path"): self.fields["exiftool_path"].text().strip(),
@@ -1642,6 +1753,9 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.warning(self, "任务运行中", "当前已有上传任务，请先安全停止后再扫描。")
             return
+        if any(scanner.isRunning() for scanner in self.scanners.values()):
+            QMessageBox.warning(self, "扫描运行中", "当前已有目录扫描，请等待扫描完成后再扫描另一个类型。")
+            return
         old = self.scanners.get(kind)
         if old is not None and old.isRunning():
             return
@@ -1735,17 +1849,18 @@ class MainWindow(QMainWindow):
 
     def _target_from_worker(self, payload: dict):
         self.home.set_connection("已连接", True)
-        is_channel = str(_cfg("TARGET_MODE", "forum_topic")) == "channel"
-        for page in (self.video_page, self.image_page):
-            page.chat_label.setText(
-                f"{'频道' if is_channel else '超级群组'} · "
-                f"{payload.get('chat_title')} ({payload.get('chat_id')})"
-            )
-            page.topic_label.setText(
-                "不适用（频道不使用 Topic）"
-                if is_channel
-                else f"{payload.get('topic_name')} ({payload.get('topic_id')})"
-            )
+        kind = payload.get("kind") or self.active_kind
+        page = self.video_page if kind == "video" else self.image_page
+        is_channel = str(payload.get("target_mode") or _target_for(kind).get("target_mode")) == "channel"
+        page.chat_label.setText(
+            f"{'频道' if is_channel else '超级群组'} · "
+            f"{payload.get('chat_title')} ({payload.get('chat_id')})"
+        )
+        page.topic_label.setText(
+            "不适用（频道不使用 Topic）"
+            if is_channel
+            else f"{payload.get('topic_name')} ({payload.get('topic_id')})"
+        )
         self.statusBar().showMessage(
             f"目标已确认：{payload.get('chat_title')}"
             + ("（频道）" if is_channel else f" / {payload.get('topic_name')}")
@@ -1850,11 +1965,14 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.StandardButton.Yes:
             self._finish_cache_clear(("thumb_cache",), reset_scan=False)
 
-    def _edit_target(self):
-        dialog = TargetDialog(self)
+    def _edit_target(self, kind: str = "video"):
+        dialog = TargetDialog(kind, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._refresh_pages()
-            self.statusBar().showMessage("Telegram 目标已保存")
+            saved_kind = dialog.kind
+            self.statusBar().showMessage(
+                f"{'视频' if saved_kind == 'video' else '图片'}上传目标已保存"
+            )
 
     def _edit_config(self):
         dialog = ConfigDialog(self)

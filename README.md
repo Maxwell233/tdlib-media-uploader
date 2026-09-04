@@ -1,15 +1,15 @@
 # TDLib Media Uploader
 
-**V1.8.0 · Windows**
+**V1.8.1 · Windows**
 
-一个用于向 **Telegram 超级群 / Forum Topic 或 Channel** 批量上传图片和视频的 Windows GUI 工具。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点和缩略图；V1.8.0 仅保留 PySide6 桌面 GUI，并继续提供缓存清理、任务管理和独立代理设置。
+一个用于向 **Telegram 超级群 / Forum Topic 或 Channel** 批量上传图片和视频的 Windows GUI 工具。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点和缩略图；V1.8.1 仅保留 PySide6 桌面 GUI，并继续提供缓存清理、任务管理和独立代理设置。
 
 ## 功能
 
 - **视频**：递归读取目录及全部子目录；按月份组成 Album；一个 Album 最多 10 个视频；每个 Album 仅第一条显示日期标题（如 `21-5`），可在预览中编辑基础标题并追加自定义文本。视频封面生成默认开启，可在配置中关闭。
 - **图片**：递归读取目录及全部子目录；每 10 张组成一个 Album；每个 Album 的统一 Caption 默认使用 `1`、`2`、`3`…编号，并可在预览中追加自定义文本。
 - **文件名描述（可选）**：可分别为视频/图片开启，在每个 Album 的统一 Caption（日期或编号）后追加当前 Album 的 `1. 文件名`、`2. 文件名`…清单；日期/编号只出现一次，默认关闭。
-- **目标类型**：可在 GUI 中选择超级群组 Forum Topic 或 Channel 频道；频道模式不使用 Topic。
+- **独立上传目标**：视频上传和图片上传可以分别选择超级群组 Forum Topic 或 Channel 频道，并分别填写 Chat ID / Topic；未单独配置时继承公共目标。频道模式不使用 Topic。
 - **TDLib 原生上传**：上传期间不需要打开 Telegram Desktop。
 - **断点续传**：只有完整发送成功的 Album 才写入断点；重启后自动跳过已完成项。
 - **统一配置**：日常优先在 GUI“设置与诊断 → 编辑配置”中修改 `config.toml`，无需编辑 Python 主脚本。
@@ -36,11 +36,11 @@
 
 ### 推荐：直接下载 Release ZIP（普通使用）
 
-Windows 用户建议直接使用已经编译好的稳定版：[TDLib Media Uploader v1.8.0 Release](https://github.com/Maxwell233/tdlib-media-uploader/releases/tag/v1.8.0)，或直接下载 [Windows x64 ZIP](https://github.com/Maxwell233/tdlib-media-uploader/releases/download/v1.8.0/TDLib.Media.Uploader-v1.8.0-windows-x64.zip)。解压后即可使用。
+Windows 用户建议直接使用已经编译好的稳定版：[TDLib Media Uploader v1.8.1 Release](https://github.com/Maxwell233/tdlib-media-uploader/releases/tag/v1.8.1)，或直接下载 [Windows x64 ZIP](https://github.com/Maxwell233/tdlib-media-uploader/releases/download/v1.8.1/TDLib.Media.Uploader-v1.8.1-windows-x64.zip)。解压后即可使用。
 
 1. 解压整个 ZIP 文件夹，不要只复制或移动其中的 EXE；
 2. 双击 `TDLib Media Uploader.exe`；
-3. 首次启动后，在 GUI 的“设置与诊断”中填写 Telegram 目标和本地媒体目录；
+3. 首次启动后，在 GUI 的“设置与诊断”中填写 Telegram API 和本地媒体目录，再分别进入“视频上传”和“图片上传”页面编辑各自的 Telegram 目标；
 4. 配置会保存在 EXE 所在目录的 `config.toml`，不需要安装 Python 或运行 `setup.cmd`。
 
 ### 可选：使用 Git 克隆源码
@@ -81,9 +81,9 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ### 2. 配置
 
-普通使用不需要手动打开配置文件。启动 GUI 后，在左侧进入“设置与诊断”，点击“配置入口”中的“编辑配置”，填写并保存 Telegram、目录、日期策略、Album 大小、缩略图和代理选项即可。
+普通使用不需要手动打开配置文件。启动 GUI 后，在左侧进入“设置与诊断”，点击“配置入口”中的“编辑配置”，填写并保存 Telegram API、视频/图片目录、日期策略、Album 大小、缩略图和代理选项即可。配置编辑器中的“编辑哪种上传目标”可以切换视频或图片，分别保存对应的 Telegram 目标。
 
-视频 / 图片上传页面中的“编辑目标”按钮也可以直接选择目标类型，修改群组/频道 Chat ID 和 Forum Topic ID；双击扫描预览中的 Album 行可修改每个 Album 的标题。
+视频 / 图片上传页面中的“编辑目标”按钮也可以直接选择目标类型，修改当前上传类型的群组/频道 Chat ID 和 Forum Topic ID；双击扫描预览中的 Album 行可修改每个 Album 的标题。
 
 配置实际保存在：
 
@@ -107,6 +107,19 @@ chat_id = -1001234567890
 forum_topic_id = 12345
 target_mode = "forum_topic" # forum_topic 或 channel
 channel_chat_id = 0           # target_mode = "channel" 时填写频道 Chat ID
+
+# 可选：按上传类型覆盖公共目标；未填写时继承 [telegram]。
+# [telegram.video]
+# target_mode = "forum_topic"
+# chat_id = -1001234567890
+# channel_chat_id = 0
+# forum_topic_id = 12345
+#
+# [telegram.image]
+# target_mode = "channel"
+# chat_id = -1001234567890
+# channel_chat_id = -1009876543210
+# forum_topic_id = 0
 
 [video]
 caption_include_filenames = false
@@ -149,7 +162,7 @@ run.cmd
 
 `run.cmd` / `run.ps1` 会直接启动 GUI。GUI 与上传核心使用相同的 `config.toml`、TDLib 登录数据和断点文件。GUI 中的“安全停止”会立即取消正在上传的文件，不会删除断点；重新扫描后，完整发送成功的 Album 会自动跳过。
 
-## V1.8.0 GUI
+## V1.8.1 GUI
 
 GUI 使用 PySide6 构建，包含：
 
@@ -158,7 +171,7 @@ GUI 使用 PySide6 构建，包含：
 - 设置中的“视频/图片描述”开关可在每个 Album 的统一 Caption 后附加带序号的文件名清单；
 - 任务中心：当前文件、Album、速度、Mbps、ETA 和运行日志；
 - 历史记录：本地保存最近任务的结果；
-- 设置与诊断：编辑主要 `config.toml` 参数、选择群组 Topic 或 Channel 目标、配置独立代理、检查运行依赖并清理应用缓存；视频 / 图片页面也可直接编辑 Telegram 目标。
+- 设置与诊断：编辑主要 `config.toml` 参数、分别为视频/图片选择群组 Topic 或 Channel 目标、配置独立代理、检查运行依赖并清理应用缓存；视频 / 图片页面也可直接编辑当前类型的 Telegram 目标。
 
 GUI 仍然只运行一个上传任务，以保护共享的 TDLib 登录数据库。当前版本使用“立即停止 + 断点恢复”，暂不提供多账号、定时任务和并发上传。
 
@@ -181,7 +194,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ```text
 dist\TDLib Media Uploader\TDLib Media Uploader.exe
-dist\TDLib Media Uploader-v1.8.0-windows-x64.zip
+dist\TDLib Media Uploader-v1.8.1-windows-x64.zip
 ```
 
 本地构建会使用独立的 `.build_venv`，不会修改日常运行的 `.venv`。构建脚本会自动下载固定的 BtbN Windows x64 LGPL FFmpeg，校验 SHA-256 和 `-version` 构建标志，再交给 PyInstaller；发现 `--enable-gpl` 或 `--enable-nonfree` 时会停止发布，避免把 GPL/nonfree FFmpeg 混入便携包。源码运行时，安装脚本只安装 imageio-ffmpeg 的 Python wrapper；若不使用 Release 便携包，请自行提供 LGPL `ffmpeg.exe`（放入 `tools\ffmpeg\ffmpeg.exe` 或加入 PATH）。EXE 构建不需要上传 `config.toml`，也不会包含 `.video_state`、`.image_state`、`.thumb_cache` 或 `tdlib_data`。

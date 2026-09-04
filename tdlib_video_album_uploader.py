@@ -642,6 +642,9 @@ def validate_config():
 
 
 def main():
+    activate = getattr(cfg, "activate_target", None)
+    if callable(activate):
+        activate("video")
     validate_config()
     version = verify_tdjson_version()
     UI.log(f"tdjson / TDLib 绑定版本：{version}（已锁定）")

@@ -97,6 +97,7 @@ jobs:
             "- Registers the application icon in the GUI and taskbar."
             "- Adds optional TDLib-native SOCKS5, HTTP, and MTProto proxy settings; disabled by default and direct-connected when off."
             "- Supports selecting a supergroup Forum Topic or a Channel as the upload target."
+            "- Allows separate Telegram targets for video and image uploads; each upload page shows and edits its own target."
             "- Numbers photo Albums by default and allows per-Album custom text."
             "- Keeps video date grouping and allows editing each Album's base title and custom text."
             "- Adds optional numbered filename descriptions to each Album caption; disabled by default."
