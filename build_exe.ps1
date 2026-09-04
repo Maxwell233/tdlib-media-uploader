@@ -123,7 +123,7 @@ function Ensure-LgplFfmpeg {
 
 try {
     $python = Resolve-PythonCommand -RequestedPath $PythonPath
-    Write-Host "TDLib Media Uploader V1.7.3 · Windows EXE 构建" -ForegroundColor Cyan
+    Write-Host "TDLib Media Uploader V1.8.0 · Windows EXE 构建" -ForegroundColor Cyan
     Write-Host "使用 Python：$python" -ForegroundColor DarkGray
 
     $iconPath = Join-Path $PSScriptRoot "assets\tdlib_media_uploader_icon.ico"

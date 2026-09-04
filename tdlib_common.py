@@ -112,7 +112,9 @@ class HeadlessUI:
         return getpass.getpass(text) if password else input(text)
 
 
-def topic_object() -> dict:
+def topic_object() -> dict | None:
+    if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel":
+        return None
     return {
         "@type": "messageTopicForum",
         "forum_topic_id": int(cfg.FORUM_TOPIC_ID),
@@ -495,7 +497,7 @@ class TDJsonClient:
         chat = self._try_get_chat(cfg.CHAT_ID)
         if chat is not None:
             return chat
-        self.ui.info("当前 TDLib 数据库尚未加载目标群，开始加载聊天列表。")
+        self.ui.info("当前 TDLib 数据库尚未加载目标聊天，开始加载聊天列表。")
         chat = self._load_chat_list_until_found(None, "主聊天列表")
         if chat is not None:
             return chat
@@ -513,11 +515,28 @@ class TDJsonClient:
             except TDLibError:
                 pass
         raise RuntimeError(
-            "找不到 CHAT_ID。请确认登录账号仍在该群中，且 config.toml 中的 chat_id 正确。"
+            "找不到目标聊天。请确认登录账号仍在目标群组/频道中，且 config.toml 中的 chat_id 正确。"
         )
 
     def validate_target(self):
         chat = self.ensure_target_chat()
+        chat_type = chat.get("type") or {}
+        if chat_type.get("@type") != "chatTypeSupergroup":
+            raise RuntimeError("目标聊天必须是超级群组或频道。")
+
+        if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel":
+            if not chat_type.get("is_channel", False):
+                raise RuntimeError("当前 Chat ID 不是频道，请在目标设置中选择正确的频道。")
+            self.ui.target(
+                chat.get("title", ""),
+                "",
+                cfg.CHAT_ID,
+                None,
+            )
+            return chat, None
+
+        if chat_type.get("is_channel", False):
+            raise RuntimeError("当前 Chat ID 是频道；请切换目标模式为 Channel 频道。")
         try:
             topic = self.request({
                 "@type": "getForumTopic",
@@ -601,31 +620,47 @@ class TDJsonClient:
         return sent_ids
 
     def send_contents(self, contents, progress=None, items=None):
-        if len(contents) == 1:
-            message = self.request({
-                "@type": "sendMessage",
-                "chat_id": int(cfg.CHAT_ID),
-                "topic_id": topic_object(),
-                "reply_to": None,
-                "options": None,
-                "reply_markup": None,
-                "input_message_content": contents[0],
-            })
-            messages = [message]
-        else:
-            response = self.request({
-                "@type": "sendMessageAlbum",
-                "chat_id": int(cfg.CHAT_ID),
-                "topic_id": topic_object(),
-                "reply_to": None,
-                "options": None,
-                "input_message_contents": contents,
-            })
-            messages = response.get("messages", [])
-            if len(messages) != len(contents):
-                raise RuntimeError(
-                    f"TDLib sendMessageAlbum 返回消息数量异常：{len(messages)}/{len(contents)}"
+        try:
+            if len(contents) == 1:
+                message = self.request({
+                    "@type": "sendMessage",
+                    "chat_id": int(cfg.CHAT_ID),
+                    "topic_id": topic_object(),
+                    "reply_to": None,
+                    "options": None,
+                    "reply_markup": None,
+                    "input_message_content": contents[0],
+                })
+                messages = [message]
+            else:
+                response = self.request({
+                    "@type": "sendMessageAlbum",
+                    "chat_id": int(cfg.CHAT_ID),
+                    "topic_id": topic_object(),
+                    "reply_to": None,
+                    "options": None,
+                    "input_message_contents": contents,
+                })
+                messages = response.get("messages", [])
+                if len(messages) != len(contents):
+                    raise RuntimeError(
+                        f"TDLib sendMessageAlbum 返回消息数量异常：{len(messages)}/{len(contents)}"
+                    )
+        except TDLibError as exc:
+            error_text = exc.message.lower()
+            forbidden = any(
+                marker in error_text
+                for marker in (
+                    "permission",
+                    "forbidden",
+                    "write_forbidden",
+                    "not enough rights",
+                    "rights_required",
                 )
+            )
+            if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel" and forbidden:
+                raise RuntimeError("当前账号没有在该频道发布内容的权限。") from exc
+            raise
         if progress is not None and items is not None:
             progress.register_messages(messages, items)
         return self.wait_for_send_results(messages)

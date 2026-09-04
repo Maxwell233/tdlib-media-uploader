@@ -1,9 +1,9 @@
 # ============================================================
-# TDLib Media Uploader V1.7.3
+# TDLib Media Uploader V1.8.0
 #
 # 首次使用：
 #   1. 复制本文件为 config.toml
-#   2. 填写 Telegram API、目标群/Topic 和本地目录
+#   2. 填写 Telegram API、目标群/Topic 或频道和本地目录
 #
 # setup.ps1 / run.ps1 在发现 config.toml 不存在时也会自动创建。
 #
@@ -24,6 +24,12 @@ chat_id = -1001234567890
 
 # Forum Topic ID
 forum_topic_id = 12345
+
+# 目标模式：forum_topic（超级群组话题）或 channel（频道）
+target_mode = "forum_topic"
+
+# 频道 Chat ID。选择 channel 时必须填写；选择 forum_topic 时可保持 0。
+channel_chat_id = 0
 
 
 [proxy]
@@ -80,6 +86,11 @@ album_size = 10
 # 4 -> 2021-5
 caption_year_digits = 2
 
+# 每个视频 Album 的统一 Caption 默认使用日期标题；可在 GUI 中编辑基础标题和追加文本。
+album_caption_separator = " · "
+# 可选：在 Album Caption 后附加当前 Album 内所有文件的“序号. 文件名”清单。
+caption_include_filenames = false
+
 generate_thumbnail = true
 thumb_max_edge = 320
 thumb_target_kib = 80
@@ -96,6 +107,13 @@ reset_state = false
 extensions = [".jpg", ".jpeg", ".png", ".webp"]
 
 album_size = 10
+
+# 图片 Album 的统一 Caption 默认按 1、2、3…编号；可在 GUI 中为每个 Album 追加自定义文本。
+album_numbering = true
+album_number_start = 1
+album_caption_separator = " · "
+# 可选：在 Album Caption 的编号/自定义文本后附加当前 Album 内所有文件的“序号. 文件名”清单。
+caption_include_filenames = false
 
 # "mtime" = 按 Windows 修改时间从旧到新
 # "path"  = 按目录/文件名排序

@@ -6,7 +6,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-APP_VERSION = "1.7.3"
+APP_VERSION = "1.8.0"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
@@ -117,13 +117,22 @@ proxy = _optional_section("proxy")
 # Telegram
 API_ID = int(_required(telegram, "api_id"))
 API_HASH = str(_required(telegram, "api_hash"))
-CHAT_ID = int(_required(telegram, "chat_id"))
-FORUM_TOPIC_ID = int(
-    _required(
-        telegram,
-        "forum_topic_id"
-    )
-)
+GROUP_CHAT_ID = int(telegram.get("chat_id", 0) or 0)
+CHANNEL_CHAT_ID = int(telegram.get("channel_chat_id", 0) or 0)
+TARGET_MODE = str(telegram.get("target_mode", "forum_topic")).strip().lower()
+if TARGET_MODE not in {"forum_topic", "channel"}:
+    raise RuntimeError('[telegram].target_mode 只能是 "forum_topic" 或 "channel"。')
+if TARGET_MODE == "channel":
+    if CHANNEL_CHAT_ID == 0:
+        raise RuntimeError("频道模式必须填写 [telegram].channel_chat_id。")
+    CHAT_ID = CHANNEL_CHAT_ID
+else:
+    if "chat_id" not in telegram:
+        raise RuntimeError("config.toml 缺少配置项：chat_id")
+    CHAT_ID = GROUP_CHAT_ID
+FORUM_TOPIC_ID = int(telegram.get("forum_topic_id", 0) or 0)
+if TARGET_MODE == "forum_topic" and "forum_topic_id" not in telegram:
+    raise RuntimeError("config.toml 缺少配置项：forum_topic_id")
 
 # 路径
 VIDEO_DIR = _resolve_path(
@@ -278,6 +287,24 @@ if not (
     raise RuntimeError(
         "[image].album_size 必须为 1~10。"
     )
+
+IMAGE_ALBUM_NUMBERING = bool(image.get("album_numbering", True))
+IMAGE_ALBUM_NUMBER_START = int(image.get("album_number_start", 1))
+if IMAGE_ALBUM_NUMBER_START < 1:
+    raise RuntimeError("[image].album_number_start 必须大于等于 1。")
+IMAGE_ALBUM_CAPTION_SEPARATOR = str(
+    image.get("album_caption_separator", " · ")
+)
+
+VIDEO_ALBUM_CAPTION_SEPARATOR = str(
+    video.get("album_caption_separator", " · ")
+)
+VIDEO_CAPTION_INCLUDE_FILENAMES = bool(
+    video.get("caption_include_filenames", False)
+)
+IMAGE_CAPTION_INCLUDE_FILENAMES = bool(
+    image.get("caption_include_filenames", False)
+)
 
 IMAGE_SORT_MODE = str(
     image.get(

@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import imageio_ffmpeg
 from PIL import Image
 
+from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 
@@ -388,7 +389,12 @@ class UploadState:
 
     def __init__(self):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        identity = f"{cfg.VIDEO_DIR.resolve()}|{cfg.CHAT_ID}|{cfg.FORUM_TOPIC_ID}|tdlib-video-v5"
+        identity_suffix = (
+            "tdlib-video-v5"
+            if getattr(cfg, "TARGET_MODE", "forum_topic") == "forum_topic"
+            else "tdlib-video-v5-channel"
+        )
+        identity = f"{cfg.VIDEO_DIR.resolve()}|{cfg.CHAT_ID}|{cfg.FORUM_TOPIC_ID}|{identity_suffix}"
         task_hash = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
         self.path = STATE_DIR / f"upload_state_{task_hash}.json"
         self.lock = threading.Lock()
@@ -401,6 +407,8 @@ class UploadState:
             "version": self.VERSION,
             "video_dir": str(cfg.VIDEO_DIR.resolve()),
             "chat_id": cfg.CHAT_ID,
+            "target_mode": getattr(cfg, "TARGET_MODE", "forum_topic"),
+            "channel_chat_id": getattr(cfg, "CHANNEL_CHAT_ID", 0),
             "forum_topic_id": cfg.FORUM_TOPIC_ID,
             "completed": {},
         }
@@ -569,6 +577,41 @@ def make_groups(items):
     return groups
 
 
+def build_album_plans(items, state=None) -> list[dict]:
+    """Build stable per-month Album plans from the complete scan."""
+    store = CaptionStore("video")
+    plans = []
+    for month_key in sorted(make_groups(items)):
+        month_items = make_groups(items)[month_key]
+        default_label = month_caption(month_key)
+        for start in range(0, len(month_items), cfg.VIDEO_ALBUM_SIZE):
+            album_items = list(month_items[start:start + cfg.VIDEO_ALBUM_SIZE])
+            pending = [
+                item for item in album_items
+                if state is None or not state.is_completed(item["path"])
+            ]
+            key = album_key("video", month_key, album_items)
+            record = store.get(key, default_label)
+            base_label = record["base_label"] or default_label
+            plans.append({
+                "key": key,
+                "month_key": month_key,
+                "number": start // cfg.VIDEO_ALBUM_SIZE + 1,
+                "items": album_items,
+                "pending_items": pending,
+                "caption": {
+                    "base_label": base_label,
+                    "custom_text": record["custom_text"],
+                    "text": compose_caption(
+                        base_label,
+                        record["custom_text"],
+                        getattr(cfg, "VIDEO_ALBUM_CAPTION_SEPARATOR", " · "),
+                    ),
+                },
+            })
+    return plans
+
+
 def print_plan(items, state):
     groups = make_groups(items)
     print("\n" + "=" * 104)
@@ -591,7 +634,10 @@ def print_plan(items, state):
 def validate_config():
     if cfg.API_ID == 12345678 or cfg.API_HASH == "YOUR_API_HASH":
         raise RuntimeError("请先在 config.toml 中填写 API_ID / API_HASH。")
-    if cfg.CHAT_ID == -1001234567890 or cfg.FORUM_TOPIC_ID == 12345:
+    if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel":
+        if cfg.CHAT_ID in {0, -1001234567890}:
+            raise RuntimeError("请先在 config.toml 中填写频道 Chat ID。")
+    elif cfg.CHAT_ID in {0, -1001234567890} or cfg.FORUM_TOPIC_ID <= 0 or cfg.FORUM_TOPIC_ID == 12345:
         raise RuntimeError("请先在 config.toml 中填写 CHAT_ID / FORUM_TOPIC_ID。")
 
 
@@ -618,8 +664,9 @@ def main():
     state = UploadState()
     completed_items = [item for item in items if state.is_completed(item["path"])]
     pending_items = [item for item in items if not state.is_completed(item["path"])]
-    pending_groups = make_groups(pending_items)
-    total_albums = sum(math.ceil(len(group) / cfg.VIDEO_ALBUM_SIZE) for group in pending_groups.values())
+    plans = build_album_plans(items, state)
+    pending_plans = [plan for plan in plans if plan["pending_items"]]
+    total_albums = len(pending_plans)
 
     print("\n" + "=" * 82)
     print(f"视频目录：{cfg.VIDEO_DIR}")
@@ -657,18 +704,26 @@ def main():
         client.validate_target()
         album_global = 0
 
-        for month_key in sorted(pending_groups):
-            month_items = pending_groups[month_key]
-            month_album_total = math.ceil(len(month_items) / cfg.VIDEO_ALBUM_SIZE)
-            label = month_caption(month_key)
+        month_plan_groups = defaultdict(list)
+        for plan in pending_plans:
+            month_plan_groups[plan["month_key"]].append(plan)
+        for month_key in sorted(month_plan_groups):
+            month_plans = month_plan_groups[month_key]
+            month_items = [item for plan in month_plans for item in plan["pending_items"]]
+            month_album_total = len(month_plans)
             UI.log("")
             UI.log("=" * 82)
-            UI.log(f"开始月份 {month_key} (Caption={label})：{len(month_items)} 个视频，{month_album_total} 个 Album")
+            UI.log(f"开始月份 {month_key}：{len(month_items)} 个视频，{month_album_total} 个 Album")
             UI.log("=" * 82)
 
-            for start in range(0, len(month_items), cfg.VIDEO_ALBUM_SIZE):
-                album_items = month_items[start:start + cfg.VIDEO_ALBUM_SIZE]
-                month_album_number = start // cfg.VIDEO_ALBUM_SIZE + 1
+            for plan in month_plans:
+                album_items = plan["pending_items"]
+                month_album_number = plan["number"]
+                label = with_filename_description(
+                    plan["caption"]["text"],
+                    album_items,
+                    getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False),
+                )
                 album_global += 1
                 progress.begin_album(album_items, month_key, album_global, total_albums)
                 UI.log("")
@@ -694,7 +749,7 @@ def main():
                     raise
                 state.mark_album_completed(album_items, message_ids)
                 progress.finish_album(album_items)
-                UI.log(f"Album 发送完成，Caption={label}，断点已保存。")
+                UI.log(f"Album 发送完成，Caption={label or '无'}，断点已保存。")
 
         UI.log("\n" + "=" * 82)
         UI.log("全部视频上传完成。")

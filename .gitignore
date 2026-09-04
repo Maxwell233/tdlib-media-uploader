@@ -22,6 +22,8 @@ __pycache__/
 /.image_state/
 /.thumb_cache/
 /.gui_history.json
+/.video_album_captions.json
+/.image_album_captions.json
 
 # Optional local tools / binaries
 /tools/exiftool.exe

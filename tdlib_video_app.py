@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""TDLib Media Uploader V1.7.3 视频上传流程。
+"""TDLib Media Uploader V1.8.0 视频上传流程。
 
 核心上传/断点/缩略图逻辑复用 tdlib_video_album_uploader.py；
 本文件负责视频扫描、mtime 日期策略和 GUI 使用的上传流程。
@@ -12,6 +12,7 @@ from collections import Counter
 
 import app_config as cfg
 import tdlib_video_album_uploader as core
+from album_metadata import with_filename_description
 
 
 UI = core.UI
@@ -120,22 +121,19 @@ def show_group_plan(items, state):
 
     for month_key in sorted(groups):
         month_items = groups[month_key]
-        pending = [
-            item
-            for item in month_items
-            if not state.is_completed(item["path"])
-        ]
-
-        album_count = (
-            math.ceil(len(pending) / cfg.VIDEO_ALBUM_SIZE)
-            if pending
-            else 0
+        plans = core.build_album_plans(month_items, state)
+        pending = [item for item in month_items if not state.is_completed(item["path"])]
+        album_count = sum(1 for plan in plans if plan["pending_items"])
+        captions = ", ".join(
+            plan["caption"]["text"] or "无"
+            for plan in plans
+            if plan["pending_items"]
         )
 
         rows.append(
             (
                 month_key,
-                core.month_caption(month_key),
+                captions or core.month_caption(month_key),
                 len(month_items),
                 len(pending),
                 album_count,
@@ -197,10 +195,12 @@ def show_upload_summary(
             ("本次 Album", total_albums),
             (
                 "Album 规则",
-                f"每组最多 {cfg.VIDEO_ALBUM_SIZE} 个；首条 Caption=yy-m",
+                f"每组最多 {cfg.VIDEO_ALBUM_SIZE} 个；Album Caption=日期，可编辑文本；"
+                f"文件名清单={'开' if getattr(cfg, 'VIDEO_CAPTION_INCLUDE_FILENAMES', False) else '关'}",
             ),
             ("CHAT_ID", cfg.CHAT_ID),
-            ("FORUM_TOPIC_ID", cfg.FORUM_TOPIC_ID),
+            ("目标模式", "Channel 频道" if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel" else "超级群组 Forum Topic"),
+            ("FORUM_TOPIC_ID", cfg.FORUM_TOPIC_ID if getattr(cfg, "TARGET_MODE", "forum_topic") == "forum_topic" else "不适用"),
             ("状态文件", state.path),
         ],
         kind="VIDEO",
@@ -266,18 +266,9 @@ def main():
         if not state.is_completed(item["path"])
     ]
 
-    pending_groups = core.make_groups(
-        pending_items
-    )
-
-    total_albums = sum(
-        math.ceil(
-            len(group)
-            /
-            cfg.VIDEO_ALBUM_SIZE
-        )
-        for group in pending_groups.values()
-    )
+    plans = core.build_album_plans(items, state)
+    pending_plans = [plan for plan in plans if plan["pending_items"]]
+    total_albums = len(pending_plans)
 
     # GUI 调用的扫描与上传流程：
     # 1. 按月份分组显示完整文件列表。
@@ -360,53 +351,31 @@ def main():
 
         album_global = 0
 
-        for month_key in sorted(
-            pending_groups
-        ):
-            month_items = (
-                pending_groups[
-                    month_key
-                ]
-            )
-
-            month_album_total = math.ceil(
-                len(month_items)
-                /
-                cfg.VIDEO_ALBUM_SIZE
-            )
-
-            label = core.month_caption(
-                month_key
-            )
+        month_plan_groups = {}
+        for plan in pending_plans:
+            month_plan_groups.setdefault(plan["month_key"], []).append(plan)
+        for month_key in sorted(month_plan_groups):
+            month_plans = month_plan_groups[month_key]
+            month_items = [item for plan in month_plans for item in plan["pending_items"]]
+            month_album_total = len(month_plans)
 
             UI.album(
                 kind="VIDEO",
                 title=f"月份 {month_key}",
                 subtitle=(
-                    f"Caption={label} · "
+                    f"{len(month_plans)} 个 Album · "
                     f"{len(month_items)} 个视频 · "
                     f"{month_album_total} 个 Album"
                 ),
             )
 
-            for start in range(
-                0,
-                len(month_items),
-                cfg.VIDEO_ALBUM_SIZE,
-            ):
-                album_items = month_items[
-                    start:
-                    start
-                    +
-                    cfg.VIDEO_ALBUM_SIZE
-                ]
-
-                month_album_number = (
-                    start
-                    //
-                    cfg.VIDEO_ALBUM_SIZE
-                    +
-                    1
+            for plan in month_plans:
+                album_items = plan["pending_items"]
+                month_album_number = plan["number"]
+                label = with_filename_description(
+                    plan["caption"]["text"],
+                    album_items,
+                    getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False),
                 )
 
                 album_global += 1

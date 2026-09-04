@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.7.3.
+"""PySide6 desktop interface for TDLib Media Uploader V1.8.0.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -18,7 +18,8 @@ import threading
 from collections import defaultdict
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
+from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -59,7 +60,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
 TEMPLATE_CONFIG_PATH = PROJECT_DIR / "config.example.toml"
 HISTORY_PATH = PROJECT_DIR / ".gui_history.json"
-APP_VERSION = "1.7.3"
+APP_VERSION = "1.8.0"
 ICON_PATH = PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"
 
 
@@ -221,6 +222,8 @@ CACHE_TARGETS = {
     "legacy_video_state": ("旧版视频状态", PROJECT_DIR / ".state"),
     "image_state": ("图片上传状态", PROJECT_DIR / ".image_state"),
     "thumb_cache": ("视频封面缓存", PROJECT_DIR / ".thumb_cache"),
+    "video_album_captions": ("视频 Album 标题", PROJECT_DIR / ".video_album_captions.json"),
+    "image_album_captions": ("图片 Album 标题", PROJECT_DIR / ".image_album_captions.json"),
     "gui_history": ("GUI 历史记录", HISTORY_PATH),
 }
 ALL_CACHE_KEYS = tuple(CACHE_TARGETS)
@@ -347,31 +350,74 @@ def _scan_result(kind: str) -> dict:
         album_size = int(_cfg("VIDEO_ALBUM_SIZE", 10))
         for month in sorted(grouped):
             month_items = grouped[month]
+            if core is not None:
+                plans = core.build_album_plans(month_items, state)
+            else:
+                default_caption = month[2:].lstrip("0")
+                plans = []
+                for offset in range(0, len(month_items), album_size):
+                    album_items = list(month_items[offset:offset + album_size])
+                    key = album_key("video", month, album_items)
+                    record = CaptionStore("video").get(key, default_caption)
+                    plans.append({
+                        "key": key,
+                        "month_key": month,
+                        "number": offset // album_size + 1,
+                        "items": album_items,
+                        "pending_items": [item for item in album_items if not completed(item)],
+                        "caption": {
+                            "base_label": record["base_label"],
+                            "custom_text": record["custom_text"],
+                            "text": compose_caption(record["base_label"], record["custom_text"], " · "),
+                        },
+                    })
             pending = [item for item in month_items if not completed(item)]
-            caption = core.month_caption(month) if core is not None else month[2:].lstrip("0")
+            pending_plans = [plan for plan in plans if plan["pending_items"]]
             groups.append(
                 {
                     "label": month,
-                    "caption": caption,
+                    "caption": plans[0]["caption"]["text"] if plans else "",
                     "items": month_items,
                     "pending": len(pending),
                     "completed": len(month_items) - len(pending),
-                    "albums": (len(pending) + album_size - 1) // album_size if pending else 0,
+                    "albums": len(pending_plans),
+                    "album_plans": plans,
                 }
             )
     else:
         album_size = int(_cfg("IMAGE_ALBUM_SIZE", 10))
-        for offset in range(0, len(items), album_size):
-            album_items = items[offset : offset + album_size]
-            pending = [item for item in album_items if not completed(item)]
+        if core is not None:
+            plans = core.build_album_plans(items, state)
+        else:
+            plans = []
+            for offset in range(0, len(items), album_size):
+                album_items = list(items[offset:offset + album_size])
+                number = offset // album_size + int(_cfg("IMAGE_ALBUM_NUMBER_START", 1))
+                key = album_key("image", f"Album {number}", album_items)
+                record = CaptionStore("image").get(key, str(number))
+                plans.append({
+                    "key": key,
+                    "number": number,
+                    "items": album_items,
+                    "pending_items": [item for item in album_items if not completed(item)],
+                    "caption": {
+                        "base_label": record["base_label"],
+                        "custom_text": record["custom_text"],
+                        "text": compose_caption(record["base_label"], record["custom_text"], " · "),
+                    },
+                })
+        for plan in plans:
+            album_items = plan["items"]
+            pending = plan["pending_items"]
             groups.append(
                 {
-                    "label": f"Album {offset // album_size + 1}",
-                    "caption": "无 Caption",
+                    "label": f"Album {plan['number']}",
+                    "caption": plan["caption"]["text"],
                     "items": album_items,
                     "pending": len(pending),
                     "completed": len(album_items) - len(pending),
-                    "albums": 1,
+                    "albums": 1 if pending else 0,
+                    "album_plans": [plan],
                 }
             )
 
@@ -522,12 +568,13 @@ class GuiConsoleUI(QObject):
     def target(self, chat_title, topic_name, chat_id, topic_id):
         payload = {
             "chat_title": chat_title or "(未命名)",
-            "topic_name": topic_name or "(未命名)",
+            "topic_name": topic_name or "",
             "chat_id": chat_id,
             "topic_id": topic_id,
         }
         self.target_changed.emit(payload)
-        self._message("success", f"Telegram 目标：{payload['chat_title']} / {payload['topic_name']}")
+        suffix = f" / {payload['topic_name']}" if payload["topic_name"] else "（频道）"
+        self._message("success", f"Telegram 目标：{payload['chat_title']}{suffix}")
 
     def album(self, *, kind, title, subtitle="", rows=None):
         self.album_changed.emit({
@@ -614,7 +661,7 @@ class HomePage(QWidget):
 
         heading = QLabel("概览")
         heading.setObjectName("pageTitle")
-        subtitle = QLabel("本地媒体 → Telegram Forum Topic")
+        subtitle = QLabel("本地媒体 → Telegram 超级群组 Topic 或 Channel")
         subtitle.setObjectName("mutedLabel")
         layout.addWidget(heading)
         layout.addWidget(subtitle)
@@ -647,11 +694,12 @@ class HomePage(QWidget):
         task_layout.addStretch(1)
         layout.addWidget(task_box)
 
-        note = QGroupBox("V1.7.3 运行提示")
+        note = QGroupBox("V1.8.0 运行提示")
         note_layout = QVBoxLayout(note)
         note_body = QLabel(
             "GUI 与上传核心共用 TDLib 登录数据和断点文件。一次只能运行一个图片或视频任务；"
-            "点击“安全停止”会立即取消正在上传的文件，完整发送成功的 Album 会在下次自动跳过。"
+            "图片 Album 默认按组编号，视频 Album 保留日期标题；双击预览中的 Album 可编辑标题。"
+            "频道模式不使用 Topic；点击“安全停止”会立即取消正在上传的文件，完整发送成功的 Album 会在下次自动跳过。"
         )
         note_body.setWordWrap(True)
         note_layout.addWidget(note_body)
@@ -714,6 +762,7 @@ class UploadPage(QWidget):
         # Keep the preview useful on a normal window while allowing the page
         # scroll area to reveal the target/actions on short windows.
         self.tree.setMinimumHeight(220)
+        self.tree.itemDoubleClicked.connect(self._edit_album)
         preview_layout.addWidget(self.tree)
         self.summary_label = QLabel("尚未扫描")
         self.summary_label.setObjectName("mutedLabel")
@@ -722,7 +771,7 @@ class UploadPage(QWidget):
 
         target_box = QGroupBox("3 · Telegram 目标")
         target_layout = QGridLayout(target_box)
-        target_layout.addWidget(QLabel("群组"), 0, 0)
+        target_layout.addWidget(QLabel("目标"), 0, 0)
         target_layout.addWidget(QLabel("Topic"), 1, 0)
         self.chat_label = QLabel("未配置")
         self.topic_label = QLabel("未配置")
@@ -756,8 +805,14 @@ class UploadPage(QWidget):
     def refresh_config(self):
         path_name = "VIDEO_DIR" if self.kind == "video" else "IMAGE_DIR"
         self.source_edit.setText(_path_text(_cfg(path_name, "")))
-        self.chat_label.setText(str(_cfg("CHAT_ID", "未配置")))
-        self.topic_label.setText(str(_cfg("FORUM_TOPIC_ID", "未配置")))
+        mode = str(_cfg("TARGET_MODE", "forum_topic"))
+        target_name = "频道" if mode == "channel" else "超级群组"
+        self.chat_label.setText(f"{target_name} · {str(_cfg('CHAT_ID', '未配置'))}")
+        self.topic_label.setText(
+            "不适用（频道不使用 Topic）"
+            if mode == "channel"
+            else str(_cfg("FORUM_TOPIC_ID", "未配置"))
+        )
 
     def _browse(self):
         path = QFileDialog.getExistingDirectory(self, "选择目录", self.source_edit.text() or str(PROJECT_DIR))
@@ -783,17 +838,46 @@ class UploadPage(QWidget):
             top = QTreeWidgetItem(["分组", group["label"], "", label])
             top.setExpanded(True)
             self.tree.addTopLevelItem(top)
-            for item in group["items"]:
-                path = item["path"] if isinstance(item, dict) else item
-                completed = str(path.resolve()) in completed_paths
-                date_value = item.get("capture_time") if isinstance(item, dict) else None
-                row = QTreeWidgetItem([
-                    "待上传" if not completed else "已完成",
-                    _fmt_date(date_value),
-                    _fmt_size(_item_size(item)),
-                    str(path),
+            plans = group.get("album_plans") or [{
+                "key": "",
+                "number": 1,
+                "items": group["items"],
+                "pending_items": [item for item in group["items"] if str((item["path"] if isinstance(item, dict) else item).resolve()) not in completed_paths],
+                "caption": {"text": group.get("caption", ""), "base_label": group.get("caption", ""), "custom_text": ""},
+            }]
+            for plan in plans:
+                album_items = plan.get("items", [])
+                pending_count = len(plan.get("pending_items", []))
+                completed_count = len(album_items) - pending_count
+                caption_text = with_filename_description(
+                    plan.get("caption", {}).get("text", ""),
+                    album_items,
+                    bool(_cfg(
+                        "VIDEO_CAPTION_INCLUDE_FILENAMES"
+                        if self.kind == "video"
+                        else "IMAGE_CAPTION_INCLUDE_FILENAMES",
+                        False,
+                    )),
+                )
+                album_row = QTreeWidgetItem([
+                    "Album" if pending_count else "已完成",
+                    f"Album {plan.get('number', 1)} · {caption_text or '无 Caption'}",
+                    _fmt_size(sum(_item_size(item) for item in album_items)),
+                    f"{len(album_items)} 个文件 · 已完成 {completed_count} · 待上传 {pending_count}",
                 ])
-                top.addChild(row)
+                album_row.setData(0, Qt.ItemDataRole.UserRole, plan)
+                top.addChild(album_row)
+                for item in album_items:
+                    path = item["path"] if isinstance(item, dict) else item
+                    completed = str(path.resolve()) in completed_paths
+                    date_value = item.get("capture_time") if isinstance(item, dict) else None
+                    row = QTreeWidgetItem([
+                        "待上传" if not completed else "已完成",
+                        _fmt_date(date_value),
+                        _fmt_size(_item_size(item)),
+                        str(path),
+                    ])
+                    album_row.addChild(row)
         self.summary_label.setText(
             f"共 {result['total_files']} 个 · {_fmt_size(result['total_bytes'])} · "
             f"已完成 {result['completed_files']} · 待上传 {result['pending_files']} · "
@@ -810,6 +894,43 @@ class UploadPage(QWidget):
         else:
             self.status_label.setText("扫描完成，可开始上传")
         self.start_button.setEnabled(bool(result["pending_files"] and result["core_available"] and not self._running))
+
+    def _edit_album(self, item, _column=0):
+        plan = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(plan, dict) or not plan.get("key"):
+            return
+        current = plan.get("caption") or {}
+        base_label = str(current.get("base_label", ""))
+        custom_text = str(current.get("custom_text", ""))
+        if self.kind == "video":
+            base_label, accepted = QInputDialog.getText(
+                self,
+                "编辑视频 Album 标题",
+                "基础标题（例如 25-1）：",
+                QLineEdit.EchoMode.Normal,
+                base_label,
+            )
+            if not accepted:
+                return
+        custom_text, accepted = QInputDialog.getText(
+            self,
+            "编辑 Album 自定义文本",
+            "追加文本（留空表示不追加）：",
+            QLineEdit.EchoMode.Normal,
+            custom_text,
+        )
+        if not accepted:
+            return
+        store = CaptionStore(self.kind)
+        store.set(plan["key"], base_label=base_label, custom_text=custom_text)
+        separator = str(_cfg("VIDEO_ALBUM_CAPTION_SEPARATOR" if self.kind == "video" else "IMAGE_ALBUM_CAPTION_SEPARATOR", " · "))
+        plan["caption"] = {
+            "base_label": base_label,
+            "custom_text": custom_text,
+            "text": compose_caption(base_label if (self.kind == "video" or _cfg("IMAGE_ALBUM_NUMBERING", True)) else "", custom_text, separator),
+        }
+        self.set_result(self.result)
+        self.status_label.setText("Album 标题已保存")
 
     def clear_scan_result(self):
         self.result = None
@@ -1082,22 +1203,32 @@ class SettingsPage(QWidget):
 
 
 class TargetDialog(QDialog):
-    """Small focused editor for the Telegram group and Forum Topic IDs."""
+    """Focused editor for a Forum Topic target or a Channel target."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑 Telegram 目标 · V1.7.3")
+        self.setWindowTitle("编辑 Telegram 目标 · V1.8.0")
         self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
         form = QFormLayout()
-        self.chat_id = QLineEdit(str(_cfg("CHAT_ID", -1001234567890)))
+        self.form = form
+        self.target_mode = QComboBox()
+        self.target_mode.addItem("超级群组 Forum Topic", "forum_topic")
+        self.target_mode.addItem("Channel 频道", "channel")
+        mode = str(_cfg("TARGET_MODE", "forum_topic"))
+        index = self.target_mode.findData(mode)
+        self.target_mode.setCurrentIndex(index if index >= 0 else 0)
+        form.addRow("目标类型", self.target_mode)
+        self.chat_id = QLineEdit(str(_cfg("GROUP_CHAT_ID", _cfg("CHAT_ID", -1001234567890))) )
+        self.channel_chat_id = QLineEdit(str(_cfg("CHANNEL_CHAT_ID", 0) or ""))
         self.topic_id = QLineEdit(str(_cfg("FORUM_TOPIC_ID", 12345)))
         form.addRow("群组 Chat ID", self.chat_id)
+        form.addRow("频道 Chat ID", self.channel_chat_id)
         form.addRow("Forum Topic ID", self.topic_id)
         layout.addLayout(form)
 
         hint = QLabel(
-            "超级群 Chat ID 通常以 -100 开头；Topic ID 为该 Forum Topic 的数字 ID。"
+            "超级群组和频道的 Chat ID 通常以 -100 开头；频道不使用 Forum Topic。"
         )
         hint.setObjectName("mutedLabel")
         hint.setWordWrap(True)
@@ -1110,22 +1241,45 @@ class TargetDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.target_mode.currentIndexChanged.connect(self._update_fields)
+        self._update_fields()
+
+    def _update_fields(self):
+        channel = self.target_mode.currentData() == "channel"
+        for field, visible in (
+            (self.chat_id, not channel),
+            (self.channel_chat_id, channel),
+            (self.topic_id, not channel),
+        ):
+            field.setVisible(visible)
+            label = self.form.labelForField(field)
+            if label is not None:
+                label.setVisible(visible)
 
     def _save(self):
         try:
-            chat_id = int(self.chat_id.text().strip())
-            topic_id = int(self.topic_id.text().strip())
+            group_id = int(self.chat_id.text().strip())
+            channel_id = int(self.channel_chat_id.text().strip() or "0")
+            topic_id = int(self.topic_id.text().strip() or "0")
         except ValueError:
             QMessageBox.critical(self, "保存失败", "Chat ID 和 Topic ID 都必须是整数。")
             return
-        if chat_id == 0:
-            QMessageBox.critical(self, "保存失败", "Chat ID 不能为 0。")
-            return
-        if topic_id <= 0:
-            QMessageBox.critical(self, "保存失败", "Forum Topic ID 必须大于 0。")
-            return
+        mode = self.target_mode.currentData() or "forum_topic"
+        if mode == "channel":
+            if channel_id == 0:
+                QMessageBox.critical(self, "保存失败", "频道 Chat ID 不能为 0。")
+                return
+        else:
+            if group_id == 0:
+                QMessageBox.critical(self, "保存失败", "群组 Chat ID 不能为 0。")
+                return
+            if topic_id <= 0:
+                QMessageBox.critical(self, "保存失败", "Forum Topic ID 必须大于 0。")
+                return
         error = _write_config_values({
-            ("telegram", "chat_id"): chat_id,
+            ("telegram", "target_mode"): mode,
+            ("telegram", "chat_id"): group_id,
+            ("telegram", "channel_chat_id"): channel_id,
             ("telegram", "forum_topic_id"): topic_id,
         })
         if error:
@@ -1137,7 +1291,7 @@ class TargetDialog(QDialog):
 class ConfigDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑配置 · V1.7.3")
+        self.setWindowTitle("编辑配置 · V1.8.0")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -1152,7 +1306,15 @@ class ConfigDialog(QDialog):
 
         form.addRow("API ID", field("api_id", _cfg("API_ID", 12345678)))
         form.addRow("API Hash", field("api_hash", _cfg("API_HASH", "YOUR_API_HASH"), True))
-        form.addRow("群组 Chat ID", field("chat_id", _cfg("CHAT_ID", -1001234567890)))
+        self.target_mode = QComboBox()
+        self.target_mode.addItem("超级群组 Forum Topic", "forum_topic")
+        self.target_mode.addItem("Channel 频道", "channel")
+        target_mode = str(_cfg("TARGET_MODE", "forum_topic"))
+        mode_index = self.target_mode.findData(target_mode)
+        self.target_mode.setCurrentIndex(mode_index if mode_index >= 0 else 0)
+        form.addRow("Telegram 目标类型", self.target_mode)
+        form.addRow("群组 Chat ID", field("chat_id", _cfg("GROUP_CHAT_ID", _cfg("CHAT_ID", -1001234567890))))
+        form.addRow("频道 Chat ID", field("channel_chat_id", _cfg("CHANNEL_CHAT_ID", "")))
         form.addRow("Forum Topic ID", field("forum_topic_id", _cfg("FORUM_TOPIC_ID", 12345)))
         form.addRow("视频目录", field("video_dir", _cfg("VIDEO_DIR", "")))
         form.addRow("图片目录", field("image_dir", _cfg("IMAGE_DIR", "")))
@@ -1177,6 +1339,21 @@ class ConfigDialog(QDialog):
         self.image_album.setRange(1, 10)
         self.image_album.setValue(int(_cfg("IMAGE_ALBUM_SIZE", 10)))
         form.addRow("图片 Album 大小", self.image_album)
+
+        self.image_numbering = QCheckBox("图片 Album 默认添加编号")
+        self.image_numbering.setChecked(bool(_cfg("IMAGE_ALBUM_NUMBERING", True)))
+        form.addRow("图片 Caption", self.image_numbering)
+
+        self.video_separator = field("video_caption_separator", _cfg("VIDEO_ALBUM_CAPTION_SEPARATOR", " · "))
+        form.addRow("视频标题分隔符", self.video_separator)
+        self.video_filenames = QCheckBox("视频标题附加“序号. 文件名”清单")
+        self.video_filenames.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAMES", False)))
+        form.addRow("视频描述", self.video_filenames)
+        self.image_separator = field("image_caption_separator", _cfg("IMAGE_ALBUM_CAPTION_SEPARATOR", " · "))
+        form.addRow("图片标题分隔符", self.image_separator)
+        self.image_filenames = QCheckBox("图片标题附加“序号. 文件名”清单")
+        self.image_filenames.setChecked(bool(_cfg("IMAGE_CAPTION_INCLUDE_FILENAMES", False)))
+        form.addRow("图片描述", self.image_filenames)
 
         self.thumbnail = QCheckBox("生成视频缩略图")
         self.thumbnail.setChecked(bool(_cfg("VIDEO_GENERATE_THUMBNAIL", True)))
@@ -1282,7 +1459,9 @@ class ConfigDialog(QDialog):
         values = {
             ("telegram", "api_id"): integer("api_id", 12345678),
             ("telegram", "api_hash"): self.fields["api_hash"].text().strip(),
+            ("telegram", "target_mode"): self.target_mode.currentData() or "forum_topic",
             ("telegram", "chat_id"): integer("chat_id", -1001234567890),
+            ("telegram", "channel_chat_id"): integer("channel_chat_id", 0),
             ("telegram", "forum_topic_id"): integer("forum_topic_id", 12345),
             ("paths", "video_dir"): self.fields["video_dir"].text().strip(),
             ("paths", "image_dir"): self.fields["image_dir"].text().strip(),
@@ -1290,8 +1469,13 @@ class ConfigDialog(QDialog):
             ("video", "missing_date_policy"): self.missing_date.currentText(),
             ("video", "album_size"): self.video_album.value(),
             ("video", "generate_thumbnail"): self.thumbnail.isChecked(),
+            ("video", "album_caption_separator"): self.video_separator.text(),
+            ("video", "caption_include_filenames"): self.video_filenames.isChecked(),
             ("image", "sort_mode"): self.sort_mode.currentText(),
             ("image", "album_size"): self.image_album.value(),
+            ("image", "album_numbering"): self.image_numbering.isChecked(),
+            ("image", "album_caption_separator"): self.image_separator.text(),
+            ("image", "caption_include_filenames"): self.image_filenames.isChecked(),
             ("proxy", "enabled"): self.proxy_enabled.isChecked(),
             ("proxy", "type"): self.proxy_type.currentData() or "socks5",
             ("proxy", "server"): self.proxy_server.text().strip(),
@@ -1551,10 +1735,21 @@ class MainWindow(QMainWindow):
 
     def _target_from_worker(self, payload: dict):
         self.home.set_connection("已连接", True)
+        is_channel = str(_cfg("TARGET_MODE", "forum_topic")) == "channel"
         for page in (self.video_page, self.image_page):
-            page.chat_label.setText(f"{payload.get('chat_title')} ({payload.get('chat_id')})")
-            page.topic_label.setText(f"{payload.get('topic_name')} ({payload.get('topic_id')})")
-        self.statusBar().showMessage(f"目标已确认：{payload.get('chat_title')} / {payload.get('topic_name')}")
+            page.chat_label.setText(
+                f"{'频道' if is_channel else '超级群组'} · "
+                f"{payload.get('chat_title')} ({payload.get('chat_id')})"
+            )
+            page.topic_label.setText(
+                "不适用（频道不使用 Topic）"
+                if is_channel
+                else f"{payload.get('topic_name')} ({payload.get('topic_id')})"
+            )
+        self.statusBar().showMessage(
+            f"目标已确认：{payload.get('chat_title')}"
+            + ("（频道）" if is_channel else f" / {payload.get('topic_name')}")
+        )
 
     def _stop_upload(self):
         if self.worker is not None and self.worker.isRunning():
@@ -1659,7 +1854,7 @@ class MainWindow(QMainWindow):
         dialog = TargetDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._refresh_pages()
-            self.statusBar().showMessage("Telegram 群组和 Topic 已保存")
+            self.statusBar().showMessage("Telegram 目标已保存")
 
     def _edit_config(self):
         dialog = ConfigDialog(self)

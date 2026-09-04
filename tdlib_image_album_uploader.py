@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""TDLib 图片批量 Album 上传器：递归扫描、10 张一组、无 Caption。"""
+"""TDLib 图片批量 Album 上传器：递归扫描、分组编号与可编辑 Caption。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 
@@ -94,7 +95,7 @@ def image_info(path: Path) -> tuple[int, int]:
     return width, height
 
 
-def input_photo(path: Path) -> dict:
+def input_photo(path: Path, caption: str = "") -> dict:
     width, height = image_info(path)
     return {
         "@type": "inputMessagePhoto",
@@ -103,7 +104,7 @@ def input_photo(path: Path) -> dict:
         "added_sticker_file_ids": [],
         "width": width,
         "height": height,
-        "caption": formatted_text(""),
+        "caption": formatted_text(caption),
         "show_caption_above_media": False,
         "self_destruct_type": None,
         "has_spoiler": False,
@@ -115,7 +116,12 @@ class UploadState:
 
     def __init__(self):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        identity = f"{cfg.IMAGE_DIR.resolve()}|{cfg.CHAT_ID}|{cfg.FORUM_TOPIC_ID}|tdlib-image-v5"
+        identity_suffix = (
+            "tdlib-image-v5"
+            if getattr(cfg, "TARGET_MODE", "forum_topic") == "forum_topic"
+            else "tdlib-image-v5-channel"
+        )
+        identity = f"{cfg.IMAGE_DIR.resolve()}|{cfg.CHAT_ID}|{cfg.FORUM_TOPIC_ID}|{identity_suffix}"
         task_hash = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
         self.path = STATE_DIR / f"image_upload_state_{task_hash}.json"
         self.lock = threading.Lock()
@@ -128,6 +134,8 @@ class UploadState:
             "version": self.VERSION,
             "image_dir": str(cfg.IMAGE_DIR.resolve()),
             "chat_id": cfg.CHAT_ID,
+            "target_mode": getattr(cfg, "TARGET_MODE", "forum_topic"),
+            "channel_chat_id": getattr(cfg, "CHANNEL_CHAT_ID", 0),
             "forum_topic_id": cfg.FORUM_TOPIC_ID,
             "completed": {},
         }
@@ -266,7 +274,7 @@ class ImageUploadProgress:
                 ratio=ratio,
                 speed=speed,
                 eta=eta,
-                detail="10 张/组，无 Caption",
+                detail="每组最多 10 张；Album Caption=编号/自定义文本",
                 album_number=self.album_number,
                 album_total=self.album_total,
                 done_files=self.completed_files,
@@ -310,7 +318,7 @@ def show_file_list(images, state):
         ],
         rows,
         kind="IMAGE",
-        caption="图片不添加日期/月份 Caption；文件顺序即计划处理顺序。",
+        caption="图片按扫描顺序每组编号；可在 GUI 中编辑每个 Album 的 Caption。",
     )
 
 
@@ -329,9 +337,15 @@ def show_upload_summary(images, state, completed, pending, total_albums):
             ("断点已完成", f"{len(completed)}/{len(images)}"),
             ("本次待上传", f"{len(pending)} · {format_size(pending_bytes)}"),
             ("本次 Album", total_albums),
-            ("Album 规则", f"每组最多 {cfg.IMAGE_ALBUM_SIZE} 张；无 Caption"),
+            (
+                "Album 规则",
+                f"每组最多 {cfg.IMAGE_ALBUM_SIZE} 张；"
+                f"Album Caption=编号，可追加自定义文本；"
+                f"文件名清单={'开' if getattr(cfg, 'IMAGE_CAPTION_INCLUDE_FILENAMES', False) else '关'}",
+            ),
             ("CHAT_ID", cfg.CHAT_ID),
-            ("FORUM_TOPIC_ID", cfg.FORUM_TOPIC_ID),
+            ("目标模式", "Channel 频道" if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel" else "超级群组 Forum Topic"),
+            ("FORUM_TOPIC_ID", cfg.FORUM_TOPIC_ID if getattr(cfg, "TARGET_MODE", "forum_topic") == "forum_topic" else "不适用"),
             ("状态文件", state.path),
         ],
         kind="IMAGE",
@@ -340,8 +354,44 @@ def show_upload_summary(images, state, completed, pending, total_albums):
 def validate_config():
     if cfg.API_ID == 12345678 or cfg.API_HASH == "YOUR_API_HASH":
         raise RuntimeError("请先在 config.toml 中填写 API_ID / API_HASH。")
-    if cfg.CHAT_ID == -1001234567890 or cfg.FORUM_TOPIC_ID == 12345:
+    if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel":
+        if cfg.CHAT_ID in {0, -1001234567890}:
+            raise RuntimeError("请先在 config.toml 中填写频道 Chat ID。")
+    elif cfg.CHAT_ID in {0, -1001234567890} or cfg.FORUM_TOPIC_ID <= 0 or cfg.FORUM_TOPIC_ID == 12345:
         raise RuntimeError("请先在 config.toml 中填写 CHAT_ID / FORUM_TOPIC_ID。")
+
+
+def build_album_plans(images: list[Path], state=None) -> list[dict]:
+    """Build stable image Albums from the complete scan, not pending-only files."""
+    store = CaptionStore("image")
+    plans = []
+    for start in range(0, len(images), cfg.IMAGE_ALBUM_SIZE):
+        album_paths = list(images[start:start + cfg.IMAGE_ALBUM_SIZE])
+        number = start // cfg.IMAGE_ALBUM_SIZE + cfg.IMAGE_ALBUM_NUMBER_START
+        key = album_key("image", f"Album {number}", album_paths)
+        pending = [
+            path for path in album_paths
+            if state is None or not state.is_completed(path)
+        ]
+        record = store.get(key, str(number))
+        base_label = record["base_label"] if record["base_label"] != f"Album {number}" else str(number)
+        caption = {
+            "base_label": base_label,
+            "custom_text": record["custom_text"],
+            "text": compose_caption(
+                base_label if getattr(cfg, "IMAGE_ALBUM_NUMBERING", True) else "",
+                record["custom_text"],
+                getattr(cfg, "IMAGE_ALBUM_CAPTION_SEPARATOR", " · "),
+            ),
+        }
+        plans.append({
+            "key": key,
+            "number": number,
+            "items": album_paths,
+            "pending_items": pending,
+            "caption": caption,
+        })
+    return plans
 
 
 def main():
@@ -363,7 +413,9 @@ def main():
     state = UploadState()
     completed = [p for p in images if state.is_completed(p)]
     pending = [p for p in images if not state.is_completed(p)]
-    total_albums = math.ceil(len(pending) / cfg.IMAGE_ALBUM_SIZE) if pending else 0
+    plans = build_album_plans(images, state)
+    pending_plans = [plan for plan in plans if plan["pending_items"]]
+    total_albums = len(pending_plans)
 
     # GUI 调用的扫描与上传流程：保留原有 Album 与断点逻辑。
     if cfg.IMAGE_SHOW_FILE_LIST:
@@ -395,21 +447,32 @@ def main():
         client.set_fast_options()
         client.validate_target()
 
-        for start in range(0, len(pending), cfg.IMAGE_ALBUM_SIZE):
-            album_paths = pending[start:start + cfg.IMAGE_ALBUM_SIZE]
-            album_number = start // cfg.IMAGE_ALBUM_SIZE + 1
-            progress.begin_album(album_paths, album_number, total_albums)
+        album_global = 0
+        for plan in pending_plans:
+            album_paths = plan["pending_items"]
+            album_number = plan["number"]
+            album_global += 1
+            caption = plan["caption"]["text"]
+            caption = with_filename_description(
+                caption,
+                album_paths,
+                getattr(cfg, "IMAGE_CAPTION_INCLUDE_FILENAMES", False),
+            )
+            progress.begin_album(album_paths, album_global, total_albums)
             UI.album(
                 kind="IMAGE",
-                title=f"Album {album_number}/{total_albums}",
-                subtitle=f"{len(album_paths)} 张图片 · Caption=无",
+                title=f"Album {album_number} · {album_global}/{total_albums}",
+                subtitle=f"{len(album_paths)} 张待上传图片 · Caption={caption or '无'}",
                 rows=[
                     f"{format_size(path.stat().st_size):>10}  {relative_name(path)}"
                     for path in album_paths
                 ],
             )
             try:
-                contents = [input_photo(path) for path in album_paths]
+                contents = [
+                    input_photo(path, caption if index == 0 else "")
+                    for index, path in enumerate(album_paths)
+                ]
                 message_ids = client.send_contents(contents, progress, album_paths)
             except Exception:
                 UI.finish()
@@ -417,7 +480,7 @@ def main():
                 raise
             state.mark_album_completed(album_paths, message_ids)
             progress.finish_album(album_paths)
-            UI.success("图片 Album 发送成功 · 断点已保存。")
+            UI.success(f"图片 Album {album_number} 发送成功 · Caption={caption or '无'} · 断点已保存。")
 
         UI.banner(
             "全部图片上传完成",
