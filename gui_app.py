@@ -721,7 +721,7 @@ class HomePage(QWidget):
         note_body = QLabel(
             "GUI 与上传核心共用 TDLib 登录数据和断点文件。一次只能运行一个图片或视频任务；"
             "图片 Album 默认按组编号，视频 Album 保留日期标题；双击预览中的 Album 可编辑标题。"
-            "视频和图片页面分别使用各自的 Telegram 目标，未单独配置时继承公共目标。"
+            "视频和图片页面分别使用各自的 Telegram 目标和媒体选项，未单独配置目标时继承公共目标。"
             "频道模式不使用 Topic；点击“安全停止”会立即取消正在上传的文件，完整发送成功的 Album 会在下次自动跳过。"
         )
         note_body.setWordWrap(True)
@@ -802,7 +802,7 @@ class UploadPage(QWidget):
         self.topic_label.setObjectName("valueLabel")
         target_layout.addWidget(self.chat_label, 0, 1)
         target_layout.addWidget(self.topic_label, 1, 1)
-        edit_target = QPushButton("编辑目标")
+        edit_target = QPushButton(f"编辑{accent}目标与配置")
         edit_target.setObjectName("secondaryButton")
         edit_target.clicked.connect(lambda: self.edit_target_requested.emit(self.kind))
         target_layout.addWidget(edit_target, 0, 2, 2, 1)
@@ -1236,16 +1236,12 @@ class TargetDialog(QDialog):
             kind = "video"
         super().__init__(parent)
         self.kind = kind if kind in {"video", "image"} else "video"
-        self._update_window_title()
-        self.setMinimumWidth(520)
+        accent = "视频" if self.kind == "video" else "图片"
+        self.setWindowTitle(f"编辑{accent}上传目标与配置 · V1.8.1")
+        self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.form = form
-        self.media_kind = QComboBox()
-        self.media_kind.addItem("视频上传", "video")
-        self.media_kind.addItem("图片上传", "image")
-        self.media_kind.setCurrentIndex(self.media_kind.findData(self.kind))
-        form.addRow("适用上传类型", self.media_kind)
         self.target_mode = QComboBox()
         self.target_mode.addItem("超级群组 Forum Topic", "forum_topic")
         self.target_mode.addItem("Channel 频道", "channel")
@@ -1258,8 +1254,14 @@ class TargetDialog(QDialog):
         form.addRow("Forum Topic ID", self.topic_id)
         layout.addLayout(form)
 
+        self.media_box = QGroupBox(f"{accent}上传配置")
+        self.media_form = QFormLayout(self.media_box)
+        self._build_media_fields()
+        layout.addWidget(self.media_box)
+
         hint = QLabel(
             "超级群组和频道的 Chat ID 通常以 -100 开头；频道不使用 Forum Topic。"
+            "本窗口只显示当前上传类型的 Album、Caption 和处理选项。"
         )
         hint.setObjectName("mutedLabel")
         hint.setWordWrap(True)
@@ -1272,21 +1274,53 @@ class TargetDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-        self.media_kind.currentIndexChanged.connect(self._kind_changed)
         self.target_mode.currentIndexChanged.connect(self._update_fields)
         self._load_target()
         self._update_fields()
 
-    def _kind_changed(self):
-        value = self.media_kind.currentData()
-        if value in {"video", "image"}:
-            self.kind = value
-            self._update_window_title()
-            self._load_target()
+    def _build_media_fields(self):
+        if self.kind == "video":
+            self.video_missing_date = QComboBox()
+            self.video_missing_date.addItems(["mtime", "error"])
+            self.video_missing_date.setCurrentText(_cfg("VIDEO_MISSING_DATE_POLICY", "mtime"))
+            self.media_form.addRow("日期缺失策略", self.video_missing_date)
 
-    def _update_window_title(self):
-        accent = "视频" if self.kind == "video" else "图片"
-        self.setWindowTitle(f"编辑{accent}上传 Telegram 目标 · V1.8.1")
+            self.video_album = QSpinBox()
+            self.video_album.setRange(1, 10)
+            self.video_album.setValue(int(_cfg("VIDEO_ALBUM_SIZE", 10)))
+            self.media_form.addRow("视频 Album 大小", self.video_album)
+
+            self.video_separator = QLineEdit(str(_cfg("VIDEO_ALBUM_CAPTION_SEPARATOR", " · ")))
+            self.media_form.addRow("视频标题分隔符", self.video_separator)
+
+            self.video_filenames = QCheckBox("视频标题附加“序号. 文件名”清单")
+            self.video_filenames.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAMES", False)))
+            self.media_form.addRow("视频描述", self.video_filenames)
+
+            self.thumbnail = QCheckBox("生成视频缩略图")
+            self.thumbnail.setChecked(bool(_cfg("VIDEO_GENERATE_THUMBNAIL", True)))
+            self.media_form.addRow("视频处理", self.thumbnail)
+        else:
+            self.image_sort = QComboBox()
+            self.image_sort.addItems(["mtime", "path"])
+            self.image_sort.setCurrentText(_cfg("IMAGE_SORT_MODE", "mtime"))
+            self.media_form.addRow("图片排序", self.image_sort)
+
+            self.image_album = QSpinBox()
+            self.image_album.setRange(1, 10)
+            self.image_album.setValue(int(_cfg("IMAGE_ALBUM_SIZE", 10)))
+            self.media_form.addRow("图片 Album 大小", self.image_album)
+
+            self.image_numbering = QCheckBox("图片 Album 默认添加编号")
+            self.image_numbering.setChecked(bool(_cfg("IMAGE_ALBUM_NUMBERING", True)))
+            self.media_form.addRow("图片 Caption", self.image_numbering)
+
+            self.image_separator = QLineEdit(str(_cfg("IMAGE_ALBUM_CAPTION_SEPARATOR", " · ")))
+            self.media_form.addRow("图片标题分隔符", self.image_separator)
+
+            self.image_filenames = QCheckBox("图片标题附加“序号. 文件名”清单")
+            self.image_filenames.setChecked(bool(_cfg("IMAGE_CAPTION_INCLUDE_FILENAMES", False)))
+            self.media_form.addRow("图片描述", self.image_filenames)
 
     def _load_target(self):
         target = _target_for(self.kind)
@@ -1331,12 +1365,29 @@ class TargetDialog(QDialog):
             if topic_id <= 0:
                 QMessageBox.critical(self, "保存失败", "Forum Topic ID 必须大于 0。")
                 return
-        error = _write_config_values({
+        values = {
             (f"telegram.{self.kind}", "target_mode"): mode,
             (f"telegram.{self.kind}", "chat_id"): group_id,
             (f"telegram.{self.kind}", "channel_chat_id"): channel_id,
             (f"telegram.{self.kind}", "forum_topic_id"): topic_id,
-        })
+        }
+        if self.kind == "video":
+            values.update({
+                ("video", "missing_date_policy"): self.video_missing_date.currentText(),
+                ("video", "album_size"): self.video_album.value(),
+                ("video", "album_caption_separator"): self.video_separator.text(),
+                ("video", "caption_include_filenames"): self.video_filenames.isChecked(),
+                ("video", "generate_thumbnail"): self.thumbnail.isChecked(),
+            })
+        else:
+            values.update({
+                ("image", "sort_mode"): self.image_sort.currentText(),
+                ("image", "album_size"): self.image_album.value(),
+                ("image", "album_numbering"): self.image_numbering.isChecked(),
+                ("image", "album_caption_separator"): self.image_separator.text(),
+                ("image", "caption_include_filenames"): self.image_filenames.isChecked(),
+            })
+        error = _write_config_values(values)
         if error:
             QMessageBox.critical(self, "保存失败", error)
             return
@@ -1350,7 +1401,6 @@ class ConfigDialog(QDialog):
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()
-        self.form = form
         self.fields = {}
 
         def field(key: str, value, password=False):
@@ -1362,67 +1412,9 @@ class ConfigDialog(QDialog):
 
         form.addRow("API ID", field("api_id", _cfg("API_ID", 12345678)))
         form.addRow("API Hash", field("api_hash", _cfg("API_HASH", "YOUR_API_HASH"), True))
-        self.target_kind = QComboBox()
-        self.target_kind.addItem("视频上传", "video")
-        self.target_kind.addItem("图片上传", "image")
-        form.addRow("编辑哪种上传目标", self.target_kind)
-
-        self.target_mode = QComboBox()
-        self.target_mode.addItem("超级群组 Forum Topic", "forum_topic")
-        self.target_mode.addItem("Channel 频道", "channel")
-        target = _target_for("video")
-        target_mode = str(target.get("target_mode", "forum_topic"))
-        mode_index = self.target_mode.findData(target_mode)
-        self.target_mode.setCurrentIndex(mode_index if mode_index >= 0 else 0)
-        form.addRow("Telegram 目标类型", self.target_mode)
-        form.addRow("群组 Chat ID", field("chat_id", target.get("group_chat_id", -1001234567890)))
-        form.addRow("频道 Chat ID", field("channel_chat_id", target.get("channel_chat_id", 0)))
-        form.addRow("Forum Topic ID", field("forum_topic_id", target.get("forum_topic_id", 12345)))
-        self.target_kind.currentIndexChanged.connect(self._load_target_fields)
-        self.target_mode.currentIndexChanged.connect(self._update_target_fields)
-        self._update_target_fields()
         form.addRow("视频目录", field("video_dir", _cfg("VIDEO_DIR", "")))
         form.addRow("图片目录", field("image_dir", _cfg("IMAGE_DIR", "")))
         form.addRow("ExifTool 路径", field("exiftool_path", _cfg("EXIFTOOL_PATH", "tools/exiftool.exe")))
-
-        self.missing_date = QComboBox()
-        self.missing_date.addItems(["mtime", "error"])
-        self.missing_date.setCurrentText(_cfg("VIDEO_MISSING_DATE_POLICY", "mtime"))
-        form.addRow("视频日期缺失策略", self.missing_date)
-
-        self.sort_mode = QComboBox()
-        self.sort_mode.addItems(["mtime", "path"])
-        self.sort_mode.setCurrentText(_cfg("IMAGE_SORT_MODE", "mtime"))
-        form.addRow("图片排序", self.sort_mode)
-
-        self.video_album = QSpinBox()
-        self.video_album.setRange(1, 10)
-        self.video_album.setValue(int(_cfg("VIDEO_ALBUM_SIZE", 10)))
-        form.addRow("视频 Album 大小", self.video_album)
-
-        self.image_album = QSpinBox()
-        self.image_album.setRange(1, 10)
-        self.image_album.setValue(int(_cfg("IMAGE_ALBUM_SIZE", 10)))
-        form.addRow("图片 Album 大小", self.image_album)
-
-        self.image_numbering = QCheckBox("图片 Album 默认添加编号")
-        self.image_numbering.setChecked(bool(_cfg("IMAGE_ALBUM_NUMBERING", True)))
-        form.addRow("图片 Caption", self.image_numbering)
-
-        self.video_separator = field("video_caption_separator", _cfg("VIDEO_ALBUM_CAPTION_SEPARATOR", " · "))
-        form.addRow("视频标题分隔符", self.video_separator)
-        self.video_filenames = QCheckBox("视频标题附加“序号. 文件名”清单")
-        self.video_filenames.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAMES", False)))
-        form.addRow("视频描述", self.video_filenames)
-        self.image_separator = field("image_caption_separator", _cfg("IMAGE_ALBUM_CAPTION_SEPARATOR", " · "))
-        form.addRow("图片标题分隔符", self.image_separator)
-        self.image_filenames = QCheckBox("图片标题附加“序号. 文件名”清单")
-        self.image_filenames.setChecked(bool(_cfg("IMAGE_CAPTION_INCLUDE_FILENAMES", False)))
-        form.addRow("图片描述", self.image_filenames)
-
-        self.thumbnail = QCheckBox("生成视频缩略图")
-        self.thumbnail.setChecked(bool(_cfg("VIDEO_GENERATE_THUMBNAIL", True)))
-        form.addRow("视频处理", self.thumbnail)
         layout.addLayout(form)
 
         proxy_box = QGroupBox("网络代理（独立设置，默认关闭）")
@@ -1480,7 +1472,7 @@ class ConfigDialog(QDialog):
         layout.addWidget(proxy_box)
 
         hint = QLabel(
-            "视频和图片目标分别保存；未单独设置时继承 [telegram] 公共目标。"
+            "视频/图片的 Album、Caption 和处理选项请在各自上传页面的“编辑目标”中设置。"
             "API Hash、代理认证信息和 MTProto Secret 只写入本地 config.toml，不会写入 GUI 日志。"
             "代理由 TDLib 原生支持；tdjson 版本仍由项目固定要求控制。"
         )
@@ -1492,35 +1484,6 @@ class ConfigDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-
-    def _load_target_fields(self):
-        """Load the effective target for the selected media type."""
-        kind = self.target_kind.currentData() or "video"
-        target = _target_for(kind)
-        mode = str(target.get("target_mode", "forum_topic"))
-        self.target_mode.blockSignals(True)
-        index = self.target_mode.findData(mode)
-        self.target_mode.setCurrentIndex(index if index >= 0 else 0)
-        self.target_mode.blockSignals(False)
-        self.fields["chat_id"].setText(str(target.get("group_chat_id", 0) or ""))
-        self.fields["channel_chat_id"].setText(str(target.get("channel_chat_id", 0) or ""))
-        self.fields["forum_topic_id"].setText(str(target.get("forum_topic_id", 0) or ""))
-        self._update_target_fields()
-
-    def _update_target_fields(self):
-        channel = self.target_mode.currentData() == "channel"
-        for key, visible in (
-            ("chat_id", not channel),
-            ("channel_chat_id", channel),
-            ("forum_topic_id", not channel),
-        ):
-            widget = self.fields[key]
-            widget.setVisible(visible)
-            # QFormLayout labels are not direct parents, so locate the label
-            # through the form layout and keep it in sync with its field.
-            label = self.form.labelForField(widget)
-            if label is not None:
-                label.setVisible(visible)
 
     def _update_proxy_fields(self):
         enabled = self.proxy_enabled.isChecked()
@@ -1551,42 +1514,12 @@ class ConfigDialog(QDialog):
             except ValueError:
                 return fallback
 
-        target_kind = self.target_kind.currentData() or "video"
-        target_mode = self.target_mode.currentData() or "forum_topic"
-        group_id = integer("chat_id", 0)
-        channel_id = integer("channel_chat_id", 0)
-        topic_id = integer("forum_topic_id", 0)
-        if target_mode == "channel":
-            if channel_id == 0:
-                QMessageBox.critical(self, "保存失败", "频道 Chat ID 不能为 0。")
-                return
-        elif group_id == 0:
-            QMessageBox.critical(self, "保存失败", "群组 Chat ID 不能为 0。")
-            return
-        elif topic_id <= 0:
-            QMessageBox.critical(self, "保存失败", "Forum Topic ID 必须大于 0。")
-            return
-
         values = {
             ("telegram", "api_id"): integer("api_id", 12345678),
             ("telegram", "api_hash"): self.fields["api_hash"].text().strip(),
-            (f"telegram.{target_kind}", "target_mode"): target_mode,
-            (f"telegram.{target_kind}", "chat_id"): group_id,
-            (f"telegram.{target_kind}", "channel_chat_id"): channel_id,
-            (f"telegram.{target_kind}", "forum_topic_id"): topic_id,
             ("paths", "video_dir"): self.fields["video_dir"].text().strip(),
             ("paths", "image_dir"): self.fields["image_dir"].text().strip(),
             ("paths", "exiftool_path"): self.fields["exiftool_path"].text().strip(),
-            ("video", "missing_date_policy"): self.missing_date.currentText(),
-            ("video", "album_size"): self.video_album.value(),
-            ("video", "generate_thumbnail"): self.thumbnail.isChecked(),
-            ("video", "album_caption_separator"): self.video_separator.text(),
-            ("video", "caption_include_filenames"): self.video_filenames.isChecked(),
-            ("image", "sort_mode"): self.sort_mode.currentText(),
-            ("image", "album_size"): self.image_album.value(),
-            ("image", "album_numbering"): self.image_numbering.isChecked(),
-            ("image", "album_caption_separator"): self.image_separator.text(),
-            ("image", "caption_include_filenames"): self.image_filenames.isChecked(),
             ("proxy", "enabled"): self.proxy_enabled.isChecked(),
             ("proxy", "type"): self.proxy_type.currentData() or "socks5",
             ("proxy", "server"): self.proxy_server.text().strip(),

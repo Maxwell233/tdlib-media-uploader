@@ -82,6 +82,8 @@ exiftool_path = 'tools\exiftool.exe'
 
 [video]
 
+# 视频上传页“编辑目标与配置”窗口可直接修改本段媒体选项。
+
 extensions = [".mp4", ".mov", ".m4v"]
 
 # 默认 mtime：
@@ -119,6 +121,8 @@ reset_state = false
 
 
 [image]
+
+# 图片上传页“编辑目标与配置”窗口可直接修改本段媒体选项。
 
 extensions = [".jpg", ".jpeg", ".png", ".webp"]
 
