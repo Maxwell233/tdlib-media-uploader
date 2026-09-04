@@ -1,5 +1,5 @@
 # ============================================================
-# TDLib Media Uploader V1.8.1
+# TDLib Media Uploader V1.8.2
 #
 # 首次使用：
 #   1. 复制本文件为 config.toml
@@ -99,6 +99,10 @@ quicktime_utc_target_zone = ""
 
 # Telegram 一个媒体组最多 10 个
 album_size = 10
+
+# 可选：开启后忽略视频日期，把全部视频按扫描顺序每 10 个组成一个 Album。
+# 默认关闭；关闭时继续按日期分组，album_size 作为普通模式的组大小。
+force_ten_per_album = false
 
 # 2 -> 21-5
 # 4 -> 2021-5

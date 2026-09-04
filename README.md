@@ -1,12 +1,12 @@
 # TDLib Media Uploader
 
-**V1.8.1 · Windows**
+**V1.8.2 · Windows**
 
-一个用于向 **Telegram 超级群 / Forum Topic 或 Channel** 批量上传图片和视频的 Windows GUI 工具。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点和缩略图；V1.8.1 仅保留 PySide6 桌面 GUI，并继续提供缓存清理、任务管理和独立代理设置。
+一个用于向 **Telegram 超级群 / Forum Topic 或 Channel** 批量上传图片和视频的 Windows GUI 工具。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点和缩略图；V1.8.2 仅保留 PySide6 桌面 GUI，并继续提供缓存清理、任务管理和独立代理设置。
 
 ## 功能
 
-- **视频**：递归读取目录及全部子目录；按月份组成 Album；一个 Album 最多 10 个视频；每个 Album 仅第一条显示日期标题（如 `21-5`），可在预览中编辑基础标题并追加自定义文本。视频封面生成默认开启，可在配置中关闭。
+- **视频**：递归读取目录及全部子目录；默认按月份组成 Album，一个 Album 最多 10 个视频；也可在“编辑视频目标与配置”中开启严格模式，忽略日期并按扫描顺序每 10 个视频组成一个 Album（最后一组可少于 10 个）。每个 Album 仅第一条显示标题，可在预览中编辑基础标题并追加自定义文本。视频封面生成默认开启，可在配置中关闭。
 - **图片**：递归读取目录及全部子目录；每 10 张组成一个 Album；每个 Album 的统一 Caption 默认使用 `1`、`2`、`3`…编号，并可在预览中追加自定义文本。
 - **文件名描述（可选）**：可分别为视频/图片开启，在每个 Album 的统一 Caption（日期或编号）后追加当前 Album 的 `1. 文件名`、`2. 文件名`…清单；日期/编号只出现一次，默认关闭。
 - **独立上传目标**：视频上传和图片上传可以分别选择超级群组 Forum Topic 或 Channel 频道，并分别填写 Chat ID / Topic；未单独配置时继承公共目标。频道模式不使用 Topic。
@@ -15,6 +15,7 @@
 - **统一配置**：日常优先在 GUI“设置与诊断 → 编辑配置”中修改 `config.toml`，无需编辑 Python 主脚本。
 - **PySide6 GUI**：提供概览、目录扫描、Album 预览、任务中心、历史记录、配置编辑、Telegram 目标编辑、缓存清理和环境诊断。
 - **后台命令无弹窗**：扫描、视频预检和封面生成调用 ExifTool / FFmpeg 时隐藏 Windows 控制台窗口，不打断 GUI 操作。
+- **Windows 网络目录**：支持本地路径和 `\\server\share\...` SMB/UNC 目录；扫描期间短暂不可读的文件会跳过并在界面提示，不会因为路径解析失败直接退出。
 - **互斥保护**：图片和视频上传器共享同一份 TDLib 登录数据库，不允许同时运行。
 - **独立代理**：可在设置中启用 SOCKS5、HTTP 或 MTProto 代理；默认关闭，关闭时明确使用直连。
 
@@ -36,7 +37,7 @@
 
 ### 推荐：直接下载 Release ZIP（普通使用）
 
-Windows 用户建议直接使用已经编译好的稳定版：[TDLib Media Uploader v1.8.1 Release](https://github.com/Maxwell233/tdlib-media-uploader/releases/tag/v1.8.1)，或直接下载 [Windows x64 ZIP](https://github.com/Maxwell233/tdlib-media-uploader/releases/download/v1.8.1/TDLib.Media.Uploader-v1.8.1-windows-x64.zip)。解压后即可使用。
+Windows 用户建议直接使用已经编译好的稳定版：[TDLib Media Uploader v1.8.2 Release](https://github.com/Maxwell233/tdlib-media-uploader/releases/tag/v1.8.2)，或直接下载 [Windows x64 ZIP](https://github.com/Maxwell233/tdlib-media-uploader/releases/download/v1.8.2/TDLib.Media.Uploader-v1.8.2-windows-x64.zip)。解压后即可使用。
 
 1. 解压整个 ZIP 文件夹，不要只复制或移动其中的 EXE；
 2. 双击 `TDLib Media Uploader.exe`；
@@ -81,7 +82,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ### 2. 配置
 
-普通使用不需要手动打开配置文件。启动 GUI 后，在左侧进入“设置与诊断”，点击“配置入口”中的“编辑配置”，填写并保存 Telegram API、视频/图片目录和代理选项即可。视频日期策略、Album 大小、Caption、文件名清单、图片排序和视频缩略图等媒体选项，分别在“视频上传”或“图片上传”页面的“编辑目标”窗口中设置。
+普通使用不需要手动打开配置文件。启动 GUI 后，在左侧进入“设置与诊断”，点击“配置入口”中的“编辑配置”，填写并保存 Telegram API、视频/图片目录和代理选项即可。视频日期策略、Album 大小、严格每 10 个视频一组、Caption、文件名清单、图片排序和视频缩略图等媒体选项，分别在“视频上传”或“图片上传”页面的“编辑目标”窗口中设置。
 
 视频 / 图片上传页面中的“编辑目标与配置”按钮可以直接修改当前上传类型的群组/频道 Chat ID、Forum Topic ID 以及该类型的 Album、Caption 和处理选项；双击扫描预览中的 Album 行可修改每个 Album 的标题。
 
@@ -122,6 +123,7 @@ channel_chat_id = 0           # target_mode = "channel" 时填写频道 Chat ID
 # forum_topic_id = 0
 
 [video]
+force_ten_per_album = false # 开启后忽略日期，按扫描顺序每 10 个视频一组
 caption_include_filenames = false
 
 [image]
@@ -162,13 +164,13 @@ run.cmd
 
 `run.cmd` / `run.ps1` 会直接启动 GUI。GUI 与上传核心使用相同的 `config.toml`、TDLib 登录数据和断点文件。GUI 中的“安全停止”会立即取消正在上传的文件，不会删除断点；重新扫描后，完整发送成功的 Album 会自动跳过。
 
-## V1.8.1 GUI
+## V1.8.2 GUI
 
 GUI 使用 PySide6 构建，包含：
 
 - 概览页：连接状态、扫描统计和快速开始；
 - 视频 / 图片上传页：目录扫描、文件清单和 Album 预览；双击 Album 可编辑视频基础标题/图片编号追加文本；
-- 视频 / 图片上传页面的“编辑目标与配置”窗口分别设置 Album 大小、Caption、文件名清单、排序和视频缩略图；
+- 视频 / 图片上传页面的“编辑目标与配置”窗口分别设置 Album 大小、Caption、文件名清单、排序和视频缩略图；视频页可选开启“强制每 10 个视频组成一个 Album（忽略日期）”；
 - 任务中心：当前文件、Album、速度、Mbps、ETA 和运行日志；
 - 历史记录：本地保存最近任务的结果；
 - 设置与诊断：编辑 API、目录和独立代理、检查运行依赖并清理应用缓存；视频 / 图片页面的“编辑目标与配置”窗口分别编辑当前类型的 Telegram 目标、Album、Caption、排序和处理选项。
@@ -194,7 +196,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ```text
 dist\TDLib Media Uploader\TDLib Media Uploader.exe
-dist\TDLib Media Uploader-v1.8.1-windows-x64.zip
+dist\TDLib Media Uploader-v1.8.2-windows-x64.zip
 ```
 
 本地构建会使用独立的 `.build_venv`，不会修改日常运行的 `.venv`。构建脚本会自动下载固定的 BtbN Windows x64 LGPL FFmpeg，校验 SHA-256 和 `-version` 构建标志，再交给 PyInstaller；发现 `--enable-gpl` 或 `--enable-nonfree` 时会停止发布，避免把 GPL/nonfree FFmpeg 混入便携包。源码运行时，安装脚本只安装 imageio-ffmpeg 的 Python wrapper；若不使用 Release 便携包，请自行提供 LGPL `ffmpeg.exe`（放入 `tools\ffmpeg\ffmpeg.exe` 或加入 PATH）。EXE 构建不需要上传 `config.toml`，也不会包含 `.video_state`、`.image_state`、`.thumb_cache` 或 `tdlib_data`。
@@ -255,6 +257,17 @@ Album 2
 ```
 
 Telegram 一个媒体组最多 10 个媒体，因此超过 10 个会自动拆组。
+
+如果在视频页的“编辑视频目标与配置”中开启“强制每 10 个视频组成一个 Album（忽略日期）”，程序会把扫描到的视频按当前排序连续分组，不再按月份拆分：
+
+```text
+全部视频（忽略日期）
+├─ Album 1：视频 1 ~ 10
+├─ Album 2：视频 11 ~ 20
+└─ ...
+```
+
+该选项默认关闭。开启后普通模式的 `album_size` 不参与分组，默认标题为 `Album 1`、`Album 2`…，仍可在扫描预览中逐组修改标题和追加文本；最后不足 10 个视频的一组会照常发送。
 
 打开 `[video].caption_include_filenames = true` 后，每个 Album 的 Caption 会变为：
 

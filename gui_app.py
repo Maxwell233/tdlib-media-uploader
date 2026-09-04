@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.8.1.
+"""PySide6 desktop interface for TDLib Media Uploader V1.8.2.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -19,6 +19,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
+from path_utils import file_mtime, iter_files, stable_path
 from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
@@ -60,7 +61,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
 TEMPLATE_CONFIG_PATH = PROJECT_DIR / "config.example.toml"
 HISTORY_PATH = PROJECT_DIR / ".gui_history.json"
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
 ICON_PATH = PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"
 
 
@@ -146,13 +147,9 @@ def _basic_paths(kind: str) -> list[Path]:
     extensions = set(_cfg("VIDEO_EXTENSIONS" if kind == "video" else "IMAGE_EXTENSIONS", set()))
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"{kind} 目录不存在或不是目录：{root}")
-    paths = [
-        path
-        for path in root.rglob("*")
-        if path.is_file() and path.suffix.lower() in extensions and path.stat().st_size > 0
-    ]
+    paths, _errors = iter_files(root, extensions)
     if kind == "image" and _cfg("IMAGE_SORT_MODE", "mtime") == "mtime":
-        paths.sort(key=lambda item: (item.stat().st_mtime, item.name.lower()))
+        paths.sort(key=lambda item: (file_mtime(item), item.name.lower()))
     else:
         paths.sort(key=lambda item: str(item).lower())
     return paths
@@ -311,6 +308,7 @@ def _scan_result(kind: str) -> dict:
 
     core = None
     warning = ""
+    scan_errors: list[str] = []
     try:
         if kind == "video":
             import tdlib_video_album_uploader as core_module
@@ -325,6 +323,7 @@ def _scan_result(kind: str) -> dict:
         if core is not None:
             core.STATE_DIR = PROJECT_DIR / ".video_state"
             paths = core.scan_videos()
+            scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
             metadata = {}
             exiftool = Path(_cfg("EXIFTOOL_PATH", ""))
             if exiftool.exists():
@@ -337,8 +336,8 @@ def _scan_result(kind: str) -> dict:
             items = [
                 {
                     "path": path,
-                    "capture_time": _dt.datetime.fromtimestamp(path.stat().st_mtime),
-                    "month_key": _dt.datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m"),
+                    "capture_time": _dt.datetime.fromtimestamp(file_mtime(path)),
+                    "month_key": _dt.datetime.fromtimestamp(file_mtime(path)).strftime("%Y-%m"),
                     "date_tag": "FileSystem:ModifyTime",
                     "fallback": True,
                 }
@@ -347,6 +346,7 @@ def _scan_result(kind: str) -> dict:
     else:
         if core is not None:
             paths = core.scan_images()
+            scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
             state = core.UploadState()
         else:
             paths = _basic_paths(kind)
@@ -359,20 +359,30 @@ def _scan_result(kind: str) -> dict:
 
     groups = []
     if kind == "video":
-        grouped = defaultdict(list)
-        for item in items:
-            grouped[item["month_key"]].append(item)
-        album_size = int(_cfg("VIDEO_ALBUM_SIZE", 10))
+        force_ten = bool(_cfg("VIDEO_FORCE_TEN_PER_ALBUM", False))
+        forced_key = getattr(core, "FORCED_GROUP_KEY", "__all_videos__")
+        if force_ten:
+            grouped = {forced_key: list(items)}
+        else:
+            grouped = defaultdict(list)
+            for item in items:
+                grouped[item["month_key"]].append(item)
+        album_size = 10 if force_ten else int(_cfg("VIDEO_ALBUM_SIZE", 10))
         for month in sorted(grouped):
             month_items = grouped[month]
             if core is not None:
                 plans = core.build_album_plans(month_items, state)
             else:
-                default_caption = month[2:].lstrip("0")
                 plans = []
                 for offset in range(0, len(month_items), album_size):
                     album_items = list(month_items[offset:offset + album_size])
-                    key = album_key("video", month, album_items)
+                    default_caption = (
+                        f"Album {offset // album_size + 1}"
+                        if force_ten
+                        else month[2:].lstrip("0")
+                    )
+                    key_group = f"{month}:{offset // album_size + 1}" if force_ten else month
+                    key = album_key("video", key_group, album_items)
                     record = CaptionStore("video").get(key, default_caption)
                     plans.append({
                         "key": key,
@@ -388,9 +398,14 @@ def _scan_result(kind: str) -> dict:
                     })
             pending = [item for item in month_items if not completed(item)]
             pending_plans = [plan for plan in plans if plan["pending_items"]]
+            group_label = (
+                getattr(core, "group_display_name", lambda value: value)(month)
+                if core is not None
+                else ("全部视频（忽略日期）" if force_ten else month)
+            )
             groups.append(
                 {
-                    "label": month,
+                    "label": group_label,
                     "caption": plans[0]["caption"]["text"] if plans else "",
                     "items": month_items,
                     "pending": len(pending),
@@ -438,6 +453,12 @@ def _scan_result(kind: str) -> dict:
 
     completed_count = sum(1 for item in items if completed(item))
     total_bytes = sum(_item_size(item) for item in items)
+    if scan_errors:
+        warning = (
+            f"扫描时跳过 {len(scan_errors)} 个暂时无法读取的项目（可能是 SMB 连接中断）。"
+            + (f"；{warning}" if warning else "")
+        )
+
     return {
         "kind": kind,
         "items": items,
@@ -450,7 +471,7 @@ def _scan_result(kind: str) -> dict:
         "pending_bytes": sum(_item_size(item) for item in items if not completed(item)),
         "album_count": sum(group["albums"] for group in groups),
         "completed_paths": [
-            str((item["path"] if isinstance(item, dict) else item).resolve())
+            stable_path(item["path"] if isinstance(item, dict) else item)
             for item in items
             if completed(item)
         ],
@@ -716,7 +737,7 @@ class HomePage(QWidget):
         task_layout.addStretch(1)
         layout.addWidget(task_box)
 
-        note = QGroupBox("V1.8.1 运行提示")
+        note = QGroupBox("V1.8.2 运行提示")
         note_layout = QVBoxLayout(note)
         note_body = QLabel(
             "GUI 与上传核心共用 TDLib 登录数据和断点文件。一次只能运行一个图片或视频任务；"
@@ -866,7 +887,7 @@ class UploadPage(QWidget):
                 "key": "",
                 "number": 1,
                 "items": group["items"],
-                "pending_items": [item for item in group["items"] if str((item["path"] if isinstance(item, dict) else item).resolve()) not in completed_paths],
+                "pending_items": [item for item in group["items"] if stable_path(item["path"] if isinstance(item, dict) else item) not in completed_paths],
                 "caption": {"text": group.get("caption", ""), "base_label": group.get("caption", ""), "custom_text": ""},
             }]
             for plan in plans:
@@ -893,7 +914,7 @@ class UploadPage(QWidget):
                 top.addChild(album_row)
                 for item in album_items:
                     path = item["path"] if isinstance(item, dict) else item
-                    completed = str(path.resolve()) in completed_paths
+                    completed = stable_path(path) in completed_paths
                     date_value = item.get("capture_time") if isinstance(item, dict) else None
                     row = QTreeWidgetItem([
                         "待上传" if not completed else "已完成",
@@ -1237,7 +1258,7 @@ class TargetDialog(QDialog):
         super().__init__(parent)
         self.kind = kind if kind in {"video", "image"} else "video"
         accent = "视频" if self.kind == "video" else "图片"
-        self.setWindowTitle(f"编辑{accent}上传目标与配置 · V1.8.1")
+        self.setWindowTitle(f"编辑{accent}上传目标与配置 · V1.8.2")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -1288,7 +1309,23 @@ class TargetDialog(QDialog):
             self.video_album = QSpinBox()
             self.video_album.setRange(1, 10)
             self.video_album.setValue(int(_cfg("VIDEO_ALBUM_SIZE", 10)))
-            self.media_form.addRow("视频 Album 大小", self.video_album)
+            self.media_form.addRow("视频 Album 大小（普通模式）", self.video_album)
+
+            self.video_force_ten = QCheckBox(
+                "强制每 10 个视频组成一个 Album（忽略日期，默认关闭）"
+            )
+            self.video_force_ten.setChecked(
+                bool(_cfg("VIDEO_FORCE_TEN_PER_ALBUM", False))
+            )
+            self.video_force_ten.toggled.connect(
+                lambda enabled: self.video_album.setEnabled(not enabled)
+            )
+            self.video_force_ten.setToolTip(
+                "开启后按扫描顺序连续分组，普通模式的 Album 大小和日期分组不参与。"
+                "最后不足 10 个视频的一组会照常发送。"
+            )
+            self.media_form.addRow("视频分组", self.video_force_ten)
+            self.video_album.setEnabled(not self.video_force_ten.isChecked())
 
             self.video_separator = QLineEdit(str(_cfg("VIDEO_ALBUM_CAPTION_SEPARATOR", " · ")))
             self.media_form.addRow("视频标题分隔符", self.video_separator)
@@ -1375,6 +1412,7 @@ class TargetDialog(QDialog):
             values.update({
                 ("video", "missing_date_policy"): self.video_missing_date.currentText(),
                 ("video", "album_size"): self.video_album.value(),
+                ("video", "force_ten_per_album"): self.video_force_ten.isChecked(),
                 ("video", "album_caption_separator"): self.video_separator.text(),
                 ("video", "caption_include_filenames"): self.video_filenames.isChecked(),
                 ("video", "generate_thumbnail"): self.thumbnail.isChecked(),
@@ -1397,7 +1435,7 @@ class TargetDialog(QDialog):
 class ConfigDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑配置 · V1.8.1")
+        self.setWindowTitle("编辑配置 · V1.8.2")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()

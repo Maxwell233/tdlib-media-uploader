@@ -16,11 +16,13 @@ from pathlib import Path
 from PIL import Image
 
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
+from path_utils import display_path, file_mtime, iter_files, relative_name as stable_relative_name, stable_path
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 
 PROJECT_DIR = Path(__file__).resolve().parent
 STATE_DIR = PROJECT_DIR / ".image_state"
+LAST_SCAN_ERRORS: list[str] = []
 
 UI = HeadlessUI()
 
@@ -44,10 +46,7 @@ def format_duration(seconds) -> str:
 
 
 def relative_name(path: Path) -> str:
-    try:
-        return path.resolve().relative_to(cfg.IMAGE_DIR.resolve()).as_posix()
-    except ValueError:
-        return path.name
+    return stable_relative_name(path, cfg.IMAGE_DIR)
 
 
 def file_signature(path: Path) -> str:
@@ -57,19 +56,14 @@ def file_signature(path: Path) -> str:
 
 
 def scan_images() -> list[Path]:
+    global LAST_SCAN_ERRORS
     root = cfg.IMAGE_DIR
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"图片目录不存在或不是目录：{root}")
-
-    images = [
-        path for path in root.rglob("*")
-        if path.is_file()
-        and path.suffix.lower() in cfg.IMAGE_EXTENSIONS
-        and path.stat().st_size > 0
-    ]
+    images, LAST_SCAN_ERRORS = iter_files(root, cfg.IMAGE_EXTENSIONS)
 
     if cfg.IMAGE_SORT_MODE == "mtime":
-        images.sort(key=lambda p: (p.stat().st_mtime, relative_name(p).lower()))
+        images.sort(key=lambda p: (file_mtime(p), relative_name(p).lower()))
     else:
         images.sort(key=lambda p: relative_name(p).lower())
     return images
@@ -80,7 +74,7 @@ _IMAGE_INFO_CACHE = {}
 
 def image_info(path: Path) -> tuple[int, int]:
     stat = path.stat()
-    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    key = (stable_path(path), stat.st_size, stat.st_mtime_ns)
     if key in _IMAGE_INFO_CACHE:
         return _IMAGE_INFO_CACHE[key]
     try:
@@ -99,7 +93,7 @@ def input_photo(path: Path, caption: str = "") -> dict:
     width, height = image_info(path)
     return {
         "@type": "inputMessagePhoto",
-        "photo": {"@type": "inputFileLocal", "path": str(path.resolve())},
+        "photo": {"@type": "inputFileLocal", "path": display_path(path)},
         "thumbnail": None,
         "added_sticker_file_ids": [],
         "width": width,
@@ -121,7 +115,7 @@ class UploadState:
             if getattr(cfg, "TARGET_MODE", "forum_topic") == "forum_topic"
             else "tdlib-image-v5-channel"
         )
-        identity = f"{cfg.IMAGE_DIR.resolve()}|{cfg.CHAT_ID}|{cfg.FORUM_TOPIC_ID}|{identity_suffix}"
+        identity = f"{stable_path(cfg.IMAGE_DIR)}|{cfg.CHAT_ID}|{cfg.FORUM_TOPIC_ID}|{identity_suffix}"
         task_hash = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
         self.path = STATE_DIR / f"image_upload_state_{task_hash}.json"
         self.lock = threading.Lock()
@@ -132,7 +126,7 @@ class UploadState:
     def _new(self):
         return {
             "version": self.VERSION,
-            "image_dir": str(cfg.IMAGE_DIR.resolve()),
+            "image_dir": stable_path(cfg.IMAGE_DIR),
             "chat_id": cfg.CHAT_ID,
             "target_mode": getattr(cfg, "TARGET_MODE", "forum_topic"),
             "channel_chat_id": getattr(cfg, "CHANNEL_CHAT_ID", 0),
@@ -199,7 +193,7 @@ class ImageUploadProgress:
         with self.lock:
             self.album_number = number
             self.album_total = total
-            self.current_paths = {os.path.normcase(os.path.abspath(str(p))): p for p in paths}
+            self.current_paths = {stable_path(p): p for p in paths}
             self.current_uploaded = {p: 0 for p in paths}
             self.file_id_to_path = {}
             self.samples.clear()
@@ -230,7 +224,7 @@ class ImageUploadProgress:
         path = None
         local_path = file_obj.get("local", {}).get("path", "")
         if local_path:
-            path = self.current_paths.get(os.path.normcase(os.path.abspath(local_path)))
+            path = self.current_paths.get(stable_path(local_path))
         if path is None:
             path = self.file_id_to_path.get(file_obj.get("id"))
         if path is None:

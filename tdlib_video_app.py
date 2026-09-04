@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""TDLib Media Uploader V1.8.1 视频上传流程。
+"""TDLib Media Uploader V1.8.2 视频上传流程。
 
 核心上传/断点/缩略图逻辑复用 tdlib_video_album_uploader.py；
 本文件负责视频扫描、mtime 日期策略和 GUI 使用的上传流程。
@@ -40,17 +40,18 @@ def _source_label(item):
 
 
 def show_file_list(items, state):
-    """按月份分组显示视频文件，避免几百个文件堆在同一张表中。"""
+    """按当前视频分组策略显示文件，避免几百个文件堆在同一张表中。"""
     groups = core.make_groups(items)
     global_index = {
         item["path"]: index
         for index, item in enumerate(items, 1)
     }
 
-    UI.info(
-        f"视频文件：共 {len(items)} 个，"
-        f"按 {len(groups)} 个月份分组展示。"
-    )
+    if core.force_ten_per_album():
+        grouping_text = "忽略日期，按扫描顺序每 10 个一组"
+    else:
+        grouping_text = f"按 {len(groups)} 个月份分组"
+    UI.info(f"视频文件：共 {len(items)} 个，{grouping_text}展示。")
 
     columns = [
         ("#", {"justify": "right", "width": 5}),
@@ -98,9 +99,10 @@ def show_file_list(items, state):
                 )
             )
 
+        group_label = core.group_display_name(month_key)
         UI.files(
             (
-                f"{month_key} · {len(month_items)} 个 · "
+                f"{group_label} · {len(month_items)} 个 · "
                 f"已完成 {completed_count} · "
                 f"待上传 {pending_count} · "
                 f"{core.format_size(month_bytes)}"
@@ -110,7 +112,11 @@ def show_file_list(items, state):
             kind="VIDEO",
             caption=(
                 f"日期来源：{source_summary}    "
-                "月份内按时间排序；已完成项由断点自动跳过。"
+                + (
+                    "分组忽略日期；文件仍按扫描排序。"
+                    if core.force_ten_per_album()
+                    else "月份内按时间排序；已完成项由断点自动跳过。"
+                )
             ),
         )
 
@@ -132,7 +138,7 @@ def show_group_plan(items, state):
 
         rows.append(
             (
-                month_key,
+                core.group_display_name(month_key),
                 captions or core.month_caption(month_key),
                 len(month_items),
                 len(pending),
@@ -140,7 +146,11 @@ def show_group_plan(items, state):
             )
         )
 
-    UI.groups("月份 / Album 计划", rows, kind="VIDEO")
+    UI.groups(
+        "分组 / Album 计划" if core.force_ten_per_album() else "月份 / Album 计划",
+        rows,
+        kind="VIDEO",
+    )
 
 
 def show_upload_summary(
@@ -195,8 +205,13 @@ def show_upload_summary(
             ("本次 Album", total_albums),
             (
                 "Album 规则",
-                f"每组最多 {cfg.VIDEO_ALBUM_SIZE} 个；Album Caption=日期，可编辑文本；"
-                f"文件名清单={'开' if getattr(cfg, 'VIDEO_CAPTION_INCLUDE_FILENAMES', False) else '关'}",
+                (
+                    "忽略日期，按扫描顺序每 10 个视频组成一个 Album（最后一组可少于 10 个）；"
+                    "默认标题为 Album 1、Album 2…"
+                    if core.force_ten_per_album()
+                    else f"按日期分组，每组最多 {cfg.VIDEO_ALBUM_SIZE} 个；Album Caption=日期，可编辑文本"
+                )
+                + f"；文件名清单={'开' if getattr(cfg, 'VIDEO_CAPTION_INCLUDE_FILENAMES', False) else '关'}",
             ),
             ("CHAT_ID", cfg.CHAT_ID),
             ("目标模式", "Channel 频道" if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel" else "超级群组 Forum Topic"),
@@ -274,8 +289,8 @@ def main():
     total_albums = len(pending_plans)
 
     # GUI 调用的扫描与上传流程：
-    # 1. 按月份分组显示完整文件列表。
-    # 2. 再显示月份/Album 计划。
+    # 1. 按当前分组策略显示完整文件列表。
+    # 2. 再显示分组/Album 计划。
     # 3. 最后显示上传摘要。
     # 4. 摘要之后才询问 y。
     if cfg.VIDEO_SHOW_FILE_LIST:
@@ -362,9 +377,11 @@ def main():
             month_items = [item for plan in month_plans for item in plan["pending_items"]]
             month_album_total = len(month_plans)
 
+            group_label = core.group_display_name(month_key)
+            group_word = "分组" if core.force_ten_per_album() else "月份"
             UI.album(
                 kind="VIDEO",
-                title=f"月份 {month_key}",
+                title=f"{group_word} {group_label}",
                 subtitle=(
                     f"{len(month_plans)} 个 Album · "
                     f"{len(month_items)} 个视频 · "
@@ -398,8 +415,8 @@ def main():
                         f"{total_albums}"
                     ),
                     subtitle=(
-                        f"{month_key} · "
-                        f"月内 {month_album_number}/{month_album_total} · "
+                        f"{group_label} · "
+                        f"组内 {month_album_number}/{month_album_total} · "
                         f"{len(album_items)} 个视频 · "
                         f"Caption={label}"
                     ),

@@ -15,6 +15,8 @@ import os
 import threading
 from pathlib import Path
 
+from path_utils import stable_path
+
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -34,9 +36,9 @@ def _item_signature(item) -> str:
     path = Path(_item_path(item))
     try:
         stat = path.stat()
-        return f"{os.path.normcase(str(path.resolve()))}|{stat.st_size}|{stat.st_mtime_ns}"
+        return f"{stable_path(path)}|{stat.st_size}|{stat.st_mtime_ns}"
     except OSError:
-        return os.path.normcase(str(path.resolve()))
+        return stable_path(path)
 
 
 def album_key(kind: str, group_label: str, items) -> str:

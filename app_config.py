@@ -6,7 +6,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
@@ -258,16 +258,14 @@ VIDEO_ALBUM_SIZE = int(
     )
 )
 
-if not (
-    1
-    <=
-    VIDEO_ALBUM_SIZE
-    <=
-    10
-):
+if not (1 <= VIDEO_ALBUM_SIZE <= 10):
     raise RuntimeError(
         "[video].album_size 必须为 1~10。"
     )
+
+# Optional mode: group the complete scan into strict ten-file batches,
+# regardless of the videos' capture dates.
+VIDEO_FORCE_TEN_PER_ALBUM = bool(video.get("force_ten_per_album", False))
 
 VIDEO_CAPTION_YEAR_DIGITS = int(
     video.get(

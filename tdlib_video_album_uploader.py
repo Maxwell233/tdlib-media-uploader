@@ -20,12 +20,14 @@ import imageio_ffmpeg
 from PIL import Image
 
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
+from path_utils import display_path, file_mtime, iter_files, relative_name as stable_relative_name, stable_path
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 
 PROJECT_DIR = Path(__file__).resolve().parent
 STATE_DIR = PROJECT_DIR / ".state"
 THUMB_CACHE_DIR = PROJECT_DIR / ".thumb_cache"
+LAST_SCAN_ERRORS: list[str] = []
 
 
 def _hidden_subprocess_kwargs() -> dict:
@@ -125,14 +127,11 @@ def format_size(value: float) -> str:
 
 
 def relative_name(path: Path) -> str:
-    try:
-        return path.resolve().relative_to(cfg.VIDEO_DIR.resolve()).as_posix()
-    except ValueError:
-        return path.name
+    return stable_relative_name(path, cfg.VIDEO_DIR)
 
 
 def normalize_path(path) -> str:
-    return os.path.normcase(os.path.abspath(str(path)))
+    return stable_path(path)
 
 
 def file_signature(path: Path) -> str:
@@ -141,22 +140,33 @@ def file_signature(path: Path) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+FORCED_GROUP_KEY = "__all_videos__"
+FORCED_GROUP_LABEL = "全部视频（忽略日期）"
+
+
+def force_ten_per_album() -> bool:
+    return bool(getattr(cfg, "VIDEO_FORCE_TEN_PER_ALBUM", False))
+
+
+def group_display_name(group_key: str) -> str:
+    return FORCED_GROUP_LABEL if group_key == FORCED_GROUP_KEY else str(group_key)
+
+
 def month_caption(month_key: str) -> str:
+    if month_key == FORCED_GROUP_KEY:
+        return "Album"
     year_text, month_text = month_key.split("-")
     year, month = int(year_text), int(month_text)
     return f"{year % 100:02d}-{month}" if cfg.VIDEO_CAPTION_YEAR_DIGITS == 2 else f"{year}-{month}"
 
 
 def scan_videos() -> list[Path]:
+    global LAST_SCAN_ERRORS
     root = cfg.VIDEO_DIR
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"视频目录不存在或不是目录：{root}")
-    videos = [
-        path for path in root.rglob("*")
-        if path.is_file()
-        and path.suffix.lower() in cfg.VIDEO_EXTENSIONS
-        and path.stat().st_size > 0
-    ]
+    videos, LAST_SCAN_ERRORS = iter_files(root, cfg.VIDEO_EXTENSIONS)
+    videos.sort(key=lambda p: (file_mtime(p), relative_name(p).lower()))
     return videos
 
 
@@ -260,7 +270,15 @@ def choose_capture_time(path: Path, row: dict | None):
 def build_items(videos, metadata_index):
     items, missing = [], []
     for path in videos:
-        selected = choose_capture_time(path, metadata_index.get(normalize_path(path)))
+        try:
+            selected = choose_capture_time(path, metadata_index.get(normalize_path(path)))
+        except (OSError, ValueError, OverflowError) as exc:
+            # A network share can disappear between os.walk() and metadata
+            # handling. Treat that file as temporarily unavailable instead
+            # of allowing a transient SMB error to abort the whole scan.
+            LAST_SCAN_ERRORS.append(f"{path}: {exc}")
+            missing.append(path)
+            continue
         if selected is None:
             missing.append(path)
             continue
@@ -272,7 +290,13 @@ def build_items(videos, metadata_index):
             "date_tag": selected["tag"],
             "fallback": selected["fallback"],
         })
-    items.sort(key=lambda item: (item["capture_time"].replace(tzinfo=None), relative_name(item["path"]).lower()))
+    if not force_ten_per_album():
+        items.sort(
+            key=lambda item: (
+                item["capture_time"].replace(tzinfo=None),
+                relative_name(item["path"]).lower(),
+            )
+        )
     return items, missing
 
 
@@ -281,7 +305,7 @@ _VIDEO_INFO_CACHE = {}
 
 def video_info(path: Path):
     stat = path.stat()
-    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    key = (stable_path(path), stat.st_size, stat.st_mtime_ns)
     if key in _VIDEO_INFO_CACHE:
         return _VIDEO_INFO_CACHE[key]
     reader = imageio_ffmpeg.read_frames(str(path))
@@ -311,7 +335,7 @@ def build_thumbnail(path: Path):
     THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     stat = path.stat()
     cache_key = hashlib.sha1(
-        f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
+        f"{stable_path(path)}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
     ).hexdigest()
     final_path = THUMB_CACHE_DIR / f"{cache_key}.jpg"
     temp_path = THUMB_CACHE_DIR / f"{cache_key}.tmp.jpg"
@@ -362,13 +386,13 @@ def input_video(item, caption: str):
         thumb_path, thumb_width, thumb_height = build_thumbnail(path)
         thumbnail = {
             "@type": "inputThumbnail",
-            "thumbnail": {"@type": "inputFileLocal", "path": str(thumb_path.resolve())},
+            "thumbnail": {"@type": "inputFileLocal", "path": display_path(thumb_path)},
             "width": int(thumb_width),
             "height": int(thumb_height),
         }
     return {
         "@type": "inputMessageVideo",
-        "video": {"@type": "inputFileLocal", "path": str(path.resolve())},
+        "video": {"@type": "inputFileLocal", "path": display_path(path)},
         "thumbnail": thumbnail,
         "cover": None,
         "start_timestamp": 0,
@@ -394,7 +418,7 @@ class UploadState:
             if getattr(cfg, "TARGET_MODE", "forum_topic") == "forum_topic"
             else "tdlib-video-v5-channel"
         )
-        identity = f"{cfg.VIDEO_DIR.resolve()}|{cfg.CHAT_ID}|{cfg.FORUM_TOPIC_ID}|{identity_suffix}"
+        identity = f"{stable_path(cfg.VIDEO_DIR)}|{cfg.CHAT_ID}|{cfg.FORUM_TOPIC_ID}|{identity_suffix}"
         task_hash = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
         self.path = STATE_DIR / f"upload_state_{task_hash}.json"
         self.lock = threading.Lock()
@@ -405,7 +429,7 @@ class UploadState:
     def _new(self):
         return {
             "version": self.VERSION,
-            "video_dir": str(cfg.VIDEO_DIR.resolve()),
+            "video_dir": stable_path(cfg.VIDEO_DIR),
             "chat_id": cfg.CHAT_ID,
             "target_mode": getattr(cfg, "TARGET_MODE", "forum_topic"),
             "channel_chat_id": getattr(cfg, "CHANNEL_CHAT_ID", 0),
@@ -571,6 +595,8 @@ class VideoUploadProgress:
 
 
 def make_groups(items):
+    if force_ten_per_album():
+        return {FORCED_GROUP_KEY: list(items)}
     groups = defaultdict(list)
     for item in items:
         groups[item["month_key"]].append(item)
@@ -578,25 +604,38 @@ def make_groups(items):
 
 
 def build_album_plans(items, state=None) -> list[dict]:
-    """Build stable per-month Album plans from the complete scan."""
+    """Build stable Album plans from the complete scan.
+
+    Normal mode keeps the historical month grouping.  The optional forced mode
+    puts the complete scan into consecutive groups of ten, regardless of each
+    video's capture month.
+    """
     store = CaptionStore("video")
     plans = []
-    for month_key in sorted(make_groups(items)):
-        month_items = make_groups(items)[month_key]
-        default_label = month_caption(month_key)
-        for start in range(0, len(month_items), cfg.VIDEO_ALBUM_SIZE):
-            album_items = list(month_items[start:start + cfg.VIDEO_ALBUM_SIZE])
+    groups = make_groups(items)
+    album_size = 10 if force_ten_per_album() else cfg.VIDEO_ALBUM_SIZE
+    for month_key in sorted(groups):
+        month_items = groups[month_key]
+        for start in range(0, len(month_items), album_size):
+            album_items = list(month_items[start:start + album_size])
+            album_number = start // album_size + 1
+            default_label = (
+                f"Album {album_number}"
+                if month_key == FORCED_GROUP_KEY
+                else month_caption(month_key)
+            )
             pending = [
                 item for item in album_items
                 if state is None or not state.is_completed(item["path"])
             ]
-            key = album_key("video", month_key, album_items)
+            key_group = f"{month_key}:{album_number}" if month_key == FORCED_GROUP_KEY else month_key
+            key = album_key("video", key_group, album_items)
             record = store.get(key, default_label)
             base_label = record["base_label"] or default_label
             plans.append({
                 "key": key,
                 "month_key": month_key,
-                "number": start // cfg.VIDEO_ALBUM_SIZE + 1,
+                "number": album_number,
                 "items": album_items,
                 "pending_items": pending,
                 "caption": {
@@ -615,12 +654,17 @@ def build_album_plans(items, state=None) -> list[dict]:
 def print_plan(items, state):
     groups = make_groups(items)
     print("\n" + "=" * 104)
-    print("上传计划：EXIF/QuickTime 按月分组；同月每最多 10 个组成 Album；每个 Album 只保留一个 yy-m Caption")
+    if force_ten_per_album():
+        print("上传计划：忽略日期，按扫描顺序每 10 个视频组成 Album；每个 Album 使用独立标题")
+    else:
+        print("上传计划：EXIF/QuickTime 按月分组；同月每最多 10 个组成 Album；每个 Album 只保留一个 yy-m Caption")
     print("=" * 104)
     for month_key in sorted(groups):
         month_items = groups[month_key]
         pending = [item for item in month_items if not state.is_completed(item["path"])]
-        print(f"\n[{month_key}] Caption={month_caption(month_key)} | 共 {len(month_items)} | 待上传 {len(pending)}")
+        group_label = group_display_name(month_key)
+        caption = "Album 1、Album 2…" if month_key == FORCED_GROUP_KEY else month_caption(month_key)
+        print(f"\n[{group_label}] Caption={caption} | 共 {len(month_items)} | 待上传 {len(pending)}")
         for index, item in enumerate(month_items, 1):
             path = item["path"]
             status = "已完成" if state.is_completed(path) else "待上传"
@@ -716,7 +760,9 @@ def main():
             month_album_total = len(month_plans)
             UI.log("")
             UI.log("=" * 82)
-            UI.log(f"开始月份 {month_key}：{len(month_items)} 个视频，{month_album_total} 个 Album")
+            group_label = group_display_name(month_key)
+            group_word = "分组" if month_key == FORCED_GROUP_KEY else "月份"
+            UI.log(f"开始{group_word} {group_label}：{len(month_items)} 个视频，{month_album_total} 个 Album")
             UI.log("=" * 82)
 
             for plan in month_plans:
@@ -731,7 +777,7 @@ def main():
                 progress.begin_album(album_items, month_key, album_global, total_albums)
                 UI.log("")
                 UI.log(
-                    f"[总 {album_global}/{total_albums}] [{month_key} {month_album_number}/{month_album_total}] "
+                    f"[总 {album_global}/{total_albums}] [{group_label} {month_album_number}/{month_album_total}] "
                     f"Album {len(album_items)} 个 | Caption={label}"
                 )
                 for item in album_items:

@@ -56,6 +56,7 @@ if packaged_ffmpeg_license.is_file():
 hiddenimports = [
     "app_config",
     "album_metadata",
+    "path_utils",
     "tdlib_common",
     "tdlib_image_album_uploader",
     "tdlib_video_album_uploader",
