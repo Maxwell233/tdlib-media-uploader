@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.7.2.
+"""PySide6 desktop interface for TDLib Media Uploader V1.7.3.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStackedWidget,
     QTableWidget,
@@ -58,7 +59,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
 TEMPLATE_CONFIG_PATH = PROJECT_DIR / "config.example.toml"
 HISTORY_PATH = PROJECT_DIR / ".gui_history.json"
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.7.3"
 ICON_PATH = PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"
 
 
@@ -646,7 +647,7 @@ class HomePage(QWidget):
         task_layout.addStretch(1)
         layout.addWidget(task_box)
 
-        note = QGroupBox("V1.7.2 运行提示")
+        note = QGroupBox("V1.7.3 运行提示")
         note_layout = QVBoxLayout(note)
         note_body = QLabel(
             "GUI 与上传核心共用 TDLib 登录数据和断点文件。一次只能运行一个图片或视频任务；"
@@ -710,7 +711,9 @@ class UploadPage(QWidget):
         self.tree.header().setStretchLastSection(True)
         self.tree.setRootIsDecorated(True)
         self.tree.setAlternatingRowColors(True)
-        self.tree.setMinimumHeight(310)
+        # Keep the preview useful on a normal window while allowing the page
+        # scroll area to reveal the target/actions on short windows.
+        self.tree.setMinimumHeight(220)
         preview_layout.addWidget(self.tree)
         self.summary_label = QLabel("尚未扫描")
         self.summary_label.setObjectName("mutedLabel")
@@ -983,6 +986,8 @@ class SettingsPage(QWidget):
             label = QLabel("检测中")
             self.env_labels[name] = label
             env_layout.addRow(name, label)
+        self.env_labels["代理"] = QLabel("检测中")
+        env_layout.addRow("代理", self.env_labels["代理"])
         layout.addWidget(env_box)
 
         config_box = QGroupBox("配置入口")
@@ -1058,6 +1063,21 @@ class SettingsPage(QWidget):
             label = self.env_labels[name]
             label.setText("可用" if available else "未找到 / 可选")
             label.setStyleSheet(f"color: {'#7ee787' if available else '#f2cc60'}")
+        proxy_label = self.env_labels["代理"]
+        if _cfg("PROXY_ENABLED", False):
+            proxy_type = {
+                "socks5": "SOCKS5",
+                "http": "HTTP",
+                "mtproto": "MTProto",
+            }.get(str(_cfg("PROXY_TYPE", "socks5")).lower(), "代理")
+            proxy_label.setText(
+                f"已启用 · {proxy_type} "
+                f"{_cfg('PROXY_SERVER', '')}:{_cfg('PROXY_PORT', '')}"
+            )
+            proxy_label.setStyleSheet("color: #7ee787")
+        else:
+            proxy_label.setText("未启用 · 直连")
+            proxy_label.setStyleSheet("color: #91a2b5")
         self.cache_status.setText(_cache_status_text())
 
 
@@ -1066,7 +1086,7 @@ class TargetDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑 Telegram 目标 · V1.7.2")
+        self.setWindowTitle("编辑 Telegram 目标 · V1.7.3")
         self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -1117,7 +1137,7 @@ class TargetDialog(QDialog):
 class ConfigDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑配置 · V1.7.2")
+        self.setWindowTitle("编辑配置 · V1.7.3")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -1163,7 +1183,64 @@ class ConfigDialog(QDialog):
         form.addRow("视频处理", self.thumbnail)
         layout.addLayout(form)
 
-        hint = QLabel("API Hash 只写入本地 config.toml，不会写入 GUI 日志。tdjson 版本仍由项目固定要求控制。")
+        proxy_box = QGroupBox("网络代理（独立设置，默认关闭）")
+        proxy_form = QFormLayout(proxy_box)
+        self.proxy_enabled = QCheckBox("启用代理（关闭时使用直连）")
+        self.proxy_enabled.setChecked(bool(_cfg("PROXY_ENABLED", False)))
+        proxy_form.addRow("代理状态", self.proxy_enabled)
+
+        self.proxy_type = QComboBox()
+        self.proxy_type.addItem("SOCKS5", "socks5")
+        self.proxy_type.addItem("HTTP", "http")
+        self.proxy_type.addItem("MTProto", "mtproto")
+        configured_proxy_type = str(_cfg("PROXY_TYPE", "socks5")).lower()
+        proxy_index = self.proxy_type.findData(configured_proxy_type)
+        self.proxy_type.setCurrentIndex(proxy_index if proxy_index >= 0 else 0)
+        proxy_type_label = QLabel("代理类型")
+        proxy_form.addRow(proxy_type_label, self.proxy_type)
+
+        self.proxy_server = field("proxy_server", _cfg("PROXY_SERVER", ""))
+        proxy_server_label = QLabel("代理服务器")
+        proxy_form.addRow(proxy_server_label, self.proxy_server)
+
+        self.proxy_port = QSpinBox()
+        self.proxy_port.setRange(1, 65535)
+        self.proxy_port.setValue(int(_cfg("PROXY_PORT", 1080)))
+        proxy_port_label = QLabel("代理端口")
+        proxy_form.addRow(proxy_port_label, self.proxy_port)
+
+        self.proxy_username = field("proxy_username", _cfg("PROXY_USERNAME", ""))
+        proxy_username_label = QLabel("代理用户名")
+        proxy_form.addRow(proxy_username_label, self.proxy_username)
+
+        self.proxy_password = field("proxy_password", _cfg("PROXY_PASSWORD", ""), True)
+        proxy_password_label = QLabel("代理密码")
+        proxy_form.addRow(proxy_password_label, self.proxy_password)
+
+        self.proxy_secret = field("proxy_secret", _cfg("PROXY_SECRET", ""), True)
+        proxy_secret_label = QLabel("MTProto Secret")
+        proxy_form.addRow(proxy_secret_label, self.proxy_secret)
+
+        self.proxy_http_only = QCheckBox("仅支持 HTTP 请求（不支持 CONNECT）")
+        self.proxy_http_only.setChecked(bool(_cfg("PROXY_HTTP_ONLY", False)))
+        proxy_http_only_label = QLabel("HTTP 选项")
+        proxy_form.addRow(proxy_http_only_label, self.proxy_http_only)
+
+        self._proxy_rows = {
+            "username": (proxy_username_label, self.proxy_username),
+            "password": (proxy_password_label, self.proxy_password),
+            "secret": (proxy_secret_label, self.proxy_secret),
+            "http_only": (proxy_http_only_label, self.proxy_http_only),
+        }
+        self.proxy_enabled.toggled.connect(self._update_proxy_fields)
+        self.proxy_type.currentIndexChanged.connect(self._update_proxy_fields)
+        self._update_proxy_fields()
+        layout.addWidget(proxy_box)
+
+        hint = QLabel(
+            "API Hash、代理认证信息和 MTProto Secret 只写入本地 config.toml，不会写入 GUI 日志。"
+            "代理由 TDLib 原生支持；tdjson 版本仍由项目固定要求控制。"
+        )
         hint.setObjectName("mutedLabel")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -1172,6 +1249,28 @@ class ConfigDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _update_proxy_fields(self):
+        enabled = self.proxy_enabled.isChecked()
+        proxy_type = self.proxy_type.currentData()
+        show_credentials = enabled and proxy_type in {"socks5", "http"}
+        show_secret = enabled and proxy_type == "mtproto"
+        show_http_only = enabled and proxy_type == "http"
+        for key in ("username", "password"):
+            label, widget = self._proxy_rows[key]
+            label.setVisible(show_credentials)
+            widget.setVisible(show_credentials)
+        label, widget = self._proxy_rows["secret"]
+        label.setVisible(show_secret)
+        widget.setVisible(show_secret)
+        label, widget = self._proxy_rows["http_only"]
+        label.setVisible(show_http_only)
+        widget.setVisible(show_http_only)
+        for key in ("proxy_type", "proxy_server", "proxy_port"):
+            getattr(self, key).setEnabled(enabled)
+        for row in self._proxy_rows.values():
+            for widget in row:
+                widget.setEnabled(enabled)
 
     def _save(self):
         def integer(name: str, fallback: int) -> int:
@@ -1193,7 +1292,22 @@ class ConfigDialog(QDialog):
             ("video", "generate_thumbnail"): self.thumbnail.isChecked(),
             ("image", "sort_mode"): self.sort_mode.currentText(),
             ("image", "album_size"): self.image_album.value(),
+            ("proxy", "enabled"): self.proxy_enabled.isChecked(),
+            ("proxy", "type"): self.proxy_type.currentData() or "socks5",
+            ("proxy", "server"): self.proxy_server.text().strip(),
+            ("proxy", "port"): self.proxy_port.value(),
+            ("proxy", "username"): self.proxy_username.text(),
+            ("proxy", "password"): self.proxy_password.text(),
+            ("proxy", "secret"): self.proxy_secret.text().strip(),
+            ("proxy", "http_only"): self.proxy_http_only.isChecked(),
         }
+        if values[("proxy", "enabled")]:
+            if not values[("proxy", "server")]:
+                QMessageBox.critical(self, "保存失败", "启用代理时必须填写代理服务器。")
+                return
+            if values[("proxy", "type")] == "mtproto" and not values[("proxy", "secret")]:
+                QMessageBox.critical(self, "保存失败", "使用 MTProto 代理时必须填写 Secret。")
+                return
         error = _write_config_values(values)
         if error:
             QMessageBox.critical(self, "保存失败", error)
@@ -1261,7 +1375,7 @@ class MainWindow(QMainWindow):
         if application is not None:
             self.setWindowIcon(application.windowIcon())
         self.setWindowTitle(f"TDLib Media Uploader · V{APP_VERSION} · Maximum 2026")
-        self.setMinimumSize(1060, 700)
+        self.setMinimumSize(860, 560)
         self.resize(1240, 800)
         self.worker: UploadWorker | None = None
         self.scanners: dict[str, ScanWorker] = {}
@@ -1295,7 +1409,18 @@ class MainWindow(QMainWindow):
         self.history_page = HistoryPage()
         self.settings_page = SettingsPage()
         for page in (self.home, self.video_page, self.image_page, self.task_page, self.history_page, self.settings_page):
-            self.stack.addWidget(page)
+            if isinstance(page, UploadPage):
+                # Upload pages contain several stacked sections.  Keeping
+                # them in a scroll area prevents the Telegram target and
+                # action buttons from being clipped when the window is made
+                # shorter or narrower.
+                scroll = QScrollArea()
+                scroll.setWidgetResizable(True)
+                scroll.setFrameShape(QFrame.Shape.NoFrame)
+                scroll.setWidget(page)
+                self.stack.addWidget(scroll)
+            else:
+                self.stack.addWidget(page)
         root.addWidget(self.stack, 1)
 
         self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)

@@ -1,7 +1,7 @@
 ExifTool（可选）
 ================
 
-V1.7.2 默认 missing_date_policy = "mtime"，因此没有 ExifTool 也能上传视频。
+V1.7.3 默认 missing_date_policy = "mtime"，因此没有 ExifTool 也能上传视频。
 
 如果希望脚本优先读取视频内部的 EXIF / QuickTime 创建时间，可安装 ExifTool：
 

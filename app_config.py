@@ -6,7 +6,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.7.3"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
@@ -42,6 +42,14 @@ def _section(name: str):
             f"config.toml 缺少 [{name}] 配置段。"
         )
 
+    return value
+
+
+def _optional_section(name: str):
+    """Return an optional TOML section while keeping old configs compatible."""
+    value = CONFIG.get(name, {})
+    if not isinstance(value, dict):
+        raise RuntimeError(f"config.toml 中的 [{name}] 配置段必须是表格。")
     return value
 
 
@@ -103,6 +111,7 @@ paths = _section("paths")
 video = _section("video")
 image = _section("image")
 tdlib = _section("tdlib")
+proxy = _optional_section("proxy")
 
 
 # Telegram
@@ -306,6 +315,40 @@ IMAGE_RESET_STATE = bool(
         False
     )
 )
+
+
+# 网络代理（由 TDLib 原生处理；默认关闭时明确使用直连）
+PROXY_ENABLED = bool(proxy.get("enabled", False))
+PROXY_TYPE = str(proxy.get("type", "socks5")).strip().lower()
+PROXY_SERVER = str(proxy.get("server", "")).strip()
+try:
+    PROXY_PORT = int(proxy.get("port", 1080))
+except (TypeError, ValueError) as exc:
+    if PROXY_ENABLED:
+        raise RuntimeError("启用代理时 [proxy].port 必须是整数。") from exc
+    PROXY_PORT = 1080
+PROXY_USERNAME = str(proxy.get("username", ""))
+PROXY_PASSWORD = str(proxy.get("password", ""))
+PROXY_SECRET = str(proxy.get("secret", "")).strip()
+PROXY_HTTP_ONLY = bool(proxy.get("http_only", False))
+
+if PROXY_TYPE not in {"socks5", "http", "mtproto"}:
+    if PROXY_ENABLED:
+        raise RuntimeError(
+            '[proxy].type 只能是 "socks5"、"http" 或 "mtproto"。'
+        )
+    PROXY_TYPE = "socks5"
+
+if not 1 <= PROXY_PORT <= 65535:
+    if PROXY_ENABLED:
+        raise RuntimeError("[proxy].port 必须为 1~65535。")
+    PROXY_PORT = 1080
+
+if PROXY_ENABLED:
+    if not PROXY_SERVER:
+        raise RuntimeError("启用代理时必须填写 [proxy].server。")
+    if PROXY_TYPE == "mtproto" and not PROXY_SECRET:
+        raise RuntimeError("使用 MTProto 代理时必须填写 [proxy].secret。")
 
 
 # TDLib

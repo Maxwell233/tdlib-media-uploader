@@ -18,6 +18,10 @@ Windows x64 构建，以及源码中实际导入的模块。审计日期：2026-
   构建选项并不适合作为本项目的固定发布来源。因此安装脚本使用 `--no-binary`
   只安装 Python wrapper，Windows 便携构建则固定下载 BtbN 的 LGPL 版本并检查
   SHA-256、`-version` 构建标志和随包的 `LICENSE.txt`。
+- 代理功能没有新增 Python 运行时依赖。程序直接使用 TDLib 的 `addProxy`、
+  `editProxy`、`enableProxy` / `disableProxy` 接口和 `proxyTypeSocks5`、
+  `proxyTypeHttp`、`proxyTypeMtproto` 类型，因此代理认证信息仍由本地
+  `config.toml` 保存并按 TDLib 条款处理。
 - FFmpeg 的具体许可取决于构建选项。当前固定构建没有 `--enable-gpl` 或
   `--enable-nonfree`，并随包提供 LGPLv3 文本；若以后更换构建，必须重新审计。
 - PyInstaller 的 bootloader 带有 GPL Bootloader Exception，可将 bootloader
@@ -68,6 +72,7 @@ Qt、TDLib 和 FFmpeg 的发行包还可能包含由其他作者提供的 ICU、
 
 - [`tdjson` 1.8.64.post1（PyPI）](https://pypi.org/project/tdjson/1.8.64.post1/)
 - [TDLib 许可证](https://github.com/tdlib/td/blob/master/LICENSE_1_0.txt)
+- [TDLib 代理 API：addProxy](https://core.telegram.org/tdlib/docs/classtd_1_1td__api_1_1add_proxy.html)
 - [Pillow 许可证](https://github.com/python-pillow/Pillow/blob/main/LICENSE)
 - [`imageio-ffmpeg` 许可证](https://github.com/imageio/imageio-ffmpeg/blob/main/LICENSE)
 - [FFmpeg 许可与合规说明](https://ffmpeg.org/legal.html)

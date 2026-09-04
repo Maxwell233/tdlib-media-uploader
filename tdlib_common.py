@@ -292,12 +292,90 @@ class TDJsonClient:
                 self.ui.warning(f"TDLib receiver 异常：{type(exc).__name__}: {exc}")
                 time.sleep(1)
 
+    @staticmethod
+    def _configured_proxy() -> dict:
+        """Build the TDLib proxy object from the optional local config."""
+        proxy_type = cfg.PROXY_TYPE
+        if proxy_type == "socks5":
+            type_payload = {
+                "@type": "proxyTypeSocks5",
+                "username": cfg.PROXY_USERNAME,
+                "password": cfg.PROXY_PASSWORD,
+            }
+        elif proxy_type == "http":
+            type_payload = {
+                "@type": "proxyTypeHttp",
+                "username": cfg.PROXY_USERNAME,
+                "password": cfg.PROXY_PASSWORD,
+                "http_only": cfg.PROXY_HTTP_ONLY,
+            }
+        elif proxy_type == "mtproto":
+            type_payload = {
+                "@type": "proxyTypeMtproto",
+                "secret": cfg.PROXY_SECRET,
+            }
+        else:
+            # app_config validates this, but keep the client defensive when
+            # tests or an embedding application provide a custom config.
+            raise RuntimeError(f"不支持的代理类型：{proxy_type}")
+        return {
+            "@type": "proxy",
+            "server": cfg.PROXY_SERVER,
+            "port": int(cfg.PROXY_PORT),
+            "type": type_payload,
+        }
+
+    def _configure_proxy(self):
+        """Apply the independent proxy setting before authentication."""
+        if not cfg.PROXY_ENABLED:
+            # A previous run may have enabled a proxy in TDLib's database.
+            # Explicitly disable it so the unchecked setting always means a
+            # direct connection.
+            self.request({"@type": "disableProxy"}, timeout=30)
+            self.ui.info("代理未启用，使用直连。")
+            return
+
+        proxy_payload = self._configured_proxy()
+        proxies_response = self.request({"@type": "getProxies"}, timeout=30)
+        existing = None
+        for entry in proxies_response.get("proxies", []):
+            configured = entry.get("proxy") or {}
+            configured_type = (configured.get("type") or {}).get("@type")
+            if (
+                configured.get("server") == proxy_payload["server"]
+                and int(configured.get("port", -1)) == proxy_payload["port"]
+                and configured_type == proxy_payload["type"]["@type"]
+            ):
+                existing = entry
+                break
+
+        if existing is not None and isinstance(existing.get("id"), int):
+            self.request({
+                "@type": "editProxy",
+                "proxy_id": existing["id"],
+                "proxy": proxy_payload,
+                "enable": True,
+            }, timeout=30)
+        else:
+            self.request({
+                "@type": "addProxy",
+                "proxy": proxy_payload,
+                "enable": True,
+            }, timeout=30)
+
+        labels = {"socks5": "SOCKS5", "http": "HTTP", "mtproto": "MTProto"}
+        self.ui.info(
+            f"代理已启用：{labels.get(cfg.PROXY_TYPE, cfg.PROXY_TYPE)} "
+            f"{cfg.PROXY_SERVER}:{cfg.PROXY_PORT}"
+        )
+
     def login(self):
         try:
             self.request({"@type": "getOption", "name": "version"}, timeout=30)
         except Exception:
             pass
 
+        proxy_configured = False
         while True:
             self._raise_if_cancelled()
             auth_deadline = time.monotonic() + 120
@@ -329,7 +407,16 @@ class TDJsonClient:
                     "system_version": "Windows",
                     "application_version": cfg.APP_VERSION,
                 })
-            elif state_type == "authorizationStateWaitPhoneNumber":
+                if not proxy_configured:
+                    self._configure_proxy()
+                    proxy_configured = True
+            elif not proxy_configured:
+                # Existing TDLib databases can resume at a later auth state,
+                # so configure the network path on the first state we see.
+                self._configure_proxy()
+                proxy_configured = True
+
+            if state_type == "authorizationStateWaitPhoneNumber":
                 phone = self._prompt(
                     "请输入 Telegram 手机号（国际格式，例如 +491234...）："
                 )

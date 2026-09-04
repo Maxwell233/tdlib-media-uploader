@@ -1,5 +1,5 @@
 # ============================================================
-# TDLib Media Uploader V1.7.2
+# TDLib Media Uploader V1.7.3
 #
 # 首次使用：
 #   1. 复制本文件为 config.toml
@@ -24,6 +24,26 @@ chat_id = -1001234567890
 
 # Forum Topic ID
 forum_topic_id = 12345
+
+
+[proxy]
+
+# 独立的 Telegram 网络代理设置。默认关闭，关闭时使用直连。
+# type 可选："socks5"、"http"、"mtproto"
+enabled = false
+type = "socks5"
+server = ""
+port = 1080
+
+# SOCKS5 / HTTP 可选认证；MTProto 不使用下面两个字段。
+username = ""
+password = ""
+
+# MTProto 代理的十六进制 secret；仅 type = "mtproto" 时填写。
+secret = ""
+
+# HTTP 代理只支持普通 HTTP 请求时设为 true；一般保持 false。
+http_only = false
 
 
 [paths]
