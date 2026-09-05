@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.8.3.
+"""PySide6 desktop interface for TDLib Media Uploader V1.8.4.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -12,16 +12,18 @@ import functools
 import importlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import sys
 import threading
+import tomllib
 from collections import defaultdict
 from pathlib import Path
 
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
 from path_utils import file_mtime, iter_files, stable_path
-from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot, Qt
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -62,7 +64,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
 TEMPLATE_CONFIG_PATH = PROJECT_DIR / "config.example.toml"
 HISTORY_PATH = PROJECT_DIR / ".gui_history.json"
-APP_VERSION = "1.8.3"
+APP_VERSION = "1.8.4"
 ICON_PATH = PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"
 
 
@@ -205,8 +207,17 @@ def _write_config_values(values: dict[tuple[str, str], object]) -> str:
         text = CONFIG_PATH.read_text(encoding="utf-8")
         for (section, key), value in values.items():
             text = _update_toml_value(text, section, key, value)
-        CONFIG_PATH.write_text(text, encoding="utf-8")
-        return _reload_config()
+        tomllib.loads(text)
+        previous = CONFIG_PATH.read_text(encoding="utf-8")
+        temp = CONFIG_PATH.with_suffix(".toml.tmp")
+        temp.write_text(text, encoding="utf-8")
+        os.replace(temp, CONFIG_PATH)
+        error = _reload_config()
+        if error:
+            temp.write_text(previous, encoding="utf-8")
+            os.replace(temp, CONFIG_PATH)
+            _reload_config()
+        return error
     except Exception as exc:
         return f"配置保存失败：{type(exc).__name__}: {exc}"
 
@@ -359,9 +370,15 @@ def _scan_result(kind: str) -> dict:
         items = paths
         missing = []
 
+    completion_cache = {}
     def completed(item) -> bool:
         path = item["path"] if isinstance(item, dict) else item
-        return bool(state is not None and state.is_completed(path))
+        key = str(path)
+        if key not in completion_cache:
+            completion_cache[key] = bool(state is not None and state.is_completed(path))
+        return completion_cache[key]
+
+    caption_store = CaptionStore(kind)
 
     groups = []
     if kind == "video":
@@ -374,10 +391,14 @@ def _scan_result(kind: str) -> dict:
             for item in items:
                 grouped[item["month_key"]].append(item)
         album_size = 10 if force_ten else int(_cfg("VIDEO_ALBUM_SIZE", 10))
+        core_plans = defaultdict(list)
+        if core is not None:
+            for plan in core.build_album_plans(items, state):
+                core_plans[plan["month_key"]].append(plan)
         for month in sorted(grouped):
             month_items = grouped[month]
             if core is not None:
-                plans = core.build_album_plans(month_items, state)
+                plans = core_plans[month]
             else:
                 plans = []
                 for offset in range(0, len(month_items), album_size):
@@ -389,7 +410,7 @@ def _scan_result(kind: str) -> dict:
                     )
                     key_group = f"{month}:{offset // album_size + 1}" if force_ten else month
                     key = album_key("video", key_group, album_items)
-                    record = CaptionStore("video").get(key, default_caption)
+                    record = caption_store.get(key, default_caption)
                     plans.append({
                         "key": key,
                         "month_key": month,
@@ -430,7 +451,7 @@ def _scan_result(kind: str) -> dict:
                 album_items = list(items[offset:offset + album_size])
                 number = offset // album_size + int(_cfg("IMAGE_ALBUM_NUMBER_START", 1))
                 key = album_key("image", f"Album {number}", album_items)
-                record = CaptionStore("image").get(key, str(number))
+                record = caption_store.get(key, str(number))
                 plans.append({
                     "key": key,
                     "number": number,
@@ -743,13 +764,12 @@ class HomePage(QWidget):
         task_layout.addStretch(1)
         layout.addWidget(task_box)
 
-        note = QGroupBox("V1.8.3 运行提示")
+        note = QGroupBox("V1.8.4 运行提示")
         note_layout = QVBoxLayout(note)
         note_body = QLabel(
-            "GUI 与上传核心共用 TDLib 登录数据和断点文件。一次只能运行一个图片或视频任务；"
-            "图片 Album 默认按组编号，视频 Album 保留日期标题；双击预览中的 Album 可编辑标题。"
-            "视频和图片页面分别使用各自的 Telegram 目标和媒体选项，未单独配置目标时继承公共目标。"
-            "频道模式不使用 Topic；点击“安全停止”会立即取消正在上传的文件，完整发送成功的 Album 会在下次自动跳过。"
+            "先配置 Telegram 信息，再选择目录并扫描。视频和图片可分别设置上传目标。\n"
+            "选中媒体组即可编辑标题；确认预览后开始上传。\n"
+            "一次只能运行一个任务。安全停止后重新扫描，已完成的媒体组会自动跳过。"
         )
         note_body.setWordWrap(True)
         note_layout.addWidget(note_body)
@@ -783,6 +803,7 @@ class UploadPage(QWidget):
         self.kind = kind
         self.result = None
         self._running = False
+        self._scanning = False
         accent = "视频" if kind == "video" else "图片"
 
         layout = QVBoxLayout(self)
@@ -795,15 +816,28 @@ class UploadPage(QWidget):
         source_box = QGroupBox("1 · 来源目录")
         source_layout = QHBoxLayout(source_box)
         self.source_edit = QLineEdit()
-        self.source_edit.setReadOnly(True)
+        self.source_edit.setPlaceholderText("输入或粘贴目录，按 Enter 保存；也可点击选择目录")
+        self.source_edit.editingFinished.connect(self._commit_source)
         browse = QPushButton("选择目录")
         browse.clicked.connect(self._browse)
         source_layout.addWidget(self.source_edit, 1)
         source_layout.addWidget(browse)
         layout.addWidget(source_box)
 
-        preview_box = QGroupBox("2 · 扫描与 Album 预览")
+        preview_box = QGroupBox("2 · 文件与媒体组预览")
         preview_layout = QVBoxLayout(preview_box)
+        filters = QHBoxLayout()
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("搜索文件名、路径或标题（仅筛选显示）")
+        self.search_edit.setClearButtonEnabled(True)
+        self.pending_only = QCheckBox("只看待上传")
+        self.edit_caption_button = QPushButton("编辑标题")
+        self.edit_caption_button.setEnabled(False)
+        self.edit_caption_button.clicked.connect(lambda: self._edit_album(self.tree.currentItem()))
+        filters.addWidget(self.search_edit, 1)
+        filters.addWidget(self.pending_only)
+        filters.addWidget(self.edit_caption_button)
+        preview_layout.addLayout(filters)
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["状态", "日期 / 分组", "大小", "文件"])
         self.tree.header().setStretchLastSection(True)
@@ -813,6 +847,13 @@ class UploadPage(QWidget):
         # scroll area to reveal the target/actions on short windows.
         self.tree.setMinimumHeight(220)
         self.tree.itemDoubleClicked.connect(self._edit_album)
+        self.tree.itemSelectionChanged.connect(self._update_edit_button)
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(180)
+        self.search_timer.timeout.connect(self._filter_preview)
+        self.search_edit.textChanged.connect(lambda: self.search_timer.start())
+        self.pending_only.toggled.connect(self._filter_preview)
         preview_layout.addWidget(self.tree)
         self.summary_label = QLabel("尚未扫描")
         self.summary_label.setObjectName("mutedLabel")
@@ -871,10 +912,19 @@ class UploadPage(QWidget):
             self.source_edit.setText(path)
             self.path_selected.emit(self.kind, path)
 
+    def _commit_source(self):
+        path = self.source_edit.text().strip()
+        saved = str(_cfg("VIDEO_DIR" if self.kind == "video" else "IMAGE_DIR", ""))
+        if path != saved:
+            self.path_selected.emit(self.kind, path)
+
     def set_scanning(self, active: bool):
+        self._scanning = active
         self.scan_button.setEnabled(not active and not self._running)
         if active:
+            self.clear_scan_result()
             self.status_label.setText("正在扫描…")
+        self._update_edit_button()
 
     def set_result(self, result: dict):
         self.result = result
@@ -884,11 +934,12 @@ class UploadPage(QWidget):
             label = (
                 f"{group['label']} · {len(group['items'])} 个 · "
                 f"已完成 {group['completed']} · 待上传 {group['pending']} · "
-                f"{group['albums']} 个 Album"
+                f"{group['albums']} 组待上传"
             )
             top = QTreeWidgetItem(["分组", group["label"], "", label])
-            top.setExpanded(True)
-            self.tree.addTopLevelItem(top)
+            if self.kind == "video":
+                self.tree.addTopLevelItem(top)
+                top.setExpanded(True)
             plans = group.get("album_plans") or [{
                 "key": "",
                 "number": 1,
@@ -911,13 +962,17 @@ class UploadPage(QWidget):
                     )),
                 )
                 album_row = QTreeWidgetItem([
-                    "Album" if pending_count else "已完成",
-                    f"Album {plan.get('number', 1)} · {caption_text or '无 Caption'}",
+                    "待上传" if pending_count else "已完成",
+                    self._album_title(plan),
                     _fmt_size(sum(_item_size(item) for item in album_items)),
                     f"{len(album_items)} 个文件 · 已完成 {completed_count} · 待上传 {pending_count}",
                 ])
                 album_row.setData(0, Qt.ItemDataRole.UserRole, plan)
-                top.addChild(album_row)
+                album_row.setToolTip(1, caption_text or "无标题")
+                if self.kind == "image":
+                    self.tree.addTopLevelItem(album_row)
+                else:
+                    top.addChild(album_row)
                 for item in album_items:
                     path = item["path"] if isinstance(item, dict) else item
                     completed = stable_path(path) in completed_paths
@@ -929,15 +984,21 @@ class UploadPage(QWidget):
                         str(path),
                     ])
                     album_row.addChild(row)
+                    row.setToolTip(3, str(path))
+        for column, width in enumerate((140, 250, 100)):
+            self.tree.setColumnWidth(column, width)
+        self._filter_preview()
         self.summary_label.setText(
             f"共 {result['total_files']} 个 · {_fmt_size(result['total_bytes'])} · "
             f"已完成 {result['completed_files']} · 待上传 {result['pending_files']} · "
-            f"{result['album_count']} 个 Album"
+            f"{result['album_count']} 组待上传"
         )
         if result.get("missing"):
             self.summary_label.setText(self.summary_label.text() + f" · 缺失日期 {len(result['missing'])}")
         if result.get("warning"):
             self.status_label.setText(result["warning"])
+        elif result["total_files"] == 0:
+            self.status_label.setText("目录中没有支持的媒体文件，请检查目录或文件格式")
         elif result["pending_files"] == 0:
             self.status_label.setText("全部项目已在断点记录中")
         elif not result["core_available"]:
@@ -947,51 +1008,102 @@ class UploadPage(QWidget):
         self.start_button.setEnabled(bool(result["pending_files"] and result["core_available"] and not self._running))
 
     def _edit_album(self, item, _column=0):
+        if item is None or self._running or self._scanning:
+            return
         plan = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(plan, dict) and item.parent() is not None:
+            item = item.parent()
+            plan = item.data(0, Qt.ItemDataRole.UserRole)
         if not isinstance(plan, dict) or not plan.get("key"):
             return
         current = plan.get("caption") or {}
         base_label = str(current.get("base_label", ""))
         custom_text = str(current.get("custom_text", ""))
-        if self.kind == "video":
-            base_label, accepted = QInputDialog.getText(
-                self,
-                "编辑视频 Album 标题",
-                "基础标题（例如 25-1）：",
-                QLineEdit.EchoMode.Normal,
-                base_label,
-            )
-            if not accepted:
-                return
-        custom_text, accepted = QInputDialog.getText(
-            self,
-            "编辑 Album 自定义文本",
-            "追加文本（留空表示不追加）：",
-            QLineEdit.EchoMode.Normal,
-            custom_text,
-        )
-        if not accepted:
-            return
-        store = CaptionStore(self.kind)
-        store.set(plan["key"], base_label=base_label, custom_text=custom_text)
         separator = str(_cfg("VIDEO_ALBUM_CAPTION_SEPARATOR" if self.kind == "video" else "IMAGE_ALBUM_CAPTION_SEPARATOR", " · "))
+        dialog = QDialog(self)
+        dialog.setWindowTitle("编辑媒体组标题")
+        dialog.resize(560, 350)
+        form = QFormLayout(dialog)
+        base_edit = QLineEdit(base_label)
+        base_edit.setReadOnly(self.kind == "image")
+        custom_edit = QPlainTextEdit(custom_text)
+        custom_edit.setPlaceholderText("可输入多行；留空表示不追加")
+        preview = QPlainTextEdit()
+        preview.setReadOnly(True)
+        include_base = self.kind == "video" or _cfg("IMAGE_ALBUM_NUMBERING", True)
+        def update_preview():
+            caption = compose_caption(base_edit.text() if include_base else "", custom_edit.toPlainText(), separator)
+            preview.setPlainText(with_filename_description(caption, plan.get("items", []), bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAMES" if self.kind == "video" else "IMAGE_CAPTION_INCLUDE_FILENAMES", False))))
+        base_edit.textChanged.connect(update_preview)
+        custom_edit.textChanged.connect(update_preview)
+        update_preview()
+        form.addRow("基础标题" if self.kind == "video" else "媒体组编号", base_edit)
+        form.addRow("追加文字", custom_edit)
+        form.addRow("标题预览", preview)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        base_label = base_edit.text().strip()
+        custom_text = custom_edit.toPlainText().strip()
+        store = CaptionStore(self.kind)
+        if self.kind == "video" and not base_label:
+            QMessageBox.warning(self, "未保存", "请填写基础标题。")
+            return
+        try:
+            store.set(plan["key"], base_label=base_label, custom_text=custom_text)
+        except OSError as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
         plan["caption"] = {
             "base_label": base_label,
             "custom_text": custom_text,
             "text": compose_caption(base_label if (self.kind == "video" or _cfg("IMAGE_ALBUM_NUMBERING", True)) else "", custom_text, separator),
         }
-        self.set_result(self.result)
-        self.status_label.setText("Album 标题已保存")
+        item.setText(1, self._album_title(plan))
+        item.setToolTip(1, preview.toPlainText())
+        self._filter_preview()
+        self.status_label.setText("标题已保存")
+
+    def _album_title(self, plan):
+        text = " ".join(plan.get("caption", {}).get("text", "").split())
+        label = f"媒体组 {plan.get('number', 1)}"
+        return label if text in {"", str(plan.get("number", 1)), f"Album {plan.get('number', 1)}"} else f"{label} · {text[:100]}"
+
+    def _update_edit_button(self):
+        item = self.tree.currentItem()
+        if item is not None and not isinstance(item.data(0, Qt.ItemDataRole.UserRole), dict):
+            item = item.parent()
+        self.edit_caption_button.setEnabled(bool(item is not None and isinstance(item.data(0, Qt.ItemDataRole.UserRole), dict) and not self._running and not self._scanning))
+
+    def _filter_preview(self):
+        query = self.search_edit.text().strip().casefold()
+        def visit(row, inherited=False):
+            matches = inherited or not query or query in " ".join(row.text(c) for c in range(4)).casefold() or query in row.toolTip(1).casefold()
+            visible = False
+            for index in range(row.childCount()):
+                visible = visit(row.child(index), matches) or visible
+            if not row.childCount():
+                visible = matches and (not self.pending_only.isChecked() or row.text(0) != "已完成")
+            row.setHidden(not visible)
+            if query and visible:
+                row.setExpanded(True)
+            return visible
+        for index in range(self.tree.topLevelItemCount()):
+            visit(self.tree.topLevelItem(index))
 
     def clear_scan_result(self):
         self.result = None
         self.tree.clear()
-        self.summary_label.setText("缓存已清理，请重新扫描目录")
+        self.summary_label.setText("请扫描目录，生成最新上传预览")
         self.status_label.setText("等待重新扫描")
         self.start_button.setEnabled(False)
 
     def set_running(self, active: bool):
         self._running = active
+        self._update_edit_button()
         self.scan_button.setEnabled(not active)
         self.start_button.setEnabled(not active and bool(self.result and self.result.get("pending_files") and self.result.get("core_available")))
         if active:
@@ -1264,7 +1376,7 @@ class TargetDialog(QDialog):
         super().__init__(parent)
         self.kind = kind if kind in {"video", "image"} else "video"
         accent = "视频" if self.kind == "video" else "图片"
-        self.setWindowTitle(f"编辑{accent}上传目标与配置 · V1.8.3")
+        self.setWindowTitle(f"编辑{accent}上传目标与配置 · V1.8.4")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -1308,8 +1420,9 @@ class TargetDialog(QDialog):
     def _build_media_fields(self):
         if self.kind == "video":
             self.video_missing_date = QComboBox()
-            self.video_missing_date.addItems(["mtime", "error"])
-            self.video_missing_date.setCurrentText(_cfg("VIDEO_MISSING_DATE_POLICY", "mtime"))
+            self.video_missing_date.addItem("使用文件修改时间", "mtime")
+            self.video_missing_date.addItem("停止并提示缺失日期", "error")
+            self.video_missing_date.setCurrentIndex(max(0, self.video_missing_date.findData(_cfg("VIDEO_MISSING_DATE_POLICY", "mtime"))))
             self.media_form.addRow("日期缺失策略", self.video_missing_date)
 
             self.video_album = QSpinBox()
@@ -1345,8 +1458,9 @@ class TargetDialog(QDialog):
             self.media_form.addRow("视频处理", self.thumbnail)
         else:
             self.image_sort = QComboBox()
-            self.image_sort.addItems(["mtime", "path"])
-            self.image_sort.setCurrentText(_cfg("IMAGE_SORT_MODE", "mtime"))
+            self.image_sort.addItem("文件修改时间", "mtime")
+            self.image_sort.addItem("完整路径", "path")
+            self.image_sort.setCurrentIndex(max(0, self.image_sort.findData(_cfg("IMAGE_SORT_MODE", "mtime"))))
             self.media_form.addRow("图片排序", self.image_sort)
 
             self.image_album = QSpinBox()
@@ -1416,7 +1530,7 @@ class TargetDialog(QDialog):
         }
         if self.kind == "video":
             values.update({
-                ("video", "missing_date_policy"): self.video_missing_date.currentText(),
+                ("video", "missing_date_policy"): self.video_missing_date.currentData(),
                 ("video", "album_size"): self.video_album.value(),
                 ("video", "force_ten_per_album"): self.video_force_ten.isChecked(),
                 ("video", "album_caption_separator"): self.video_separator.text(),
@@ -1425,7 +1539,7 @@ class TargetDialog(QDialog):
             })
         else:
             values.update({
-                ("image", "sort_mode"): self.image_sort.currentText(),
+                ("image", "sort_mode"): self.image_sort.currentData(),
                 ("image", "album_size"): self.image_album.value(),
                 ("image", "album_numbering"): self.image_numbering.isChecked(),
                 ("image", "album_caption_separator"): self.image_separator.text(),
@@ -1441,7 +1555,7 @@ class TargetDialog(QDialog):
 class ConfigDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑配置 · V1.8.3")
+        self.setWindowTitle("编辑配置 · V1.8.4")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -1552,14 +1666,16 @@ class ConfigDialog(QDialog):
                 widget.setEnabled(enabled)
 
     def _save(self):
-        def integer(name: str, fallback: int) -> int:
-            try:
-                return int(self.fields[name].text().strip())
-            except ValueError:
-                return fallback
+        try:
+            api_id = int(self.fields["api_id"].text().strip())
+            if api_id <= 0:
+                raise ValueError
+        except ValueError:
+            QMessageBox.warning(self, "无法保存", "API ID 必须是正整数。")
+            return
 
         values = {
-            ("telegram", "api_id"): integer("api_id", 12345678),
+            ("telegram", "api_id"): api_id,
             ("telegram", "api_hash"): self.fields["api_hash"].text().strip(),
             ("paths", "video_dir"): self.fields["video_dir"].text().strip(),
             ("paths", "image_dir"): self.fields["image_dir"].text().strip(),
@@ -1761,25 +1877,30 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
 
     def _save_source_path(self, kind: str, path: str):
-        section_key = ("paths", "video_dir" if kind == "video" else "image_dir")
-        answer = QMessageBox.question(
-            self,
-            "保存目录",
-            f"是否将此目录保存为默认{('视频' if kind == 'video' else '图片')}目录？\n\n{path}",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
+        if not self._can_change_configuration():
             (self.video_page if kind == "video" else self.image_page).refresh_config()
+            return
+        path = path.strip().strip('"')
+        if not path or not Path(path).is_dir():
+            (self.video_page if kind == "video" else self.image_page).refresh_config()
+            QMessageBox.warning(self, "目录不可用", "请输入可访问的目录路径。")
+            return
+        section_key = ("paths", "video_dir" if kind == "video" else "image_dir")
+        if path == str(_cfg("VIDEO_DIR" if kind == "video" else "IMAGE_DIR", "")):
             return
         error = _write_config_values({section_key: path})
         if error:
             QMessageBox.critical(self, "保存失败", error)
             (self.video_page if kind == "video" else self.image_page).refresh_config()
         else:
+            self._invalidate_previews()
             self._refresh_pages()
             self.statusBar().showMessage("目录配置已保存")
 
     def _start_upload(self, kind: str):
+        if any(scanner.isRunning() for scanner in self.scanners.values()):
+            QMessageBox.information(self, "正在扫描", "请等待目录扫描完成后再上传。")
+            return
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.warning(self, "任务运行中", "图片和视频任务不能同时运行。")
             return
@@ -1799,7 +1920,11 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "确认开始上传",
-            f"待上传 {result['pending_files']} 个文件，约 {_fmt_size(result['pending_bytes'])}，共 {result['album_count']} 个 Album。\n\n确认开始？",
+            f"待上传 {result['pending_files']} 个文件，约 {_fmt_size(result['pending_bytes'])}，共 {result['album_count']} 组。\n"
+            f"来源：{result.get('source_dir', '')}\n"
+            f"目标 Chat ID：{_target_for(kind).get('chat_id', 0)}\n"
+            + (f"话题 ID：{_target_for(kind).get('forum_topic_id', 0)}\n" if _target_for(kind).get('target_mode') != 'channel' else "目标类型：频道\n")
+            + "\n确认开始？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
@@ -1818,7 +1943,8 @@ class MainWindow(QMainWindow):
         worker.ui.target_changed.connect(self._target_from_worker)
         worker.completed.connect(self._upload_finished)
         worker.finished.connect(lambda w=worker: self._worker_thread_finished(w))
-        page.set_running(True)
+        self.video_page.set_running(True)
+        self.image_page.set_running(True)
         self.home.task_value.setText(f"{'视频' if kind == 'video' else '图片'}上传中")
         self.home.set_connection("上传中", True)
         self.statusBar().showMessage("上传任务已启动")
@@ -1874,7 +2000,9 @@ class MainWindow(QMainWindow):
 
         self.task_page.finish_session(success, message)
         page = self.video_page if self.active_kind == "video" else self.image_page
-        page.set_running(False)
+        self.video_page.set_running(False)
+        self.image_page.set_running(False)
+        page.clear_scan_result()
         self.home.task_value.setText("无")
         self.home.set_connection("已连接" if success else "未连接", success)
         self.statusBar().showMessage(message)
@@ -1943,8 +2071,11 @@ class MainWindow(QMainWindow):
             self._finish_cache_clear(("thumb_cache",), reset_scan=False)
 
     def _edit_target(self, kind: str = "video"):
+        if not self._can_change_configuration():
+            return
         dialog = TargetDialog(kind, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._invalidate_previews()
             self._refresh_pages()
             saved_kind = dialog.kind
             self.statusBar().showMessage(
@@ -1952,10 +2083,24 @@ class MainWindow(QMainWindow):
             )
 
     def _edit_config(self):
+        if not self._can_change_configuration():
+            return
         dialog = ConfigDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._invalidate_previews()
             self._refresh_pages()
             self.statusBar().showMessage("配置已保存")
+
+    def _can_change_configuration(self):
+        if (self.worker is not None and self.worker.isRunning()) or any(scanner.isRunning() for scanner in self.scanners.values()):
+            QMessageBox.information(self, "任务进行中", "请等待扫描完成或停止上传后再修改配置。")
+            return False
+        return True
+
+    def _invalidate_previews(self):
+        self.video_page.clear_scan_result()
+        self.image_page.clear_scan_result()
+        self.home.clear_scan()
 
     @Slot(str, bool)
     def _show_auth_dialog(self, prompt: str, password: bool):

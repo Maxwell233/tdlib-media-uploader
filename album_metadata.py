@@ -90,6 +90,7 @@ class CaptionStore:
         self.kind = kind
         self.path = path_for(kind)
         self._lock = threading.Lock()
+        self._snapshot = None
 
     def _load(self) -> dict:
         if not self.path.exists():
@@ -101,7 +102,10 @@ class CaptionStore:
             return {}
 
     def get(self, key: str, default_label: str) -> dict:
-        record = self._load().get(key, {})
+        # A store belongs to one plan/scan. Parse once, not once per Album.
+        if self._snapshot is None:
+            self._snapshot = self._load()
+        record = self._snapshot.get(key, {})
         if not isinstance(record, dict):
             record = {}
         return {
@@ -120,6 +124,7 @@ class CaptionStore:
             temp = self.path.with_suffix(self.path.suffix + ".tmp")
             temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(temp, self.path)
+            self._snapshot = data
 
 
 def make_plan(kind: str, group_label: str, items: list, album_size: int, state=None) -> list[dict]:

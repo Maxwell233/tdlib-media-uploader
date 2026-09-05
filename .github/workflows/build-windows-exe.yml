@@ -34,6 +34,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --no-cache-dir --upgrade --force-reinstall --no-binary imageio-ffmpeg -r requirements-build.txt
 
+      - name: Run offline regression tests
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests -v
+
       - name: Build one-folder EXE
         shell: pwsh
         run: .\build_exe.ps1 -SkipInstall -Clean -PythonPath "python"

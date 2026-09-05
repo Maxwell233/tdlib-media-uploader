@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ntpath
 import os
+import stat
 from pathlib import Path
 
 
@@ -83,7 +84,8 @@ def iter_files(root, extensions):
                 if path.suffix.lower() not in accepted:
                     continue
                 try:
-                    if path.is_file() and path.stat().st_size > 0:
+                    info = path.stat()
+                    if stat.S_ISREG(info.st_mode) and info.st_size > 0:
                         paths.append(path)
                 except OSError as error:
                     errors.append(f"{path}: {error}")
