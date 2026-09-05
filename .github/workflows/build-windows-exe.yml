@@ -104,6 +104,7 @@ jobs:
             "- Adds optional numbered filename descriptions to each Album caption; disabled by default."
             "- Includes the CC BY-NC 4.0 license and Maximum attribution."
             "- Adds an optional strict video mode that ignores dates and groups videos in batches of ten; disabled by default."
+            "- Caches repeated file-size lookups during GUI scans to reduce blocking stat calls on large or SMB-backed directories."
             "- Handles Windows UNC/SMB paths without resolving the share for scan identities and skips temporarily unavailable entries with a warning."
             "- Includes THIRD_PARTY_LICENSES.md with upstream license and redistribution notes."
             "- `config.toml` and Telegram login data are not included."

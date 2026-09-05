@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.8.2.
+"""PySide6 desktop interface for TDLib Media Uploader V1.8.3.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -8,6 +8,7 @@ truth for scanning, Album creation, TDLib requests and resumable state.
 from __future__ import annotations
 
 import datetime as _dt
+import functools
 import importlib
 import importlib.util
 import json
@@ -61,7 +62,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.toml"
 TEMPLATE_CONFIG_PATH = PROJECT_DIR / "config.example.toml"
 HISTORY_PATH = PROJECT_DIR / ".gui_history.json"
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.8.3"
 ICON_PATH = PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"
 
 
@@ -154,8 +155,6 @@ def _basic_paths(kind: str) -> list[Path]:
         paths.sort(key=lambda item: str(item).lower())
     return paths
 
-
-import functools
 
 @functools.lru_cache(maxsize=32768)
 def _path_size(path_str: str) -> int:
@@ -744,7 +743,7 @@ class HomePage(QWidget):
         task_layout.addStretch(1)
         layout.addWidget(task_box)
 
-        note = QGroupBox("V1.8.2 运行提示")
+        note = QGroupBox("V1.8.3 运行提示")
         note_layout = QVBoxLayout(note)
         note_body = QLabel(
             "GUI 与上传核心共用 TDLib 登录数据和断点文件。一次只能运行一个图片或视频任务；"
@@ -1265,7 +1264,7 @@ class TargetDialog(QDialog):
         super().__init__(parent)
         self.kind = kind if kind in {"video", "image"} else "video"
         accent = "视频" if self.kind == "video" else "图片"
-        self.setWindowTitle(f"编辑{accent}上传目标与配置 · V1.8.2")
+        self.setWindowTitle(f"编辑{accent}上传目标与配置 · V1.8.3")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -1442,7 +1441,7 @@ class TargetDialog(QDialog):
 class ConfigDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑配置 · V1.8.2")
+        self.setWindowTitle("编辑配置 · V1.8.3")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()

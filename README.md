@@ -1,8 +1,8 @@
 # TDLib Media Uploader
 
-**V1.8.2 · Windows**
+**V1.8.3 · Windows**
 
-一个用于向 **Telegram 超级群 / Forum Topic 或 Channel** 批量上传图片和视频的 Windows GUI 工具。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点和缩略图；V1.8.2 仅保留 PySide6 桌面 GUI，并继续提供缓存清理、任务管理和独立代理设置。
+一个用于向 **Telegram 超级群 / Forum Topic 或 Channel** 批量上传图片和视频的 Windows GUI 工具。上传核心使用 [`tdjson`](https://pypi.org/project/tdjson/) 调用 TDLib 原生 C++ 网络栈，Python 负责文件扫描、分组、断点和缩略图；V1.8.3 仅保留 PySide6 桌面 GUI，并继续提供缓存清理、任务管理和独立代理设置。
 
 ## 功能
 
@@ -37,7 +37,7 @@
 
 ### 推荐：直接下载 Release ZIP（普通使用）
 
-Windows 用户建议直接使用已经编译好的稳定版：[TDLib Media Uploader v1.8.2 Release](https://github.com/Maxwell233/tdlib-media-uploader/releases/tag/v1.8.2)，或直接下载 [Windows x64 ZIP](https://github.com/Maxwell233/tdlib-media-uploader/releases/download/v1.8.2/TDLib.Media.Uploader-v1.8.2-windows-x64.zip)。解压后即可使用。
+Windows 用户建议直接使用已经编译好的稳定版：[TDLib Media Uploader v1.8.3 Release](https://github.com/Maxwell233/tdlib-media-uploader/releases/tag/v1.8.3)，或直接下载 [Windows x64 ZIP](https://github.com/Maxwell233/tdlib-media-uploader/releases/download/v1.8.3/TDLib.Media.Uploader-v1.8.3-windows-x64.zip)。解压后即可使用。
 
 1. 解压整个 ZIP 文件夹，不要只复制或移动其中的 EXE；
 2. 双击 `TDLib Media Uploader.exe`；
@@ -164,7 +164,7 @@ run.cmd
 
 `run.cmd` / `run.ps1` 会直接启动 GUI。GUI 与上传核心使用相同的 `config.toml`、TDLib 登录数据和断点文件。GUI 中的“安全停止”会立即取消正在上传的文件，不会删除断点；重新扫描后，完整发送成功的 Album 会自动跳过。
 
-## V1.8.2 GUI
+## V1.8.3 GUI
 
 GUI 使用 PySide6 构建，包含：
 
@@ -196,7 +196,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ```text
 dist\TDLib Media Uploader\TDLib Media Uploader.exe
-dist\TDLib Media Uploader-v1.8.2-windows-x64.zip
+dist\TDLib Media Uploader-v1.8.3-windows-x64.zip
 ```
 
 本地构建会使用独立的 `.build_venv`，不会修改日常运行的 `.venv`。构建脚本会自动下载固定的 BtbN Windows x64 LGPL FFmpeg，校验 SHA-256 和 `-version` 构建标志，再交给 PyInstaller；发现 `--enable-gpl` 或 `--enable-nonfree` 时会停止发布，避免把 GPL/nonfree FFmpeg 混入便携包。源码运行时，安装脚本只安装 imageio-ffmpeg 的 Python wrapper；若不使用 Release 便携包，请自行提供 LGPL `ffmpeg.exe`（放入 `tools\ffmpeg\ffmpeg.exe` 或加入 PATH）。EXE 构建不需要上传 `config.toml`，也不会包含 `.video_state`、`.image_state`、`.thumb_cache` 或 `tdlib_data`。
