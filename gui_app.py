@@ -155,12 +155,18 @@ def _basic_paths(kind: str) -> list[Path]:
     return paths
 
 
-def _item_size(item) -> int:
-    path = item["path"] if isinstance(item, dict) else item
+import functools
+
+@functools.lru_cache(maxsize=32768)
+def _path_size(path_str: str) -> int:
     try:
-        return path.stat().st_size
+        return Path(path_str).stat().st_size
     except OSError:
         return 0
+
+def _item_size(item) -> int:
+    path = item["path"] if isinstance(item, dict) else item
+    return _path_size(str(path))
 
 
 def _update_toml_value(text: str, section: str, key: str, value) -> str:
@@ -300,6 +306,7 @@ def _clear_cache(keys: tuple[str, ...]) -> tuple[list[str], list[str]]:
 
 def _scan_result(kind: str) -> dict:
     """Scan using the existing core when available, with a preview fallback."""
+    _path_size.cache_clear()
     if cfg is None:
         raise RuntimeError(_CONFIG_ERROR or "配置不可用。")
     activate = getattr(cfg, "activate_target", None)
