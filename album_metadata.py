@@ -16,9 +16,10 @@ import threading
 from pathlib import Path
 
 from path_utils import stable_path
+from runtime_paths import APP_DATA_DIR
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = APP_DATA_DIR
 
 
 def path_for(kind: str) -> Path:

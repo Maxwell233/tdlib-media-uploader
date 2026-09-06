@@ -1,9 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-"""PyInstaller one-folder build for the Windows PySide6 application."""
+"""PyInstaller one-folder build for the Windows and macOS PySide6 application."""
 
+import os
+import sys
 from pathlib import Path
 
+from PyInstaller.building.api import COLLECT, EXE
+from PyInstaller.building.osx import BUNDLE
 from PyInstaller.utils.hooks import collect_all
 
 
@@ -30,28 +34,42 @@ def is_embedded_ffmpeg(item) -> bool:
 
     for value in item[:2]:
         path = Path(str(value))
-        if path.suffix.lower() == ".exe" and "ffmpeg" in path.name.lower():
+        parts = {part.lower() for part in path.parts}
+        if "ffmpeg" in path.name.lower() and (
+            path.suffix.lower() == ".exe"
+            or "binaries" in parts
+            or "imageio_ffmpeg" in parts
+        ):
             return True
     return False
 
 
-datas = [
-    (str(PROJECT_DIR / "config.example.toml"), "."),
-    (str(PROJECT_DIR / "VERSION"), "."),
-    (str(PROJECT_DIR / "LICENSE"), "."),
-    (str(PROJECT_DIR / "ATTRIBUTION"), "."),
-    (str(PROJECT_DIR / "THIRD_PARTY_LICENSES.md"), "."),
-    (str(PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"), "assets"),
-    (str(PROJECT_DIR / "tools" / "README.txt"), "tools"),
-]
+datas = []
+for source, destination in [
+    (PROJECT_DIR / "config.example.toml", "."),
+    (PROJECT_DIR / "VERSION", "."),
+    (PROJECT_DIR / "LICENSE", "."),
+    (PROJECT_DIR / "ATTRIBUTION", "."),
+    (PROJECT_DIR / "THIRD_PARTY_LICENSES.md", "."),
+    (PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico", "assets"),
+    (PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.png", "assets"),
+    (PROJECT_DIR / "tools" / "README.txt", "tools"),
+]:
+    if source.is_file():
+        datas.append((str(source), destination))
 binaries = []
 
-packaged_ffmpeg = PROJECT_DIR / "tools" / "ffmpeg" / "ffmpeg.exe"
+packaged_ffmpeg = PROJECT_DIR / "tools" / "ffmpeg" / (
+    "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+)
 packaged_ffmpeg_license = PROJECT_DIR / "tools" / "ffmpeg" / "LICENSE.txt"
 if packaged_ffmpeg.is_file():
     binaries.append((str(packaged_ffmpeg), "tools/ffmpeg"))
 if packaged_ffmpeg_license.is_file():
     datas.append((str(packaged_ffmpeg_license), "tools/ffmpeg"))
+ffmpeg_build_info = PROJECT_DIR / "tools" / "ffmpeg" / "BUILD_INFO.txt"
+if ffmpeg_build_info.is_file():
+    datas.append((str(ffmpeg_build_info), "tools/ffmpeg"))
 
 hiddenimports = [
     "app_config",
@@ -88,27 +106,60 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name="TDLib Media Uploader",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=False,
-    disable_windowed_traceback=False,
-    icon=str(PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"),
-)
+is_macos = sys.platform == "darwin"
+if is_macos:
+    mac_icon = Path(os.environ.get("TDLIB_MACOS_ICON_PATH", ""))
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="TDLib Media Uploader",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=False,
+        disable_windowed_traceback=False,
+        icon=str(mac_icon) if mac_icon.is_file() else None,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        a.zipfiles,
+        strip=False,
+        upx=False,
+        name="TDLib Media Uploader",
+    )
+    app = BUNDLE(
+        coll,
+        name="TDLib Media Uploader.app",
+        icon=str(mac_icon) if mac_icon.is_file() else None,
+        bundle_identifier="com.maxwell233.tdlib-media-uploader",
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="TDLib Media Uploader",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=False,
+        disable_windowed_traceback=False,
+        icon=str(PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"),
+    )
 
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    a.zipfiles,
-    strip=False,
-    upx=False,
-    name="TDLib Media Uploader",
-)
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        a.zipfiles,
+        strip=False,
+        upx=False,
+        name="TDLib Media Uploader",
+    )

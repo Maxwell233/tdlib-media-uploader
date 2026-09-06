@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""TDLib Media Uploader V1.8.4 视频上传流程。
+"""TDLib Media Uploader V1.8.5 视频上传流程。
 
 核心上传/断点/缩略图逻辑复用 tdlib_video_album_uploader.py；
 本文件负责视频扫描、mtime 日期策略和 GUI 使用的上传流程。
@@ -24,7 +24,7 @@ def read_metadata():
         if cfg.VIDEO_MISSING_DATE_POLICY == "mtime":
             UI.warning(
                 f"未找到 ExifTool：{cfg.EXIFTOOL_PATH}。"
-                " 本次全部使用 Windows 修改时间（mtime）。"
+                " 本次全部使用文件修改时间（mtime）。"
             )
             return {}, False
         raise RuntimeError(
@@ -183,7 +183,7 @@ def show_upload_summary(
     date_mode = (
         "EXIF/QuickTime 优先；缺失时 mtime"
         if exiftool_used
-        else "Windows 修改时间（mtime）"
+        else "文件修改时间（mtime）"
     )
 
     UI.summary(

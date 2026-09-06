@@ -23,10 +23,11 @@ from album_metadata import CaptionStore, album_key, compose_caption, with_filena
 from path_utils import display_path, file_mtime, iter_files, relative_name as stable_relative_name, stable_path
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
+from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
 
-PROJECT_DIR = Path(__file__).resolve().parent
-STATE_DIR = PROJECT_DIR / ".state"
-THUMB_CACHE_DIR = PROJECT_DIR / ".thumb_cache"
+PROJECT_DIR = RESOURCE_DIR
+STATE_DIR = APP_DATA_DIR / ".state"
+THUMB_CACHE_DIR = APP_DATA_DIR / ".thumb_cache"
 LAST_SCAN_ERRORS: list[str] = []
 
 
@@ -99,6 +100,8 @@ def _find_ffmpeg_override() -> str | None:
         PROJECT_DIR / "tools" / "ffmpeg" / names[0],
         PROJECT_DIR / "tools" / names[0],
         PROJECT_DIR / names[0],
+        APP_DATA_DIR / "tools" / "ffmpeg" / names[0],
+        APP_DATA_DIR / "tools" / names[0],
     ]
     for candidate in candidates:
         if candidate.is_file():
@@ -197,7 +200,7 @@ def read_exif_metadata() -> dict[str, dict]:
     if not cfg.EXIFTOOL_PATH.exists():
         raise RuntimeError(
             f"找不到 ExifTool：{cfg.EXIFTOOL_PATH}\n"
-            "请把 exiftool.exe 放入 tools 目录。"
+            "请把对应平台的 ExifTool 可执行文件放入 tools 目录，或在设置中指定路径。"
         )
     command = [
         str(cfg.EXIFTOOL_PATH), "-j", "-r", "-a", "-G1", "-s",

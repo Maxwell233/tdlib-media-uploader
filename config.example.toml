@@ -1,15 +1,13 @@
 # ============================================================
-# TDLib Media Uploader V1.8.4
+# TDLib Media Uploader V1.8.5
 #
 # 首次使用：
 #   1. 复制本文件为 config.toml
 #   2. 填写 Telegram API、目标群/Topic 或频道和本地目录
 #
-# setup.ps1 / run.ps1 在发现 config.toml 不存在时也会自动创建。
+# 各平台 setup / run 脚本在发现 config.toml 不存在时也会自动创建。
 #
-# Windows 路径建议使用单引号：
-# video_dir = 'F:\Videos'
-# 这样反斜杠不需要写成 \\。
+# 路径支持绝对路径和 ~；Windows 也可以使用单引号保存反斜杠。
 # ============================================================
 
 
@@ -71,13 +69,14 @@ http_only = false
 [paths]
 
 # 会递归扫描所有子文件夹
-video_dir = 'F:\Videos'
-image_dir = 'F:\Images'
+video_dir = '~/Movies/TDLib Media Uploader/Videos'
+image_dir = '~/Pictures/TDLib Media Uploader/Images'
 
 # 可选：ExifTool 路径
-# 如果 tools\exiftool.exe 不存在，且 missing_date_policy = "mtime"，
-# 视频脚本会直接使用 Windows 修改时间，不会报错。
-exiftool_path = 'tools\exiftool.exe'
+# Windows 使用 tools/exiftool.exe，macOS/Linux 使用 tools/exiftool。
+# 如果 ExifTool 不存在，且 missing_date_policy = "mtime"，
+# 视频脚本会直接使用文件修改时间，不会报错。
+exiftool_path = 'tools/exiftool'
 
 
 [video]
@@ -87,8 +86,8 @@ exiftool_path = 'tools\exiftool.exe'
 extensions = [".mp4", ".mov", ".m4v"]
 
 # 默认 mtime：
-# - 安装 ExifTool 时：优先 EXIF/QuickTime 内部时间，缺失时用 Windows 修改时间
-# - 未安装 ExifTool 时：全部使用 Windows 修改时间
+# - 安装 ExifTool 时：优先 EXIF/QuickTime 内部时间，缺失时用文件修改时间
+# - 未安装 ExifTool 时：全部使用文件修改时间
 #
 # "error"：
 # - 必须安装 ExifTool
@@ -139,7 +138,7 @@ album_caption_separator = " · "
 # 可选：在 Album Caption 的编号/自定义文本后附加当前 Album 内所有文件的“序号. 文件名”清单。
 caption_include_filenames = false
 
-# "mtime" = 按 Windows 修改时间从旧到新
+# "mtime" = 按文件修改时间从旧到新
 # "path"  = 按目录/文件名排序
 sort_mode = "mtime"
 

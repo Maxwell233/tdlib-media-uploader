@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.8.4.
+"""PySide6 desktop interface for TDLib Media Uploader V1.8.5.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import threading
 import tomllib
@@ -23,7 +24,7 @@ from pathlib import Path
 
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
 from path_utils import file_mtime, iter_files, stable_path
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot, Qt
+from PySide6.QtCore import QLibraryInfo, QObject, QThread, QTimer, Signal, Slot, Qt
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -58,19 +59,45 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from runtime_paths import APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = PROJECT_DIR / "config.toml"
-TEMPLATE_CONFIG_PATH = PROJECT_DIR / "config.example.toml"
-HISTORY_PATH = PROJECT_DIR / ".gui_history.json"
-APP_VERSION = "1.8.4"
-ICON_PATH = PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico"
+PROJECT_DIR = RESOURCE_DIR
+HISTORY_PATH = APP_DATA_DIR / ".gui_history.json"
+APP_VERSION = "1.8.5"
+ICON_NAME = "tdlib_media_uploader_icon.png" if sys.platform == "darwin" else "tdlib_media_uploader_icon.ico"
+ICON_PATH = PROJECT_DIR / "assets" / ICON_NAME
+
+
+def _prepare_qt_plugins() -> None:
+    """Make bundled Qt plugins loadable on macOS installs with hidden flags."""
+    if sys.platform != "darwin":
+        return
+    plugins_path = Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath))
+    hidden_flag = getattr(stat, "UF_HIDDEN", 0)
+    if hidden_flag:
+        try:
+            for item in plugins_path.rglob("*"):
+                try:
+                    flags = item.stat().st_flags
+                    if flags & hidden_flag:
+                        os.chflags(item, flags & ~hidden_flag)
+                except OSError:
+                    continue
+        except OSError:
+            pass
+    platforms_path = plugins_path / "platforms"
+    if platforms_path.is_dir():
+        os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", str(platforms_path))
+
+
+_prepare_qt_plugins()
 
 
 def _ensure_config_file() -> bool:
     if CONFIG_PATH.exists() or not TEMPLATE_CONFIG_PATH.exists():
         return False
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(TEMPLATE_CONFIG_PATH, CONFIG_PATH)
     return True
 
@@ -203,6 +230,7 @@ def _write_config_values(values: dict[tuple[str, str], object]) -> str:
         if not CONFIG_PATH.exists():
             if not TEMPLATE_CONFIG_PATH.exists():
                 return "找不到 config.toml 和 config.example.toml。"
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(TEMPLATE_CONFIG_PATH, CONFIG_PATH)
         text = CONFIG_PATH.read_text(encoding="utf-8")
         for (section, key), value in values.items():
@@ -243,12 +271,12 @@ def _save_history(records: list[dict]) -> None:
 
 
 CACHE_TARGETS = {
-    "video_state": ("视频上传状态", PROJECT_DIR / ".video_state"),
-    "legacy_video_state": ("旧版视频状态", PROJECT_DIR / ".state"),
-    "image_state": ("图片上传状态", PROJECT_DIR / ".image_state"),
-    "thumb_cache": ("视频封面缓存", PROJECT_DIR / ".thumb_cache"),
-    "video_album_captions": ("视频 Album 标题", PROJECT_DIR / ".video_album_captions.json"),
-    "image_album_captions": ("图片 Album 标题", PROJECT_DIR / ".image_album_captions.json"),
+    "video_state": ("视频上传状态", APP_DATA_DIR / ".video_state"),
+    "legacy_video_state": ("旧版视频状态", APP_DATA_DIR / ".state"),
+    "image_state": ("图片上传状态", APP_DATA_DIR / ".image_state"),
+    "thumb_cache": ("视频封面缓存", APP_DATA_DIR / ".thumb_cache"),
+    "video_album_captions": ("视频 Album 标题", APP_DATA_DIR / ".video_album_captions.json"),
+    "image_album_captions": ("图片 Album 标题", APP_DATA_DIR / ".image_album_captions.json"),
     "gui_history": ("GUI 历史记录", HISTORY_PATH),
 }
 ALL_CACHE_KEYS = tuple(CACHE_TARGETS)
@@ -338,7 +366,7 @@ def _scan_result(kind: str) -> dict:
     state = None
     if kind == "video":
         if core is not None:
-            core.STATE_DIR = PROJECT_DIR / ".video_state"
+            core.STATE_DIR = APP_DATA_DIR / ".video_state"
             paths = core.scan_videos()
             scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
             metadata = {}
@@ -684,7 +712,7 @@ class UploadWorker(QThread):
                 import tdlib_video_album_uploader as core
                 import tdlib_video_app as entry
 
-                core.STATE_DIR = PROJECT_DIR / ".video_state"
+                core.STATE_DIR = APP_DATA_DIR / ".video_state"
                 core.UI = self.ui
                 entry.UI = self.ui
                 entry.main()
@@ -764,7 +792,7 @@ class HomePage(QWidget):
         task_layout.addStretch(1)
         layout.addWidget(task_box)
 
-        note = QGroupBox("V1.8.4 运行提示")
+        note = QGroupBox(f"V{APP_VERSION} 运行提示")
         note_layout = QVBoxLayout(note)
         note_body = QLabel(
             "先配置 Telegram 信息，再选择目录并扫描。视频和图片可分别设置上传目标。\n"
@@ -1376,7 +1404,7 @@ class TargetDialog(QDialog):
         super().__init__(parent)
         self.kind = kind if kind in {"video", "image"} else "video"
         accent = "视频" if self.kind == "video" else "图片"
-        self.setWindowTitle(f"编辑{accent}上传目标与配置 · V1.8.4")
+        self.setWindowTitle(f"编辑{accent}上传目标与配置 · V{APP_VERSION}")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -1555,7 +1583,7 @@ class TargetDialog(QDialog):
 class ConfigDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑配置 · V1.8.4")
+        self.setWindowTitle(f"编辑配置 · V{APP_VERSION}")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -1572,7 +1600,8 @@ class ConfigDialog(QDialog):
         form.addRow("API Hash", field("api_hash", _cfg("API_HASH", "YOUR_API_HASH"), True))
         form.addRow("视频目录", field("video_dir", _cfg("VIDEO_DIR", "")))
         form.addRow("图片目录", field("image_dir", _cfg("IMAGE_DIR", "")))
-        form.addRow("ExifTool 路径", field("exiftool_path", _cfg("EXIFTOOL_PATH", "tools/exiftool.exe")))
+        default_exiftool = "tools/exiftool.exe" if os.name == "nt" else "tools/exiftool"
+        form.addRow("ExifTool 路径", field("exiftool_path", _cfg("EXIFTOOL_PATH", default_exiftool)))
         layout.addLayout(form)
 
         proxy_box = QGroupBox("网络代理（独立设置，默认关闭）")
@@ -2133,6 +2162,7 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    _prepare_qt_plugins()
     app = QApplication(sys.argv)
     app.setApplicationName("TDLib Media Uploader")
     app.setApplicationVersion(APP_VERSION)

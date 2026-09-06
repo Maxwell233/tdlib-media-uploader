@@ -1,5 +1,22 @@
 # 更新记录
 
+## 1.8.5
+
+### 跨平台发布
+
+- Windows x64 与 macOS Apple Silicon arm64 使用同一套 GUI、上传核心和配置功能，并在 GitHub Actions 中并行构建。
+- 新增 macOS `setup.sh` / `run.sh` / `.command` 入口和 `TDLib Media Uploader.app` 打包流程。
+- macOS 发布版把配置、TDLib 登录数据库、断点、标题和缓存放到用户 Application Support 目录，避免写入只读 `.app` 包。
+- macOS 构建从 FFmpeg 7.1.1 官方源码生成 LGPL arm64 FFmpeg，排除 `imageio-ffmpeg` wheel 自带二进制，并检查 GPL/nonfree 构建标志。
+- Release 同时提供 Windows x64 ZIP、macOS arm64 ZIP 和 `SHA256SUMS`，并附带项目许可、署名与第三方组件清单。
+- README 增加官方下载核验、未签名/未公证提示、个人凭据保护和 Telegram 使用风险说明。
+
+### 兼容性
+
+- TDLib `system_version` 按当前操作系统设置，不再把 macOS 设备报告为 Windows。
+- 配置路径支持 `~` 和环境变量；示例路径与 ExifTool 提示改为跨平台写法。
+- macOS 启动前清除 Qt 插件可能携带的隐藏文件标记，避免 `cocoa` 平台插件无法加载。
+
 ## 1.8.4
 
 ### 操作与文案

@@ -6,7 +6,9 @@ from __future__ import annotations
 import getpass
 import importlib.metadata
 import json
+import platform
 import queue
+import sys
 import threading
 import time
 import uuid
@@ -15,11 +17,12 @@ from pathlib import Path
 import tdjson
 
 import app_config as cfg
+from runtime_paths import APP_DATA_DIR
 
 REQUIRED_TDJSON_VERSION = "1.8.64.post1"
-PROJECT_DIR = Path(__file__).resolve().parent
-TDLIB_DATABASE_DIR = PROJECT_DIR / "tdlib_data"
-TDLIB_FILES_DIR = PROJECT_DIR / "tdlib_files"
+PROJECT_DIR = APP_DATA_DIR
+TDLIB_DATABASE_DIR = APP_DATA_DIR / "tdlib_data"
+TDLIB_FILES_DIR = APP_DATA_DIR / "tdlib_files"
 
 
 class TDLibError(RuntimeError):
@@ -37,12 +40,12 @@ def verify_tdjson_version() -> str:
     try:
         installed = importlib.metadata.version("tdjson")
     except importlib.metadata.PackageNotFoundError as exc:
-        raise RuntimeError("未安装 tdjson，请先运行 .\\setup.ps1") from exc
+        raise RuntimeError("未安装 tdjson，请先运行对应平台的 setup 脚本。") from exc
     if installed != REQUIRED_TDJSON_VERSION:
         raise RuntimeError(
             "tdjson 版本不符合要求。\n\n"
             f"当前：{installed}\n要求：{REQUIRED_TDJSON_VERSION}\n\n"
-            "请运行 .\\setup.ps1 重新安装固定版本。"
+            "请运行对应平台的 setup 脚本重新安装固定版本。"
         )
     return installed
 
@@ -406,7 +409,7 @@ class TDJsonClient:
                     "api_hash": cfg.API_HASH,
                     "system_language_code": "zh-Hans",
                     "device_model": self.device_model,
-                    "system_version": "Windows",
+                    "system_version": "macOS" if sys.platform == "darwin" else platform.system(),
                     "application_version": cfg.APP_VERSION,
                 })
                 if not proxy_configured:

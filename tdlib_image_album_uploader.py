@@ -19,9 +19,10 @@ from album_metadata import CaptionStore, album_key, compose_caption, with_filena
 from path_utils import display_path, file_mtime, iter_files, relative_name as stable_relative_name, stable_path
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
+from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
 
-PROJECT_DIR = Path(__file__).resolve().parent
-STATE_DIR = PROJECT_DIR / ".image_state"
+PROJECT_DIR = RESOURCE_DIR
+STATE_DIR = APP_DATA_DIR / ".image_state"
 LAST_SCAN_ERRORS: list[str] = []
 
 UI = HeadlessUI()

@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import tomllib
+import os
 from pathlib import Path
 
-APP_VERSION = "1.8.4"
+from runtime_paths import CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH
 
-PROJECT_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = PROJECT_DIR / "config.toml"
-TEMPLATE_CONFIG_PATH = PROJECT_DIR / "config.example.toml"
+APP_VERSION = "1.8.5"
+PROJECT_DIR = RESOURCE_DIR
 
 
 def _load():
@@ -18,7 +18,7 @@ def _load():
         raise RuntimeError(
             "找不到配置文件：\n"
             f"{CONFIG_PATH}\n\n"
-            "请先复制 config.example.toml 为 config.toml，或运行 .\\setup.ps1 / .\\run.ps1 自动创建。"
+            "请先复制 config.example.toml 为 config.toml，或运行对应平台的 setup 脚本自动创建。"
         )
 
     try:
@@ -70,7 +70,7 @@ def _resolve_path(value):
             "config.toml 中存在空路径。"
         )
 
-    path = Path(text)
+    path = Path(os.path.expandvars(os.path.expanduser(text)))
 
     if path.is_absolute():
         return path
@@ -212,6 +212,13 @@ EXIFTOOL_PATH = _resolve_path(
         "exiftool_path"
     )
 )
+# Keep the shared template usable on Windows too: its extensionless path is
+# convenient on macOS, while the Windows download is conventionally named
+# ``exiftool.exe``.
+if os.name == "nt" and not EXIFTOOL_PATH.exists() and EXIFTOOL_PATH.suffix.lower() != ".exe":
+    windows_exiftool = EXIFTOOL_PATH.with_name(EXIFTOOL_PATH.name + ".exe")
+    if windows_exiftool.exists():
+        EXIFTOOL_PATH = windows_exiftool
 
 
 # 视频
