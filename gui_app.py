@@ -67,6 +67,24 @@ HISTORY_PATH = APP_DATA_DIR / ".gui_history.json"
 APP_VERSION = "1.8.5"
 ICON_NAME = "tdlib_media_uploader_icon.png" if sys.platform == "darwin" else "tdlib_media_uploader_icon.ico"
 ICON_PATH = PROJECT_DIR / "assets" / ICON_NAME
+WINDOWS_APP_USER_MODEL_ID = "Maxwell233.TDLibMediaUploader"
+
+
+def _prepare_windows_app_identity() -> None:
+    """Give Windows a stable taskbar identity before any UI is created."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        set_app_id = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+        set_app_id.argtypes = [ctypes.c_wchar_p]
+        set_app_id.restype = ctypes.c_long
+        set_app_id(WINDOWS_APP_USER_MODEL_ID)
+    except (AttributeError, OSError, TypeError):
+        # The GUI and executable icon still work if an older Windows shell or
+        # a restricted runtime does not expose this optional API.
+        pass
 
 
 def _prepare_qt_plugins() -> None:
@@ -2162,6 +2180,7 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    _prepare_windows_app_identity()
     _prepare_qt_plugins()
     app = QApplication(sys.argv)
     app.setApplicationName("TDLib Media Uploader")

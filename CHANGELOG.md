@@ -16,6 +16,7 @@
 - TDLib `system_version` 按当前操作系统设置，不再把 macOS 设备报告为 Windows。
 - 配置路径支持 `~` 和环境变量；示例路径与 ExifTool 提示改为跨平台写法。
 - macOS 启动前清除 Qt 插件可能携带的隐藏文件标记，避免 `cocoa` 平台插件无法加载。
+- Windows 启动前设置稳定的 AppUserModelID，并继续写入 EXE/Qt 图标，改善任务栏图标显示与窗口归组。
 
 ## 1.8.4
 
