@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.8.6.
+"""PySide6 desktop interface for TDLib Media Uploader V1.8.5.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -64,7 +64,7 @@ from runtime_paths import APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONF
 
 PROJECT_DIR = RESOURCE_DIR
 HISTORY_PATH = APP_DATA_DIR / ".gui_history.json"
-APP_VERSION = "1.8.6"
+APP_VERSION = "1.8.5"
 ICON_NAME = "tdlib_media_uploader_icon.png" if sys.platform == "darwin" else "tdlib_media_uploader_icon.ico"
 ICON_PATH = PROJECT_DIR / "assets" / ICON_NAME
 WINDOWS_APP_USER_MODEL_ID = "Maxwell233.TDLibMediaUploader"
@@ -1031,10 +1031,6 @@ class UploadPage(QWidget):
                     ])
                     album_row.addChild(row)
                     row.setToolTip(3, str(path))
-                    if isinstance(item, dict):
-                        source = item.get("date_tag", "未知")
-                        label = "文件修改日期" if source == "FileSystem:ModifyTime" else ("媒体创建日期" if source.startswith("Media:") else "EXIF/QuickTime")
-                        row.setToolTip(1, f"日期来源：{label}\n{source}\n{_fmt_date(date_value)}")
         for column, width in enumerate((140, 250, 100)):
             self.tree.setColumnWidth(column, width)
         self._filter_preview()
@@ -1470,7 +1466,7 @@ class TargetDialog(QDialog):
     def _build_media_fields(self):
         if self.kind == "video":
             self.video_missing_date = QComboBox()
-            self.video_missing_date.addItem("EXIF → 媒体创建日期 → 修改日期", "mtime")
+            self.video_missing_date.addItem("使用文件修改时间", "mtime")
             self.video_missing_date.addItem("停止并提示缺失日期", "error")
             self.video_missing_date.setCurrentIndex(max(0, self.video_missing_date.findData(_cfg("VIDEO_MISSING_DATE_POLICY", "mtime"))))
             self.media_form.addRow("日期缺失策略", self.video_missing_date)

@@ -74,16 +74,6 @@ jobs:
           Write-Host "Validated: $exe"
           Write-Host "Validated: $($archive.FullName)"
 
-      - name: Verify real media dates with packaged FFmpeg
-        shell: pwsh
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          $ffmpeg = Get-ChildItem -LiteralPath "dist\TDLib Media Uploader" -Filter "ffmpeg.exe" -File -Recurse | Select-Object -First 1
-          if ($null -eq $ffmpeg) { throw "Packaged FFmpeg is missing" }
-          $env:TEST_MEDIA_FFMPEG = $ffmpeg.FullName
-          python -m unittest discover -s tests -p test_media_dates.py -v
-
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v7
         with:
@@ -150,16 +140,6 @@ jobs:
           test -f dist/TDLib\ Media\ Uploader-v*-macos-arm64.zip
           test -f dist/TDLib\ Media\ Uploader-v*-macos-arm64.zip.sha256
 
-      - name: Verify real media dates with packaged FFmpeg
-        shell: bash
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          set -Eeuo pipefail
-          export TEST_MEDIA_FFMPEG="$(find "$PWD/dist/TDLib Media Uploader.app" -type f -name ffmpeg -perm -111 -print -quit)"
-          test -n "$TEST_MEDIA_FFMPEG"
-          .build_venv/bin/python -m unittest discover -s tests -p test_media_dates.py -v
-
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v7
         with:
@@ -210,7 +190,6 @@ jobs:
           - macOS：解压后打开 `TDLib Media Uploader.app`；首次打开若遇到系统安全提示，请确认下载来源和 SHA-256 后右键点按“打开”。
           - 发布包包含许可、署名、第三方清单以及 macOS FFmpeg 构建信息。
           - 使用 `SHA256SUMS` 校验下载文件完整性。
-          - 视频日期优先级：EXIF / QuickTime → 媒体创建日期 → 文件修改日期；未安装 ExifTool 时使用内置 FFmpeg 读取媒体日期。
 
           风险提示：当前发布包未配置 Apple Developer 签名/公证，因此 macOS Gatekeeper 可能提示无法验证开发者；未签名不等于安全认证。请只从本仓库 Release 下载，先核对 SHA-256，并在使用前阅读源码和许可文件。程序会保存 Telegram 登录数据、API 凭据相关配置和上传断点到本机，不会把这些个人文件放入发布包；请勿分享 `config.toml`、登录数据库或 API Hash。上传行为、代理和目标权限由用户自行确认，并应遵守 Telegram 条款及目标群组规则。
           EOF
