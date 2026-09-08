@@ -186,7 +186,7 @@ jobs:
           done
           version="$(tr -d '[:space:]' < VERSION)"
           cat > release-notes.md <<'EOF'
-          ## TDLib Media Uploader v__VERSION__
+          ## V__VERSION__
 
           此版本由同一份远程源码同时构建两个平台：Windows x64 和 macOS Apple Silicon arm64；两者使用同一套 GUI、上传核心和功能配置。
 
@@ -210,10 +210,10 @@ jobs:
           tag="$GITHUB_REF_NAME"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" release-assets/*.zip release-assets/SHA256SUMS --clobber
-            gh release edit "$tag" --title "TDLib Media Uploader v${version}" --notes-file release-notes.md --latest
+            gh release edit "$tag" --title "V${version}" --notes-file release-notes.md --latest
           else
             gh release create "$tag" release-assets/*.zip release-assets/SHA256SUMS \
-              --title "TDLib Media Uploader v${version}" \
+              --title "V${version}" \
               --notes-file release-notes.md \
               --latest
           fi
