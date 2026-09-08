@@ -1,6 +1,6 @@
 # TDLib Media Uploader
 
-**V1.8.5 · Windows x64 + macOS arm64 桌面应用**
+**V1.8.7 · Windows x64 + macOS arm64 桌面应用**
 
 把本地或网络目录中的视频、图片批量上传到 Telegram 群组话题或频道。Windows x64 与 macOS Apple Silicon arm64 使用同一套 GUI、上传核心和功能配置；支持上传预览、标题编辑、断点恢复和独立代理，上传时无需打开 Telegram Desktop。
 
@@ -69,11 +69,13 @@ macOS 首次打开若出现“无法验证开发者”等提示，请先确认�
 “设置与诊断”提供两类清理：
 
 - **仅清理视频封面**：删除 `.thumb_cache` 的生成文件，之后需要时重新生成。
-- **清理所有**：清空视频/图片断点、旧版断点、封面、媒体组标题和本地任务历史。保留缓存目录、`config.toml` 及 Telegram 登录数据。清理断点后重新上传可能产生重复消息。
+- **清理所有**：清空视频/图片断点、旧版断点、封面、媒体组标题、本地任务历史和运行日志。保留缓存目录、`config.toml` 及 Telegram 登录数据。清理断点后重新上传可能产生重复消息。
 
 也可在相应媒体配置中临时设置 `reset_state = true`；运行一次后务必改回 `false`。
 
 历史记录保留最近 100 次任务。Telegram 登录数据位于 `tdlib_data` 和 `tdlib_files`；标题修改存放在 `.video_album_captions.json` / `.image_album_captions.json`，独立于上传断点。macOS 发布版会将这些可写数据放到上面的 Application Support 目录，避免写入只读的 `.app` 包。
+
+视频或图片无法被 FFmpeg/Pillow 读取时，程序会在预检阶段跳过该文件，继续上传其他文件；坏文件不会写入断点，修复后重新扫描即可重试。跳过文件的完整路径和原因会显示在任务日志中，并保存到应用数据目录的 `logs/app.log`。TDLib 原生诊断写入同目录的 `logs/tdlib.log`，可用于排查上传失败。点击“清理所有缓存”会同时删除这两个日志文件。
 
 ## 配置与代理
 
@@ -146,12 +148,12 @@ Windows 和 macOS 构建使用各自平台的原生 runner，并行执行离线�
 
 建议只从本仓库的 [GitHub Releases](https://github.com/Maxwell233/tdlib-media-uploader/releases) 下载，并在运行前核对 `SHA256SUMS`。构建脚本、平台构建 workflow、项目许可、作者署名和第三方依赖清单都公开在仓库中；发布 ZIP 也包含许可/署名文件，便于检查来源和再分发条件。SHA-256 只能证明文件与发布者提供的摘要一致，不能替代代码审查或操作系统安全认证。
 
-macOS v1.8.5 包未配置 Apple Developer 签名和公证，所以 Gatekeeper 可能显示“无法验证开发者”。请不要绕过来源核验后直接运行未知文件；确认仓库地址、标签和 SHA-256 后再按系统提示打开。Windows 版也不应被视为经过独立安全机构认证的程序。
+macOS v1.8.7 包未配置 Apple Developer 签名和公证，所以 Gatekeeper 可能显示“无法验证开发者”。请不要绕过来源核验后直接运行未知文件；确认仓库地址、标签和 SHA-256 后再按系统提示打开。Windows 版也不应被视为经过独立安全机构认证的程序。
 
 程序需要 Telegram API ID/API Hash，并会在本机保存 Telegram 登录数据库、代理设置、上传断点和用户输入的标题；这些数据不会随发布包提供。不要把 `config.toml`、API Hash、登录数据库、代理密码或缓存发给他人。上传目标、代理、媒体内容和 Telegram 账号权限均由使用者自行确认；请遵守 Telegram 使用条款、版权要求和目标群组/频道规则。若使用 ExifTool 或自行替换 FFmpeg，还需遵守对应上游许可证。
 
 ## 项目许可与署名
 
-本项目的原创代码、文档和界面资源采用 [Creative Commons BY-NC 4.0 国际许可](https://creativecommons.org/licenses/by-nc/4.0/) 发布：允许分享、复制、修改和再创作，但必须保留作者署名 Maximum、提供许可链接、说明修改内容，并且禁止商业用途。CC BY-NC 4.0 不是 OSI 定义的软件开源许可证，本项目采用它是为了明确非商业使用条件。
+本项目的原创代码、文档和界面资源采用 [MIT License](LICENSE) 发布。使用、修改和再分发时请保留 `LICENSE` 中的版权与许可声明。
 
-完整许可文本见根目录的 `LICENSE`，作者署名见 `ATTRIBUTION`，第三方组件清单见 `THIRD_PARTY_LICENSES.md`。本项目为独立社区项目，与 Telegram 官方无隶属关系；TDLib、PySide6、Pillow、imageio-ffmpeg、FFmpeg、PyInstaller、Python 及其他第三方组件分别遵循各自许可证，根目录许可中的非商业条件不会限制这些上游许可证授予的权利。源码包和编译包均包含上述三个许可/署名文件，请勿将 `config.toml`、Telegram API 凭据、登录数据或本地断点状态随包分发。
+完整许可文本见根目录的 `LICENSE`，作者署名见 `ATTRIBUTION`，第三方组件清单见 `THIRD_PARTY_LICENSES.md`。本项目为独立社区项目，与 Telegram 官方无隶属关系；TDLib、PySide6、Pillow、imageio-ffmpeg、FFmpeg、PyInstaller、Python 及其他第三方组件分别遵循各自许可证。源码包和编译包均包含上述三个许可/署名文件，请勿将 `config.toml`、Telegram API 凭据、登录数据或本地断点状态随包分发。

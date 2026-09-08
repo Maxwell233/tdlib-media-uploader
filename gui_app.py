@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.8.5.
+"""PySide6 desktop interface for TDLib Media Uploader V1.8.7.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -23,6 +23,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
+from app_logging import APP_LOG_PATH, LOG_DIR, TDLIB_LOG_PATH, write_app_log, write_exception
 from path_utils import file_mtime, iter_files, stable_path
 from PySide6.QtCore import QLibraryInfo, QObject, QThread, QTimer, Signal, Slot, Qt
 from PySide6.QtGui import QColor, QIcon, QPalette
@@ -64,7 +65,7 @@ from runtime_paths import APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONF
 
 PROJECT_DIR = RESOURCE_DIR
 HISTORY_PATH = APP_DATA_DIR / ".gui_history.json"
-APP_VERSION = "1.8.5"
+APP_VERSION = "1.8.7"
 ICON_NAME = "tdlib_media_uploader_icon.png" if sys.platform == "darwin" else "tdlib_media_uploader_icon.ico"
 ICON_PATH = PROJECT_DIR / "assets" / ICON_NAME
 WINDOWS_APP_USER_MODEL_ID = "Maxwell233.TDLibMediaUploader"
@@ -296,6 +297,7 @@ CACHE_TARGETS = {
     "video_album_captions": ("视频 Album 标题", APP_DATA_DIR / ".video_album_captions.json"),
     "image_album_captions": ("图片 Album 标题", APP_DATA_DIR / ".image_album_captions.json"),
     "gui_history": ("GUI 历史记录", HISTORY_PATH),
+    "logs": ("运行日志", LOG_DIR),
 }
 ALL_CACHE_KEYS = tuple(CACHE_TARGETS)
 
@@ -527,6 +529,11 @@ def _scan_result(kind: str) -> dict:
     completed_count = sum(1 for item in items if completed(item))
     total_bytes = sum(_item_size(item) for item in items)
     if scan_errors:
+        write_app_log(
+            "WARNING",
+            "目录扫描跳过项目：\n" + "\n".join(scan_errors),
+            source=f"scan/{kind}",
+        )
         warning = (
             f"扫描时跳过 {len(scan_errors)} 个暂时无法读取的项目（可能是 SMB 连接中断）。"
             + (f"；{warning}" if warning else "")
@@ -568,6 +575,7 @@ class ScanWorker(QThread):
         try:
             self.completed.emit(_scan_result(self.kind))
         except Exception as exc:
+            write_exception(f"{self.kind} 扫描失败", exc, source=f"scan/{self.kind}")
             self.failed.emit(f"扫描失败：{type(exc).__name__}: {exc}")
 
 
@@ -645,7 +653,18 @@ class GuiConsoleUI(QObject):
         return value
 
     def _message(self, level: str, text):
-        self.message_added.emit(level, str(text))
+        message = str(text)
+        level_name = {
+            "log": "INFO",
+            "info": "INFO",
+            "success": "INFO",
+            "banner": "INFO",
+            "summary": "INFO",
+            "warning": "WARNING",
+            "error": "ERROR",
+        }.get(level, "INFO")
+        write_app_log(level_name, message, source=f"gui/{self.kind or 'app'}")
+        self.message_added.emit(level, message)
 
     def log(self, text=""):
         self._message("log", text)
@@ -748,6 +767,11 @@ class UploadWorker(QThread):
                 self.completed.emit(False, "任务已立即停止；完整完成的 Album 已保存断点。")
             else:
                 self.ui.error(f"程序停止：{type(exc).__name__}: {exc}")
+                write_exception(
+                    f"{self.kind} 上传线程失败",
+                    exc,
+                    source=f"upload/{self.kind}",
+                )
                 self.completed.emit(False, f"任务失败：{type(exc).__name__}: {exc}")
 
 
@@ -1330,10 +1354,22 @@ class SettingsPage(QWidget):
         config_layout.addStretch(1)
         layout.addWidget(config_box)
 
+        log_box = QGroupBox("运行日志")
+        log_layout = QVBoxLayout(log_box)
+        log_hint = QLabel(
+            f"应用日志：{APP_LOG_PATH}\n"
+            f"TDLib 原生日志：{TDLIB_LOG_PATH}\n"
+            "日志会跨应用重启保留；点击“清理所有缓存”时一并删除。"
+        )
+        log_hint.setObjectName("mutedLabel")
+        log_hint.setWordWrap(True)
+        log_layout.addWidget(log_hint)
+        layout.addWidget(log_box)
+
         license_box = QGroupBox("许可与署名")
         license_layout = QVBoxLayout(license_box)
         license_hint = QLabel(
-            "原创内容采用 CC BY-NC 4.0（非商业）许可；TDLib、Qt/PySide6、"
+            "原创内容采用 MIT License；TDLib、Qt/PySide6、"
             "Pillow、FFmpeg、PyInstaller 和 Python 仍按各自上游许可证使用。"
             "完整许可清单随程序放在 THIRD_PARTY_LICENSES.md。"
         )
@@ -1350,7 +1386,7 @@ class SettingsPage(QWidget):
         cache_layout.addWidget(self.cache_status)
         cache_hint = QLabel(
             "清理所有会清空上传状态、旧版状态、视频封面和 GUI 历史记录；"
-            "不会删除 config.toml 或 Telegram 登录数据库。"
+            "同时删除运行日志，但不会删除 config.toml 或 Telegram 登录数据库。"
         )
         cache_hint.setObjectName("mutedLabel")
         cache_hint.setWordWrap(True)
@@ -2031,6 +2067,11 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("正在立即停止上传任务…")
 
     def _upload_finished(self, success: bool, message: str):
+        write_app_log(
+            "INFO" if success else "ERROR",
+            f"{self.active_kind} 任务结束：{message}",
+            source=f"upload/{self.active_kind or 'app'}",
+        )
         if self.active_result is not None:
             records = _load_history()
             records.append({
@@ -2096,7 +2137,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.warning(
             self,
             "确认清理所有缓存",
-            "将清空视频/图片上传状态、旧版状态、视频封面缓存和 GUI 历史记录，保留目录本身。\n\n"
+            "将清空视频/图片上传状态、旧版状态、视频封面缓存、GUI 历史记录和运行日志，保留目录本身。\n\n"
             "config.toml 和 Telegram 登录数据库不会被删除。是否继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -2182,6 +2223,7 @@ class MainWindow(QMainWindow):
 def main() -> int:
     _prepare_windows_app_identity()
     _prepare_qt_plugins()
+    write_app_log("INFO", f"启动 TDLib Media Uploader V{APP_VERSION}", source="startup")
     app = QApplication(sys.argv)
     app.setApplicationName("TDLib Media Uploader")
     app.setApplicationVersion(APP_VERSION)

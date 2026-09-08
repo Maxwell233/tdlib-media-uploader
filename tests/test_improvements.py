@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import album_metadata as metadata
+import app_logging
 import gui_app as gui
 import path_utils
 from PySide6.QtWidgets import QApplication
@@ -177,6 +178,92 @@ class ImprovementsTest(unittest.TestCase):
                 self.assertEqual([g["label"] for g in result["groups"]], ["2025-01", "2025-02"])
                 self.assertEqual(result["pending_files"], 2)
                 self.assertEqual(result["album_count"], 2)
+
+    def test_unreadable_videos_are_isolated_before_upload(self):
+        import tdlib_video_album_uploader as core
+
+        class UI:
+            def __init__(self):
+                self.messages = []
+
+            def info(self, text):
+                self.messages.append(("info", str(text)))
+
+            def warning(self, text):
+                self.messages.append(("warning", str(text)))
+
+            def log(self, text):
+                self.messages.append(("log", str(text)))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            good = root / "good.mp4"
+            bad = root / "bad.mp4"
+            good.write_bytes(b"good")
+            bad.write_bytes(b"bad")
+            items = [
+                {"path": good, "capture_time": None, "month_key": "2025-01", "date_tag": "test", "fallback": False},
+                {"path": bad, "capture_time": None, "month_key": "2025-01", "date_tag": "test", "fallback": False},
+            ]
+            ui = UI()
+
+            def prepare(path):
+                if path == bad:
+                    raise RuntimeError("坏视频")
+
+            with patch.object(core, "prepare_video", side_effect=prepare):
+                skipped = core.preflight_videos(items, ui)
+
+            self.assertEqual([record["path"] for record in skipped], [bad])
+            self.assertTrue(any("坏视频" in message for level, message in ui.messages if level == "log"))
+
+    def test_unreadable_video_does_not_abort_album_content_build(self):
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            good = root / "good.mp4"
+            bad = root / "bad.mp4"
+            good.write_bytes(b"good")
+            bad.write_bytes(b"bad")
+            items = [{"path": good}, {"path": bad}]
+
+            def build(item, caption):
+                if item["path"] == bad:
+                    raise RuntimeError("无法读取")
+                return {"path": str(item["path"]), "caption": caption}
+
+            with patch.object(core, "input_video", side_effect=build):
+                contents, valid, skipped = core.build_video_contents(items, "标题")
+
+            self.assertEqual(valid, [items[0]])
+            self.assertEqual(contents[0]["caption"], "标题")
+            self.assertEqual([record["path"] for record in skipped], [bad])
+
+    def test_all_cache_clear_removes_persistent_logs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_dir = Path(directory) / "logs"
+            log_dir.mkdir()
+            (log_dir / "app.log").write_text("app", encoding="utf-8")
+            (log_dir / "tdlib.log").write_text("tdlib", encoding="utf-8")
+            with patch.object(gui, "CACHE_TARGETS", {"logs": ("运行日志", log_dir)}):
+                removed, errors = gui._clear_cache(("logs",))
+            self.assertEqual(removed, ["运行日志"])
+            self.assertFalse(errors)
+            self.assertTrue(log_dir.is_dir())
+            self.assertEqual(list(log_dir.iterdir()), [])
+
+    def test_app_log_is_persistent_and_utf8(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log_dir = root / "logs"
+            log_path = log_dir / "app.log"
+            with patch.object(app_logging, "LOG_DIR", log_dir), patch.object(app_logging, "APP_LOG_PATH", log_path):
+                app_logging.write_app_log("WARNING", "跳过坏视频：测试.mp4", source="test")
+                app_logging.write_app_log("INFO", "第二次启动仍可追加", source="test")
+            text = log_path.read_text(encoding="utf-8")
+            self.assertIn("跳过坏视频：测试.mp4", text)
+            self.assertIn("第二次启动仍可追加", text)
 
 
 if __name__ == "__main__":

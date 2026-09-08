@@ -17,6 +17,7 @@ from pathlib import Path
 import tdjson
 
 import app_config as cfg
+from app_logging import TDLIB_LOG_PATH, write_app_log, write_exception
 from runtime_paths import APP_DATA_DIR
 
 REQUIRED_TDJSON_VERSION = "1.8.64.post1"
@@ -55,58 +56,65 @@ def formatted_text(text: str = "") -> dict:
 
 
 class HeadlessUI:
-    """Minimal internal adapter used until the GUI binds its own signals.
+    """Minimal internal adapter used when the GUI is not active.
 
     Upload modules still call a small presentation interface while scanning
-    and sending.  Keeping this no-op implementation in the backend lets the
-    project ship a GUI-only entry point without carrying a second terminal UI
-    implementation or an extra display dependency.
+    and sending.  Keeping this lightweight implementation in the backend lets
+    the project retain its command-line-compatible core while recording the
+    same durable diagnostics as the GUI.
     """
 
     def register_client(self, client):
         self.client = client
 
+    @staticmethod
+    def _write_log(level, text):
+        write_app_log(level, text, source="ui")
+
     def log(self, text=""):
-        pass
+        self._write_log("INFO", text)
 
     def info(self, text):
-        pass
+        self._write_log("INFO", text)
 
     def success(self, text):
-        pass
+        self._write_log("INFO", text)
 
     def warning(self, text):
-        pass
+        self._write_log("WARNING", text)
 
     def error(self, text):
-        pass
+        self._write_log("ERROR", text)
 
     def banner(self, title, subtitle="", *, accent="cyan"):
-        pass
+        self._write_log("INFO", f"{title}\n{subtitle}".strip())
 
     def summary(self, title, rows, *, kind="VIDEO"):
-        pass
+        self._write_log("INFO", "\n".join([str(title)] + [f"{key}: {value}" for key, value in rows]))
 
     def files(self, title, columns, rows, *, kind="VIDEO", caption=None):
-        pass
+        text = str(title)
+        if caption:
+            text += f"\n{caption}"
+        self._write_log("INFO", text)
 
     def groups(self, title, rows, *, kind="VIDEO"):
-        pass
+        self._write_log("INFO", title)
 
     def target(self, chat_title, topic_name, chat_id, topic_id):
-        pass
+        self._write_log("INFO", f"Telegram 目标：{chat_title} / {topic_name or '频道'} ({chat_id})")
 
     def album(self, *, kind, title, subtitle="", rows=None):
-        pass
+        self._write_log("INFO", f"{title}\n{subtitle}".strip())
 
     def progress(self, **kwargs):
         pass
 
     def finish(self):
-        pass
+        self._write_log("INFO", "当前媒体组处理结束")
 
     def cancelled(self):
-        pass
+        self._write_log("WARNING", "上传任务已取消")
 
     def confirm_upload(self):
         return True
@@ -132,6 +140,28 @@ class TDJsonClient:
         self.device_model = device_model
         TDLIB_DATABASE_DIR.mkdir(parents=True, exist_ok=True)
         TDLIB_FILES_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Keep TDLib's native diagnostic stream beside the durable app log so
+        # wrapped errors such as upload code 400 can be investigated later.
+        try:
+            TDLIB_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            result = self.execute({
+                "@type": "setLogStream",
+                "log_stream": {
+                    "@type": "logStreamFile",
+                    "path": str(TDLIB_LOG_PATH),
+                    "max_file_size": 20 * 1024 * 1024,
+                    "redirect_stderr": False,
+                },
+            })
+            if isinstance(result, dict) and result.get("@type") == "error":
+                write_app_log(
+                    "WARNING",
+                    f"TDLib 日志流配置失败：{result.get('message', result)}",
+                    source="tdlib",
+                )
+        except Exception as exc:
+            write_exception("TDLib 日志流配置失败", exc, source="tdlib")
 
         self.execute({
             "@type": "setLogVerbosityLevel",
@@ -219,7 +249,12 @@ class TDJsonClient:
         waiter: queue.Queue = queue.Queue(maxsize=1)
         with self.pending_lock:
             self.pending[extra] = waiter
-        self.send_raw(payload)
+        try:
+            self.send_raw(payload)
+        except Exception:
+            with self.pending_lock:
+                self.pending.pop(extra, None)
+            raise
         deadline = time.monotonic() + float(timeout)
         try:
             while True:

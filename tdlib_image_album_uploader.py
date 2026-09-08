@@ -90,6 +90,39 @@ def image_info(path: Path) -> tuple[int, int]:
     return width, height
 
 
+def preflight_images(paths, ui=None) -> list[dict]:
+    """Find unreadable images without aborting the complete upload task."""
+
+    target = ui or UI
+    skipped = []
+    total = len(paths)
+    for index, path in enumerate(paths, 1):
+        try:
+            if getattr(cfg, "IMAGE_VERIFY_ALL_IMAGES", False):
+                target.info(f"预检图片 {index}/{total} · {path.name}")
+            image_info(path)
+        except Exception as exc:
+            record = {
+                "path": path,
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+            skipped.append(record)
+            target.warning(f"跳过无法读取的图片：{relative_name(path)}")
+            target.log(f"跳过图片详情：{path}\n原因：{record['reason']}")
+    return skipped
+
+
+def report_skipped_images(skipped, ui=None, *, final=False) -> None:
+    if not skipped:
+        return
+    target = ui or UI
+    prefix = "本次任务结束" if final else "图片预检完成"
+    target.warning(
+        f"{prefix}：已跳过 {len(skipped)} 个无法读取的图片；"
+        "这些文件未写入上传断点，修复后可重新扫描上传。"
+    )
+
+
 def input_photo(path: Path, caption: str = "") -> dict:
     width, height = image_info(path)
     return {
@@ -104,6 +137,28 @@ def input_photo(path: Path, caption: str = "") -> dict:
         "self_destruct_type": None,
         "has_spoiler": False,
     }
+
+
+def build_image_contents(paths, caption: str, ui=None):
+    """Build an Album while isolating images that became unreadable later."""
+
+    target = ui or UI
+    contents = []
+    valid_paths = []
+    skipped = []
+    for path in paths:
+        try:
+            contents.append(input_photo(path, caption if not valid_paths else ""))
+            valid_paths.append(path)
+        except Exception as exc:
+            record = {
+                "path": path,
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+            skipped.append(record)
+            target.warning(f"跳过上传前变得无法读取的图片：{relative_name(path)}")
+            target.log(f"跳过图片详情：{path}\n原因：{record['reason']}")
+    return contents, valid_paths, skipped
 
 
 class UploadState:
@@ -199,6 +254,17 @@ class ImageUploadProgress:
             self.file_id_to_path = {}
             self.samples.clear()
             self.last_draw = 0.0
+
+    def skip_items(self, paths: list[Path]):
+        """Remove files that failed local preparation from progress totals."""
+
+        with self.lock:
+            for path in paths:
+                size = self.sizes.pop(path, 0)
+                self.total_bytes = max(0, self.total_bytes - size)
+                self.total_files = max(0, self.total_files - 1)
+                self.current_uploaded.pop(path, None)
+        self.draw(force=True)
 
     @staticmethod
     def _photo_file(message):
@@ -317,7 +383,7 @@ def show_file_list(images, state):
     )
 
 
-def show_upload_summary(images, state, completed, pending, total_albums):
+def show_upload_summary(images, state, completed, pending, total_albums, skipped_items):
     total_bytes = sum(path.stat().st_size for path in images)
     pending_bytes = sum(path.stat().st_size for path in pending)
 
@@ -327,6 +393,7 @@ def show_upload_summary(images, state, completed, pending, total_albums):
             ("上传引擎", "TDLib 原生 C++ / tdjson"),
             ("图片目录", cfg.IMAGE_DIR),
             ("扫描图片", len(images)),
+            ("跳过坏图片", len(skipped_items)),
             ("排序方式", cfg.IMAGE_SORT_MODE),
             ("全部大小", format_size(total_bytes)),
             ("断点已完成", f"{len(completed)}/{len(images)}"),
@@ -411,6 +478,23 @@ def main():
     state = UploadState()
     completed = [p for p in images if state.is_completed(p)]
     pending = [p for p in images if not state.is_completed(p)]
+    skipped_items = []
+    if pending:
+        UI.info(f"检查 {len(pending)} 个待上传图片的媒体数据…")
+        skipped_items = preflight_images(pending, UI)
+        skipped_paths = {
+            stable_path(record["path"])
+            for record in skipped_items
+        }
+        if skipped_paths:
+            images = [
+                path
+                for path in images
+                if stable_path(path) not in skipped_paths
+            ]
+            completed = [path for path in images if state.is_completed(path)]
+            pending = [path for path in images if not state.is_completed(path)]
+            report_skipped_images(skipped_items, UI)
     plans = build_album_plans(images, state)
     pending_plans = [plan for plan in plans if plan["pending_items"]]
     total_albums = len(pending_plans)
@@ -419,18 +503,14 @@ def main():
     if cfg.IMAGE_SHOW_FILE_LIST:
         show_file_list(images, state)
 
-    show_upload_summary(images, state, completed, pending, total_albums)
+    show_upload_summary(images, state, completed, pending, total_albums, skipped_items)
 
     if not pending:
-        UI.success("所有图片都已上传完成。")
+        if skipped_items:
+            report_skipped_images(skipped_items, UI, final=True)
+        else:
+            UI.success("所有图片都已上传完成。")
         return
-
-    if cfg.IMAGE_VERIFY_ALL_IMAGES:
-        UI.info("开始预检本次待上传图片…")
-        for index, path in enumerate(pending, 1):
-            UI.info(f"预检 {index}/{len(pending)} · {path.name}")
-            image_info(path)
-        UI.success("图片预检完成。")
 
     if not UI.confirm_upload():
         UI.cancelled()
@@ -449,35 +529,60 @@ def main():
         for plan in pending_plans:
             album_paths = plan["pending_items"]
             album_number = plan["number"]
-            album_global += 1
             caption = plan["caption"]["text"]
             caption = with_filename_description(
                 caption,
                 album_paths,
                 getattr(cfg, "IMAGE_CAPTION_INCLUDE_FILENAMES", False),
             )
-            progress.begin_album(album_paths, album_global, total_albums)
+            contents, ready_paths, runtime_skipped = build_image_contents(
+                album_paths,
+                caption,
+                UI,
+            )
+            if runtime_skipped:
+                skipped_items.extend(runtime_skipped)
+                progress.skip_items([record["path"] for record in runtime_skipped])
+            if not ready_paths:
+                UI.warning("当前图片 Album 没有可读取的图片，已跳过。")
+                continue
+            if ready_paths != album_paths and getattr(cfg, "IMAGE_CAPTION_INCLUDE_FILENAMES", False):
+                caption = with_filename_description(
+                    plan["caption"]["text"],
+                    ready_paths,
+                    True,
+                )
+                contents, rebuilt_paths, rebuilt_skipped = build_image_contents(
+                    ready_paths,
+                    caption,
+                    UI,
+                )
+                if rebuilt_skipped:
+                    skipped_items.extend(rebuilt_skipped)
+                    progress.skip_items([record["path"] for record in rebuilt_skipped])
+                ready_paths = rebuilt_paths
+                if not ready_paths:
+                    UI.warning("当前图片 Album 没有可读取的图片，已跳过。")
+                    continue
+            album_global += 1
+            progress.begin_album(ready_paths, album_global, total_albums)
             UI.album(
                 kind="IMAGE",
                 title=f"Album {album_number} · {album_global}/{total_albums}",
-                subtitle=f"{len(album_paths)} 张待上传图片 · Caption={caption or '无'}",
+                subtitle=f"{len(ready_paths)} 张待上传图片 · Caption={caption or '无'}",
                 rows=[
                     f"{format_size(path.stat().st_size):>10}  {relative_name(path)}"
-                    for path in album_paths
+                    for path in ready_paths
                 ],
             )
             try:
-                contents = [
-                    input_photo(path, caption if index == 0 else "")
-                    for index, path in enumerate(album_paths)
-                ]
-                message_ids = client.send_contents(contents, progress, album_paths)
+                message_ids = client.send_contents(contents, progress, ready_paths)
             except Exception:
                 UI.finish()
                 UI.error("当前图片 Album 未写入断点；下次会重新处理这一组。")
                 raise
-            state.mark_album_completed(album_paths, message_ids)
-            progress.finish_album(album_paths)
+            state.mark_album_completed(ready_paths, message_ids)
+            progress.finish_album(ready_paths)
             UI.success(f"图片 Album {album_number} 发送成功 · Caption={caption or '无'} · 断点已保存。")
 
         UI.banner(
@@ -485,6 +590,7 @@ def main():
             f"共完成 {total_albums} 个 Album · 断点已保存",
             accent="green",
         )
+        report_skipped_images(skipped_items, UI, final=True)
     finally:
         client.remove_update_callback(progress.handle_update)
         client.close()

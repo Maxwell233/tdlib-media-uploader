@@ -123,7 +123,7 @@ function Ensure-LgplFfmpeg {
 
 try {
     $python = Resolve-PythonCommand -RequestedPath $PythonPath
-    Write-Host "TDLib Media Uploader V1.8.5 · Windows EXE 构建" -ForegroundColor Cyan
+    Write-Host "TDLib Media Uploader V1.8.7 · Windows EXE 构建" -ForegroundColor Cyan
     Write-Host "使用 Python：$python" -ForegroundColor DarkGray
 
     $iconPath = Join-Path $PSScriptRoot "assets\tdlib_media_uploader_icon.ico"
@@ -174,6 +174,13 @@ try {
     $exePath = Join-Path $distDir "TDLib Media Uploader.exe"
     if (-not (Test-Path -LiteralPath $exePath)) {
         throw "构建完成但没有找到 EXE：$exePath"
+    }
+    # PyInstaller 6 one-folder builds place data files below _internal, while
+    # older layouts put them directly below the application directory.
+    $packagedIcon = Get-ChildItem -LiteralPath $distDir -Filter "tdlib_media_uploader_icon.ico" -File -Recurse |
+        Select-Object -First 1
+    if ($null -eq $packagedIcon) {
+        throw "构建完成但没有找到 Windows Qt/任务栏图标资源：$distDir"
     }
 
     # Keep the project license, author attribution and third-party index beside

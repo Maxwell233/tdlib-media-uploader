@@ -5,7 +5,7 @@ Windows x64 构建、PyInstaller macOS arm64 `.app` 构建，以及源码中实�
 审计日期：2026-09-06。
 
 本文件是随源码和便携 ZIP 分发的许可索引，不替代各上游项目的完整许可文本。
-第三方组件不受根目录 `LICENSE` 的 CC BY-NC 4.0 条件覆盖；下表中的组件仍按
+第三方组件不受根目录 `LICENSE` 的 MIT 条件覆盖；下表中的组件仍按
 自己的许可证使用。发布新版本或升级依赖时，应重新核对对应版本的上游文本。
 
 ## 结论
@@ -29,8 +29,8 @@ Windows x64 构建、PyInstaller macOS arm64 `.app` 构建，以及源码中实�
 - PyInstaller 的 bootloader 带有 GPL Bootloader Exception，可将 bootloader
   嵌入组合程序；这不会把本项目源码变成 GPL。PyInstaller 仅是构建依赖，但其
   例外说明仍列入本清单以便追溯。
-- CC BY-NC 4.0 的非商业条件只针对本项目原创内容。它不是 OSI 定义的软件
-  开源许可证，因此不能替代或覆盖 LGPL、Boost、MIT、BSD、PSF 等第三方条款。
+- 根目录 `LICENSE` 的 MIT 条件只针对本项目原创内容，不能替代或覆盖 LGPL、
+  Boost、MIT、BSD、PSF 等第三方条款。
 
 ## 组件矩阵
 
@@ -50,13 +50,13 @@ Windows x64 构建、PyInstaller macOS arm64 `.app` 构建，以及源码中实�
 Qt、TDLib 和 FFmpeg 的发行包还可能包含由其他作者提供的 ICU、OpenSSL、zlib
 或编解码器等材料；这些材料不一定与主项目使用同一许可证。它们的具体范围
 取决于实际 wheel、Qt DLL 和 FFmpeg 构建，本清单通过上游来源链接指向对应的
-完整清单，不把这些二进制误归入 CC BY-NC 4.0。
+  完整清单，不把这些二进制误归入本项目 MIT 许可。
 
 ## 分发检查
 
 每个源码包和便携 ZIP 都应包含：
 
-1. `LICENSE`（本项目原创内容的 CC BY-NC 4.0 条件）；
+1. `LICENSE`（本项目原创内容的 MIT 条件）；
 2. `ATTRIBUTION`（Maximum 署名）；
 3. `THIRD_PARTY_LICENSES.md`（本清单）；
 4. 随 Qt、TDLib、Pillow、`imageio-ffmpeg` 和 FFmpeg 二进制一起提供的上游

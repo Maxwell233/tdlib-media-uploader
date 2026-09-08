@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""TDLib Media Uploader V1.8.5 视频上传流程。
+"""TDLib Media Uploader V1.8.7 视频上传流程。
 
 核心上传/断点/缩略图逻辑复用 tdlib_video_album_uploader.py；
 本文件负责视频扫描、mtime 日期策略和 GUI 使用的上传流程。
@@ -163,6 +163,7 @@ def show_upload_summary(
     pending_items,
     total_albums,
     exiftool_used,
+    skipped_items,
 ):
     pending_bytes = sum(
         item["path"].stat().st_size
@@ -193,6 +194,7 @@ def show_upload_summary(
             ("视频目录", cfg.VIDEO_DIR),
             ("扫描视频", len(videos)),
             ("有效视频", len(items)),
+            ("跳过坏视频", len(skipped_items)),
             ("日期模式", date_mode),
             ("mtime 兜底", fallback_count),
             ("缺失日期", len(missing)),
@@ -284,6 +286,32 @@ def main():
         if not state.is_completed(item["path"])
     ]
 
+    skipped_items = []
+    if pending_items:
+        UI.info(f"检查 {len(pending_items)} 个待上传视频的媒体数据…")
+        skipped_items = core.preflight_videos(pending_items, UI)
+        skipped_paths = {
+            core.stable_path(record["path"])
+            for record in skipped_items
+        }
+        if skipped_paths:
+            items = [
+                item
+                for item in items
+                if core.stable_path(item["path"]) not in skipped_paths
+            ]
+            completed_items = [
+                item
+                for item in items
+                if state.is_completed(item["path"])
+            ]
+            pending_items = [
+                item
+                for item in items
+                if not state.is_completed(item["path"])
+            ]
+            core.report_skipped_videos(skipped_items, UI)
+
     plans = core.build_album_plans(items, state)
     pending_plans = [plan for plan in plans if plan["pending_items"]]
     total_albums = len(pending_plans)
@@ -313,36 +341,15 @@ def main():
         pending_items=pending_items,
         total_albums=total_albums,
         exiftool_used=exiftool_used,
+        skipped_items=skipped_items,
     )
 
     if not pending_items:
-        UI.success(
-            "全部视频都已存在于断点记录中，无需上传。"
-        )
+        if skipped_items:
+            core.report_skipped_videos(skipped_items, UI, final=True)
+        else:
+            UI.success("全部视频都已存在于断点记录中，无需上传。")
         return
-
-    if cfg.VIDEO_VERIFY_ALL_METADATA:
-        UI.info(
-            "开始预检本次待上传视频…"
-        )
-
-        for index, item in enumerate(
-            pending_items,
-            1,
-        ):
-            path = item["path"]
-
-            UI.info(
-                f"预检 {index}/{len(pending_items)} · {path.name}"
-            )
-
-            core.video_info(
-                path
-            )
-
-        UI.success(
-            "视频预检完成。"
-        )
 
     if not UI.confirm_upload():
         UI.cancelled()
@@ -398,10 +405,46 @@ def main():
                     getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False),
                 )
 
+                contents, ready_items, runtime_skipped = core.build_video_contents(
+                    album_items,
+                    label,
+                    UI,
+                )
+                if runtime_skipped:
+                    skipped_items.extend(runtime_skipped)
+                    progress.skip_items([
+                        record["item"]
+                        for record in runtime_skipped
+                    ])
+                if not ready_items:
+                    UI.warning("当前 Album 没有可读取的视频，已跳过。")
+                    continue
+                if ready_items != album_items and getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False):
+                    label = with_filename_description(
+                        plan["caption"]["text"],
+                        ready_items,
+                        True,
+                    )
+                    contents, rebuilt_items, rebuilt_skipped = core.build_video_contents(
+                        ready_items,
+                        label,
+                        UI,
+                    )
+                    if rebuilt_skipped:
+                        skipped_items.extend(rebuilt_skipped)
+                        progress.skip_items([
+                            record["item"]
+                            for record in rebuilt_skipped
+                        ])
+                    ready_items = rebuilt_items
+                    if not ready_items:
+                        UI.warning("当前 Album 没有可读取的视频，已跳过。")
+                        continue
+
                 album_global += 1
 
                 progress.begin_album(
-                    album_items,
+                    ready_items,
                     month_key,
                     album_global,
                     total_albums,
@@ -417,7 +460,7 @@ def main():
                     subtitle=(
                         f"{group_label} · "
                         f"组内 {month_album_number}/{month_album_total} · "
-                        f"{len(album_items)} 个视频 · "
+                        f"{len(ready_items)} 个视频 · "
                         f"Caption={label}"
                     ),
                     rows=[
@@ -426,29 +469,16 @@ def main():
                             f"{core.format_size(item['path'].stat().st_size):>10}  "
                             f"{core.relative_name(item['path'])}"
                         )
-                        for item in album_items
+                        for item in ready_items
                     ],
                 )
 
                 try:
-                    contents = [
-                        core.input_video(
-                            item,
-                            label
-                            if index == 0
-                            else "",
-                        )
-                        for index, item
-                        in enumerate(
-                            album_items
-                        )
-                    ]
-
                     message_ids = (
                         client.send_contents(
                             contents,
                             progress,
-                            album_items,
+                            ready_items,
                         )
                     )
 
@@ -463,12 +493,12 @@ def main():
                     raise
 
                 state.mark_album_completed(
-                    album_items,
+                    ready_items,
                     message_ids,
                 )
 
                 progress.finish_album(
-                    album_items
+                    ready_items
                 )
 
                 UI.success(
@@ -485,6 +515,7 @@ def main():
             ),
             accent="green",
         )
+        core.report_skipped_videos(skipped_items, UI, final=True)
 
     finally:
         client.remove_update_callback(

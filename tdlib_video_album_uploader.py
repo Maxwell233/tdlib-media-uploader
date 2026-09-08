@@ -311,11 +311,23 @@ def video_info(path: Path):
     key = (stable_path(path), stat.st_size, stat.st_mtime_ns)
     if key in _VIDEO_INFO_CACHE:
         return _VIDEO_INFO_CACHE[key]
-    reader = imageio_ffmpeg.read_frames(str(path))
+    reader = None
     try:
+        reader = imageio_ffmpeg.read_frames(str(path))
         metadata = next(reader)
+    except StopIteration as exc:
+        raise RuntimeError(f"视频没有可读取的媒体流：{path}") from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"无法读取视频媒体信息：{path}\n"
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     finally:
-        reader.close()
+        if reader is not None:
+            try:
+                reader.close()
+            except Exception:
+                pass
     size = metadata.get("size") or metadata.get("source_size")
     duration = float(metadata.get("duration") or 0)
     if not size or len(size) != 2:
@@ -343,42 +355,148 @@ def build_thumbnail(path: Path):
     final_path = THUMB_CACHE_DIR / f"{cache_key}.jpg"
     temp_path = THUMB_CACHE_DIR / f"{cache_key}.tmp.jpg"
     if final_path.exists() and final_path.stat().st_size > 0:
-        with Image.open(final_path) as image:
-            return final_path, image.width, image.height
+        try:
+            with Image.open(final_path) as image:
+                image.verify()
+            with Image.open(final_path) as image:
+                return final_path, image.width, image.height
+        except (OSError, ValueError):
+            # A killed process can leave a zero-byte or partially written
+            # thumbnail.  Remove it and regenerate instead of treating the
+            # cache corruption as a bad source video.
+            try:
+                final_path.unlink()
+            except OSError:
+                pass
 
     ffmpeg = _FFMPEG_OVERRIDE or imageio_ffmpeg.get_ffmpeg_exe()
     process_kwargs = _hidden_subprocess_kwargs()
 
+    last_error = ""
+
     def extract(second: float):
-        result = subprocess.run(
-            [
-                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                "-ss", str(second), "-i", str(path), "-frames:v", "1",
-                "-vf", "scale=640:640:force_original_aspect_ratio=decrease",
-                "-q:v", "3", str(temp_path),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **process_kwargs,
-        )
-        return result.returncode == 0 and temp_path.exists() and temp_path.stat().st_size > 0
+        nonlocal last_error
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            result = subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                    "-ss", str(second), "-i", str(path), "-frames:v", "1",
+                    "-vf", "scale=640:640:force_original_aspect_ratio=decrease",
+                    "-q:v", "3", str(temp_path),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **process_kwargs,
+            )
+            last_error = result.stderr.strip() or f"FFmpeg 退出码 {result.returncode}"
+            return result.returncode == 0 and temp_path.exists() and temp_path.stat().st_size > 0
+        except (OSError, subprocess.SubprocessError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            return False
 
     if not extract(1.0) and not extract(0.0):
-        raise RuntimeError(f"无法生成视频预览图：{path}")
+        detail = f"；FFmpeg：{last_error[:500]}" if last_error else ""
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError(f"无法生成视频预览图：{path}{detail}")
 
-    with Image.open(temp_path) as image:
-        image = image.convert("RGB")
-        image.thumbnail((cfg.VIDEO_THUMB_MAX_EDGE, cfg.VIDEO_THUMB_MAX_EDGE), Image.Resampling.LANCZOS)
-        for quality in (85, 75, 65, 55, 45, 35, 25):
-            image.save(final_path, "JPEG", quality=quality, optimize=True)
-            if final_path.stat().st_size <= cfg.VIDEO_THUMB_TARGET_BYTES:
-                break
-        width, height = image.width, image.height
     try:
-        temp_path.unlink()
-    except FileNotFoundError:
-        pass
+        with Image.open(temp_path) as image:
+            image = image.convert("RGB")
+            image.thumbnail((cfg.VIDEO_THUMB_MAX_EDGE, cfg.VIDEO_THUMB_MAX_EDGE), Image.Resampling.LANCZOS)
+            for quality in (85, 75, 65, 55, 45, 35, 25):
+                image.save(final_path, "JPEG", quality=quality, optimize=True)
+                if final_path.stat().st_size <= cfg.VIDEO_THUMB_TARGET_BYTES:
+                    break
+            width, height = image.width, image.height
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     return final_path, width, height
+
+
+def prepare_video(path: Path):
+    """Read all local video data required before a Telegram request."""
+
+    info = video_info(path)
+    if cfg.VIDEO_GENERATE_THUMBNAIL:
+        build_thumbnail(path)
+    return info
+
+
+def preflight_videos(items, ui=None) -> list[dict]:
+    """Find unreadable videos before login and Album construction.
+
+    The source file remains in the scan and is intentionally not marked as
+    uploaded.  A later run can retry it after the user repairs or replaces the
+    file.
+    """
+
+    target = ui or UI
+    skipped = []
+    total = len(items)
+    for index, item in enumerate(items, 1):
+        path = item["path"]
+        try:
+            if getattr(cfg, "VIDEO_VERIFY_ALL_METADATA", False):
+                target.info(f"预检视频 {index}/{total} · {path.name}")
+            prepare_video(path)
+        except Exception as exc:
+            record = {
+                "item": item,
+                "path": path,
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+            skipped.append(record)
+            target.warning(f"跳过无法读取的视频：{relative_name(path)}")
+            target.log(f"跳过视频详情：{path}\n原因：{record['reason']}")
+    return skipped
+
+
+def report_skipped_videos(skipped, ui=None, *, final=False) -> None:
+    if not skipped:
+        return
+    target = ui or UI
+    prefix = "本次任务结束" if final else "视频预检完成"
+    target.warning(
+        f"{prefix}：已跳过 {len(skipped)} 个无法读取的视频；"
+        "这些文件未写入上传断点，修复后可重新扫描上传。"
+    )
+
+
+def build_video_contents(items, caption: str, ui=None):
+    """Build an Album while isolating files that became unreadable later."""
+
+    target = ui or UI
+    contents = []
+    valid_items = []
+    skipped = []
+    for item in items:
+        try:
+            contents.append(input_video(item, caption if not valid_items else ""))
+            valid_items.append(item)
+        except Exception as exc:
+            path = item["path"]
+            record = {
+                "item": item,
+                "path": path,
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+            skipped.append(record)
+            target.warning(f"跳过上传前变得无法读取的视频：{relative_name(path)}")
+            target.log(f"跳过视频详情：{path}\n原因：{record['reason']}")
+    return contents, valid_items, skipped
 
 
 def input_video(item, caption: str):
@@ -510,6 +628,18 @@ class VideoUploadProgress:
             self.file_id_to_path = {}
             self.samples.clear()
             self.last_draw = 0.0
+
+    def skip_items(self, items):
+        """Remove files that failed local preparation from progress totals."""
+
+        with self.lock:
+            for item in items:
+                path = item["path"]
+                size = self.sizes.pop(path, 0)
+                self.total_bytes = max(0, self.total_bytes - size)
+                self.total_files = max(0, self.total_files - 1)
+                self.current_uploaded.pop(path, None)
+        self.draw(force=True)
 
     @staticmethod
     def _video_file(message):
@@ -714,6 +844,20 @@ def main():
     state = UploadState()
     completed_items = [item for item in items if state.is_completed(item["path"])]
     pending_items = [item for item in items if not state.is_completed(item["path"])]
+    skipped_items = []
+    if pending_items:
+        UI.log(f"正在检查 {len(pending_items)} 个待上传视频的媒体数据…")
+        skipped_items = preflight_videos(pending_items)
+        skipped_paths = {stable_path(record["path"]) for record in skipped_items}
+        if skipped_paths:
+            items = [
+                item
+                for item in items
+                if stable_path(item["path"]) not in skipped_paths
+            ]
+            completed_items = [item for item in items if state.is_completed(item["path"])]
+            pending_items = [item for item in items if not state.is_completed(item["path"])]
+            report_skipped_videos(skipped_items)
     plans = build_album_plans(items, state)
     pending_plans = [plan for plan in plans if plan["pending_items"]]
     total_albums = len(pending_plans)
@@ -721,6 +865,7 @@ def main():
     print("\n" + "=" * 82)
     print(f"视频目录：{cfg.VIDEO_DIR}")
     print(f"扫描视频：{len(videos)} | 可用日期：{len(items)} | 缺失日期：{len(missing)}")
+    print(f"跳过坏视频：{len(skipped_items)}")
     print(f"断点已完成：{len(completed_items)}/{len(items)}")
     print(f"本次待上传：{len(pending_items)} | {format_size(sum(item['path'].stat().st_size for item in pending_items))}")
     print(f"本次 Album：{total_albums}")
@@ -730,15 +875,12 @@ def main():
     if cfg.VIDEO_SHOW_FILE_LIST:
         print_plan(items, state)
     if not pending_items:
-        print("\n全部视频已经在断点记录中，无需上传。")
+        if skipped_items:
+            report_skipped_videos(skipped_items, final=True)
+            print("\n没有可上传的有效视频；坏视频已跳过并记录。")
+        else:
+            print("\n全部视频已经在断点记录中，无需上传。")
         return
-
-    if cfg.VIDEO_VERIFY_ALL_METADATA:
-        for index, item in enumerate(pending_items, 1):
-            path = item["path"]
-            print(f"\r预检视频 {index}/{len(pending_items)}：{path.name}", end="", flush=True)
-            video_info(path)
-        print()
 
     if input("\n确认开始上传？输入 y 继续：").strip().lower() != "y":
         print("已取消。")
@@ -770,41 +912,65 @@ def main():
 
             for plan in month_plans:
                 album_items = plan["pending_items"]
-                month_album_number = plan["number"]
                 label = with_filename_description(
                     plan["caption"]["text"],
                     album_items,
                     getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False),
                 )
+                contents, ready_items, runtime_skipped = build_video_contents(
+                    album_items,
+                    label,
+                )
+                if runtime_skipped:
+                    skipped_items.extend(runtime_skipped)
+                    progress.skip_items([record["item"] for record in runtime_skipped])
+                if not ready_items:
+                    UI.warning("当前 Album 没有可读取的视频，已跳过。")
+                    continue
+                month_album_number = plan["number"]
+                if ready_items != album_items and getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False):
+                    label = with_filename_description(
+                        plan["caption"]["text"],
+                        ready_items,
+                        True,
+                    )
+                    contents, rebuilt_items, rebuilt_skipped = build_video_contents(
+                        ready_items,
+                        label,
+                    )
+                    if rebuilt_skipped:
+                        skipped_items.extend(rebuilt_skipped)
+                        progress.skip_items([record["item"] for record in rebuilt_skipped])
+                    ready_items = rebuilt_items
+                    if not ready_items:
+                        UI.warning("当前 Album 没有可读取的视频，已跳过。")
+                        continue
                 album_global += 1
-                progress.begin_album(album_items, month_key, album_global, total_albums)
+                progress.begin_album(ready_items, month_key, album_global, total_albums)
                 UI.log("")
                 UI.log(
                     f"[总 {album_global}/{total_albums}] [{group_label} {month_album_number}/{month_album_total}] "
-                    f"Album {len(album_items)} 个 | Caption={label}"
+                    f"Album {len(ready_items)} 个 | Caption={label}"
                 )
-                for item in album_items:
+                for item in ready_items:
                     path = item["path"]
                     UI.log(
                         f"  {item['capture_time'].strftime('%Y-%m-%d %H:%M:%S')}  "
                         f"{format_size(path.stat().st_size):>10}  {relative_name(path)}"
                     )
                 try:
-                    contents = [
-                        input_video(item, label if index == 0 else "")
-                        for index, item in enumerate(album_items)
-                    ]
-                    message_ids = client.send_contents(contents, progress, album_items)
+                    message_ids = client.send_contents(contents, progress, ready_items)
                 except Exception:
                     UI.finish()
                     UI.log("当前 Album 未写入断点。")
                     raise
-                state.mark_album_completed(album_items, message_ids)
-                progress.finish_album(album_items)
+                state.mark_album_completed(ready_items, message_ids)
+                progress.finish_album(ready_items)
                 UI.log(f"Album 发送完成，Caption={label or '无'}，断点已保存。")
 
         UI.log("\n" + "=" * 82)
         UI.log("全部视频上传完成。")
+        report_skipped_videos(skipped_items, final=True)
         UI.log("=" * 82)
     finally:
         client.remove_update_callback(progress.handle_update)

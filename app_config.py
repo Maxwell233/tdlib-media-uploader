@@ -9,7 +9,7 @@ from pathlib import Path
 
 from runtime_paths import CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH
 
-APP_VERSION = "1.8.5"
+APP_VERSION = "1.8.7"
 PROJECT_DIR = RESOURCE_DIR
 
 

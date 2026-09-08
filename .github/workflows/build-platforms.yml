@@ -52,6 +52,10 @@ jobs:
           if (-not (Test-Path -LiteralPath $exe)) {
             throw "EXE not found: $exe"
           }
+          $appIcon = Get-ChildItem -LiteralPath "dist\TDLib Media Uploader" -Filter "tdlib_media_uploader_icon.ico" -File -Recurse | Select-Object -First 1
+          if ($null -eq $appIcon) {
+            throw "Windows Qt/taskbar icon resource not found in the packaged application"
+          }
           foreach ($noticeName in @("LICENSE", "ATTRIBUTION", "THIRD_PARTY_LICENSES.md")) {
             $notice = "dist\TDLib Media Uploader\$noticeName"
             if (-not (Test-Path -LiteralPath $notice)) {
