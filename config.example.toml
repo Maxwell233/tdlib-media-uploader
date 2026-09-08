@@ -1,5 +1,5 @@
 # ============================================================
-# TDLib Media Uploader V1.8.5
+# TDLib Media Uploader V1.8.6
 #
 # 首次使用：
 #   1. 复制本文件为 config.toml
@@ -74,8 +74,7 @@ image_dir = '~/Pictures/TDLib Media Uploader/Images'
 
 # 可选：ExifTool 路径
 # Windows 使用 tools/exiftool.exe，macOS/Linux 使用 tools/exiftool。
-# 如果 ExifTool 不存在，且 missing_date_policy = "mtime"，
-# 视频脚本会直接使用文件修改时间，不会报错。
+# ExifTool 不存在时，通过 FFmpeg 读取媒体创建日期。
 exiftool_path = 'tools/exiftool'
 
 
@@ -86,12 +85,11 @@ exiftool_path = 'tools/exiftool'
 extensions = [".mp4", ".mov", ".m4v"]
 
 # 默认 mtime：
-# - 安装 ExifTool 时：优先 EXIF/QuickTime 内部时间，缺失时用文件修改时间
-# - 未安装 ExifTool 时：全部使用文件修改时间
+# - 优先 EXIF/QuickTime，再读取视频媒体创建日期，最后使用文件修改日期
+# - 不使用文件系统的创建时间（复制文件可能改变该时间）
 #
 # "error"：
-# - 必须安装 ExifTool
-# - 找不到内部日期的视频会停止上传
+# - EXIF 和媒体创建日期都缺失时停止，不回退到文件修改日期
 missing_date_policy = "mtime"
 
 quicktime_utc_target_zone = ""

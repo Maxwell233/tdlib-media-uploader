@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import functools
 import json
 import math
 import os
@@ -180,6 +181,8 @@ def parse_exif_datetime(value):
     if not text or text.startswith("0000-"):
         return None
     text = text.replace("Z", "+00:00")
+    if len(text) >= 10 and text[4] == ":" and text[7] == ":":
+        text = text[:10].replace(":", "-") + text[10:]
     if len(text) >= 5:
         tail = text[-5:]
         if tail[0] in "+-" and tail[1:].isdigit():
@@ -205,6 +208,7 @@ def read_exif_metadata() -> dict[str, dict]:
     command = [
         str(cfg.EXIFTOOL_PATH), "-j", "-r", "-a", "-G1", "-s",
         "-api", "LargeFileSupport=1",
+        "-api", "QuickTimeUTC=1",
         "-d", "%Y-%m-%d %H:%M:%S%z",
         "-time:all",
     ]
@@ -233,9 +237,63 @@ def read_exif_metadata() -> dict[str, dict]:
     }
 
 
+@functools.lru_cache(maxsize=4096)
+def _media_creation_metadata(path_text: str, size: int, mtime_ns: int):
+    """Read container, then video-stream creation tags without transcoding.
+
+    File attributes invalidate the cache after edits; scan and upload can reuse
+    the same metadata. The existing bundled FFmpeg works on both platforms.
+    """
+    executable = imageio_ffmpeg.get_ffmpeg_exe()
+    for source in ("0", "0:s:v:0"):
+        result = subprocess.run(
+            [executable, "-nostdin", "-v", "error", "-i", path_text,
+             "-map_metadata", source, "-map_chapters", "-1", "-f", "ffmetadata", "pipe:1"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", timeout=20,
+            **_hidden_subprocess_kwargs(),
+        )
+        if result.returncode != 0:
+            continue
+        tags = {}
+        for line in result.stdout.splitlines():
+            # Only global metadata; chapters/stream sections are not dates
+            # for the whole file. Stream metadata is explicitly mapped above.
+            if line.startswith("["):
+                break
+            key, separator, value = line.partition("=")
+            if separator:
+                tags[key.strip().lower()] = value.strip()
+        for key in ("com.apple.quicktime.creationdate", "creation_time"):
+            dt = parse_exif_datetime(tags.get(key))
+            if dt is not None and dt.date().isoformat() != "1904-01-01":
+                return dt, f"Media:{key}", key == "creation_time"
+    return None
+
+
+def read_media_creation_time(path: Path):
+    try:
+        info = path.stat()
+        return _media_creation_metadata(display_path(path), info.st_size, info.st_mtime_ns)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        # Missing tools, unreadable/unsupported files or a timed-out share
+        # leave the final decision to missing_date_policy.
+        return None
+
+
+def _normalize_media_timezone(dt, utc_style):
+    zone = cfg.VIDEO_QUICKTIME_UTC_TARGET_ZONE
+    if utc_style:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ZoneInfo(zone)) if zone else dt.astimezone()
+    return dt
+
+
 def choose_capture_time(path: Path, row: dict | None):
     row = row or {}
     predicates = [
+        lambda key: key.lower() in {"exififd:datetimeoriginal", "exif:datetimeoriginal", "composite:subsecdatetimeoriginal"},
         lambda key: key.lower() == "keys:creationdate",
         lambda key: key.lower().endswith(":datetimeoriginal"),
         lambda key: key.lower() == "quicktime:creationdate",
@@ -249,18 +307,19 @@ def choose_capture_time(path: Path, row: dict | None):
             if key == "SourceFile" or not predicate(key):
                 continue
             dt = parse_exif_datetime(value)
-            if dt is None:
+            if dt is None or dt.date().isoformat() == "1904-01-01":
                 continue
             utc_style = (
                 key.lower() == "quicktime:createdate"
                 or key.lower().endswith(":trackcreatedate")
                 or key.lower().endswith(":mediacreatedate")
             )
-            if utc_style and cfg.VIDEO_QUICKTIME_UTC_TARGET_ZONE:
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                dt = dt.astimezone(ZoneInfo(cfg.VIDEO_QUICKTIME_UTC_TARGET_ZONE))
+            dt = _normalize_media_timezone(dt, utc_style)
             return {"datetime": dt, "tag": key, "fallback": False}
+    media = read_media_creation_time(path)
+    if media is not None:
+        dt, tag, utc_style = media
+        return {"datetime": _normalize_media_timezone(dt, utc_style), "tag": tag, "fallback": False}
     if cfg.VIDEO_MISSING_DATE_POLICY == "mtime":
         return {
             "datetime": datetime.fromtimestamp(path.stat().st_mtime),
@@ -701,8 +760,8 @@ def main():
         UI.log("没有找到视频文件。")
         return
 
-    UI.log("正在使用 ExifTool 读取视频内嵌日期...")
-    metadata_index = read_exif_metadata()
+    UI.log("读取 EXIF 和媒体创建日期...")
+    metadata_index = read_exif_metadata() if cfg.EXIFTOOL_PATH.exists() else {}
     items, missing = build_items(videos, metadata_index)
     if missing and cfg.VIDEO_MISSING_DATE_POLICY == "error":
         UI.log("以下视频没有找到可用的 EXIF/QuickTime 日期：")
