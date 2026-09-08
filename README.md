@@ -154,6 +154,6 @@ macOS v1.8.7 包未配置 Apple Developer 签名和公证，所以 Gatekeeper �
 
 ## 项目许可与署名
 
-本项目的原创代码、文档和界面资源采用 [MIT License](LICENSE) 发布。使用、修改和再分发时请保留 `LICENSE` 中的版权与许可声明。
+本项目的原创代码、文档和界面资源采用 [GNU General Public License v3.0 only（GPL-3.0-only）](LICENSE) 发布。使用、修改和再分发时请遵守 `LICENSE` 中的版权与许可要求。
 
 完整许可文本见根目录的 `LICENSE`，作者署名见 `ATTRIBUTION`，第三方组件清单见 `THIRD_PARTY_LICENSES.md`。本项目为独立社区项目，与 Telegram 官方无隶属关系；TDLib、PySide6、Pillow、imageio-ffmpeg、FFmpeg、PyInstaller、Python 及其他第三方组件分别遵循各自许可证。源码包和编译包均包含上述三个许可/署名文件，请勿将 `config.toml`、Telegram API 凭据、登录数据或本地断点状态随包分发。

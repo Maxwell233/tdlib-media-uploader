@@ -3,8 +3,8 @@ TDLib Media Uploader
 作者署名：Maximum
 署名年份：2026
 
-原创代码、文档和界面资源使用 MIT License。
-许可文本见根目录 LICENSE；版权声明：Copyright (c) 2026 Maximum。
+原创代码、文档和界面资源使用 GNU General Public License v3.0 only
+(GPL-3.0-only)。许可文本见根目录 LICENSE；版权声明：Copyright (C) 2026 Maximum。
 
 第三方组件不受本文件许可覆盖，仍分别遵循其各自的上游许可条款。
 第三方清单：THIRD_PARTY_LICENSES.md

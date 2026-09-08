@@ -5,16 +5,16 @@ Windows x64 构建、PyInstaller macOS arm64 `.app` 构建，以及源码中实�
 审计日期：2026-09-06。
 
 本文件是随源码和便携 ZIP 分发的许可索引，不替代各上游项目的完整许可文本。
-第三方组件不受根目录 `LICENSE` 的 MIT 条件覆盖；下表中的组件仍按
+第三方组件不受根目录 `LICENSE` 的 GPL-3.0-only 条件覆盖；下表中的组件仍按
 自己的许可证使用。发布新版本或升级依赖时，应重新核对对应版本的上游文本。
 
 ## 结论
 
-- 没有发现项目源码主动使用 GPL 或 AGPL 代码，也没有发现会把本项目原创代码
-  强制改成 GPL/AGPL 的“强传染性”依赖。
+- 本项目原创代码、文档和界面资源采用 GPL-3.0-only。依赖审计没有发现会额外
+  要求本项目采用更强 copyleft 条件的第三方 GPL/AGPL 依赖。
 - `PySide6/Qt` 和 FFmpeg 属于需要特别处理的弱传染性运行库：它们不会自动要求
-  本项目源码改用 GPL，但便携包必须保留许可说明，并且不能阻止用户替换 LGPL
-  运行库。
+  改变本项目已经采用的 GPL-3.0-only 许可；便携包必须保留许可说明，并且不能
+  阻止用户替换 LGPL 运行库。
 - `imageio-ffmpeg` 的 Windows/macOS wheel 会附带一个 FFmpeg 可执行文件；该 wheel
   的构建选项并不适合作为本项目的固定发布来源。因此安装脚本使用 `--no-binary`
   只安装 Python wrapper，Windows 构建固定下载 BtbN 的 LGPL 版本，macOS 构建从
@@ -27,10 +27,11 @@ Windows x64 构建、PyInstaller macOS arm64 `.app` 构建，以及源码中实�
 - FFmpeg 的具体许可取决于构建选项。当前固定构建没有 `--enable-gpl` 或
   `--enable-nonfree`，并随包提供 LGPLv3 文本；若以后更换构建，必须重新审计。
 - PyInstaller 的 bootloader 带有 GPL Bootloader Exception，可将 bootloader
-  嵌入组合程序；这不会把本项目源码变成 GPL。PyInstaller 仅是构建依赖，但其
-  例外说明仍列入本清单以便追溯。
-- 根目录 `LICENSE` 的 MIT 条件只针对本项目原创内容，不能替代或覆盖 LGPL、
-  Boost、MIT、BSD、PSF 等第三方条款。
+  嵌入组合程序；该例外说明 bootloader 的许可关系，不替代本项目 GPL-3.0-only
+  许可或第三方组件各自的许可证。PyInstaller 仅是构建依赖，但其例外说明仍
+  列入本清单以便追溯。
+- 根目录 `LICENSE` 的 GPL-3.0-only 条件适用于本项目原创内容，不能替代或覆盖
+  LGPL、Boost、MIT、BSD、PSF 等第三方条款。
 
 ## 组件矩阵
 
@@ -50,13 +51,13 @@ Windows x64 构建、PyInstaller macOS arm64 `.app` 构建，以及源码中实�
 Qt、TDLib 和 FFmpeg 的发行包还可能包含由其他作者提供的 ICU、OpenSSL、zlib
 或编解码器等材料；这些材料不一定与主项目使用同一许可证。它们的具体范围
 取决于实际 wheel、Qt DLL 和 FFmpeg 构建，本清单通过上游来源链接指向对应的
-  完整清单，不把这些二进制误归入本项目 MIT 许可。
+  完整清单，不把这些二进制误归入本项目 GPL-3.0-only 许可。
 
 ## 分发检查
 
 每个源码包和便携 ZIP 都应包含：
 
-1. `LICENSE`（本项目原创内容的 MIT 条件）；
+1. `LICENSE`（本项目原创内容的 GPL-3.0-only 条件）；
 2. `ATTRIBUTION`（Maximum 署名）；
 3. `THIRD_PARTY_LICENSES.md`（本清单）；
 4. 随 Qt、TDLib、Pillow、`imageio-ffmpeg` 和 FFmpeg 二进制一起提供的上游

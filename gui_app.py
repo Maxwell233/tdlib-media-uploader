@@ -1369,7 +1369,7 @@ class SettingsPage(QWidget):
         license_box = QGroupBox("许可与署名")
         license_layout = QVBoxLayout(license_box)
         license_hint = QLabel(
-            "原创内容采用 MIT License；TDLib、Qt/PySide6、"
+            "原创内容采用 GNU GPL v3.0 only（GPL-3.0-only）；TDLib、Qt/PySide6、"
             "Pillow、FFmpeg、PyInstaller 和 Python 仍按各自上游许可证使用。"
             "完整许可清单随程序放在 THIRD_PARTY_LICENSES.md。"
         )
