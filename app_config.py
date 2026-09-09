@@ -252,9 +252,9 @@ if VIDEO_MISSING_DATE_POLICY not in {
         '"error" 或 "mtime"。'
     )
 
-# MediaCreateDate/TrackCreateDate 等容器日期需要 ExifTool 读取。默认开启
-# 是为了保持旧版本会读取 QuickTime 日期的行为；关闭后仍会优先使用
-# EXIF 日期，但跳过额外的媒体日期字段，扫描更快。
+# 默认开启媒体创建日期以保持旧版本读取 QuickTime 日期的行为。扫描先由
+# ExifTool 一次批量读取；缺少可用 EXIF 的视频才会使用 FFmpeg 回退。关闭后
+# 仍优先使用 EXIF 日期，但跳过媒体日期回退，扫描更快。
 VIDEO_READ_MEDIA_CREATION_DATE = bool(
     video.get(
         "read_media_creation_date",

@@ -19,17 +19,24 @@ UI = core.UI
 
 
 def read_metadata():
-    """读取批量日期元数据；没有 ExifTool 时按配置回退。"""
+    """读取批量日期元数据；没有 ExifTool 时保留 FFmpeg 媒体日期回退。"""
     if not cfg.EXIFTOOL_PATH.exists():
+        if cfg.VIDEO_READ_MEDIA_CREATION_DATE:
+            UI.warning(
+                f"未找到 ExifTool：{cfg.EXIFTOOL_PATH}。"
+                " EXIF 日期不可用，将尝试通过 FFmpeg 读取媒体创建日期；"
+                "读取失败后按当前缺失日期策略处理。"
+            )
+            return {}, False
         if cfg.VIDEO_MISSING_DATE_POLICY == "mtime":
             UI.warning(
                 f"未找到 ExifTool：{cfg.EXIFTOOL_PATH}。"
-                " 本次全部使用文件修改时间（mtime）；媒体创建日期不会读取。"
+                " 本次缺失 EXIF 的视频使用文件修改时间（mtime）。"
             )
             return {}, False
         raise RuntimeError(
             f"找不到 ExifTool：{cfg.EXIFTOOL_PATH}\n"
-            '当前 missing_date_policy="error"，必须安装 ExifTool。'
+            '当前未启用媒体创建日期，且 missing_date_policy="error"，必须安装 ExifTool。'
         )
 
     return core.read_exif_metadata(), True
@@ -181,15 +188,16 @@ def show_upload_summary(
         if item["fallback"]
     )
 
-    date_mode = (
-        (
+    if exiftool_used:
+        date_mode = (
             "EXIF 优先；媒体创建日期次之；缺失时 mtime"
             if cfg.VIDEO_READ_MEDIA_CREATION_DATE
             else "EXIF 优先；缺失时 mtime"
         )
-        if exiftool_used
-        else "文件修改时间（mtime）"
-    )
+    elif cfg.VIDEO_READ_MEDIA_CREATION_DATE:
+        date_mode = "媒体创建日期（FFmpeg）；缺失时 mtime"
+    else:
+        date_mode = "文件修改时间（mtime）"
 
     UI.summary(
         f"上传前确认 · TDLib Media Uploader V{cfg.APP_VERSION}",

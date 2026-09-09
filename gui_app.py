@@ -410,7 +410,7 @@ def _clear_cache(keys: tuple[str, ...]) -> tuple[list[str], list[str]]:
     return removed, errors
 
 
-def _scan_result(kind: str) -> dict:
+def _scan_result(kind: str, progress_callback=None) -> dict:
     """Scan using the existing core when available, with a preview fallback."""
     _path_size.cache_clear()
     if cfg is None:
@@ -441,14 +441,27 @@ def _scan_result(kind: str) -> dict:
             scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
             metadata = {}
             exiftool = Path(_cfg("EXIFTOOL_PATH", ""))
+            if progress_callback is not None:
+                progress_callback({"phase": "exif", "completed": 0, "total": len(paths)})
             if exiftool.exists():
                 metadata = core.read_exif_metadata()
             elif _cfg("VIDEO_READ_MEDIA_CREATION_DATE", True):
                 warning = (
-                    "未找到 ExifTool，EXIF 和媒体创建日期不可用；"
-                    "本次缺失日期的视频将使用文件修改时间。"
+                    "未找到 ExifTool，EXIF 日期不可用；"
+                    "缺少 EXIF 的视频仍会尝试读取媒体创建日期，失败后使用文件修改时间。"
                 )
-            items, missing = core.build_items(paths, metadata)
+            elif _cfg("VIDEO_MISSING_DATE_POLICY", "mtime") == "mtime":
+                warning = "未找到 ExifTool，缺失 EXIF 的视频将使用文件修改时间。"
+            else:
+                warning = (
+                    "未找到 ExifTool，无法读取 EXIF；"
+                    "当前未启用媒体日期回退，缺失日期的视频会被标记。"
+                )
+            items, missing = core.build_items(
+                paths,
+                metadata,
+                progress_callback=progress_callback,
+            )
             state = core.UploadState()
         else:
             paths, scan_size_skips = _apply_size_limits(_basic_paths(kind), kind)
@@ -656,14 +669,23 @@ def _scan_result(kind: str) -> dict:
 class ScanWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
+    progress_changed = Signal(str, object)
 
     def __init__(self, kind: str):
         super().__init__()
         self.kind = kind
 
+    def _report_progress(self, payload: dict):
+        self.progress_changed.emit(self.kind, payload)
+
     def run(self):
         try:
-            self.completed.emit(_scan_result(self.kind))
+            self.completed.emit(
+                _scan_result(
+                    self.kind,
+                    progress_callback=self._report_progress,
+                )
+            )
         except Exception as exc:
             write_exception(f"{self.kind} 扫描失败", exc, source=f"scan/{self.kind}")
             self.failed.emit(f"扫描失败：{type(exc).__name__}: {exc}")
@@ -1620,7 +1642,8 @@ class TargetDialog(QDialog):
             self.video_media_creation.setToolTip(
                 "EXIF 日期始终优先；开启后在 EXIF 缺失时读取 MediaCreateDate、"
                 "TrackCreateDate 等容器日期，最后仍使用文件修改时间。"
-                "日期由一次批量 ExifTool 扫描读取，不会逐个启动 FFmpeg。"
+                "缺少 EXIF 的视频最多同时读取 4 个，每个文件只启动一次 FFmpeg；"
+                "扫描进度会显示在页面和状态栏。"
             )
             self.media_form.addRow("日期来源", self.video_media_creation)
 
@@ -2070,8 +2093,26 @@ class MainWindow(QMainWindow):
         page.set_scanning(True)
         worker.completed.connect(lambda result, k=kind: self._scan_done(k, result))
         worker.failed.connect(lambda message, k=kind: self._scan_failed(k, message))
+        worker.progress_changed.connect(self._scan_progress)
         worker.finished.connect(worker.deleteLater)
         worker.start()
+
+    @Slot(str, object)
+    def _scan_progress(self, kind: str, payload: object):
+        if not isinstance(payload, dict):
+            return
+        page = self.video_page if kind == "video" else self.image_page
+        phase = str(payload.get("phase", "scan"))
+        completed = max(0, int(payload.get("completed", 0) or 0))
+        total = max(0, int(payload.get("total", 0) or 0))
+        if phase == "exif":
+            message = f"正在读取 EXIF 日期… {completed}/{total}"
+        elif phase == "media_date":
+            message = f"正在读取媒体创建日期… {completed}/{total}"
+        else:
+            message = "正在扫描…"
+        page.status_label.setText(message)
+        self.statusBar().showMessage(message)
 
     def _scan_done(self, kind: str, result: dict):
         self.scanners.pop(kind, None)

@@ -37,7 +37,9 @@ macOS:  exiftool_path = 'tools/exiftool'
 
 日期规则：
 - 优先读取 EXIF；启用 read_media_creation_date 后，再读取媒体/QuickTime 创建日期；最后按配置使用 mtime 兜底。
-- ExifTool 不存在：在 missing_date_policy="mtime" 时使用文件修改时间。
+- ExifTool 一次批量读取日期；已有日期的文件不会启动 FFmpeg。
+- 缺少 EXIF 的视频最多同时由 4 个 FFmpeg 任务读取媒体创建日期，每个文件只启动一次。
+- ExifTool 不存在：启用 read_media_creation_date 时仍会尝试 FFmpeg；失败后按缺失日期策略处理。
 
 FFmpeg（源码运行视频功能）
 ============================

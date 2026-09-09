@@ -74,8 +74,8 @@ image_dir = '~/Pictures/TDLib Media Uploader/Images'
 
 # 可选：ExifTool 路径
 # Windows 使用 tools/exiftool.exe，macOS/Linux 使用 tools/exiftool。
-# 如果 ExifTool 不存在，且 missing_date_policy = "mtime"，
-# 视频脚本会直接使用文件修改时间，不会报错。
+# 如果 ExifTool 不存在，程序仍会按 read_media_creation_date 设置尝试媒体日期，
+# 最后按 missing_date_policy 回退，不会因为工具缺失直接中断。
 exiftool_path = 'tools/exiftool'
 
 
@@ -86,12 +86,13 @@ exiftool_path = 'tools/exiftool'
 extensions = [".mp4", ".mov", ".m4v"]
 
 # 日期优先级：EXIF 信息 →（可选）媒体创建日期 → 文件修改日期。
-# 媒体创建日期使用同一次 ExifTool 批量扫描读取，不会逐个启动 FFmpeg。
+# ExifTool 仍使用一次批量扫描；缺少 EXIF 的视频才会用 FFmpeg 读取媒体日期。
+# 媒体日期最多同时读取 4 个文件，每个文件只启动一次 FFmpeg，并显示扫描进度。
 # 如果扫描速度优先，可关闭 read_media_creation_date；关闭后仍会读取 EXIF。
 #
 # "error"：
-# - 必须安装 ExifTool
 # - 找不到可用的 EXIF 或媒体创建日期的视频会停止上传
+# - 未安装 ExifTool 且关闭媒体日期回退时，无法读取 EXIF 的视频会停止上传
 missing_date_policy = "mtime"
 
 # 是否读取 MediaCreateDate、TrackCreateDate、QuickTime CreationDate 等媒体日期。

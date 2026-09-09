@@ -3,15 +3,18 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import math
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections import defaultdict, deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -225,26 +228,12 @@ def read_exif_metadata() -> dict[str, dict]:
             f"找不到 ExifTool：{cfg.EXIFTOOL_PATH}\n"
             "请把对应平台的 ExifTool 可执行文件放入 tools 目录，或在设置中指定路径。"
         )
-    # ``-time:all`` makes ExifTool parse and serialize every time field in a
-    # video.  Scanning only the date tags used by the uploader keeps the same
-    # one-process batch design while avoiding a large JSON response and much
-    # of the unnecessary metadata work.  In particular, do not fall back to
-    # one FFmpeg process per file here: that is considerably slower on large
-    # folders and network shares.
     command = [
-        str(cfg.EXIFTOOL_PATH), "-j", "-r", "-a", "-G1", "-s", "-fast",
+        str(cfg.EXIFTOOL_PATH), "-j", "-r", "-a", "-G1", "-s",
         "-api", "LargeFileSupport=1",
         "-d", "%Y-%m-%d %H:%M:%S%z",
-        "-DateTimeOriginal", "-CreateDate",
+        "-time:all",
     ]
-    if getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True):
-        command.extend(
-            (
-                "-CreationDate",
-                "-MediaCreateDate",
-                "-TrackCreateDate",
-            )
-        )
     for ext in sorted(cfg.VIDEO_EXTENSIONS):
         command += ["-ext", ext.lstrip(".")]
     command.append(str(cfg.VIDEO_DIR))
@@ -270,7 +259,128 @@ def read_exif_metadata() -> dict[str, dict]:
     }
 
 
-def choose_capture_time(path: Path, row: dict | None):
+MEDIA_DATE_MAX_WORKERS = 4
+
+
+def _parse_ffmetadata(text: str) -> dict[str, str]:
+    tags = {}
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(";") or line.startswith("["):
+            continue
+        key, separator, value = line.partition("=")
+        if separator:
+            tags[key.strip().lower()] = value.strip()
+    return tags
+
+
+def _valid_media_datetime(value):
+    dt = parse_exif_datetime(value)
+    if dt is None or (dt.year == 1904 and dt.month == 1 and dt.day == 1):
+        return None
+    return dt
+
+
+@functools.lru_cache(maxsize=4096)
+def _media_creation_metadata(path_text: str, size: int, mtime_ns: int):
+    """Read media creation metadata with one FFmpeg process.
+
+    The global and first-video-stream metadata are written by the same
+    FFmpeg invocation. This avoids the old fallback's second full media read
+    while keeping both common metadata locations available.
+    """
+    executable = imageio_ffmpeg.get_ffmpeg_exe()
+    fd, stream_metadata_path = tempfile.mkstemp(
+        prefix="tdlib-media-stream-",
+        suffix=".ffmeta",
+    )
+    os.close(fd)
+    try:
+        command = [
+            executable,
+            "-nostdin",
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            path_text,
+            "-map_metadata",
+            "0",
+            "-map_chapters",
+            "-1",
+            "-f",
+            "ffmetadata",
+            "pipe:1",
+            "-map_metadata",
+            "0:s:v:0",
+            "-map_chapters",
+            "-1",
+            "-f",
+            "ffmetadata",
+            stream_metadata_path,
+        ]
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            **_hidden_subprocess_kwargs(),
+        )
+        if result.returncode != 0:
+            return None
+        try:
+            stream_text = Path(stream_metadata_path).read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError:
+            stream_text = ""
+
+        sources = (
+            ("", result.stdout),
+            ("stream:", stream_text),
+        )
+        for prefix, text in sources:
+            tags = _parse_ffmetadata(text)
+            for key in ("com.apple.quicktime.creationdate", "creation_time"):
+                dt = _valid_media_datetime(tags.get(key))
+                if dt is not None:
+                    return dt, f"Media:{prefix}{key}", True
+        return None
+    finally:
+        try:
+            Path(stream_metadata_path).unlink()
+        except OSError:
+            pass
+
+
+def read_media_creation_time(path: Path):
+    try:
+        info = path.stat()
+        return _media_creation_metadata(
+            display_path(path),
+            info.st_size,
+            info.st_mtime_ns,
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        # Missing tools, unreadable/unsupported files or a timed-out share
+        # leave the final decision to missing_date_policy.
+        return None
+
+
+def _normalize_media_timezone(dt, utc_style):
+    zone = cfg.VIDEO_QUICKTIME_UTC_TARGET_ZONE
+    if utc_style:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ZoneInfo(zone)) if zone else dt.astimezone()
+    return dt
+
+
+def _choose_embedded_capture_time(row: dict | None):
     row = row or {}
     exif_candidates = []
     media_candidates = []
@@ -281,8 +391,8 @@ def choose_capture_time(path: Path, row: dict | None):
         normalized = str(key).lower()
         tag = normalized.rsplit(":", 1)[-1]
         group = normalized.split(":", 1)[0]
-        dt = parse_exif_datetime(value)
-        if dt is None or (dt.year == 1904 and dt.month == 1 and dt.day == 1):
+        dt = _valid_media_datetime(value)
+        if dt is None:
             continue
 
         # ExifTool may expose EXIF dates as ExifIFD/IFD0, XMP or Composite.
@@ -318,7 +428,7 @@ def choose_capture_time(path: Path, row: dict | None):
                 media_candidates.append((media_priority, key, dt, utc_style))
 
     if exif_candidates:
-        _, key, dt, utc_style = min(exif_candidates, key=lambda item: item[0])
+        _, key, dt, _ = min(exif_candidates, key=lambda item: item[0])
         return {"datetime": dt, "tag": key, "fallback": False}
 
     if media_candidates:
@@ -329,6 +439,22 @@ def choose_capture_time(path: Path, row: dict | None):
             dt = dt.astimezone(ZoneInfo(cfg.VIDEO_QUICKTIME_UTC_TARGET_ZONE))
         return {"datetime": dt, "tag": key, "fallback": False}
 
+    return None
+
+
+def _media_selection(media):
+    if media is None:
+        return None
+    dt, tag, utc_style = media
+    return {
+        "datetime": _normalize_media_timezone(dt, utc_style),
+        "tag": tag,
+        "fallback": False,
+    }
+
+
+def _fallback_capture_time(path: Path):
+
     if cfg.VIDEO_MISSING_DATE_POLICY == "mtime":
         return {
             "datetime": datetime.fromtimestamp(path.stat().st_mtime),
@@ -338,18 +464,132 @@ def choose_capture_time(path: Path, row: dict | None):
     return None
 
 
-def build_items(videos, metadata_index):
+def choose_capture_time(
+    path: Path,
+    row: dict | None,
+    *,
+    probe_media: bool = True,
+    allow_fallback: bool = True,
+):
+    selected = _choose_embedded_capture_time(row)
+    if selected is not None:
+        return selected
+    if probe_media and getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True):
+        selected = _media_selection(read_media_creation_time(path))
+        if selected is not None:
+            return selected
+    return _fallback_capture_time(path) if allow_fallback else None
+
+
+def _emit_scan_progress(progress_callback, payload: dict):
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(payload)
+    except Exception:
+        # A progress display must never abort a scan.
+        pass
+
+
+def _probe_media_dates(paths, progress_callback=None):
+    if not paths or not getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True):
+        return {}
+
+    total = len(paths)
+    completed = 0
+    results = {}
+    iterator = iter(paths)
+    futures = {}
+    _emit_scan_progress(
+        progress_callback,
+        {"phase": "media_date", "completed": 0, "total": total},
+    )
+
+    with ThreadPoolExecutor(
+        max_workers=MEDIA_DATE_MAX_WORKERS,
+        thread_name_prefix="tdlib-media-date",
+    ) as executor:
+        for _ in range(min(MEDIA_DATE_MAX_WORKERS, total)):
+            path = next(iterator, None)
+            if path is None:
+                break
+            futures[executor.submit(read_media_creation_time, path)] = path
+
+        while futures:
+            done, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+            for future in done:
+                path = futures.pop(future)
+                try:
+                    results[normalize_path(path)] = future.result()
+                except Exception as exc:
+                    LAST_SCAN_ERRORS.append(f"{path}: {exc}")
+                    results[normalize_path(path)] = None
+                completed += 1
+                _emit_scan_progress(
+                    progress_callback,
+                    {
+                        "phase": "media_date",
+                        "completed": completed,
+                        "total": total,
+                        "path": relative_name(path),
+                    },
+                )
+                next_path = next(iterator, None)
+                if next_path is not None:
+                    futures[executor.submit(read_media_creation_time, next_path)] = next_path
+    return results
+
+
+def build_items(videos, metadata_index, progress_callback=None):
     items, missing = [], []
+    metadata_index = metadata_index or {}
+    embedded = {}
+    pending_media = []
+    unavailable = set()
+
     for path in videos:
         try:
-            selected = choose_capture_time(path, metadata_index.get(normalize_path(path)))
+            selected = choose_capture_time(
+                path,
+                metadata_index.get(normalize_path(path)),
+                probe_media=False,
+                allow_fallback=False,
+            )
         except (OSError, ValueError, OverflowError) as exc:
             # A network share can disappear between os.walk() and metadata
             # handling. Treat that file as temporarily unavailable instead
             # of allowing a transient SMB error to abort the whole scan.
             LAST_SCAN_ERRORS.append(f"{path}: {exc}")
+            unavailable.add(normalize_path(path))
             missing.append(path)
             continue
+
+        key = normalize_path(path)
+        if selected is None:
+            pending_media.append(path)
+        else:
+            embedded[key] = selected
+
+    _emit_scan_progress(
+        progress_callback,
+        {"phase": "exif", "completed": len(videos), "total": len(videos)},
+    )
+    media_dates = _probe_media_dates(pending_media, progress_callback)
+
+    for path in videos:
+        key = normalize_path(path)
+        if key in unavailable:
+            continue
+        selected = embedded.get(key)
+        if selected is None:
+            selected = _media_selection(media_dates.get(key))
+        if selected is None:
+            try:
+                selected = _fallback_capture_time(path)
+            except (OSError, ValueError, OverflowError) as exc:
+                LAST_SCAN_ERRORS.append(f"{path}: {exc}")
+                missing.append(path)
+                continue
         if selected is None:
             missing.append(path)
             continue
@@ -932,11 +1172,29 @@ def main():
         UI.log("没有找到视频文件。")
         return
 
-    UI.log(
-        "正在使用 ExifTool 批量读取 EXIF"
-        + (" 和媒体创建日期..." if getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True) else "...")
-    )
-    metadata_index = read_exif_metadata()
+    if cfg.EXIFTOOL_PATH.exists():
+        UI.log(
+            "正在使用 ExifTool 批量读取 EXIF"
+            + ("；缺少 EXIF 的视频再读取媒体创建日期..." if getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True) else "...")
+        )
+        metadata_index = read_exif_metadata()
+    elif getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True):
+        UI.warning(
+            f"未找到 ExifTool：{cfg.EXIFTOOL_PATH}。"
+            " EXIF 日期不可用，将仅尝试读取媒体创建日期；读取失败后按缺失日期策略处理。"
+        )
+        metadata_index = {}
+    elif cfg.VIDEO_MISSING_DATE_POLICY == "mtime":
+        UI.warning(
+            f"未找到 ExifTool：{cfg.EXIFTOOL_PATH}。"
+            " 缺失 EXIF 的视频将使用文件修改时间（mtime）。"
+        )
+        metadata_index = {}
+    else:
+        raise RuntimeError(
+            f"找不到 ExifTool：{cfg.EXIFTOOL_PATH}\n"
+            '当前未启用媒体创建日期，且 missing_date_policy="error"，必须安装 ExifTool。'
+        )
     items, missing = build_items(videos, metadata_index)
     if missing and cfg.VIDEO_MISSING_DATE_POLICY == "error":
         UI.log("以下视频没有找到可用的 EXIF 或媒体创建日期：")

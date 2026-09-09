@@ -56,9 +56,9 @@ Telegram 限制在扫描阶段生效：大于 4 GiB 的视频会直接跳过；�
 
 ## 日期与视频工具
 
-日期优先级为 **EXIF 信息 →（可选）媒体创建日期 → 文件修改日期**。在视频配置中开启 `read_media_creation_date`，或在“编辑视频目标与配置”中勾选“读取媒体创建日期”，即可读取 `MediaCreateDate`、`TrackCreateDate` 和 QuickTime 创建日期。EXIF 始终优先；所有媒体日期由一次批量 ExifTool 调用读取，不会逐个启动 FFmpeg。
+日期优先级为 **EXIF 信息 →（可选）媒体创建日期 → 文件修改日期**。在视频配置中开启 `read_media_creation_date`，或在“编辑视频目标与配置”中勾选“读取媒体创建日期”，即可读取 `MediaCreateDate`、`TrackCreateDate` 和 QuickTime 创建日期。ExifTool 仍然只执行一次批量读取；只有缺少可用 EXIF/内嵌日期的视频才会进入 FFmpeg 回退，每个文件只读取一次，最多同时处理 4 个文件，扫描进度会显示在界面中。
 
-默认配置开启媒体创建日期以保持旧版本行为；如果更重视扫描速度，可以关闭 `read_media_creation_date`，此时仍读取 EXIF，缺失时直接使用文件修改时间（`missing_date_policy = "mtime"`）。选择“停止并提示缺失日期”（`error`）时，需要安装 ExifTool，找不到可用日期的视频会阻止上传。
+默认配置开启媒体创建日期以保持旧版本行为；如果更重视扫描速度，可以关闭 `read_media_creation_date`，此时仍读取 EXIF，缺失时直接使用文件修改时间（`missing_date_policy = "mtime"`）。没有 ExifTool 时，只要开关保持开启，程序仍会尝试通过 FFmpeg 读取媒体创建日期。选择“停止并提示缺失日期”（`error`）时，找不到可用日期的视频会阻止上传。
 
 从 [ExifTool 官网](https://exiftool.org/) 下载对应平台版本。Windows 将程序放到 `tools/exiftool.exe`；macOS 可将可执行文件放到 `tools/exiftool` 并执行 `chmod +x tools/exiftool`。若附带 `exiftool_files`，一起放入 `tools/`；也可在设置中指定工具路径。
 

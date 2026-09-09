@@ -251,7 +251,7 @@ class ImprovementsTest(unittest.TestCase):
                 self.assertEqual(fallback["tag"], "FileSystem:ModifyTime")
                 self.assertEqual(fallback["datetime"].timestamp(), path.stat().st_mtime)
 
-    def test_exiftool_date_query_is_narrow_and_optional(self):
+    def test_exiftool_date_query_keeps_full_time_batch(self):
         import subprocess
         import tdlib_video_album_uploader as core
 
@@ -268,9 +268,8 @@ class ImprovementsTest(unittest.TestCase):
                     patch.object(core.subprocess, "run", return_value=completed) as run:
                 core.read_exif_metadata()
                 command = run.call_args.args[0]
-                self.assertIn("-fast", command)
-                self.assertNotIn("-time:all", command)
-                self.assertIn("-MediaCreateDate", command)
+                self.assertIn("-time:all", command)
+                self.assertNotIn("-fast", command)
 
             with patch.object(core.cfg, "EXIFTOOL_PATH", executable), \
                     patch.object(core.cfg, "VIDEO_DIR", root), \
@@ -279,8 +278,92 @@ class ImprovementsTest(unittest.TestCase):
                     patch.object(core.subprocess, "run", return_value=completed) as run:
                 core.read_exif_metadata()
                 command = run.call_args.args[0]
-                self.assertNotIn("-MediaCreateDate", command)
-                self.assertNotIn("-TrackCreateDate", command)
+                self.assertIn("-time:all", command)
+
+    def test_build_items_probes_missing_media_dates_with_four_workers(self):
+        import datetime
+        import threading
+        import time
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = []
+            for index in range(8):
+                path = root / f"{index}.mp4"
+                path.write_bytes(b"video")
+                paths.append(path)
+
+            state = {"active": 0, "maximum": 0, "calls": 0}
+            lock = threading.Lock()
+
+            def probe(_path):
+                with lock:
+                    state["active"] += 1
+                    state["calls"] += 1
+                    state["maximum"] = max(state["maximum"], state["active"])
+                time.sleep(0.02)
+                with lock:
+                    state["active"] -= 1
+                return (
+                    datetime.datetime(2024, 6, 29, 5, 48, tzinfo=datetime.timezone.utc),
+                    "Media:creation_time",
+                    True,
+                )
+
+            progress = []
+            with patch.object(core.cfg, "VIDEO_MISSING_DATE_POLICY", "mtime"), \
+                    patch.object(core.cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True), \
+                    patch.object(core, "read_media_creation_time", side_effect=probe):
+                items, missing = core.build_items(paths, {}, progress_callback=progress.append)
+
+            self.assertEqual(len(items), len(paths))
+            self.assertFalse(missing)
+            self.assertEqual(state["calls"], len(paths))
+            self.assertGreater(state["maximum"], 1)
+            self.assertLessEqual(state["maximum"], core.MEDIA_DATE_MAX_WORKERS)
+            self.assertEqual(progress[-1]["phase"], "media_date")
+            self.assertEqual(progress[-1]["completed"], len(paths))
+
+    def test_embedded_date_does_not_probe_ffmpeg(self):
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "clip.mp4"
+            path.write_bytes(b"video")
+            row = {"ExifIFD:DateTimeOriginal": "2023:05:02 10:20:30"}
+            with patch.object(core.cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True), \
+                    patch.object(core.cfg, "VIDEO_MISSING_DATE_POLICY", "mtime"), \
+                    patch.object(core, "read_media_creation_time") as probe:
+                items, missing = core.build_items([path], {core.normalize_path(path): row})
+
+            self.assertFalse(missing)
+            self.assertEqual(items[0]["date_tag"], "ExifIFD:DateTimeOriginal")
+            probe.assert_not_called()
+
+    def test_media_date_reader_uses_one_ffmpeg_invocation(self):
+        import subprocess
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "clip.mp4"
+            path.write_bytes(b"video")
+
+            def run(command, **_kwargs):
+                Path(command[-1]).write_text(
+                    ";FFMETADATA1\ncreation_time=2024-06-29T05:48:00Z\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            core._media_creation_metadata.cache_clear()
+            with patch.object(core.imageio_ffmpeg, "get_ffmpeg_exe", return_value="ffmpeg"), \
+                    patch.object(core.subprocess, "run", side_effect=run) as ffmpeg:
+                media = core.read_media_creation_time(path)
+
+            self.assertIsNotNone(media)
+            self.assertEqual(media[1], "Media:stream:creation_time")
+            self.assertEqual(ffmpeg.call_count, 1)
 
     def test_title_edit_keeps_tree_rows(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(metadata, "PROJECT_DIR", Path(directory)):
