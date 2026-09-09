@@ -7,6 +7,8 @@ import hashlib
 import json
 import math
 import os
+import shutil
+import subprocess
 import threading
 import time
 from collections import deque
@@ -24,6 +26,9 @@ from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
 PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = APP_DATA_DIR / ".image_state"
 LAST_SCAN_ERRORS: list[str] = []
+LAST_SCAN_SIZE_SKIPS: list[dict] = []
+IMAGE_UPLOAD_PATHS: dict[str, Path] = {}
+COMPRESSED_IMAGE_DIR = APP_DATA_DIR / ".image_compression"
 
 UI = HeadlessUI()
 
@@ -57,11 +62,36 @@ def file_signature(path: Path) -> str:
 
 
 def scan_images() -> list[Path]:
-    global LAST_SCAN_ERRORS
+    global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS
     root = cfg.IMAGE_DIR
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"图片目录不存在或不是目录：{root}")
     images, LAST_SCAN_ERRORS = iter_files(root, cfg.IMAGE_EXTENSIONS)
+    LAST_SCAN_SIZE_SKIPS = []
+    accepted = []
+    for path in images:
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            LAST_SCAN_ERRORS.append(f"{path}: {exc}")
+            continue
+        if size > cfg.IMAGE_MAX_BYTES:
+            record = {
+                "path": path,
+                "size": size,
+                "limit": cfg.IMAGE_MAX_BYTES,
+                "category": "size",
+                "action": "compress" if cfg.IMAGE_COMPRESS_OVERSIZE else "skip",
+                "reason": (
+                    f"文件大小 {format_size(size)} 超过 Telegram Photo 上限 "
+                    f"{format_size(cfg.IMAGE_MAX_BYTES)}"
+                ),
+            }
+            LAST_SCAN_SIZE_SKIPS.append(record)
+            if not cfg.IMAGE_COMPRESS_OVERSIZE:
+                continue
+        accepted.append(path)
+    images = accepted
 
     if cfg.IMAGE_SORT_MODE == "mtime":
         images.sort(key=lambda p: (file_mtime(p), relative_name(p).lower()))
@@ -71,6 +101,147 @@ def scan_images() -> list[Path]:
 
 
 _IMAGE_INFO_CACHE = {}
+
+
+def _hidden_subprocess_kwargs() -> dict:
+    """Keep FFmpeg from opening a console window in the Windows GUI build."""
+
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "startupinfo": startupinfo,
+    }
+
+
+def _find_ffmpeg() -> str | None:
+    configured = os.environ.get("IMAGEIO_FFMPEG_EXE", "").strip()
+    if configured and Path(configured).is_file():
+        return str(Path(configured).resolve())
+    name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    for candidate in (
+        PROJECT_DIR / "tools" / "ffmpeg" / name,
+        PROJECT_DIR / "tools" / name,
+        APP_DATA_DIR / "tools" / "ffmpeg" / name,
+        APP_DATA_DIR / "tools" / name,
+    ):
+        if candidate.is_file():
+            return str(candidate.resolve())
+    return shutil.which("ffmpeg")
+
+
+def _compressed_path(path: Path) -> Path:
+    stat = path.stat()
+    digest = hashlib.sha1(
+        f"{stable_path(path)}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
+    ).hexdigest()
+    return COMPRESSED_IMAGE_DIR / f"{digest}.jpg"
+
+
+def compress_image(path: Path) -> Path:
+    """Create a temporary JPEG under the Telegram photo limit with FFmpeg."""
+
+    target = int(getattr(cfg, "IMAGE_COMPRESSION_TARGET_BYTES", int(9.5 * 1024 ** 2)))
+    final_path = _compressed_path(path)
+    if final_path.is_file() and final_path.stat().st_size <= target:
+        try:
+            with Image.open(final_path) as image:
+                image.verify()
+            return final_path
+        except (OSError, ValueError):
+            final_path.unlink(missing_ok=True)
+
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError("找不到 FFmpeg，无法压缩超限图片")
+    COMPRESSED_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    last_error = ""
+    # First preserve the original dimensions, then reduce dimensions only if
+    # quality reduction alone cannot get under the safety margin.
+    for scale, qualities in (
+        (1.0, (2, 4, 6, 8, 10, 12, 15, 18, 22, 26, 30, 34)),
+        (0.9, (4, 8, 12, 16, 20, 24, 28, 32)),
+        (0.8, (4, 8, 12, 16, 20, 24, 28, 32)),
+        (0.7, (4, 8, 12, 16, 20, 24, 28, 32)),
+        (0.6, (4, 8, 12, 16, 20, 24, 28, 32)),
+    ):
+        if scale == 1.0:
+            video_filter = "format=yuv420p"
+        else:
+            video_filter = (
+                f"scale=trunc(iw*{scale}/2)*2:trunc(ih*{scale}/2)*2,format=yuv420p"
+            )
+        for quality in qualities:
+            temp_path = final_path.with_name(
+                f".{final_path.stem}.{scale:g}.{quality}.tmp.jpg"
+            )
+            temp_path.unlink(missing_ok=True)
+            try:
+                result = subprocess.run(
+                    [
+                        ffmpeg,
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-y",
+                        "-i",
+                        str(path),
+                        "-map_metadata",
+                        "-1",
+                        "-frames:v",
+                        "1",
+                        "-vf",
+                        video_filter,
+                        "-c:v",
+                        "mjpeg",
+                        "-q:v",
+                        str(quality),
+                        str(temp_path),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    **_hidden_subprocess_kwargs(),
+                )
+                last_error = result.stderr.strip() or f"FFmpeg 退出码 {result.returncode}"
+                if result.returncode == 0 and temp_path.is_file() and temp_path.stat().st_size > 0:
+                    with Image.open(temp_path) as image:
+                        image.verify()
+                    if temp_path.stat().st_size <= target:
+                        os.replace(temp_path, final_path)
+                        return final_path
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                temp_path.unlink(missing_ok=True)
+    raise RuntimeError(
+        f"FFmpeg 无法将图片压到 {format_size(target)} 以下"
+        + (f"：{last_error[:300]}" if last_error else "")
+    )
+
+
+def upload_path(path: Path) -> Path:
+    return IMAGE_UPLOAD_PATHS.get(stable_path(path), path)
+
+
+def cleanup_compressed_images() -> None:
+    paths = set(IMAGE_UPLOAD_PATHS.values())
+    IMAGE_UPLOAD_PATHS.clear()
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        if COMPRESSED_IMAGE_DIR.is_dir() and not any(COMPRESSED_IMAGE_DIR.iterdir()):
+            COMPRESSED_IMAGE_DIR.rmdir()
+    except OSError:
+        pass
 
 
 def image_info(path: Path) -> tuple[int, int]:
@@ -98,16 +269,34 @@ def preflight_images(paths, ui=None) -> list[dict]:
     total = len(paths)
     for index, path in enumerate(paths, 1):
         try:
+            size = path.stat().st_size
+            if size > cfg.IMAGE_MAX_BYTES:
+                reason = (
+                    f"文件大小 {format_size(size)} 超过 Telegram Photo 上限 "
+                    f"{format_size(cfg.IMAGE_MAX_BYTES)}"
+                )
+                if not cfg.IMAGE_COMPRESS_OVERSIZE:
+                    raise RuntimeError(reason)
+                # Compression is deliberately deferred until the image is
+                # actually being assembled for upload, after confirmation.
+                target.info(
+                    f"预检发现超限图片，将在上传时使用 FFmpeg 压缩：{relative_name(path)}"
+                )
+                IMAGE_UPLOAD_PATHS.pop(stable_path(path), None)
+                image_info(path)
+            else:
+                IMAGE_UPLOAD_PATHS.pop(stable_path(path), None)
+                image_info(path)
             if getattr(cfg, "IMAGE_VERIFY_ALL_IMAGES", False):
                 target.info(f"预检图片 {index}/{total} · {path.name}")
-            image_info(path)
         except Exception as exc:
             record = {
                 "path": path,
                 "reason": f"{type(exc).__name__}: {exc}",
+                "category": "size" if "Telegram Photo 上限" in str(exc) else "unreadable",
             }
             skipped.append(record)
-            target.warning(f"跳过无法读取的图片：{relative_name(path)}")
+            target.warning(f"跳过图片：{relative_name(path)}")
             target.log(f"跳过图片详情：{path}\n原因：{record['reason']}")
     return skipped
 
@@ -117,17 +306,68 @@ def report_skipped_images(skipped, ui=None, *, final=False) -> None:
         return
     target = ui or UI
     prefix = "本次任务结束" if final else "图片预检完成"
+    size_count = sum(record.get("category") == "size" for record in skipped)
+    unreadable_count = len(skipped) - size_count
+    parts = []
+    if unreadable_count:
+        parts.append(f"{unreadable_count} 个无法读取的图片")
+    if size_count:
+        parts.append(f"{size_count} 个超过 10 MiB 上限的图片")
     target.warning(
-        f"{prefix}：已跳过 {len(skipped)} 个无法读取的图片；"
+        f"{prefix}：已跳过{'、'.join(parts) or f'{len(skipped)} 个图片'}；"
         "这些文件未写入上传断点，修复后可重新扫描上传。"
     )
 
 
+def report_scan_size_skips(skipped, ui=None) -> None:
+    """Report image size decisions made while scanning the directory."""
+
+    if not skipped:
+        return
+    target = ui or UI
+    compressing = [record for record in skipped if record.get("action") == "compress"]
+    rejected = [record for record in skipped if record.get("action") == "skip"]
+    if compressing:
+        target.warning(
+            f"扫描提醒：发现 {len(compressing)} 个超过 10 MiB 的图片；"
+            "上传时将尝试用 FFmpeg 生成临时压缩副本。"
+        )
+    if rejected:
+        target.warning(
+            f"扫描时跳过 {len(rejected)} 个超过 Telegram Photo 10 MiB 上限的图片；"
+            "这些文件未加入上传计划。"
+        )
+    for record in skipped:
+        target.log(
+            f"扫描图片大小检查：{record['path']}\n"
+            f"处理：{'上传时压缩' if record.get('action') == 'compress' else '跳过'}\n"
+            f"原因：{record['reason']}"
+        )
+
+
 def input_photo(path: Path, caption: str = "") -> dict:
-    width, height = image_info(path)
+    source_path = upload_path(path)
+    if path.stat().st_size > cfg.IMAGE_MAX_BYTES and cfg.IMAGE_COMPRESS_OVERSIZE:
+        original_size = path.stat().st_size
+        UI.warning(
+            f"图片开始上传，正在使用 FFmpeg 生成临时压缩副本：{relative_name(path)}"
+        )
+        source_path = compress_image(path)
+        IMAGE_UPLOAD_PATHS[stable_path(path)] = source_path
+        UI.info(
+            f"图片压缩完成：{relative_name(path)} · "
+            f"{format_size(original_size)} → {format_size(source_path.stat().st_size)}；原文件未修改"
+        )
+    elif path.stat().st_size > cfg.IMAGE_MAX_BYTES:
+        raise RuntimeError(
+            f"文件大小 {format_size(path.stat().st_size)} 超过 Telegram Photo 上限 "
+            f"{format_size(cfg.IMAGE_MAX_BYTES)}"
+        )
+    source_path = upload_path(path)
+    width, height = image_info(source_path)
     return {
         "@type": "inputMessagePhoto",
-        "photo": {"@type": "inputFileLocal", "path": display_path(path)},
+        "photo": {"@type": "inputFileLocal", "path": display_path(source_path)},
         "thumbnail": None,
         "added_sticker_file_ids": [],
         "width": width,
@@ -151,9 +391,14 @@ def build_image_contents(paths, caption: str, ui=None):
             contents.append(input_photo(path, caption if not valid_paths else ""))
             valid_paths.append(path)
         except Exception as exc:
+            try:
+                current_size = path.stat().st_size
+            except OSError:
+                current_size = 0
             record = {
                 "path": path,
                 "reason": f"{type(exc).__name__}: {exc}",
+                "category": "size" if current_size > cfg.IMAGE_MAX_BYTES else "unreadable",
             }
             skipped.append(record)
             target.warning(f"跳过上传前变得无法读取的图片：{relative_name(path)}")
@@ -471,6 +716,7 @@ def main():
 
     UI.info(f"扫描图片目录：{cfg.IMAGE_DIR}")
     images = scan_images()
+    report_scan_size_skips(LAST_SCAN_SIZE_SKIPS, UI)
     if not images:
         UI.warning("没有找到支持的图片。")
         return
@@ -478,13 +724,17 @@ def main():
     state = UploadState()
     completed = [p for p in images if state.is_completed(p)]
     pending = [p for p in images if not state.is_completed(p)]
-    skipped_items = []
+    skipped_items = [
+        record for record in LAST_SCAN_SIZE_SKIPS
+        if record.get("action") == "skip"
+    ]
     if pending:
         UI.info(f"检查 {len(pending)} 个待上传图片的媒体数据…")
-        skipped_items = preflight_images(pending, UI)
+        preflight_skipped = preflight_images(pending, UI)
+        skipped_items.extend(preflight_skipped)
         skipped_paths = {
             stable_path(record["path"])
-            for record in skipped_items
+            for record in preflight_skipped
         }
         if skipped_paths:
             images = [
@@ -510,9 +760,11 @@ def main():
             report_skipped_images(skipped_items, UI, final=True)
         else:
             UI.success("所有图片都已上传完成。")
+        cleanup_compressed_images()
         return
 
     if not UI.confirm_upload():
+        cleanup_compressed_images()
         UI.cancelled()
         return
 
@@ -594,3 +846,4 @@ def main():
     finally:
         client.remove_update_callback(progress.handle_update)
         client.close()
+        cleanup_compressed_images()

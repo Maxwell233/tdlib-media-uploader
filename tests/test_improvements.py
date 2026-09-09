@@ -120,6 +120,85 @@ class ImprovementsTest(unittest.TestCase):
             self.assertFalse(errors)
             self.assertEqual(len(calls), 2)
 
+    def test_media_scan_applies_telegram_size_limits(self):
+        import tdlib_image_album_uploader as image_core
+        import tdlib_video_album_uploader as video_core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            small_image = root / "small.jpg"
+            large_image = root / "large.jpg"
+            small_video = root / "small.mp4"
+            large_video = root / "large.mp4"
+            small_image.write_bytes(b"1234")
+            large_image.write_bytes(b"12345")
+            small_video.write_bytes(b"1234")
+            large_video.write_bytes(b"12345")
+
+            with patch.object(image_core.cfg, "IMAGE_DIR", root), \
+                    patch.object(image_core.cfg, "IMAGE_EXTENSIONS", {".jpg"}), \
+                    patch.object(image_core.cfg, "IMAGE_MAX_BYTES", 4), \
+                    patch.object(image_core.cfg, "IMAGE_COMPRESS_OVERSIZE", False):
+                self.assertEqual(image_core.scan_images(), [small_image])
+                self.assertEqual(len(image_core.LAST_SCAN_SIZE_SKIPS), 1)
+                self.assertEqual(image_core.LAST_SCAN_SIZE_SKIPS[0]["action"], "skip")
+
+            with patch.object(image_core.cfg, "IMAGE_DIR", root), \
+                    patch.object(image_core.cfg, "IMAGE_EXTENSIONS", {".jpg"}), \
+                    patch.object(image_core.cfg, "IMAGE_MAX_BYTES", 4), \
+                    patch.object(image_core.cfg, "IMAGE_COMPRESS_OVERSIZE", True):
+                self.assertEqual(
+                    {path.name for path in image_core.scan_images()},
+                    {"large.jpg", "small.jpg"},
+                )
+                self.assertEqual(image_core.LAST_SCAN_SIZE_SKIPS[0]["action"], "compress")
+
+            with patch.object(video_core.cfg, "VIDEO_DIR", root), \
+                    patch.object(video_core.cfg, "VIDEO_EXTENSIONS", {".mp4"}), \
+                    patch.object(video_core.cfg, "VIDEO_MAX_BYTES", 4):
+                self.assertEqual(video_core.scan_videos(), [small_video])
+                self.assertEqual(len(video_core.LAST_SCAN_SIZE_SKIPS), 1)
+
+    def test_oversize_image_compression_is_deferred_until_upload(self):
+        import tdlib_image_album_uploader as core
+        from PIL import Image
+
+        class UI:
+            def __init__(self):
+                self.messages = []
+
+            def info(self, text):
+                self.messages.append(("info", str(text)))
+
+            def warning(self, text):
+                self.messages.append(("warning", str(text)))
+
+            def log(self, text):
+                self.messages.append(("log", str(text)))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / "large.jpg"
+            compressed = root / "compressed.jpg"
+            Image.new("RGB", (20, 20), "red").save(original, format="JPEG")
+            Image.new("RGB", (10, 10), "red").save(compressed, format="JPEG")
+            ui = UI()
+            core.IMAGE_UPLOAD_PATHS.clear()
+            with patch.object(core.cfg, "IMAGE_MAX_BYTES", 10), \
+                    patch.object(core.cfg, "IMAGE_COMPRESS_OVERSIZE", True), \
+                    patch.object(core, "compress_image", return_value=compressed) as compress, \
+                    patch.object(core, "UI", ui):
+                skipped = core.preflight_images([original], ui)
+                compress.assert_not_called()
+                self.assertEqual(skipped, [])
+
+                payload = core.input_photo(original, "测试")
+                compress.assert_called_once_with(original)
+                self.assertEqual(payload["photo"]["@type"], "inputFileLocal")
+                self.assertEqual(Path(payload["photo"]["path"]), compressed)
+
+            core.cleanup_compressed_images()
+
     def test_video_monthly_and_forced_grouping(self):
         import tdlib_video_album_uploader as core
         import datetime

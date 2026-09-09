@@ -1,7 +1,7 @@
 ExifTool（可选）
 ================
 
-V1.8.7 默认 missing_date_policy = "mtime"，因此没有 ExifTool 也能上传视频。
+V1.8.8 默认 missing_date_policy = "mtime"，因此没有 ExifTool 也能上传视频。
 
 如果希望脚本优先读取视频内部的 EXIF / QuickTime 创建时间，可安装 ExifTool：
 
@@ -42,7 +42,7 @@ macOS:  exiftool_path = 'tools/exiftool'
 FFmpeg（源码运行视频功能）
 ============================
 
-发布的 Windows 和 macOS ZIP 已内置经过许可检查的 LGPL FFmpeg。若直接运行源码，
+发布的 Windows ZIP 和 macOS DMG 已内置经过许可检查的 LGPL FFmpeg。若直接运行源码，
 请使用 LGPL 构建并任选一种方式提供：
 
 1. 放置在：

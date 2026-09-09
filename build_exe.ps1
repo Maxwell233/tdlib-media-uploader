@@ -123,7 +123,7 @@ function Ensure-LgplFfmpeg {
 
 try {
     $python = Resolve-PythonCommand -RequestedPath $PythonPath
-    Write-Host "TDLib Media Uploader V1.8.7 · Windows EXE 构建" -ForegroundColor Cyan
+    Write-Host "TDLib Media Uploader V1.8.8 · Windows EXE 构建" -ForegroundColor Cyan
     Write-Host "使用 Python：$python" -ForegroundColor DarkGray
 
     $iconPath = Join-Path $PSScriptRoot "assets\tdlib_media_uploader_icon.ico"
@@ -181,6 +181,21 @@ try {
         Select-Object -First 1
     if ($null -eq $packagedIcon) {
         throw "构建完成但没有找到 Windows Qt/任务栏图标资源：$distDir"
+    }
+
+    # Validate the icon embedded in the EXE itself.  The loose ICO resource
+    # above is needed by Qt at runtime, while Explorer/taskbar uses the PE
+    # icon resource written by PyInstaller's --icon option.
+    try {
+        Add-Type -AssemblyName System.Drawing
+        $embeddedIcon = [System.Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path -LiteralPath $exePath).Path)
+        if ($null -eq $embeddedIcon) {
+            throw "EXE 没有可提取的嵌入图标资源"
+        }
+        $embeddedIcon.Dispose()
+    }
+    catch {
+        throw "Windows EXE 任务栏图标校验失败：$($_.Exception.Message)"
     }
 
     # Keep the project license, author attribution and third-party index beside

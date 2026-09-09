@@ -29,6 +29,7 @@ PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = APP_DATA_DIR / ".state"
 THUMB_CACHE_DIR = APP_DATA_DIR / ".thumb_cache"
 LAST_SCAN_ERRORS: list[str] = []
+LAST_SCAN_SIZE_SKIPS: list[dict] = []
 
 
 def _hidden_subprocess_kwargs() -> dict:
@@ -164,11 +165,33 @@ def month_caption(month_key: str) -> str:
 
 
 def scan_videos() -> list[Path]:
-    global LAST_SCAN_ERRORS
+    global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS
     root = cfg.VIDEO_DIR
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"视频目录不存在或不是目录：{root}")
     videos, LAST_SCAN_ERRORS = iter_files(root, cfg.VIDEO_EXTENSIONS)
+    LAST_SCAN_SIZE_SKIPS = []
+    accepted = []
+    for path in videos:
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            LAST_SCAN_ERRORS.append(f"{path}: {exc}")
+            continue
+        if size > cfg.VIDEO_MAX_BYTES:
+            LAST_SCAN_SIZE_SKIPS.append({
+                "path": path,
+                "size": size,
+                "limit": cfg.VIDEO_MAX_BYTES,
+                "category": "size",
+                "reason": (
+                    f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
+                    f"{format_size(cfg.VIDEO_MAX_BYTES)}"
+                ),
+            })
+            continue
+        accepted.append(path)
+    videos = accepted
     videos.sort(key=lambda p: (file_mtime(p), relative_name(p).lower()))
     return videos
 
@@ -449,6 +472,12 @@ def preflight_videos(items, ui=None) -> list[dict]:
     for index, item in enumerate(items, 1):
         path = item["path"]
         try:
+            size = path.stat().st_size
+            if size > cfg.VIDEO_MAX_BYTES:
+                raise RuntimeError(
+                    f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
+                    f"{format_size(cfg.VIDEO_MAX_BYTES)}"
+                )
             if getattr(cfg, "VIDEO_VERIFY_ALL_METADATA", False):
                 target.info(f"预检视频 {index}/{total} · {path.name}")
             prepare_video(path)
@@ -457,6 +486,7 @@ def preflight_videos(items, ui=None) -> list[dict]:
                 "item": item,
                 "path": path,
                 "reason": f"{type(exc).__name__}: {exc}",
+                "category": "size" if "超过 Telegram 视频上限" in str(exc) else "unreadable",
             }
             skipped.append(record)
             target.warning(f"跳过无法读取的视频：{relative_name(path)}")
@@ -464,13 +494,37 @@ def preflight_videos(items, ui=None) -> list[dict]:
     return skipped
 
 
+def report_scan_size_skips(skipped, ui=None) -> None:
+    """Report files rejected during directory scanning."""
+
+    if not skipped:
+        return
+    target = ui or UI
+    target.warning(
+        f"扫描时跳过 {len(skipped)} 个超过 Telegram 4 GiB 上限的视频；"
+        "这些文件未加入上传计划。"
+    )
+    for record in skipped:
+        target.log(
+            f"扫描跳过视频：{record['path']}\n"
+            f"原因：{record['reason']}"
+        )
+
+
 def report_skipped_videos(skipped, ui=None, *, final=False) -> None:
     if not skipped:
         return
     target = ui or UI
     prefix = "本次任务结束" if final else "视频预检完成"
+    size_count = sum(record.get("category") == "size" for record in skipped)
+    unreadable_count = len(skipped) - size_count
+    parts = []
+    if unreadable_count:
+        parts.append(f"{unreadable_count} 个无法读取的视频")
+    if size_count:
+        parts.append(f"{size_count} 个超过 4 GiB 上限的视频")
     target.warning(
-        f"{prefix}：已跳过 {len(skipped)} 个无法读取的视频；"
+        f"{prefix}：已跳过{'、'.join(parts) or f'{len(skipped)} 个视频'}；"
         "这些文件未写入上传断点，修复后可重新扫描上传。"
     )
 
@@ -827,6 +881,8 @@ def main():
     UI.log(f"tdjson / TDLib 绑定版本：{version}（已锁定）")
 
     videos = scan_videos()
+    if LAST_SCAN_SIZE_SKIPS:
+        report_scan_size_skips(LAST_SCAN_SIZE_SKIPS)
     if not videos:
         UI.log("没有找到视频文件。")
         return
