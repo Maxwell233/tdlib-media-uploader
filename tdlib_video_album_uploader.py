@@ -202,12 +202,26 @@ def read_exif_metadata() -> dict[str, dict]:
             f"找不到 ExifTool：{cfg.EXIFTOOL_PATH}\n"
             "请把对应平台的 ExifTool 可执行文件放入 tools 目录，或在设置中指定路径。"
         )
+    # ``-time:all`` makes ExifTool parse and serialize every time field in a
+    # video.  Scanning only the date tags used by the uploader keeps the same
+    # one-process batch design while avoiding a large JSON response and much
+    # of the unnecessary metadata work.  In particular, do not fall back to
+    # one FFmpeg process per file here: that is considerably slower on large
+    # folders and network shares.
     command = [
-        str(cfg.EXIFTOOL_PATH), "-j", "-r", "-a", "-G1", "-s",
+        str(cfg.EXIFTOOL_PATH), "-j", "-r", "-a", "-G1", "-s", "-fast",
         "-api", "LargeFileSupport=1",
         "-d", "%Y-%m-%d %H:%M:%S%z",
-        "-time:all",
+        "-DateTimeOriginal", "-CreateDate",
     ]
+    if getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True):
+        command.extend(
+            (
+                "-CreationDate",
+                "-MediaCreateDate",
+                "-TrackCreateDate",
+            )
+        )
     for ext in sorted(cfg.VIDEO_EXTENSIONS):
         command += ["-ext", ext.lstrip(".")]
     command.append(str(cfg.VIDEO_DIR))
@@ -235,32 +249,63 @@ def read_exif_metadata() -> dict[str, dict]:
 
 def choose_capture_time(path: Path, row: dict | None):
     row = row or {}
-    predicates = [
-        lambda key: key.lower() == "keys:creationdate",
-        lambda key: key.lower().endswith(":datetimeoriginal"),
-        lambda key: key.lower() == "quicktime:creationdate",
-        lambda key: key.lower() == "quicktime:createdate",
-        lambda key: key.lower().endswith(":createdate") and "file:" not in key.lower() and "track" not in key.lower() and "media" not in key.lower(),
-        lambda key: key.lower().endswith(":trackcreatedate"),
-        lambda key: key.lower().endswith(":mediacreatedate"),
-    ]
-    for predicate in predicates:
-        for key, value in row.items():
-            if key == "SourceFile" or not predicate(key):
-                continue
-            dt = parse_exif_datetime(value)
-            if dt is None:
-                continue
-            utc_style = (
-                key.lower() == "quicktime:createdate"
-                or key.lower().endswith(":trackcreatedate")
-                or key.lower().endswith(":mediacreatedate")
+    exif_candidates = []
+    media_candidates = []
+
+    for key, value in row.items():
+        if key == "SourceFile":
+            continue
+        normalized = str(key).lower()
+        tag = normalized.rsplit(":", 1)[-1]
+        group = normalized.split(":", 1)[0]
+        dt = parse_exif_datetime(value)
+        if dt is None or (dt.year == 1904 and dt.month == 1 and dt.day == 1):
+            continue
+
+        # ExifTool may expose EXIF dates as ExifIFD/IFD0, XMP or Composite.
+        # Treat DateTimeOriginal as an EXIF-style date unless it is clearly a
+        # file/container date, and keep CreateDate from video groups for the
+        # optional media pass below.
+        exif_group = group in {"exif", "exififd", "ifd0", "xmp", "composite"}
+        if tag == "datetimeoriginal" and group not in {"file", "quicktime", "keys"}:
+            exif_candidates.append((0, key, dt, False))
+        elif tag == "createdate" and exif_group:
+            exif_candidates.append((1, key, dt, False))
+
+        if getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True):
+            is_media = (
+                normalized in {
+                    "keys:creationdate",
+                    "quicktime:creationdate",
+                    "quicktime:createdate",
+                }
+                or tag in {"mediacreatedate", "trackcreatedate"}
+                or (tag == "creationdate" and group not in {"file", "exif", "exififd", "ifd0", "xmp"})
             )
-            if utc_style and cfg.VIDEO_QUICKTIME_UTC_TARGET_ZONE:
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                dt = dt.astimezone(ZoneInfo(cfg.VIDEO_QUICKTIME_UTC_TARGET_ZONE))
-            return {"datetime": dt, "tag": key, "fallback": False}
+            if is_media:
+                utc_style = (
+                    normalized == "quicktime:createdate"
+                    or tag in {"trackcreatedate", "mediacreatedate"}
+                )
+                media_priority = {
+                    "keys:creationdate": 0,
+                    "quicktime:creationdate": 1,
+                    "quicktime:createdate": 2,
+                }.get(normalized, 3)
+                media_candidates.append((media_priority, key, dt, utc_style))
+
+    if exif_candidates:
+        _, key, dt, utc_style = min(exif_candidates, key=lambda item: item[0])
+        return {"datetime": dt, "tag": key, "fallback": False}
+
+    if media_candidates:
+        _, key, dt, utc_style = min(media_candidates, key=lambda item: item[0])
+        if utc_style and cfg.VIDEO_QUICKTIME_UTC_TARGET_ZONE:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.astimezone(ZoneInfo(cfg.VIDEO_QUICKTIME_UTC_TARGET_ZONE))
+        return {"datetime": dt, "tag": key, "fallback": False}
+
     if cfg.VIDEO_MISSING_DATE_POLICY == "mtime":
         return {
             "datetime": datetime.fromtimestamp(path.stat().st_mtime),
@@ -831,11 +876,14 @@ def main():
         UI.log("没有找到视频文件。")
         return
 
-    UI.log("正在使用 ExifTool 读取视频内嵌日期...")
+    UI.log(
+        "正在使用 ExifTool 批量读取 EXIF"
+        + (" 和媒体创建日期..." if getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True) else "...")
+    )
     metadata_index = read_exif_metadata()
     items, missing = build_items(videos, metadata_index)
     if missing and cfg.VIDEO_MISSING_DATE_POLICY == "error":
-        UI.log("以下视频没有找到可用的 EXIF/QuickTime 日期：")
+        UI.log("以下视频没有找到可用的 EXIF 或媒体创建日期：")
         for path in missing:
             UI.log(f"  {relative_name(path)}")
         UI.log('当前 missing_date_policy="error"，所以没有开始上传。')

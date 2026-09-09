@@ -1,6 +1,6 @@
 # TDLib Media Uploader
 
-**V1.8.7 · Windows x64 + macOS arm64 桌面应用**
+**V1.8.9 · Windows x64 + macOS arm64 桌面应用**
 
 把本地或网络目录中的视频、图片批量上传到 Telegram 群组话题或频道。Windows x64 与 macOS Apple Silicon arm64 使用同一套 GUI、上传核心和功能配置；支持上传预览、标题编辑、断点恢复和独立代理，上传时无需打开 Telegram Desktop。
 
@@ -38,7 +38,7 @@ macOS 首次打开若出现“无法验证开发者”等提示，请先确认�
 | 默认标题 | 月份，如 `21-5` | 编号，如 `1`、`2` |
 | 标题编辑 | 基础标题及追加文字 | 编号后追加文字；可关闭编号 |
 | 文件名清单 | 可开启，默认关闭 | 可开启，默认关闭 |
-| 其他选项 | 日期策略、强制十个一组、视频封面 | 按修改时间或完整路径排序 |
+| 其他选项 | 日期策略、媒体创建日期、强制十个一组、视频封面 | 按修改时间或完整路径排序 |
 
 每组仅第一条消息显示统一标题。最后不足一组也会发送；只有一个文件时发送单条消息。
 
@@ -54,7 +54,9 @@ macOS 首次打开若出现“无法验证开发者”等提示，请先确认�
 
 ## 日期与视频工具
 
-默认优先读取 ExifTool 提供的视频内部 EXIF / QuickTime 日期；没有工具或内部日期时，使用文件修改时间（`missing_date_policy = "mtime"`）。选择“停止并提示缺失日期”（`error`）时，需要安装 ExifTool，缺少内部日期的视频会阻止上传。
+日期优先级为 **EXIF 信息 →（可选）媒体创建日期 → 文件修改日期**。在视频配置中开启 `read_media_creation_date`，或在“编辑视频目标与配置”中勾选“读取媒体创建日期”，即可读取 `MediaCreateDate`、`TrackCreateDate` 和 QuickTime 创建日期。EXIF 始终优先；所有媒体日期由一次批量 ExifTool 调用读取，不会逐个启动 FFmpeg。
+
+默认配置开启媒体创建日期以保持旧版本行为；如果更重视扫描速度，可以关闭 `read_media_creation_date`，此时仍读取 EXIF，缺失时直接使用文件修改时间（`missing_date_policy = "mtime"`）。选择“停止并提示缺失日期”（`error`）时，需要安装 ExifTool，找不到可用日期的视频会阻止上传。
 
 从 [ExifTool 官网](https://exiftool.org/) 下载对应平台版本。Windows 将程序放到 `tools/exiftool.exe`；macOS 可将可执行文件放到 `tools/exiftool` 并执行 `chmod +x tools/exiftool`。若附带 `exiftool_files`，一起放入 `tools/`；也可在设置中指定工具路径。
 
@@ -148,7 +150,7 @@ Windows 和 macOS 构建使用各自平台的原生 runner，并行执行离线�
 
 建议只从本仓库的 [GitHub Releases](https://github.com/Maxwell233/tdlib-media-uploader/releases) 下载，并在运行前核对 `SHA256SUMS`。构建脚本、平台构建 workflow、项目许可、作者署名和第三方依赖清单都公开在仓库中；发布 ZIP 也包含许可/署名文件，便于检查来源和再分发条件。SHA-256 只能证明文件与发布者提供的摘要一致，不能替代代码审查或操作系统安全认证。
 
-macOS v1.8.7 包未配置 Apple Developer 签名和公证，所以 Gatekeeper 可能显示“无法验证开发者”。请不要绕过来源核验后直接运行未知文件；确认仓库地址、标签和 SHA-256 后再按系统提示打开。Windows 版也不应被视为经过独立安全机构认证的程序。
+macOS v1.8.9 包未配置 Apple Developer 签名和公证，所以 Gatekeeper 可能显示“无法验证开发者”。请不要绕过来源核验后直接运行未知文件；确认仓库地址、标签和 SHA-256 后再按系统提示打开。Windows 版也不应被视为经过独立安全机构认证的程序。
 
 程序需要 Telegram API ID/API Hash，并会在本机保存 Telegram 登录数据库、代理设置、上传断点和用户输入的标题；这些数据不会随发布包提供。不要把 `config.toml`、API Hash、登录数据库、代理密码或缓存发给他人。上传目标、代理、媒体内容和 Telegram 账号权限均由使用者自行确认；请遵守 Telegram 使用条款、版权要求和目标群组/频道规则。若使用 ExifTool 或自行替换 FFmpeg，还需遵守对应上游许可证。
 

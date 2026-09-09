@@ -1,9 +1,9 @@
 ExifTool（可选）
 ================
 
-V1.8.7 默认 missing_date_policy = "mtime"，因此没有 ExifTool 也能上传视频。
+V1.8.9 默认 missing_date_policy = "mtime"，因此没有 ExifTool 也能上传视频。
 
-如果希望脚本优先读取视频内部的 EXIF / QuickTime 创建时间，可安装 ExifTool：
+如果希望脚本优先读取视频内部的 EXIF，以及可选的媒体/QuickTime 创建时间，可安装 ExifTool：
 
 官方主页 / 下载：
 https://exiftool.org/
@@ -36,8 +36,8 @@ Windows: exiftool_path = 'tools/exiftool.exe'
 macOS:  exiftool_path = 'tools/exiftool'
 
 日期规则：
-- ExifTool 存在：优先读取 EXIF/QuickTime；缺失时 mtime 兜底。
-- ExifTool 不存在：在 missing_date_policy="mtime" 时全部使用文件修改时间。
+- 优先读取 EXIF；启用 read_media_creation_date 后，再读取媒体/QuickTime 创建日期；最后按配置使用 mtime 兜底。
+- ExifTool 不存在：在 missing_date_policy="mtime" 时使用文件修改时间。
 
 FFmpeg（源码运行视频功能）
 ============================

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.8.7.
+"""PySide6 desktop interface for TDLib Media Uploader V1.8.9.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -65,7 +65,7 @@ from runtime_paths import APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONF
 
 PROJECT_DIR = RESOURCE_DIR
 HISTORY_PATH = APP_DATA_DIR / ".gui_history.json"
-APP_VERSION = "1.8.7"
+APP_VERSION = "1.8.9"
 ICON_NAME = "tdlib_media_uploader_icon.png" if sys.platform == "darwin" else "tdlib_media_uploader_icon.ico"
 ICON_PATH = PROJECT_DIR / "assets" / ICON_NAME
 WINDOWS_APP_USER_MODEL_ID = "Maxwell233.TDLibMediaUploader"
@@ -393,6 +393,11 @@ def _scan_result(kind: str) -> dict:
             exiftool = Path(_cfg("EXIFTOOL_PATH", ""))
             if exiftool.exists():
                 metadata = core.read_exif_metadata()
+            elif _cfg("VIDEO_READ_MEDIA_CREATION_DATE", True):
+                warning = (
+                    "未找到 ExifTool，EXIF 和媒体创建日期不可用；"
+                    "本次缺失日期的视频将使用文件修改时间。"
+                )
             items, missing = core.build_items(paths, metadata)
             state = core.UploadState()
         else:
@@ -1055,6 +1060,12 @@ class UploadPage(QWidget):
                     ])
                     album_row.addChild(row)
                     row.setToolTip(3, str(path))
+                    if isinstance(item, dict):
+                        source = item.get("date_tag") or "未知"
+                        row.setToolTip(
+                            1,
+                            f"{_fmt_date(date_value)}\n日期来源：{source}",
+                        )
         for column, width in enumerate((140, 250, 100)):
             self.tree.setColumnWidth(column, width)
         self._filter_preview()
@@ -1507,6 +1518,17 @@ class TargetDialog(QDialog):
             self.video_missing_date.setCurrentIndex(max(0, self.video_missing_date.findData(_cfg("VIDEO_MISSING_DATE_POLICY", "mtime"))))
             self.media_form.addRow("日期缺失策略", self.video_missing_date)
 
+            self.video_media_creation = QCheckBox("读取媒体创建日期")
+            self.video_media_creation.setChecked(
+                bool(_cfg("VIDEO_READ_MEDIA_CREATION_DATE", True))
+            )
+            self.video_media_creation.setToolTip(
+                "EXIF 日期始终优先；开启后在 EXIF 缺失时读取 MediaCreateDate、"
+                "TrackCreateDate 等容器日期，最后仍使用文件修改时间。"
+                "日期由一次批量 ExifTool 扫描读取，不会逐个启动 FFmpeg。"
+            )
+            self.media_form.addRow("日期来源", self.video_media_creation)
+
             self.video_album = QSpinBox()
             self.video_album.setRange(1, 10)
             self.video_album.setValue(int(_cfg("VIDEO_ALBUM_SIZE", 10)))
@@ -1613,6 +1635,7 @@ class TargetDialog(QDialog):
         if self.kind == "video":
             values.update({
                 ("video", "missing_date_policy"): self.video_missing_date.currentData(),
+                ("video", "read_media_creation_date"): self.video_media_creation.isChecked(),
                 ("video", "album_size"): self.video_album.value(),
                 ("video", "force_ten_per_album"): self.video_force_ten.isChecked(),
                 ("video", "album_caption_separator"): self.video_separator.text(),

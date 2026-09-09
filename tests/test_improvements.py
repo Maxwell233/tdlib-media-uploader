@@ -138,6 +138,71 @@ class ImprovementsTest(unittest.TestCase):
                     self.assertEqual([len(p["items"]) for p in forced], [10, 10, 3])
                     self.assertEqual([p["caption"]["text"] for p in forced], ["Album 1", "Album 2", "Album 3"])
 
+    def test_video_date_priority_and_optional_media_date(self):
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "clip.mp4"
+            path.write_bytes(b"video")
+            os.utime(path, (1784935138, 1784935138))
+            row = {
+                "Keys:CreationDate": "2024-06-29 05:48:00+0000",
+                "ExifIFD:DateTimeOriginal": "2023:05:02 10:20:30",
+            }
+            with patch.object(core.cfg, "VIDEO_MISSING_DATE_POLICY", "mtime"), \
+                    patch.object(core.cfg, "VIDEO_QUICKTIME_UTC_TARGET_ZONE", None), \
+                    patch.object(core.cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True):
+                selected = core.choose_capture_time(path, row)
+                self.assertEqual(selected["tag"], "ExifIFD:DateTimeOriginal")
+                self.assertEqual(selected["datetime"].year, 2023)
+
+                media = core.choose_capture_time(
+                    path,
+                    {"QuickTime:MediaCreateDate": "2024-06-29 05:48:00+0000"},
+                )
+                self.assertEqual(media["tag"], "QuickTime:MediaCreateDate")
+                self.assertFalse(media["fallback"])
+
+            with patch.object(core.cfg, "VIDEO_MISSING_DATE_POLICY", "mtime"), \
+                    patch.object(core.cfg, "VIDEO_READ_MEDIA_CREATION_DATE", False):
+                fallback = core.choose_capture_time(
+                    path,
+                    {"QuickTime:MediaCreateDate": "2024-06-29 05:48:00+0000"},
+                )
+                self.assertEqual(fallback["tag"], "FileSystem:ModifyTime")
+                self.assertEqual(fallback["datetime"].timestamp(), path.stat().st_mtime)
+
+    def test_exiftool_date_query_is_narrow_and_optional(self):
+        import subprocess
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "exiftool"
+            executable.write_bytes(b"tool")
+            output = json.dumps([{"SourceFile": str(root / "clip.mp4")}])
+            completed = subprocess.CompletedProcess([], 0, output, "")
+            with patch.object(core.cfg, "EXIFTOOL_PATH", executable), \
+                    patch.object(core.cfg, "VIDEO_DIR", root), \
+                    patch.object(core.cfg, "VIDEO_EXTENSIONS", {".mp4"}), \
+                    patch.object(core.cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True), \
+                    patch.object(core.subprocess, "run", return_value=completed) as run:
+                core.read_exif_metadata()
+                command = run.call_args.args[0]
+                self.assertIn("-fast", command)
+                self.assertNotIn("-time:all", command)
+                self.assertIn("-MediaCreateDate", command)
+
+            with patch.object(core.cfg, "EXIFTOOL_PATH", executable), \
+                    patch.object(core.cfg, "VIDEO_DIR", root), \
+                    patch.object(core.cfg, "VIDEO_EXTENSIONS", {".mp4"}), \
+                    patch.object(core.cfg, "VIDEO_READ_MEDIA_CREATION_DATE", False), \
+                    patch.object(core.subprocess, "run", return_value=completed) as run:
+                core.read_exif_metadata()
+                command = run.call_args.args[0]
+                self.assertNotIn("-MediaCreateDate", command)
+                self.assertNotIn("-TrackCreateDate", command)
+
     def test_title_edit_keeps_tree_rows(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(metadata, "PROJECT_DIR", Path(directory)):
             page = gui.UploadPage("image")

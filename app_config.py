@@ -9,7 +9,7 @@ from pathlib import Path
 
 from runtime_paths import CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH
 
-APP_VERSION = "1.8.7"
+APP_VERSION = "1.8.9"
 PROJECT_DIR = RESOURCE_DIR
 
 
@@ -244,6 +244,16 @@ if VIDEO_MISSING_DATE_POLICY not in {
         '[video].missing_date_policy 只能是 '
         '"error" 或 "mtime"。'
     )
+
+# MediaCreateDate/TrackCreateDate 等容器日期需要 ExifTool 读取。默认开启
+# 是为了保持旧版本会读取 QuickTime 日期的行为；关闭后仍会优先使用
+# EXIF 日期，但跳过额外的媒体日期字段，扫描更快。
+VIDEO_READ_MEDIA_CREATION_DATE = bool(
+    video.get(
+        "read_media_creation_date",
+        True,
+    )
+)
 
 _video_zone = str(
     video.get(
