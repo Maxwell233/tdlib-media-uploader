@@ -12,6 +12,13 @@ from runtime_paths import CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH
 APP_VERSION = "1.8.9"
 PROJECT_DIR = RESOURCE_DIR
 
+# Telegram's current upload limits used by this application.  Keep these
+# checks local so an oversized file is reported during scanning instead of
+# failing later inside TDLib.
+VIDEO_MAX_BYTES = 4 * 1024 ** 3
+IMAGE_MAX_BYTES = 10 * 1024 ** 2
+IMAGE_COMPRESSION_TARGET_BYTES = int(9.5 * 1024 ** 2)
+
 
 def _load():
     if not CONFIG_PATH.exists():
@@ -412,6 +419,13 @@ IMAGE_RESET_STATE = bool(
     image.get(
         "reset_state",
         False
+    )
+)
+
+IMAGE_COMPRESS_OVERSIZE = bool(
+    image.get(
+        "compress_oversize",
+        False,
     )
 )
 

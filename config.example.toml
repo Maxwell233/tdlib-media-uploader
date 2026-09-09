@@ -149,6 +149,11 @@ sort_mode = "mtime"
 show_file_list = true
 verify_all_images_before_upload = false
 
+# 图片超过 Telegram Photo 的 10 MiB 时，是否使用已有的 LGPL FFmpeg
+# 生成临时 JPEG 副本后继续作为 Photo 上传。默认关闭；关闭时超限图片会在扫描阶段跳过。
+# 原文件不会被修改。启用后如果 FFmpeg 不可用或无法压到安全大小，仍会跳过该图片。
+compress_oversize = false
+
 # 仅在需要清空图片断点时临时改为 true
 reset_state = false
 

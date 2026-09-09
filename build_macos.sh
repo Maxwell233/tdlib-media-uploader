@@ -195,27 +195,39 @@ for notice in LICENSE ATTRIBUTION THIRD_PARTY_LICENSES.md; do
 done
 
 PACKAGE_NAME="TDLib Media Uploader-v${VERSION}-macos-arm64"
-PACKAGE_DIR="$BUILD_DIR/package/$PACKAGE_NAME"
-ARCHIVE_PATH="$DIST_DIR/${PACKAGE_NAME}.zip"
-rm -rf "$PACKAGE_DIR" "$ARCHIVE_PATH" "$ARCHIVE_PATH.sha256"
-mkdir -p "$PACKAGE_DIR"
-cp -R "$APP_PATH" "$PACKAGE_DIR/"
+DMG_STAGE_DIR="$BUILD_DIR/dmg/$PACKAGE_NAME"
+DMG_PATH="$DIST_DIR/${PACKAGE_NAME}.dmg"
+rm -rf "$DMG_STAGE_DIR" "$DMG_PATH" "$DMG_PATH.sha256"
+mkdir -p "$DMG_STAGE_DIR"
+cp -R "$APP_PATH" "$DMG_STAGE_DIR/"
+# A real Applications alias makes the first-run drag-and-drop action obvious
+# and avoids asking users to discover the system folder themselves.
+ln -s /Applications "$DMG_STAGE_DIR/Applications"
 for notice in LICENSE ATTRIBUTION THIRD_PARTY_LICENSES.md; do
-    cp "$PROJECT_DIR/$notice" "$PACKAGE_DIR/"
+    cp "$PROJECT_DIR/$notice" "$DMG_STAGE_DIR/"
 done
 if [[ -f "$FFMPEG_STAGE_DIR/BUILD_INFO.txt" ]]; then
-    cp "$FFMPEG_STAGE_DIR/BUILD_INFO.txt" "$PACKAGE_DIR/FFMPEG_BUILD_INFO.txt"
+    cp "$FFMPEG_STAGE_DIR/BUILD_INFO.txt" "$DMG_STAGE_DIR/FFMPEG_BUILD_INFO.txt"
 fi
 
-ditto -c -k --sequesterRsrc --keepParent "$PACKAGE_DIR" "$ARCHIVE_PATH"
+if [[ ! -L "$DMG_STAGE_DIR/Applications" ]]; then
+    echo "DMG 暂存目录缺少 Applications 文件夹别名。" >&2
+    exit 1
+fi
+hdiutil create \
+    -volname "TDLib Media Uploader V${VERSION}" \
+    -srcfolder "$DMG_STAGE_DIR" \
+    -ov \
+    -format UDZO \
+    "$DMG_PATH" >/dev/null
 (
     cd "$DIST_DIR"
-    shasum -a 256 "$(basename "$ARCHIVE_PATH")" > "$(basename "$ARCHIVE_PATH").sha256"
+    shasum -a 256 "$(basename "$DMG_PATH")" > "$(basename "$DMG_PATH").sha256"
 )
 
 echo "✓ macOS arm64 .app 构建完成：$APP_PATH"
-echo "✓ macOS arm64 ZIP：$ARCHIVE_PATH"
-echo "✓ SHA-256：$ARCHIVE_PATH.sha256"
+echo "✓ macOS arm64 DMG：$DMG_PATH"
+echo "✓ SHA-256：$DMG_PATH.sha256"
 if ! codesign -dv "$APP_PATH" >/dev/null 2>&1; then
     echo "提示：该构建未签名/未公证，首次打开可能需要右键点按“打开”。"
 fi

@@ -56,6 +56,12 @@ jobs:
           if ($null -eq $appIcon) {
             throw "Windows Qt/taskbar icon resource not found in the packaged application"
           }
+          Add-Type -AssemblyName System.Drawing
+          $embeddedIcon = [System.Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path -LiteralPath $exe).Path)
+          if ($null -eq $embeddedIcon) {
+            throw "Windows EXE does not contain an extractable embedded icon resource"
+          }
+          $embeddedIcon.Dispose()
           foreach ($noticeName in @("LICENSE", "ATTRIBUTION", "THIRD_PARTY_LICENSES.md")) {
             $notice = "dist\TDLib Media Uploader\$noticeName"
             if (-not (Test-Path -LiteralPath $notice)) {
@@ -141,16 +147,26 @@ jobs:
           for notice in LICENSE ATTRIBUTION THIRD_PARTY_LICENSES.md; do
             test -f "$APP/Contents/Resources/$notice" || test -f "$APP/$notice"
           done
-          test -f dist/TDLib\ Media\ Uploader-v*-macos-arm64.zip
-          test -f dist/TDLib\ Media\ Uploader-v*-macos-arm64.zip.sha256
+          DMG="$(find dist -maxdepth 1 -type f -name 'TDLib Media Uploader-v*-macos-arm64.dmg' -print -quit)"
+          test -n "$DMG"
+          test -f "$DMG.sha256"
+          MOUNT_POINT="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 || true
+            rmdir "$MOUNT_POINT" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          hdiutil attach "$DMG" -readonly -nobrowse -mountpoint "$MOUNT_POINT" >/dev/null
+          test -d "$MOUNT_POINT/TDLib Media Uploader.app"
+          test -L "$MOUNT_POINT/Applications"
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v7
         with:
           name: tdlib-media-uploader-${{ github.ref_name }}-macos-arm64
           path: |
-            dist/TDLib Media Uploader-v*-macos-arm64.zip
-            dist/TDLib Media Uploader-v*-macos-arm64.zip.sha256
+            dist/TDLib Media Uploader-v*-macos-arm64.dmg
+            dist/TDLib Media Uploader-v*-macos-arm64.dmg.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -178,7 +194,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           shopt -s nullglob
-          archives=(release-assets/*.zip)
+          archives=(release-assets/*.zip release-assets/*.dmg)
           test "${#archives[@]}" -eq 2
           : > release-assets/SHA256SUMS
           for archive in "${archives[@]}"; do
@@ -191,7 +207,8 @@ jobs:
           此版本由同一份远程源码同时构建两个平台：Windows x64 和 macOS Apple Silicon arm64；两者使用同一套 GUI、上传核心和功能配置。
 
           - Windows：解压后运行 `TDLib Media Uploader.exe`。
-          - macOS：解压后打开 `TDLib Media Uploader.app`；首次打开若遇到系统安全提示，请确认下载来源和 SHA-256 后右键点按“打开”。
+          - macOS：打开 DMG，把 `TDLib Media Uploader.app` 拖到其中的 `Applications` 文件夹；首次打开若遇到系统安全提示，请确认下载来源和 SHA-256 后右键点按“打开”。
+          - 视频大于 4 GiB 会在扫描阶段跳过；图片大于 10 MiB 默认在扫描阶段跳过。启用图片压缩选项后，超限图片只会在确认上传并实际处理该图片时使用已有 FFmpeg 生成临时副本，原图不会被修改。
           - 发布包包含许可、署名、第三方清单以及 macOS FFmpeg 构建信息。
           - 项目原创代码、文档和界面资源采用 GNU GPL v3.0 only（GPL-3.0-only）；第三方组件仍遵循各自上游许可证。
           - 使用 `SHA256SUMS` 校验下载文件完整性。
@@ -209,10 +226,10 @@ jobs:
           version="$(tr -d '[:space:]' < VERSION)"
           tag="$GITHUB_REF_NAME"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" release-assets/*.zip release-assets/SHA256SUMS --clobber
+            gh release upload "$tag" release-assets/*.zip release-assets/*.dmg release-assets/SHA256SUMS --clobber
             gh release edit "$tag" --title "V${version}" --notes-file release-notes.md --latest
           else
-            gh release create "$tag" release-assets/*.zip release-assets/SHA256SUMS \
+            gh release create "$tag" release-assets/*.zip release-assets/*.dmg release-assets/SHA256SUMS \
               --title "V${version}" \
               --notes-file release-notes.md \
               --latest

@@ -110,6 +110,21 @@ def _prepare_qt_plugins() -> None:
         os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", str(platforms_path))
 
 
+def _application_icon() -> QIcon:
+    """Load the packaged icon with a PNG fallback for Windows taskbar shells."""
+
+    candidates = [ICON_PATH]
+    if os.name == "nt":
+        candidates.append(PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.png")
+    for path in candidates:
+        if not path.is_file():
+            continue
+        icon = QIcon(str(path))
+        if not icon.isNull():
+            return icon
+    return QIcon()
+
+
 _prepare_qt_plugins()
 
 
@@ -214,6 +229,39 @@ def _path_size(path_str: str) -> int:
 def _item_size(item) -> int:
     path = item["path"] if isinstance(item, dict) else item
     return _path_size(str(path))
+
+
+def _apply_size_limits(paths: list[Path], kind: str) -> tuple[list[Path], list[dict]]:
+    """Apply Telegram size limits for the GUI fallback scanner."""
+
+    limit = int(
+        _cfg(
+            "VIDEO_MAX_BYTES" if kind == "video" else "IMAGE_MAX_BYTES",
+            4 * 1024 ** 3 if kind == "video" else 10 * 1024 ** 2,
+        )
+    )
+    compress_images = kind == "image" and bool(_cfg("IMAGE_COMPRESS_OVERSIZE", False))
+    accepted = []
+    skipped = []
+    for path in paths:
+        size = _path_size(str(path))
+        if size > limit:
+            action = "compress" if compress_images else "skip"
+            skipped.append({
+                "path": path,
+                "size": size,
+                "limit": limit,
+                "category": "size",
+                "action": action,
+                "reason": (
+                    f"文件大小 {_fmt_size(size)} 超过 Telegram "
+                    f"{'视频' if kind == 'video' else 'Photo'} 上限 {_fmt_size(limit)}"
+                ),
+            })
+            if action == "skip":
+                continue
+        accepted.append(path)
+    return accepted, skipped
 
 
 def _update_toml_value(text: str, section: str, key: str, value) -> str:
@@ -374,6 +422,7 @@ def _scan_result(kind: str) -> dict:
     core = None
     warning = ""
     scan_errors: list[str] = []
+    scan_size_skips: list[dict] = []
     try:
         if kind == "video":
             import tdlib_video_album_uploader as core_module
@@ -389,6 +438,7 @@ def _scan_result(kind: str) -> dict:
             core.STATE_DIR = APP_DATA_DIR / ".video_state"
             paths = core.scan_videos()
             scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
+            scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
             metadata = {}
             exiftool = Path(_cfg("EXIFTOOL_PATH", ""))
             if exiftool.exists():
@@ -401,7 +451,7 @@ def _scan_result(kind: str) -> dict:
             items, missing = core.build_items(paths, metadata)
             state = core.UploadState()
         else:
-            paths = _basic_paths(kind)
+            paths, scan_size_skips = _apply_size_limits(_basic_paths(kind), kind)
             missing = []
             items = [
                 {
@@ -417,9 +467,10 @@ def _scan_result(kind: str) -> dict:
         if core is not None:
             paths = core.scan_images()
             scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
+            scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
             state = core.UploadState()
         else:
-            paths = _basic_paths(kind)
+            paths, scan_size_skips = _apply_size_limits(_basic_paths(kind), kind)
         items = paths
         missing = []
 
@@ -544,6 +595,37 @@ def _scan_result(kind: str) -> dict:
             + (f"；{warning}" if warning else "")
         )
 
+    scan_rejected = [
+        record for record in scan_size_skips
+        if record.get("action", "skip") == "skip"
+    ]
+    scan_compressing = [
+        record for record in scan_size_skips
+        if record.get("action") == "compress"
+    ]
+    if scan_size_skips:
+        write_app_log(
+            "WARNING",
+            "目录扫描大小限制处理：\n" + "\n".join(
+                f"{record['path']} · {record.get('reason', '')} · "
+                f"处理={'上传时压缩' if record.get('action') == 'compress' else '扫描时跳过'}"
+                for record in scan_size_skips
+            ),
+            source=f"scan/{kind}",
+        )
+        notices = []
+        if scan_rejected:
+            notices.append(
+                f"扫描时跳过 {len(scan_rejected)} 个超过 "
+                f"Telegram {'视频 4 GiB' if kind == 'video' else 'Photo 10 MiB'} 上限的项目"
+            )
+        if scan_compressing:
+            notices.append(
+                f"发现 {len(scan_compressing)} 个超限图片，将在上传时使用 FFmpeg 压缩临时副本"
+            )
+        size_warning = "；".join(notices)
+        warning = size_warning + (f"；{warning}" if warning else "")
+
     return {
         "kind": kind,
         "items": items,
@@ -564,6 +646,9 @@ def _scan_result(kind: str) -> dict:
         "state_path": str(state.path) if state is not None else "",
         "core_available": core is not None,
         "warning": warning,
+        "scan_size_skips": scan_size_skips,
+        "scan_skipped_files": len(scan_rejected),
+        "scan_compress_files": len(scan_compressing),
         "target": _target_for(kind),
     }
 
@@ -1076,6 +1161,16 @@ class UploadPage(QWidget):
         )
         if result.get("missing"):
             self.summary_label.setText(self.summary_label.text() + f" · 缺失日期 {len(result['missing'])}")
+        if result.get("scan_skipped_files"):
+            self.summary_label.setText(
+                self.summary_label.text()
+                + f" · 扫描跳过超限 {result['scan_skipped_files']} 个"
+            )
+        if result.get("scan_compress_files"):
+            self.summary_label.setText(
+                self.summary_label.text()
+                + f" · 上传时压缩 {result['scan_compress_files']} 个"
+            )
         if result.get("warning"):
             self.status_label.setText(result["warning"])
         elif result["total_files"] == 0:
@@ -1583,6 +1678,16 @@ class TargetDialog(QDialog):
             self.image_filenames.setChecked(bool(_cfg("IMAGE_CAPTION_INCLUDE_FILENAMES", False)))
             self.media_form.addRow("图片描述", self.image_filenames)
 
+            self.image_compress = QCheckBox(
+                "图片超过 10 MiB 时，在上传时使用 FFmpeg 压缩临时副本"
+            )
+            self.image_compress.setChecked(bool(_cfg("IMAGE_COMPRESS_OVERSIZE", False)))
+            self.image_compress.setToolTip(
+                "扫描和预检只提示，不提前压缩；确认上传后才为超限图片生成临时 JPEG。"
+                "原文件不会被修改，压缩失败的图片会记录日志并跳过。"
+            )
+            self.media_form.addRow("图片超限处理", self.image_compress)
+
     def _load_target(self):
         target = _target_for(self.kind)
         self.target_mode.blockSignals(True)
@@ -1649,6 +1754,7 @@ class TargetDialog(QDialog):
                 ("image", "album_numbering"): self.image_numbering.isChecked(),
                 ("image", "album_caption_separator"): self.image_separator.text(),
                 ("image", "caption_include_filenames"): self.image_filenames.isChecked(),
+                ("image", "compress_oversize"): self.image_compress.isChecked(),
             })
         error = _write_config_values(values)
         if error:
@@ -2250,10 +2356,11 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("TDLib Media Uploader")
     app.setApplicationVersion(APP_VERSION)
-    app.setWindowIcon(QIcon(str(ICON_PATH)) if ICON_PATH.is_file() else QIcon())
+    app.setWindowIcon(_application_icon())
     app.setStyle("Fusion")
     app.setStyleSheet(APP_STYLE)
     window = MainWindow()
+    window.setWindowIcon(app.windowIcon())
     window.show()
     return app.exec()
 

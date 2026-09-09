@@ -42,7 +42,7 @@ macOS:  exiftool_path = 'tools/exiftool'
 FFmpeg（源码运行视频功能）
 ============================
 
-发布的 Windows 和 macOS ZIP 已内置经过许可检查的 LGPL FFmpeg。若直接运行源码，
+发布的 Windows ZIP 和 macOS DMG 已内置经过许可检查的 LGPL FFmpeg。若直接运行源码，
 请使用 LGPL 构建并任选一种方式提供：
 
 1. 放置在：

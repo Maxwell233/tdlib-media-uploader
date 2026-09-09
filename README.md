@@ -6,7 +6,7 @@
 
 ## 开始使用
 
-已发布的便携包在 [Releases](https://github.com/Maxwell233/tdlib-media-uploader/releases)。Windows 下载 x64 ZIP，完整解压后运行 `TDLib Media Uploader.exe`；macOS 下载 arm64 ZIP，解压后打开 `TDLib Media Uploader.app`，两者都无需安装 Python。下载后可用 Release 中的 `SHA256SUMS` 校验 ZIP；源码中的修改可能尚未打包发布。
+已发布的便携包在 [Releases](https://github.com/Maxwell233/tdlib-media-uploader/releases)。Windows 下载 x64 ZIP，完整解压后运行 `TDLib Media Uploader.exe`；macOS 下载 Apple Silicon arm64 DMG，打开后将 `TDLib Media Uploader.app` 拖到其中的 `Applications` 文件夹，再从“应用程序”启动；两者都无需安装 Python。下载后可用 Release 中的 `SHA256SUMS` 校验 ZIP 和 DMG；源码中的修改可能尚未打包发布。
 
 macOS 首次打开若出现“无法验证开发者”等提示，请先确认下载地址和 SHA-256，再在 Finder 中右键点按应用并选择“打开”。当前包没有 Apple Developer 签名/公证，见下方[信任与风险](#信任与风险)。
 
@@ -41,6 +41,8 @@ macOS 首次打开若出现“无法验证开发者”等提示，请先确认�
 | 其他选项 | 日期策略、媒体创建日期、强制十个一组、视频封面 | 按修改时间或完整路径排序 |
 
 每组仅第一条消息显示统一标题。最后不足一组也会发送；只有一个文件时发送单条消息。
+
+Telegram 限制在扫描阶段生效：大于 4 GiB 的视频会直接跳过；大于 10 MiB 的图片默认跳过。两类跳过都会立即显示在扫描提示和任务日志中，不会写入上传断点。图片配置中可开启“超限图片使用 FFmpeg 压缩”：扫描和预检只提示，确认上传并实际处理该图片时才生成不超过约 9.5 MiB 的临时 JPEG；原文件不会被修改。若 FFmpeg 不可用或压缩失败，该图片会记录原因并跳过。
 
 视频开启“强制每 10 个视频组成一个 Album”后，忽略月份，按扫描顺序连续分组，普通组大小不参与分组。默认标题为 `Album 1`、`Album 2` 等，仍可逐组编辑。
 
@@ -140,7 +142,7 @@ macOS Apple Silicon：
 
 Windows 和 macOS 构建使用各自平台的原生 runner，并行执行离线回归测试。Windows 脚本下载固定的 BtbN LGPL FFmpeg；macOS 脚本从 FFmpeg 7.1.1 官方源码构建 arm64 FFmpeg，使用 `--disable-gpl --disable-nonfree`，并检查二进制架构、构建标志和许可文件。两条构建路径都会在 PyInstaller 前排除 `imageio-ffmpeg` wheel 自带的 FFmpeg 二进制。
 
-输出为 Windows 的 `dist/TDLib Media Uploader/TDLib Media Uploader.exe` 及 Windows x64 ZIP，和 macOS 的 `dist/TDLib Media Uploader.app` 及带版本号的 macOS arm64 ZIP。构建包不包含个人配置、断点、封面缓存、媒体文件或登录数据；macOS 包另附 FFmpeg 构建信息。
+输出为 Windows 的 `dist/TDLib Media Uploader/TDLib Media Uploader.exe` 及 Windows x64 ZIP，和 macOS 的 `dist/TDLib Media Uploader.app` 及带版本号的 macOS arm64 DMG。DMG 根目录包含应用和指向系统 `/Applications` 的 `Applications` 文件夹别名，便于拖放安装。Windows 构建同时校验 EXE 嵌入图标、Qt 图标资源和稳定的 AppUserModelID，避免打包后任务栏图标缺失或归组异常。构建包不包含个人配置、断点、封面缓存、媒体文件或登录数据；macOS 包另附 FFmpeg 构建信息。
 
 核心文件：`gui_app.py`（界面）、`app_config.py`（配置）、`tdlib_video_app.py`（视频流程）、两个 `*_album_uploader.py`（媒体上传）、`tdlib_common.py`（TDLib）、`album_metadata.py`（标题）、`path_utils.py`（路径和扫描）。
 
@@ -150,7 +152,7 @@ Windows 和 macOS 构建使用各自平台的原生 runner，并行执行离线�
 
 建议只从本仓库的 [GitHub Releases](https://github.com/Maxwell233/tdlib-media-uploader/releases) 下载，并在运行前核对 `SHA256SUMS`。构建脚本、平台构建 workflow、项目许可、作者署名和第三方依赖清单都公开在仓库中；发布 ZIP 也包含许可/署名文件，便于检查来源和再分发条件。SHA-256 只能证明文件与发布者提供的摘要一致，不能替代代码审查或操作系统安全认证。
 
-macOS v1.8.9 包未配置 Apple Developer 签名和公证，所以 Gatekeeper 可能显示“无法验证开发者”。请不要绕过来源核验后直接运行未知文件；确认仓库地址、标签和 SHA-256 后再按系统提示打开。Windows 版也不应被视为经过独立安全机构认证的程序。
+macOS v1.8.9 包未配置 Apple Developer 签名和公证，所以 Gatekeeper 可能显示“无法验证开发者”。请不要绕过来源核验后直接运行未知文件；确认仓库地址、标签和 SHA-256 后再按系统提示打开。Windows 版也不应被视为经过独立安全机构认证的程序。应用会调用随包提供或系统中的 FFmpeg/ExifTool 处理媒体；请确认这些工具来源和许可，并注意压缩失败、网络中断、Telegram 限制以及重复上传等运行风险。
 
 程序需要 Telegram API ID/API Hash，并会在本机保存 Telegram 登录数据库、代理设置、上传断点和用户输入的标题；这些数据不会随发布包提供。不要把 `config.toml`、API Hash、登录数据库、代理密码或缓存发给他人。上传目标、代理、媒体内容和 Telegram 账号权限均由使用者自行确认；请遵守 Telegram 使用条款、版权要求和目标群组/频道规则。若使用 ExifTool 或自行替换 FFmpeg，还需遵守对应上游许可证。
 
