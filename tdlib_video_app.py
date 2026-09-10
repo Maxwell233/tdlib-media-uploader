@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""TDLib Media Uploader V1.8.9 视频上传流程。
+"""TDLib Media Uploader V1.8.10 视频上传流程。
 
 核心上传/断点/缩略图逻辑复用 tdlib_video_album_uploader.py；
 本文件负责视频扫描、mtime 日期策略和 GUI 使用的上传流程。
@@ -55,7 +55,7 @@ def show_file_list(items, state):
     }
 
     if core.force_ten_per_album():
-        grouping_text = "忽略日期，按扫描顺序每 10 个一组"
+        grouping_text = f"忽略日期，按扫描顺序每 {cfg.VIDEO_ALBUM_SIZE} 个一组"
     else:
         grouping_text = f"按 {len(groups)} 个月份分组"
     UI.info(f"视频文件：共 {len(items)} 个，{grouping_text}展示。")
@@ -120,7 +120,7 @@ def show_file_list(items, state):
             caption=(
                 f"日期来源：{source_summary}    "
                 + (
-                    "分组忽略日期；文件仍按扫描排序。"
+                    f"分组忽略日期；每组 {cfg.VIDEO_ALBUM_SIZE} 个，文件按扫描排序。"
                     if core.force_ten_per_album()
                     else "月份内按时间排序；已完成项由断点自动跳过。"
                 )
@@ -146,7 +146,7 @@ def show_group_plan(items, state):
         rows.append(
             (
                 core.group_display_name(month_key),
-                captions or core.month_caption(month_key),
+                captions or (core.month_caption(month_key) if core.include_group_title() else "无"),
                 len(month_items),
                 len(pending),
                 album_count,
@@ -208,6 +208,7 @@ def show_upload_summary(
             ("有效视频", len(items)),
             ("跳过坏视频", len(skipped_items)),
             ("日期模式", date_mode),
+            ("扫描排序", "文件名" if cfg.VIDEO_SORT_MODE == "name" else "修改时间"),
             ("mtime 兜底", fallback_count),
             ("缺失日期", len(missing)),
             ("全部大小", core.format_size(total_bytes)),
@@ -220,12 +221,15 @@ def show_upload_summary(
             (
                 "Album 规则",
                 (
-                    "忽略日期，按扫描顺序每 10 个视频组成一个 Album（最后一组可少于 10 个）；"
-                    "默认标题为 Album 1、Album 2…"
+                    f"忽略日期，按扫描顺序每 {cfg.VIDEO_ALBUM_SIZE} 个视频组成一组（最后一组可少于该数量）"
                     if core.force_ten_per_album()
-                    else f"按日期分组，每组最多 {cfg.VIDEO_ALBUM_SIZE} 个；Album Caption=日期，可编辑文本"
+                    else f"按日期分组，每组最多 {cfg.VIDEO_ALBUM_SIZE} 个"
                 )
-                + f"；文件名清单={'开' if getattr(cfg, 'VIDEO_CAPTION_INCLUDE_FILENAMES', False) else '关'}",
+                + (
+                    f"；组标题={'开' if core.include_group_title() else '关'}"
+                    f"；文件名={'开' if getattr(cfg, 'VIDEO_CAPTION_INCLUDE_FILENAMES', False) else '关'}"
+                    f"；文件名序号={'开' if core.include_filename_numbers() else '关'}"
+                ),
             ),
             ("CHAT_ID", cfg.CHAT_ID),
             ("目标模式", "Channel 频道" if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel" else "超级群组 Forum Topic"),
@@ -415,6 +419,7 @@ def main():
                     plan["caption"]["text"],
                     album_items,
                     getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False),
+                    core.include_filename_numbers(),
                 )
 
                 contents, ready_items, runtime_skipped = core.build_video_contents(
@@ -436,6 +441,7 @@ def main():
                         plan["caption"]["text"],
                         ready_items,
                         True,
+                        core.include_filename_numbers(),
                     )
                     contents, rebuilt_items, rebuilt_skipped = core.build_video_contents(
                         ready_items,

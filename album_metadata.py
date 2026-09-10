@@ -60,22 +60,32 @@ def compose_caption(base_label: str, custom_text: str = "", separator: str = " Â
     return f"{base}{separator}{custom}"
 
 
-def filename_description(items, *, max_chars: int = 950) -> str:
-    """Format an Album's local filenames as a numbered description."""
+def filename_description(
+    items,
+    *,
+    numbered: bool = True,
+    max_chars: int = 950,
+) -> str:
+    """Format an Album's local filenames for a generated caption."""
     lines = []
     for index, item in enumerate(items, 1):
         name = Path(_item_path(item)).name
-        lines.append(f"{index}. {name}")
+        lines.append(f"{index}. {name}" if numbered else name)
     text = "\n".join(lines)
     if len(text) <= max_chars:
         return text
     return text[: max(0, max_chars - 1)].rstrip() + "â€¦"
 
 
-def with_filename_description(caption: str, items, enabled: bool) -> str:
+def with_filename_description(
+    caption: str,
+    items,
+    enabled: bool,
+    numbered: bool = True,
+) -> str:
     if not enabled:
         return caption
-    description = filename_description(items)
+    description = filename_description(items, numbered=numbered)
     if not description:
         return caption
     result = f"{caption}\n{description}" if caption else description

@@ -148,11 +148,25 @@ def file_signature(path: Path) -> str:
 
 
 FORCED_GROUP_KEY = "__all_videos__"
-FORCED_GROUP_LABEL = "全部视频（忽略日期）"
+FORCED_GROUP_LABEL = "全部视频（按顺序分组）"
 
 
 def force_ten_per_album() -> bool:
-    return bool(getattr(cfg, "VIDEO_FORCE_TEN_PER_ALBUM", False))
+    group_mode = getattr(cfg, "VIDEO_GROUP_MODE", None)
+    legacy_enabled = bool(getattr(cfg, "VIDEO_FORCE_TEN_PER_ALBUM", False))
+    if group_mode is not None:
+        # Keep extensions that still set the legacy flag working while the
+        # parser's alias remains synchronized with the new group_mode value.
+        return str(group_mode).strip().lower() == "fixed" or legacy_enabled
+    return legacy_enabled
+
+
+def include_group_title() -> bool:
+    return bool(getattr(cfg, "VIDEO_CAPTION_INCLUDE_GROUP_TITLE", True))
+
+
+def include_filename_numbers() -> bool:
+    return bool(getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS", True))
 
 
 def group_display_name(group_key: str) -> str:
@@ -195,7 +209,10 @@ def scan_videos() -> list[Path]:
             continue
         accepted.append(path)
     videos = accepted
-    videos.sort(key=lambda p: (file_mtime(p), relative_name(p).lower()))
+    if getattr(cfg, "VIDEO_SORT_MODE", "mtime") == "name":
+        videos.sort(key=lambda p: (p.name.casefold(), relative_name(p).casefold()))
+    else:
+        videos.sort(key=lambda p: (file_mtime(p), relative_name(p).casefold()))
     return videos
 
 
@@ -1078,24 +1095,26 @@ def make_groups(items):
 def build_album_plans(items, state=None) -> list[dict]:
     """Build stable Album plans from the complete scan.
 
-    Normal mode keeps the historical month grouping.  The optional forced mode
-    puts the complete scan into consecutive groups of ten, regardless of each
-    video's capture month.
+    Normal mode keeps the historical month grouping.  The optional fixed mode
+    puts the complete scan into consecutive groups of the configured size,
+    regardless of each video's capture month.
     """
     store = CaptionStore("video")
     plans = []
     groups = make_groups(items)
-    album_size = 10 if force_ten_per_album() else cfg.VIDEO_ALBUM_SIZE
+    album_size = cfg.VIDEO_ALBUM_SIZE
     for month_key in sorted(groups):
         month_items = groups[month_key]
         for start in range(0, len(month_items), album_size):
             album_items = list(month_items[start:start + album_size])
             album_number = start // album_size + 1
-            default_label = (
-                f"Album {album_number}"
-                if month_key == FORCED_GROUP_KEY
-                else month_caption(month_key)
-            )
+            default_label = ""
+            if include_group_title():
+                default_label = (
+                    f"Album {album_number}"
+                    if month_key == FORCED_GROUP_KEY
+                    else month_caption(month_key)
+                )
             pending = [
                 item for item in album_items
                 if state is None or not state.is_completed(item["path"])
@@ -1103,7 +1122,9 @@ def build_album_plans(items, state=None) -> list[dict]:
             key_group = f"{month_key}:{album_number}" if month_key == FORCED_GROUP_KEY else month_key
             key = album_key("video", key_group, album_items)
             record = store.get(key, default_label)
-            base_label = record["base_label"] or default_label
+            base_label = record["base_label"] if include_group_title() else ""
+            if include_group_title() and not base_label:
+                base_label = default_label
             plans.append({
                 "key": key,
                 "month_key": month_key,
@@ -1127,15 +1148,26 @@ def print_plan(items, state):
     groups = make_groups(items)
     print("\n" + "=" * 104)
     if force_ten_per_album():
-        print("上传计划：忽略日期，按扫描顺序每 10 个视频组成 Album；每个 Album 使用独立标题")
+        title_mode = "带组标题" if include_group_title() else "不带组标题"
+        print(
+            f"上传计划：按扫描顺序每 {cfg.VIDEO_ALBUM_SIZE} 个视频组成一组；"
+            f"{title_mode}"
+        )
     else:
-        print("上传计划：EXIF/QuickTime 按月分组；同月每最多 10 个组成 Album；每个 Album 只保留一个 yy-m Caption")
+        print(
+            f"上传计划：EXIF/QuickTime 按月分组；同月每最多 {cfg.VIDEO_ALBUM_SIZE} 个组成 Album；"
+            "每个 Album 只保留一个日期 Caption"
+        )
     print("=" * 104)
     for month_key in sorted(groups):
         month_items = groups[month_key]
         pending = [item for item in month_items if not state.is_completed(item["path"])]
         group_label = group_display_name(month_key)
-        caption = "Album 1、Album 2…" if month_key == FORCED_GROUP_KEY else month_caption(month_key)
+        caption = (
+            "Album 1、Album 2…"
+            if month_key == FORCED_GROUP_KEY and include_group_title()
+            else month_caption(month_key) if include_group_title() else ""
+        )
         print(f"\n[{group_label}] Caption={caption} | 共 {len(month_items)} | 待上传 {len(pending)}")
         for index, item in enumerate(month_items, 1):
             path = item["path"]
@@ -1278,6 +1310,7 @@ def main():
                     plan["caption"]["text"],
                     album_items,
                     getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False),
+                    include_filename_numbers(),
                 )
                 contents, ready_items, runtime_skipped = build_video_contents(
                     album_items,
@@ -1295,6 +1328,7 @@ def main():
                         plan["caption"]["text"],
                         ready_items,
                         True,
+                        include_filename_numbers(),
                     )
                     contents, rebuilt_items, rebuilt_skipped = build_video_contents(
                         ready_items,

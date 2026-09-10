@@ -1,5 +1,5 @@
 # ============================================================
-# TDLib Media Uploader V1.8.9
+# TDLib Media Uploader V1.8.10
 #
 # 首次使用：
 #   1. 复制本文件为 config.toml
@@ -101,21 +101,28 @@ read_media_creation_date = true
 
 quicktime_utc_target_zone = ""
 
-# Telegram 一个媒体组最多 10 个
-album_size = 10
+# 视频分组方式：date=按媒体日期分组；fixed=按扫描顺序固定分组。
+# 旧版 force_ten_per_album 仍可读取，但新配置请使用 group_mode。
+group_mode = "date"
 
-# 可选：开启后忽略视频日期，把全部视频按扫描顺序每 10 个组成一个 Album。
-# 默认关闭；关闭时继续按日期分组，album_size 作为普通模式的组大小。
-force_ten_per_album = false
+# 扫描顺序只能二选一：mtime=修改时间，name=文件名。
+sort_mode = "mtime"
+
+# 每组 1~10 个视频；按日期模式表示每个月上限，固定模式表示固定组大小。
+album_size = 10
 
 # 2 -> 21-5
 # 4 -> 2021-5
 caption_year_digits = 2
 
-# 每个视频 Album 的统一 Caption 默认使用日期标题；可在 GUI 中编辑基础标题和追加文本。
+# 视频组标题默认使用日期或 Album 编号；可在 GUI 中编辑基础标题和追加文本。
 album_caption_separator = " · "
-# 可选：在 Album Caption 后附加当前 Album 内所有文件的“序号. 文件名”清单。
+# 是否显示默认组标题（如 Album 1、25-06）。
+caption_include_group_title = true
+# 是否在标题后附加当前组内的文件名。
 caption_include_filenames = false
+# 文件名列表是否带 1、2、3… 序号。
+caption_include_filename_numbers = true
 
 generate_thumbnail = true
 thumb_max_edge = 320

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from runtime_paths import CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH
 
-APP_VERSION = "1.8.9"
+APP_VERSION = "1.8.10"
 PROJECT_DIR = RESOURCE_DIR
 
 # Telegram's current upload limits used by this application.  Keep these
@@ -236,6 +236,17 @@ VIDEO_EXTENSIONS = _extensions(
     )
 )
 
+VIDEO_SORT_MODE = str(
+    video.get(
+        "sort_mode",
+        "mtime",
+    )
+).strip().lower()
+if VIDEO_SORT_MODE not in {"mtime", "name"}:
+    raise RuntimeError(
+        '[video].sort_mode 只能是 "mtime" 或 "name"。'
+    )
+
 VIDEO_MISSING_DATE_POLICY = str(
     video.get(
         "missing_date_policy",
@@ -287,9 +298,22 @@ if not (1 <= VIDEO_ALBUM_SIZE <= 10):
         "[video].album_size 必须为 1~10。"
     )
 
-# Optional mode: group the complete scan into strict ten-file batches,
-# regardless of the videos' capture dates.
-VIDEO_FORCE_TEN_PER_ALBUM = bool(video.get("force_ten_per_album", False))
+# Video grouping keeps the historical date mode and adds a configurable
+# scan-order mode.  The legacy flag is accepted as a migration fallback.
+_legacy_force_ten = bool(video.get("force_ten_per_album", False))
+VIDEO_GROUP_MODE = str(
+    video.get(
+        "group_mode",
+        "fixed" if _legacy_force_ten else "date",
+    )
+).strip().lower()
+if VIDEO_GROUP_MODE not in {"date", "fixed"}:
+    raise RuntimeError(
+        '[video].group_mode 只能是 "date" 或 "fixed"。'
+    )
+
+# Keep the old constant available to extensions and older integrations.
+VIDEO_FORCE_TEN_PER_ALBUM = VIDEO_GROUP_MODE == "fixed"
 
 VIDEO_CAPTION_YEAR_DIGITS = int(
     video.get(
@@ -380,6 +404,12 @@ VIDEO_ALBUM_CAPTION_SEPARATOR = str(
 )
 VIDEO_CAPTION_INCLUDE_FILENAMES = bool(
     video.get("caption_include_filenames", False)
+)
+VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS = bool(
+    video.get("caption_include_filename_numbers", True)
+)
+VIDEO_CAPTION_INCLUDE_GROUP_TITLE = bool(
+    video.get("caption_include_group_title", True)
 )
 IMAGE_CAPTION_INCLUDE_FILENAMES = bool(
     image.get("caption_include_filenames", False)

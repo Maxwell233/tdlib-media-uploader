@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.8.9.
+"""PySide6 desktop interface for TDLib Media Uploader V1.8.10.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -65,7 +65,7 @@ from runtime_paths import APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONF
 
 PROJECT_DIR = RESOURCE_DIR
 HISTORY_PATH = APP_DATA_DIR / ".gui_history.json"
-APP_VERSION = "1.8.9"
+APP_VERSION = "1.8.10"
 ICON_NAME = "tdlib_media_uploader_icon.png" if sys.platform == "darwin" else "tdlib_media_uploader_icon.ico"
 ICON_PATH = PROJECT_DIR / "assets" / ICON_NAME
 WINDOWS_APP_USER_MODEL_ID = "Maxwell233.TDLibMediaUploader"
@@ -214,8 +214,10 @@ def _basic_paths(kind: str) -> list[Path]:
     paths, _errors = iter_files(root, extensions)
     if kind == "image" and _cfg("IMAGE_SORT_MODE", "mtime") == "mtime":
         paths.sort(key=lambda item: (file_mtime(item), item.name.lower()))
+    elif kind == "video" and _cfg("VIDEO_SORT_MODE", "mtime") == "mtime":
+        paths.sort(key=lambda item: (file_mtime(item), str(item).lower()))
     else:
-        paths.sort(key=lambda item: str(item).lower())
+        paths.sort(key=lambda item: (item.name.casefold(), str(item).casefold()))
     return paths
 
 
@@ -499,7 +501,17 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
 
     groups = []
     if kind == "video":
-        force_ten = bool(_cfg("VIDEO_FORCE_TEN_PER_ALBUM", False))
+        force_ten = (
+            bool(core.force_ten_per_album())
+            if core is not None
+            else str(
+                _cfg(
+                    "VIDEO_GROUP_MODE",
+                    "fixed" if _cfg("VIDEO_FORCE_TEN_PER_ALBUM", False) else "date",
+                )
+            ).lower() == "fixed"
+        )
+        include_group_title = bool(_cfg("VIDEO_CAPTION_INCLUDE_GROUP_TITLE", True))
         forced_key = getattr(core, "FORCED_GROUP_KEY", "__all_videos__")
         if force_ten:
             grouped = {forced_key: list(items)}
@@ -507,7 +519,7 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
             grouped = defaultdict(list)
             for item in items:
                 grouped[item["month_key"]].append(item)
-        album_size = 10 if force_ten else int(_cfg("VIDEO_ALBUM_SIZE", 10))
+        album_size = int(_cfg("VIDEO_ALBUM_SIZE", 10))
         core_plans = defaultdict(list)
         if core is not None:
             for plan in core.build_album_plans(items, state):
@@ -520,14 +532,17 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
                 plans = []
                 for offset in range(0, len(month_items), album_size):
                     album_items = list(month_items[offset:offset + album_size])
-                    default_caption = (
-                        f"Album {offset // album_size + 1}"
-                        if force_ten
-                        else month[2:].lstrip("0")
-                    )
+                    default_caption = ""
+                    if include_group_title:
+                        default_caption = (
+                            f"Album {offset // album_size + 1}"
+                            if force_ten
+                            else month[2:].lstrip("0")
+                        )
                     key_group = f"{month}:{offset // album_size + 1}" if force_ten else month
                     key = album_key("video", key_group, album_items)
                     record = caption_store.get(key, default_caption)
+                    base_label = record["base_label"] if include_group_title else ""
                     plans.append({
                         "key": key,
                         "month_key": month,
@@ -535,9 +550,9 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
                         "items": album_items,
                         "pending_items": [item for item in album_items if not completed(item)],
                         "caption": {
-                            "base_label": record["base_label"],
+                            "base_label": base_label,
                             "custom_text": record["custom_text"],
-                            "text": compose_caption(record["base_label"], record["custom_text"], " · "),
+                            "text": compose_caption(base_label, record["custom_text"], " · "),
                         },
                     })
             pending = [item for item in month_items if not completed(item)]
@@ -545,7 +560,7 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
             group_label = (
                 getattr(core, "group_display_name", lambda value: value)(month)
                 if core is not None
-                else ("全部视频（忽略日期）" if force_ten else month)
+                else ("全部视频（按顺序分组）" if force_ten else month)
             )
             groups.append(
                 {
@@ -1142,6 +1157,12 @@ class UploadPage(QWidget):
                         else "IMAGE_CAPTION_INCLUDE_FILENAMES",
                         False,
                     )),
+                    bool(_cfg(
+                        "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS"
+                        if self.kind == "video"
+                        else "IMAGE_CAPTION_INCLUDE_FILENAMES",
+                        True,
+                    )),
                 )
                 album_row = QTreeWidgetItem([
                     "待上传" if pending_count else "已完成",
@@ -1231,7 +1252,22 @@ class UploadPage(QWidget):
         include_base = self.kind == "video" or _cfg("IMAGE_ALBUM_NUMBERING", True)
         def update_preview():
             caption = compose_caption(base_edit.text() if include_base else "", custom_edit.toPlainText(), separator)
-            preview.setPlainText(with_filename_description(caption, plan.get("items", []), bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAMES" if self.kind == "video" else "IMAGE_CAPTION_INCLUDE_FILENAMES", False))))
+            preview.setPlainText(with_filename_description(
+                caption,
+                plan.get("items", []),
+                bool(_cfg(
+                    "VIDEO_CAPTION_INCLUDE_FILENAMES"
+                    if self.kind == "video"
+                    else "IMAGE_CAPTION_INCLUDE_FILENAMES",
+                    False,
+                )),
+                bool(_cfg(
+                    "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS"
+                    if self.kind == "video"
+                    else "IMAGE_CAPTION_INCLUDE_FILENAMES",
+                    True,
+                )),
+            ))
         base_edit.textChanged.connect(update_preview)
         custom_edit.textChanged.connect(update_preview)
         update_preview()
@@ -1247,7 +1283,7 @@ class UploadPage(QWidget):
         base_label = base_edit.text().strip()
         custom_text = custom_edit.toPlainText().strip()
         store = CaptionStore(self.kind)
-        if self.kind == "video" and not base_label:
+        if self.kind == "video" and _cfg("VIDEO_CAPTION_INCLUDE_GROUP_TITLE", True) and not base_label:
             QMessageBox.warning(self, "未保存", "请填写基础标题。")
             return
         try:
@@ -1587,9 +1623,11 @@ class TargetDialog(QDialog):
         self.kind = kind if kind in {"video", "image"} else "video"
         accent = "视频" if self.kind == "video" else "图片"
         self.setWindowTitle(f"编辑{accent}上传目标与配置 · V{APP_VERSION}")
-        self.setMinimumWidth(620)
+        self.setMinimumWidth(700)
+        self.resize(760, 640 if self.kind == "video" else 560)
         layout = QVBoxLayout(self)
-        form = QFormLayout()
+        target_box = QGroupBox("上传目标")
+        form = QFormLayout(target_box)
         self.form = form
         self.target_mode = QComboBox()
         self.target_mode.addItem("超级群组 Forum Topic", "forum_topic")
@@ -1601,16 +1639,20 @@ class TargetDialog(QDialog):
         form.addRow("群组 Chat ID", self.chat_id)
         form.addRow("频道 Chat ID", self.channel_chat_id)
         form.addRow("Forum Topic ID", self.topic_id)
-        layout.addLayout(form)
+        layout.addWidget(target_box)
 
-        self.media_box = QGroupBox(f"{accent}上传配置")
-        self.media_form = QFormLayout(self.media_box)
+        self.media_box = QGroupBox(f"{accent}设置")
+        self.media_layout = QVBoxLayout(self.media_box)
         self._build_media_fields()
         layout.addWidget(self.media_box)
 
         hint = QLabel(
             "超级群组和频道的 Chat ID 通常以 -100 开头；频道不使用 Forum Topic。"
-            "本窗口只显示当前上传类型的 Album、Caption 和处理选项。"
+            + (
+                "视频的分组方式、每组数量、组标题、文件名和序号都集中在“视频分组与标题”中。"
+                if self.kind == "video"
+                else "图片的排序、分组数量、标题和文件名选项都集中在图片设置中。"
+            )
         )
         hint.setObjectName("mutedLabel")
         hint.setWordWrap(True)
@@ -1629,11 +1671,13 @@ class TargetDialog(QDialog):
 
     def _build_media_fields(self):
         if self.kind == "video":
+            date_box = QGroupBox("日期读取")
+            date_form = QFormLayout(date_box)
             self.video_missing_date = QComboBox()
             self.video_missing_date.addItem("使用文件修改时间", "mtime")
             self.video_missing_date.addItem("停止并提示缺失日期", "error")
             self.video_missing_date.setCurrentIndex(max(0, self.video_missing_date.findData(_cfg("VIDEO_MISSING_DATE_POLICY", "mtime"))))
-            self.media_form.addRow("日期缺失策略", self.video_missing_date)
+            date_form.addRow("缺失日期", self.video_missing_date)
 
             self.video_media_creation = QCheckBox("读取媒体创建日期")
             self.video_media_creation.setChecked(
@@ -1645,62 +1689,97 @@ class TargetDialog(QDialog):
                 "缺少 EXIF 的视频最多同时读取 4 个，每个文件只启动一次 FFmpeg；"
                 "扫描进度会显示在页面和状态栏。"
             )
-            self.media_form.addRow("日期来源", self.video_media_creation)
+            date_form.addRow("媒体日期", self.video_media_creation)
+            self.media_layout.addWidget(date_box)
+
+            group_box = QGroupBox("视频分组与标题")
+            group_form = QFormLayout(group_box)
+            self.video_sort = QComboBox()
+            self.video_sort.addItem("按修改时间", "mtime")
+            self.video_sort.addItem("按文件名", "name")
+            sort_index = self.video_sort.findData(_cfg("VIDEO_SORT_MODE", "mtime"))
+            self.video_sort.setCurrentIndex(sort_index if sort_index >= 0 else 0)
+            self.video_sort.setToolTip(
+                "按修改时间和按文件名只能选择一种；固定分组会按这里的顺序取视频。"
+            )
+            group_form.addRow("扫描排序", self.video_sort)
+
+            self.video_group_mode = QComboBox()
+            self.video_group_mode.addItem("按日期分组", "date")
+            self.video_group_mode.addItem("按扫描顺序固定分组", "fixed")
+            group_mode = _cfg(
+                "VIDEO_GROUP_MODE",
+                "fixed" if _cfg("VIDEO_FORCE_TEN_PER_ALBUM", False) else "date",
+            )
+            mode_index = self.video_group_mode.findData(str(group_mode).lower())
+            self.video_group_mode.setCurrentIndex(mode_index if mode_index >= 0 else 0)
+            self.video_group_mode.setToolTip(
+                "按日期分组会按月份整理；固定分组会忽略日期，按扫描顺序连续分组。"
+            )
+            group_form.addRow("分组方式", self.video_group_mode)
 
             self.video_album = QSpinBox()
             self.video_album.setRange(1, 10)
             self.video_album.setValue(int(_cfg("VIDEO_ALBUM_SIZE", 10)))
-            self.media_form.addRow("视频 Album 大小（普通模式）", self.video_album)
+            self.video_album.setToolTip("按日期模式表示每个月最多多少个；固定模式表示每组多少个。")
+            group_form.addRow("每组视频数", self.video_album)
 
-            self.video_force_ten = QCheckBox(
-                "强制每 10 个视频组成一个 Album（忽略日期，默认关闭）"
-            )
-            self.video_force_ten.setChecked(
-                bool(_cfg("VIDEO_FORCE_TEN_PER_ALBUM", False))
-            )
-            self.video_force_ten.toggled.connect(
-                lambda enabled: self.video_album.setEnabled(not enabled)
-            )
-            self.video_force_ten.setToolTip(
-                "开启后按扫描顺序连续分组，普通模式的 Album 大小和日期分组不参与。"
-                "最后不足 10 个视频的一组会照常发送。"
-            )
-            self.media_form.addRow("视频分组", self.video_force_ten)
-            self.video_album.setEnabled(not self.video_force_ten.isChecked())
+            self.video_group_title = QCheckBox("带组标题（如 Album 1、25-06）")
+            self.video_group_title.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_GROUP_TITLE", True)))
+            self.video_group_title.setToolTip("关闭后仍可保留自定义追加文字，但不显示默认的 Album 或月份标题。")
+            group_form.addRow("组标题", self.video_group_title)
+
+            self.video_filenames = QCheckBox("带文件名")
+            self.video_filenames.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAMES", False)))
+            self.video_filenames.setToolTip("在组标题或追加文字下方列出当前组的视频文件名。")
+            group_form.addRow("文件名列表", self.video_filenames)
+
+            self.video_filename_numbers = QCheckBox("文件名带序号（1、2、3…）")
+            self.video_filename_numbers.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS", True)))
+            self.video_filename_numbers.setToolTip("关闭后只显示文件名，每行一个，不添加序号。")
+            self.video_filenames.toggled.connect(self.video_filename_numbers.setEnabled)
+            group_form.addRow("文件名格式", self.video_filename_numbers)
 
             self.video_separator = QLineEdit(str(_cfg("VIDEO_ALBUM_CAPTION_SEPARATOR", " · ")))
-            self.media_form.addRow("视频标题分隔符", self.video_separator)
+            self.video_separator.setToolTip("组标题与自定义追加文字之间使用的分隔符。")
+            group_form.addRow("标题分隔符", self.video_separator)
+            self.media_layout.addWidget(group_box)
 
-            self.video_filenames = QCheckBox("视频标题附加“序号. 文件名”清单")
-            self.video_filenames.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAMES", False)))
-            self.media_form.addRow("视频描述", self.video_filenames)
-
+            process_box = QGroupBox("上传前处理")
+            process_form = QFormLayout(process_box)
             self.thumbnail = QCheckBox("生成视频缩略图")
             self.thumbnail.setChecked(bool(_cfg("VIDEO_GENERATE_THUMBNAIL", True)))
-            self.media_form.addRow("视频处理", self.thumbnail)
+            process_form.addRow("缩略图", self.thumbnail)
+            self.media_layout.addWidget(process_box)
+            self.video_filename_numbers.setEnabled(self.video_filenames.isChecked())
         else:
+            image_box = QGroupBox("图片分组与标题")
+            image_form = QFormLayout(image_box)
             self.image_sort = QComboBox()
             self.image_sort.addItem("文件修改时间", "mtime")
             self.image_sort.addItem("完整路径", "path")
             self.image_sort.setCurrentIndex(max(0, self.image_sort.findData(_cfg("IMAGE_SORT_MODE", "mtime"))))
-            self.media_form.addRow("图片排序", self.image_sort)
+            image_form.addRow("排序方式", self.image_sort)
 
             self.image_album = QSpinBox()
             self.image_album.setRange(1, 10)
             self.image_album.setValue(int(_cfg("IMAGE_ALBUM_SIZE", 10)))
-            self.media_form.addRow("图片 Album 大小", self.image_album)
+            image_form.addRow("每组图片数", self.image_album)
 
             self.image_numbering = QCheckBox("图片 Album 默认添加编号")
             self.image_numbering.setChecked(bool(_cfg("IMAGE_ALBUM_NUMBERING", True)))
-            self.media_form.addRow("图片 Caption", self.image_numbering)
+            image_form.addRow("组标题", self.image_numbering)
 
             self.image_separator = QLineEdit(str(_cfg("IMAGE_ALBUM_CAPTION_SEPARATOR", " · ")))
-            self.media_form.addRow("图片标题分隔符", self.image_separator)
+            image_form.addRow("标题分隔符", self.image_separator)
 
             self.image_filenames = QCheckBox("图片标题附加“序号. 文件名”清单")
             self.image_filenames.setChecked(bool(_cfg("IMAGE_CAPTION_INCLUDE_FILENAMES", False)))
-            self.media_form.addRow("图片描述", self.image_filenames)
+            image_form.addRow("文件名列表", self.image_filenames)
+            self.media_layout.addWidget(image_box)
 
+            process_box = QGroupBox("上传前处理")
+            process_form = QFormLayout(process_box)
             self.image_compress = QCheckBox(
                 "图片超过 10 MiB 时，在上传时使用 FFmpeg 压缩临时副本"
             )
@@ -1709,7 +1788,8 @@ class TargetDialog(QDialog):
                 "扫描和预检只提示，不提前压缩；确认上传后才为超限图片生成临时 JPEG。"
                 "原文件不会被修改，压缩失败的图片会记录日志并跳过。"
             )
-            self.media_form.addRow("图片超限处理", self.image_compress)
+            process_form.addRow("超限处理", self.image_compress)
+            self.media_layout.addWidget(process_box)
 
     def _load_target(self):
         target = _target_for(self.kind)
@@ -1764,10 +1844,14 @@ class TargetDialog(QDialog):
             values.update({
                 ("video", "missing_date_policy"): self.video_missing_date.currentData(),
                 ("video", "read_media_creation_date"): self.video_media_creation.isChecked(),
+                ("video", "sort_mode"): self.video_sort.currentData(),
                 ("video", "album_size"): self.video_album.value(),
-                ("video", "force_ten_per_album"): self.video_force_ten.isChecked(),
+                ("video", "group_mode"): self.video_group_mode.currentData(),
+                ("video", "force_ten_per_album"): self.video_group_mode.currentData() == "fixed",
+                ("video", "caption_include_group_title"): self.video_group_title.isChecked(),
                 ("video", "album_caption_separator"): self.video_separator.text(),
                 ("video", "caption_include_filenames"): self.video_filenames.isChecked(),
+                ("video", "caption_include_filename_numbers"): self.video_filename_numbers.isChecked(),
                 ("video", "generate_thumbnail"): self.thumbnail.isChecked(),
             })
         else:

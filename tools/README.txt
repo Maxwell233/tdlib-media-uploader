@@ -1,7 +1,7 @@
 ExifTool（可选）
 ================
 
-V1.8.9 默认 missing_date_policy = "mtime"，因此没有 ExifTool 也能上传视频。
+V1.8.10 默认 missing_date_policy = "mtime"，因此没有 ExifTool 也能上传视频。
 
 如果希望脚本优先读取视频内部的 EXIF，以及可选的媒体/QuickTime 创建时间，可安装 ExifTool：
 
@@ -40,6 +40,12 @@ macOS:  exiftool_path = 'tools/exiftool'
 - ExifTool 一次批量读取日期；已有日期的文件不会启动 FFmpeg。
 - 缺少 EXIF 的视频最多同时由 4 个 FFmpeg 任务读取媒体创建日期，每个文件只启动一次。
 - ExifTool 不存在：启用 read_media_creation_date 时仍会尝试 FFmpeg；失败后按缺失日期策略处理。
+
+视频分组和标题：
+- group_mode = "date" 按日期分组；group_mode = "fixed" 按扫描顺序固定分组。
+- album_size 可设为 1~10；sort_mode 可在修改时间和文件名之间二选一。
+- caption_include_group_title、caption_include_filenames、caption_include_filename_numbers
+  分别控制组标题、文件名和文件名序号。
 
 FFmpeg（源码运行视频功能）
 ============================
