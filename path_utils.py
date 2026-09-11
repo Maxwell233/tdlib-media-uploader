@@ -73,22 +73,25 @@ def iter_files(root, extensions):
     paths = []
     errors = []
 
-    def onerror(error):
-        errors.append(str(error))
+    def scan(directory):
+        try:
+            with os.scandir(directory) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            scan(entry.path)
+                        else:
+                            path = Path(entry.path)
+                            if path.suffix.lower() not in accepted:
+                                continue
+                            info = entry.stat()
+                            if stat.S_ISREG(info.st_mode) and info.st_size > 0:
+                                paths.append(path)
+                    except OSError as error:
+                        # entry.path is a string here, but previous code used path which is a Path object
+                        errors.append(f"{Path(entry.path)}: {error}")
+        except OSError as error:
+            errors.append(str(error))
 
-    try:
-        walker = os.walk(_text(root), onerror=onerror)
-        for directory, _dirnames, filenames in walker:
-            for filename in filenames:
-                path = Path(directory) / filename
-                if path.suffix.lower() not in accepted:
-                    continue
-                try:
-                    info = path.stat()
-                    if stat.S_ISREG(info.st_mode) and info.st_size > 0:
-                        paths.append(path)
-                except OSError as error:
-                    errors.append(f"{path}: {error}")
-    except OSError as error:
-        errors.append(str(error))
+    scan(_text(root))
     return paths, errors
