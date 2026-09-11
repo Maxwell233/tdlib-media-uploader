@@ -363,13 +363,26 @@ def _cache_usage(path: Path) -> tuple[int, int]:
             return (0, 0)
         count = 0
         total = 0
-        for child in path.rglob("*"):
+
+        stack = [str(path)]
+        while stack:
+            current_dir = stack.pop()
             try:
-                if child.is_file() and not child.is_symlink():
-                    count += 1
-                    total += child.stat().st_size
+                with os.scandir(current_dir) as it:
+                    for entry in it:
+                        try:
+                            if entry.is_symlink():
+                                continue
+                            if entry.is_file():
+                                count += 1
+                                total += entry.stat(follow_symlinks=False).st_size
+                            elif entry.is_dir():
+                                stack.append(entry.path)
+                        except OSError:
+                            continue
             except OSError:
                 continue
+
         return (count, total)
     except OSError:
         return (0, 0)
