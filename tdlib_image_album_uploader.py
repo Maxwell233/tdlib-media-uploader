@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -266,7 +267,8 @@ def preflight_images(paths, ui=None) -> list[dict]:
     target = ui or UI
     skipped = []
     total = len(paths)
-    for index, path in enumerate(paths, 1):
+
+    def worker(path):
         try:
             size = path.stat().st_size
             if size > cfg.IMAGE_MAX_BYTES:
@@ -276,27 +278,35 @@ def preflight_images(paths, ui=None) -> list[dict]:
                 )
                 if not cfg.IMAGE_COMPRESS_OVERSIZE:
                     raise RuntimeError(reason)
-                # Compression is deliberately deferred until the image is
-                # actually being assembled for upload, after confirmation.
-                target.info(
-                    f"预检发现超限图片，将在上传时使用 FFmpeg 压缩：{relative_name(path)}"
-                )
+
                 IMAGE_UPLOAD_PATHS.pop(stable_path(path), None)
                 image_info(path)
+                return {"path": path, "oversize": True}
             else:
                 IMAGE_UPLOAD_PATHS.pop(stable_path(path), None)
                 image_info(path)
-            if getattr(cfg, "IMAGE_VERIFY_ALL_IMAGES", False):
-                target.info(f"预检图片 {index}/{total} · {path.name}")
+                return None
         except Exception as exc:
-            record = {
+            return {
                 "path": path,
                 "reason": f"{type(exc).__name__}: {exc}",
                 "category": "size" if "Telegram Photo 上限" in str(exc) else "unreadable",
             }
-            skipped.append(record)
-            target.warning(f"跳过图片：{relative_name(path)}")
-            target.log(f"跳过图片详情：{path}\n原因：{record['reason']}")
+
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="tdlib-preflight") as executor:
+        for index, result in enumerate(executor.map(worker, paths), 1):
+            if result and result.get("oversize"):
+                target.info(
+                    f"预检发现超限图片，将在上传时使用 FFmpeg 压缩：{relative_name(result['path'])}"
+                )
+            elif result:
+                skipped.append(result)
+                target.warning(f"跳过图片：{relative_name(result['path'])}")
+                target.log(f"跳过图片详情：{result['path']}\n原因：{result['reason']}")
+
+            if getattr(cfg, "IMAGE_VERIFY_ALL_IMAGES", False):
+                target.info(f"预检图片 {index}/{total} · {paths[index-1].name}")
+
     return skipped
 
 

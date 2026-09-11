@@ -770,7 +770,8 @@ def preflight_videos(items, ui=None) -> list[dict]:
     target = ui or UI
     skipped = []
     total = len(items)
-    for index, item in enumerate(items, 1):
+
+    def worker(item):
         path = item["path"]
         try:
             size = path.stat().st_size
@@ -779,19 +780,25 @@ def preflight_videos(items, ui=None) -> list[dict]:
                     f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
                     f"{format_size(cfg.VIDEO_MAX_BYTES)}"
                 )
-            if getattr(cfg, "VIDEO_VERIFY_ALL_METADATA", False):
-                target.info(f"预检视频 {index}/{total} · {path.name}")
             prepare_video(path)
+            return None
         except Exception as exc:
-            record = {
+            return {
                 "item": item,
                 "path": path,
                 "reason": f"{type(exc).__name__}: {exc}",
                 "category": "size" if "超过 Telegram 视频上限" in str(exc) else "unreadable",
             }
-            skipped.append(record)
-            target.warning(f"跳过无法读取的视频：{relative_name(path)}")
-            target.log(f"跳过视频详情：{path}\n原因：{record['reason']}")
+
+    with ThreadPoolExecutor(max_workers=MEDIA_DATE_MAX_WORKERS, thread_name_prefix="tdlib-preflight") as executor:
+        for index, result in enumerate(executor.map(worker, items), 1):
+            if getattr(cfg, "VIDEO_VERIFY_ALL_METADATA", False):
+                target.info(f"预检视频 {index}/{total} · {items[index-1]['path'].name}")
+            if result:
+                skipped.append(result)
+                target.warning(f"跳过无法读取的视频：{relative_name(result['path'])}")
+                target.log(f"跳过视频详情：{result['path']}\n原因：{result['reason']}")
+
     return skipped
 
 
