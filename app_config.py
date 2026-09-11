@@ -7,7 +7,7 @@ import tomllib
 import os
 from pathlib import Path
 
-from runtime_paths import CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH
+from runtime_paths import CONFIG_PATH, RESOURCE_DIR
 
 APP_VERSION = "1.8.10"
 PROJECT_DIR = RESOURCE_DIR
