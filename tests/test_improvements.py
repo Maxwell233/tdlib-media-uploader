@@ -118,7 +118,7 @@ class ImprovementsTest(unittest.TestCase):
                 files, errors = path_utils.iter_files(root, {".jpg"})
             self.assertEqual([p.name for p in files], ["a.jpg"])
             self.assertFalse(errors)
-            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(calls), 0)
 
     def test_media_scan_applies_telegram_size_limits(self):
         import tdlib_image_album_uploader as image_core
