@@ -266,6 +266,16 @@ def _apply_size_limits(paths: list[Path], kind: str) -> tuple[list[Path], list[d
     return accepted, skipped
 
 
+@functools.lru_cache(maxsize=128)
+def _get_section_re(section: str):
+    return re.compile(rf"(?ms)^(\[{re.escape(section)}\]\s*$)(.*?)(?=^\[|\Z)")
+
+
+@functools.lru_cache(maxsize=128)
+def _get_key_re(key: str):
+    return re.compile(rf"(?m)^(\s*{re.escape(key)}\s*=\s*).*$")
+
+
 def _update_toml_value(text: str, section: str, key: str, value) -> str:
     if isinstance(value, bool):
         literal = "true" if value else "false"
@@ -274,16 +284,14 @@ def _update_toml_value(text: str, section: str, key: str, value) -> str:
     else:
         literal = json.dumps(str(value), ensure_ascii=False)
 
-    section_re = re.compile(
-        rf"(?ms)^(\[{re.escape(section)}\]\s*$)(.*?)(?=^\[|\Z)"
-    )
+    section_re = _get_section_re(section)
     match = section_re.search(text)
     if not match:
         suffix = "\n" if text and not text.endswith("\n") else ""
         return f"{text}{suffix}\n[{section}]\n{key} = {literal}\n"
 
     body = match.group(2)
-    key_re = re.compile(rf"(?m)^(\s*{re.escape(key)}\s*=\s*).*$")
+    key_re = _get_key_re(key)
     key_match = key_re.search(body)
     if key_match:
         body = body[: key_match.start()] + key_match.group(1) + literal + body[key_match.end() :]
