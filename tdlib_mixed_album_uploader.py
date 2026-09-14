@@ -26,7 +26,10 @@ from path_utils import (
     file_snapshot,
     io_worker_count,
     iter_files,
-    natural_sort,
+    media_path_sort,
+    file_mtime,
+    is_link_or_junction,
+    ordered_bounded_map,
     relative_name as stable_relative_name,
     stable_path,
     wait_for_file_ready,
@@ -34,7 +37,7 @@ from path_utils import (
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
-from staging import stage_file
+from staging import cleanup_staging, stage_file
 
 import tdlib_image_album_uploader as image_core
 import tdlib_video_album_uploader as video_core
@@ -51,6 +54,26 @@ MEDIA_DATE_MAX_WORKERS = 4
 READINESS_ATTEMPTS = 3
 
 
+def _readiness_options() -> dict:
+    return {
+        "attempts": int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", READINESS_ATTEMPTS)),
+        "stable_interval": float(getattr(cfg, "SCAN_STABILITY_INTERVAL_SECONDS", 0.05)),
+        "stable_checks": int(getattr(cfg, "SCAN_STABILITY_CHECKS", 2)),
+        "probe_bytes": int(getattr(cfg, "SCAN_READ_PROBE_BYTES", 64 * 1024)),
+    }
+
+
+def _validate_extensions() -> None:
+    overlap = set(getattr(cfg, "MIXED_IMAGE_EXTENSIONS", set())) & set(
+        getattr(cfg, "MIXED_VIDEO_EXTENSIONS", set())
+    )
+    if overlap:
+        values = ", ".join(sorted(overlap))
+        raise RuntimeError(
+            f"混合上传的图片和视频扩展名冲突：{values}。请在 [image]/[video] 中移除重复扩展名。"
+        )
+
+
 def format_size(value: float | int) -> str:
     value = float(value or 0)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
@@ -64,6 +87,19 @@ def relative_name(path: Path, root=None) -> str:
     return stable_relative_name(path, root or cfg.MIXED_DIR)
 
 
+def cleanup_staging_cache(*, startup: bool = False) -> None:
+    """Prune stale local staging artifacts without affecting source state."""
+
+    if not getattr(cfg, "STAGING_ENABLED", False):
+        return
+    if startup and not getattr(cfg, "STAGING_CLEANUP_ON_START", True):
+        return
+    cleanup_staging(
+        cfg.STAGING_DIR,
+        max_age_seconds=float(getattr(cfg, "STAGING_CLEANUP_DAYS", 7)) * 86400,
+    )
+
+
 def file_signature(path: Path, snapshot=None) -> str:
     if snapshot is None:
         snapshot = file_snapshot(path)
@@ -75,6 +111,7 @@ def file_signature(path: Path, snapshot=None) -> str:
 
 
 def _kind_for(path: Path) -> str | None:
+    _validate_extensions()
     suffix = path.suffix.lower()
     if suffix in cfg.MIXED_VIDEO_EXTENSIONS:
         return "video"
@@ -119,8 +156,10 @@ def _item_for_path(path: Path, group_name: str) -> dict | None:
     }
 
 
-def _group_items(group_path: Path, group_name: str) -> list[dict]:
-    candidates, errors = iter_files(group_path, cfg.MIXED_EXTENSIONS)
+def _group_items(group_path: Path, group_name: str, cancel_event=None) -> list[dict]:
+    candidates, errors = iter_files(
+        group_path, cfg.MIXED_EXTENSIONS, cancel_event=cancel_event
+    )
     LAST_SCAN_ERRORS.extend(errors)
     items = []
     for path in candidates:
@@ -128,25 +167,25 @@ def _group_items(group_path: Path, group_name: str) -> list[dict]:
         if item is not None:
             items.append(item)
     sort_mode = str(getattr(cfg, "MIXED_SORT_MODE", "name")).strip().lower()
-    if sort_mode == "mtime":
-        items.sort(
-            key=lambda item: (
-                int(item.get("scan_mtime_ns", 0)),
-                relative_name(item["path"], group_path),
-            )
-        )
-    else:
-        items = natural_sort(
-            items,
-            key=lambda item: relative_name(item["path"], group_path),
-        )
-    return items
+    def item_mtime(item):
+        snapshot_mtime = item.get("scan_mtime_ns")
+        return snapshot_mtime if snapshot_mtime is not None else file_mtime(item["path"])
+    return media_path_sort(
+        items,
+        group_path,
+        mode=sort_mode,
+        path_key=lambda item: item["path"],
+        mtime_key=item_mtime,
+    )
 
 
-def scan_mixed_groups() -> list[dict]:
+def scan_mixed_groups(cancel_event=None) -> list[dict]:
     """Scan each first-level directory as a separate mixed-media group."""
     global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_IGNORED_ROOT_MEDIA
     root = Path(cfg.MIXED_DIR)
+    _validate_extensions()
+    if is_link_or_junction(root):
+        raise RuntimeError(f"混合上传目录不能是符号链接或 junction：{root}")
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"混合上传目录不存在或不是目录：{root}")
     LAST_SCAN_ERRORS = []
@@ -160,16 +199,22 @@ def scan_mixed_groups() -> list[dict]:
     directories = []
     root_files = []
     for entry in entries:
+        if cancel_event is not None and cancel_event.is_set():
+            LAST_SCAN_ERRORS.append("目录扫描已取消")
+            break
         try:
+            if is_link_or_junction(entry):
+                LAST_SCAN_ERRORS.append(f"跳过符号链接或 junction：{entry.path}")
+                continue
             if entry.is_dir(follow_symlinks=False):
                 directories.append(Path(entry.path))
             elif entry.is_file(follow_symlinks=False) and _kind_for(Path(entry.path)):
                 root_files.append(Path(entry.path))
         except OSError as exc:
             LAST_SCAN_ERRORS.append(f"{entry.path}: {exc}")
-    directories = natural_sort(directories, key=lambda path: path.name)
+    directories = media_path_sort(directories, root, mode="name")
     for group_path in directories:
-        items = _group_items(group_path, group_path.name)
+        items = _group_items(group_path, group_path.name, cancel_event=cancel_event)
         if items:
             groups.append({
                 "group_name": group_path.name,
@@ -311,24 +356,6 @@ def _deferred(exc: Exception) -> bool:
     )
 
 
-def _ordered_bounded_map(executor, items, worker, max_workers: int):
-    """Yield results in input order without queueing a whole network tree."""
-
-    iterator = iter(items)
-    pending = deque()
-    for _ in range(max(1, int(max_workers))):
-        try:
-            pending.append(executor.submit(worker, next(iterator)))
-        except StopIteration:
-            break
-    while pending:
-        yield pending.popleft().result()
-        try:
-            pending.append(executor.submit(worker, next(iterator)))
-        except StopIteration:
-            pass
-
-
 def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
     target = ui or UI
     skipped = []
@@ -340,7 +367,7 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
                 path,
                 expected_size=item.get("scan_size"),
                 expected_mtime_ns=item.get("scan_mtime_ns"),
-                attempts=READINESS_ATTEMPTS,
+                **_readiness_options(),
                 cancel_event=cancel_event,
             )
             if not readiness.ready:
@@ -352,7 +379,10 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
                 # Metadata validation is enough for the scan. Thumbnail
                 # generation is deferred to the upload path and therefore is
                 # performed at most once per video.
-                video_core.video_info(path)
+                if cancel_event is None:
+                    video_core.video_info(path)
+                else:
+                    video_core.video_info(path, cancel_event=cancel_event)
             else:
                 if snapshot[0] > cfg.IMAGE_MAX_BYTES and not cfg.IMAGE_COMPRESS_OVERSIZE:
                     raise RuntimeError("文件大小超过 Telegram Photo 上限")
@@ -363,10 +393,14 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
             category = "size" if "超过 Telegram" in text else "deferred" if _deferred(exc) else "unreadable"
             return {"item": item, "path": path, "reason": f"{type(exc).__name__}: {exc}", "category": category}
 
-    worker_count = io_worker_count(cfg.MIXED_DIR, local=MEDIA_DATE_MAX_WORKERS, network=2)
+    worker_count = io_worker_count(
+        cfg.MIXED_DIR,
+        local=getattr(cfg, "IO_WORKERS_LOCAL", MEDIA_DATE_MAX_WORKERS),
+        network=getattr(cfg, "IO_WORKERS_NETWORK", 2),
+    )
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tdlib-mixed-preflight") as executor:
         for index, result in enumerate(
-            _ordered_bounded_map(executor, items, worker, worker_count),
+            ordered_bounded_map(executor, items, worker, worker_count),
             1,
         ):
             if cancel_event is not None and cancel_event.is_set():
@@ -429,7 +463,7 @@ def _mixed_input_video(item, caption, cancel_event=None):
         path,
         expected_size=item.get("scan_size"),
         expected_mtime_ns=item.get("scan_mtime_ns"),
-        attempts=READINESS_ATTEMPTS,
+        **_readiness_options(),
         cancel_event=cancel_event,
     )
     if not readiness.ready:
@@ -442,7 +476,11 @@ def _mixed_input_video(item, caption, cancel_event=None):
             staging_dir=cfg.STAGING_DIR,
             cancel_event=cancel_event,
         )
-    info = video_core.video_info(source_path)
+    info = (
+        video_core.video_info(source_path)
+        if cancel_event is None
+        else video_core.video_info(source_path, cancel_event=cancel_event)
+    )
     thumbnail = None
     if getattr(cfg, "MIXED_GENERATE_THUMBNAIL", True):
         if cancel_event is None:
@@ -691,8 +729,13 @@ def main():
     _validate_config()
     version = verify_tdjson_version()
     UI.banner(f"TDLib Media Uploader V{cfg.APP_VERSION}", f"混合模式 · tdjson {version}", accent="cyan")
-    groups = scan_mixed_groups()
     cancel_event = getattr(UI, "cancel_event", None)
+    cleanup_staging_cache(startup=True)
+    groups = (
+        scan_mixed_groups()
+        if cancel_event is None
+        else scan_mixed_groups(cancel_event=cancel_event)
+    )
     report_scan_size_skips(LAST_SCAN_SIZE_SKIPS, UI)
     if LAST_SCAN_ERRORS:
         UI.warning(
@@ -820,4 +863,5 @@ def main():
     finally:
         client.remove_update_callback(progress.handle_update)
         client.close()
+        cleanup_staging_cache()
         image_core.cleanup_compressed_images()

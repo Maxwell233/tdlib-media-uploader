@@ -35,15 +35,17 @@ from path_utils import (
     file_snapshot,
     io_worker_count,
     iter_files,
-    natural_sort,
+    media_path_sort,
+    ordered_bounded_map,
     relative_name as stable_relative_name,
+    run_cancellable_process,
     stable_path,
     wait_for_file_ready,
 )
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
-from staging import stage_file
+from staging import cleanup_staging, stage_file
 
 PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = APP_DATA_DIR / ".state"
@@ -148,7 +150,7 @@ def _find_ffprobe() -> str | None:
 
 _FFMPEG_OVERRIDE = _find_ffmpeg_override()
 if _FFMPEG_OVERRIDE:
-    # read_frames()/count_frames_and_secs() resolve their executable through
+    # read_frames() resolves its executable through
     # imageio-ffmpeg, so expose the selected binary through its supported
     # environment-variable override without changing the public API.
     os.environ["IMAGEIO_FFMPEG_EXE"] = _FFMPEG_OVERRIDE
@@ -196,6 +198,19 @@ def video_dates_enabled() -> bool:
     return bool(getattr(cfg, "VIDEO_READ_DATES", True))
 
 
+def cleanup_staging_cache(*, startup: bool = False) -> None:
+    """Prune stale local staging artifacts without affecting source state."""
+
+    if not getattr(cfg, "STAGING_ENABLED", False):
+        return
+    if startup and not getattr(cfg, "STAGING_CLEANUP_ON_START", True):
+        return
+    cleanup_staging(
+        cfg.STAGING_DIR,
+        max_age_seconds=float(getattr(cfg, "STAGING_CLEANUP_DAYS", 7)) * 86400,
+    )
+
+
 def force_ten_per_album() -> bool:
     if not video_dates_enabled():
         return True
@@ -228,12 +243,14 @@ def month_caption(month_key: str) -> str:
     return f"{year % 100:02d}-{month}" if cfg.VIDEO_CAPTION_YEAR_DIGITS == 2 else f"{year}-{month}"
 
 
-def scan_videos() -> list[Path]:
+def scan_videos(cancel_event=None) -> list[Path]:
     global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_SNAPSHOTS
     root = cfg.VIDEO_DIR
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"视频目录不存在或不是目录：{root}")
-    videos, LAST_SCAN_ERRORS = iter_files(root, cfg.VIDEO_EXTENSIONS)
+    videos, LAST_SCAN_ERRORS = iter_files(
+        root, cfg.VIDEO_EXTENSIONS, cancel_event=cancel_event
+    )
     LAST_SCAN_SIZE_SKIPS = []
     LAST_SCAN_SNAPSHOTS = {}
     accepted = []
@@ -258,21 +275,15 @@ def scan_videos() -> list[Path]:
         LAST_SCAN_SNAPSHOTS[normalize_path(path)] = snapshot
         accepted.append(path)
     videos = accepted
-    if not video_dates_enabled() or getattr(cfg, "VIDEO_SORT_MODE", "mtime") == "name":
-        # Keep the historical filename-first ordering while comparing each
-        # numeric run as an integer. A stable secondary path order makes files
-        # with the same basename deterministic across directory traversals.
-        videos = natural_sort(
-            videos,
-            key=lambda p: relative_name(p),
-        )
-        videos = natural_sort(
-            videos,
-            key=lambda p: p.name,
-        )
-    else:
-        videos.sort(key=lambda p: (file_mtime(p), relative_name(p).casefold()))
-    return videos
+    sort_mode = "name"
+    if video_dates_enabled() and getattr(cfg, "VIDEO_SORT_MODE", "mtime") == "mtime":
+        sort_mode = "mtime"
+    return media_path_sort(
+        videos,
+        root,
+        mode=sort_mode,
+        mtime_key=lambda path: LAST_SCAN_SNAPSHOTS.get(normalize_path(path), (0, 0))[1],
+    )
 
 
 def parse_exif_datetime(value):
@@ -300,11 +311,13 @@ def parse_exif_datetime(value):
 
 EXIFTOOL_BATCH_SIZE = 256
 EXIFTOOL_MAX_RETRIES = 2
-EXIFTOOL_TIMEOUT_SECONDS = 120
-FFMPEG_METADATA_TIMEOUT_SECONDS = 30
-FFMPEG_INFO_TIMEOUT_SECONDS = 30
-FFMPEG_THUMBNAIL_TIMEOUT_SECONDS = 45
-READINESS_ATTEMPTS = 3
+# Keep module-level names for integrations that patch them, while taking the
+# defaults from the shared [process]/[scan] configuration.
+EXIFTOOL_TIMEOUT_SECONDS = float(getattr(cfg, "EXIFTOOL_TIMEOUT_SECONDS", 120))
+FFMPEG_METADATA_TIMEOUT_SECONDS = float(getattr(cfg, "FFMPEG_METADATA_TIMEOUT_SECONDS", 30))
+FFMPEG_INFO_TIMEOUT_SECONDS = float(getattr(cfg, "FFMPEG_INFO_TIMEOUT_SECONDS", 30))
+FFMPEG_THUMBNAIL_TIMEOUT_SECONDS = float(getattr(cfg, "FFMPEG_THUMBNAIL_TIMEOUT_SECONDS", 45))
+READINESS_ATTEMPTS = int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", 3))
 
 
 def _cancel_requested(cancel_event=None) -> bool:
@@ -313,7 +326,27 @@ def _cancel_requested(cancel_event=None) -> bool:
     return bool(getattr(UI, "stop_requested", False))
 
 
-def _exiftool_command(*, recursive: bool) -> list[str]:
+def _readiness_options() -> dict:
+    """Return the shared, bounded source-file readiness configuration."""
+
+    return {
+        "attempts": int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", READINESS_ATTEMPTS)),
+        "stable_interval": float(getattr(cfg, "SCAN_STABILITY_INTERVAL_SECONDS", 0.05)),
+        "stable_checks": int(getattr(cfg, "SCAN_STABILITY_CHECKS", 2)),
+        "probe_bytes": int(getattr(cfg, "SCAN_READ_PROBE_BYTES", 64 * 1024)),
+    }
+
+
+def _process_timeout(config_name: str, fallback: float) -> float:
+    """Read a live timeout value so GUI config reloads take effect."""
+
+    try:
+        return max(1.0, float(getattr(cfg, config_name, fallback)))
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
+def _exiftool_command(*, recursive: bool = False) -> list[str]:
     command = [
         str(cfg.EXIFTOOL_PATH),
         "-charset", "FileName=UTF8",
@@ -322,8 +355,9 @@ def _exiftool_command(*, recursive: bool) -> list[str]:
         "-d", "%Y-%m-%d %H:%M:%S%z",
         "-time:all",
     ]
-    if recursive:
-        command.append("-r")
+    # ExifTool must never discover a second, potentially inconsistent view of
+    # a network directory.  Python supplies the explicit file list through
+    # stdin; keep the legacy argument for API compatibility but ignore it.
     for ext in sorted(cfg.VIDEO_EXTENSIONS):
         command += ["-ext", ext.lstrip(".")]
     # Keep all paths in an UTF-8 argument stream. This avoids Windows codepage
@@ -340,27 +374,33 @@ def _exiftool_rows_detailed(
     cancel_event=None,
 ) -> tuple[list[dict], str | None, bool]:
     """Run one ExifTool batch and report whether the output is complete."""
-    input_text = (
-        f"{cfg.VIDEO_DIR}\n"
-        if batch is None
-        else "\n".join(str(path) for path in batch) + ("\n" if batch else "")
-    )
+    if not batch:
+        return [], None, True
+    input_text = "\n".join(str(path) for path in batch) + "\n"
     last_error = ""
     for attempt in range(EXIFTOOL_MAX_RETRIES + 1):
         if _cancel_requested(cancel_event):
             return [], "ExifTool 读取已取消", False
         try:
-            result = subprocess.run(
-                _exiftool_command(recursive=recursive),
-                input=input_text,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=EXIFTOOL_TIMEOUT_SECONDS,
+            command = _exiftool_command(recursive=recursive)
+            process_kwargs = {
+                "input": input_text,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "text": True,
+                "encoding": "utf-8",
+                "errors": "replace",
+                "timeout": _process_timeout("EXIFTOOL_TIMEOUT_SECONDS", EXIFTOOL_TIMEOUT_SECONDS),
                 **_hidden_subprocess_kwargs(),
-            )
+            }
+            if cancel_event is None:
+                result = subprocess.run(command, **process_kwargs)
+            else:
+                result = run_cancellable_process(
+                    command,
+                    cancel_event=cancel_event,
+                    **process_kwargs,
+                )
         except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             if attempt < EXIFTOOL_MAX_RETRIES:
@@ -369,10 +409,6 @@ def _exiftool_rows_detailed(
         stdout = str(result.stdout or "").lstrip("\ufeff").strip()
         stderr = str(result.stderr or "").strip()
         if not stdout:
-            # An empty explicit-file batch is a failure and must be retried;
-            # an empty legacy recursive directory is a valid no-match result.
-            if batch is None and result.returncode in (0, 1):
-                return [], stderr or None, True
             last_error = stderr or "ExifTool 对非空文件批次没有返回 JSON"
             if attempt < EXIFTOOL_MAX_RETRIES:
                 cancelable_sleep(min(0.25 * (2 ** attempt), 2.0), cancel_event)
@@ -435,15 +471,21 @@ def _exiftool_rows(batch, *, recursive: bool) -> tuple[list[dict], str | None]:
 def read_exif_metadata(paths=None, cancel_event=None) -> dict[str, dict]:
     """Read EXIF metadata without letting one bad network file abort a scan.
 
-    ``paths=None`` retains the legacy recursive-directory behavior for CLI and
-    integrations.  GUI scans pass the already accepted paths; those are
-    queried in bounded batches and recursively isolated when ExifTool returns
-    malformed output or a transient share error.
+    ``paths=None`` is retained as a convenience for CLI callers, but it now
+    performs the same Python discovery as the GUI and always supplies explicit
+    file paths to ExifTool.  ExifTool itself never recursively scans a root.
     """
     global LAST_SCAN_ERRORS
     if not video_dates_enabled():
         return {}
-    requested = None if paths is None else [Path(path) for path in paths]
+    if paths is None:
+        requested = (
+            scan_videos()
+            if cancel_event is None
+            else scan_videos(cancel_event=cancel_event)
+        )
+    else:
+        requested = [Path(path) for path in paths]
     # An empty scan has no metadata work to do and should remain a successful
     # no-op even when ExifTool is not installed.
     if requested == []:
@@ -453,13 +495,10 @@ def read_exif_metadata(paths=None, cancel_event=None) -> dict[str, dict]:
             f"找不到 ExifTool：{cfg.EXIFTOOL_PATH}\n"
             "请把对应平台的 ExifTool 可执行文件放入 tools 目录，或在设置中指定路径。"
         )
-    if requested is None:
-        batches = [(None, True)]
-    else:
-        batches = [
-            (requested[offset:offset + EXIFTOOL_BATCH_SIZE], False)
-            for offset in range(0, len(requested), EXIFTOOL_BATCH_SIZE)
-        ]
+    batches = [
+        (requested[offset:offset + EXIFTOOL_BATCH_SIZE], False)
+        for offset in range(0, len(requested), EXIFTOOL_BATCH_SIZE)
+    ]
     index = {}
     diagnostics = []
 
@@ -477,7 +516,7 @@ def read_exif_metadata(paths=None, cancel_event=None) -> dict[str, dict]:
             collect(batch[midpoint:], False)
             return
         if diagnostic and not rows:
-            label = str(cfg.VIDEO_DIR) if batch is None else str(batch[0])
+            label = str(batch[0]) if batch else str(cfg.VIDEO_DIR)
             diagnostics.append(f"{label}: {diagnostic}")
         for row in rows:
             source = row.get("SourceFile")
@@ -515,7 +554,12 @@ def _valid_media_datetime(value):
     return dt
 
 
-def _read_media_creation_metadata(path_text: str, size: int, mtime_ns: int):
+def _read_media_creation_metadata(
+    path_text: str,
+    size: int,
+    mtime_ns: int,
+    cancel_event=None,
+):
     """Read media creation metadata with one FFmpeg process.
 
     The global and first-video-stream metadata are written by the same
@@ -529,7 +573,7 @@ def _read_media_creation_metadata(path_text: str, size: int, mtime_ns: int):
     )
     os.close(fd)
     try:
-        if _cancel_requested():
+        if _cancel_requested(cancel_event):
             return None
         command = [
             executable,
@@ -554,16 +598,23 @@ def _read_media_creation_metadata(path_text: str, size: int, mtime_ns: int):
             "ffmetadata",
             stream_metadata_path,
         ]
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=FFMPEG_METADATA_TIMEOUT_SECONDS,
+        process_kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": _process_timeout("FFMPEG_METADATA_TIMEOUT_SECONDS", FFMPEG_METADATA_TIMEOUT_SECONDS),
             **_hidden_subprocess_kwargs(),
-        )
+        }
+        if cancel_event is None:
+            result = subprocess.run(command, **process_kwargs)
+        else:
+            result = run_cancellable_process(
+                command,
+                cancel_event=cancel_event,
+                **process_kwargs,
+            )
         if result.returncode != 0:
             return None
         try:
@@ -607,7 +658,14 @@ def _cached_media_creation_metadata(path_text: str, size: int, mtime_ns: int):
     return result
 
 
-def _media_creation_metadata(path_text: str, size: int, mtime_ns: int):
+def _media_creation_metadata(path_text: str, size: int, mtime_ns: int, cancel_event=None):
+    if cancel_event is not None:
+        try:
+            return _read_media_creation_metadata(
+                path_text, size, mtime_ns, cancel_event=cancel_event
+            )
+        except _NoMediaDate:
+            return None
     try:
         return _cached_media_creation_metadata(path_text, size, mtime_ns)
     except _NoMediaDate:
@@ -625,18 +683,22 @@ def read_media_creation_time(path: Path, cancel_event=None):
             return None
         readiness = wait_for_file_ready(
             path,
-            attempts=2,
-            stable_interval=0.02,
+            **_readiness_options(),
             probe=True,
             cancel_event=cancel_event,
         )
         if not readiness.ready:
             return None
         info = readiness.snapshot
+        if cancel_event is None:
+            return _media_creation_metadata(
+                display_path(path), info.size, info.mtime_ns
+            )
         return _media_creation_metadata(
             display_path(path),
             info.size,
             info.mtime_ns,
+            cancel_event=cancel_event,
         )
     except (OSError, RuntimeError, subprocess.SubprocessError):
         # Missing tools, unreadable/unsupported files or a timed-out share
@@ -791,8 +853,8 @@ def _probe_media_dates(paths, progress_callback=None, cancel_event=None):
 
     worker_count = io_worker_count(
         cfg.VIDEO_DIR,
-        local=MEDIA_DATE_MAX_WORKERS,
-        network=2,
+        local=getattr(cfg, "IO_WORKERS_LOCAL", MEDIA_DATE_MAX_WORKERS),
+        network=getattr(cfg, "IO_WORKERS_NETWORK", 2),
     )
     probe = (
         (lambda path: read_media_creation_time(path, cancel_event))
@@ -936,11 +998,11 @@ def build_items(videos, metadata_index, progress_callback=None, cancel_event=Non
             item["scan_size"], item["scan_mtime_ns"] = snapshot
         items.append(item)
     if not force_ten_per_album():
+        # ``videos`` was already ordered by the shared media path sorter.
+        # Keep that order as the stable tie-breaker when capture dates match;
+        # do not re-sort by basename or lexical path here.
         items.sort(
-            key=lambda item: (
-                item["capture_time"].replace(tzinfo=None),
-                relative_name(item["path"]).lower(),
-            )
+            key=lambda item: item["capture_time"].replace(tzinfo=None)
         )
     return items, missing
 
@@ -949,13 +1011,34 @@ _VIDEO_INFO_CACHE = {}
 _VIDEO_INFO_CACHE_LOCK = threading.Lock()
 
 
-def _next_frame_metadata(reader, *, timeout: float):
+def _next_frame_metadata(reader, *, timeout: float, cancel_event=None):
     """Read imageio's header with a timeout and close its child process."""
 
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tdlib-video-header")
     future = executor.submit(next, reader)
     try:
-        return future.result(timeout=max(1.0, float(timeout)))
+        limit = max(1.0, float(timeout))
+        if cancel_event is None:
+            return future.result(timeout=limit)
+        deadline = time.monotonic() + limit
+        while True:
+            if _cancel_requested(cancel_event):
+                try:
+                    reader.close()
+                except Exception:
+                    pass
+                raise TimeoutError("读取视频媒体信息已取消")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                try:
+                    reader.close()
+                except Exception:
+                    pass
+                raise TimeoutError("读取视频媒体信息超时")
+            try:
+                return future.result(timeout=min(0.1, remaining))
+            except FutureTimeoutError:
+                continue
     except FutureTimeoutError as exc:
         try:
             reader.close()
@@ -966,30 +1049,40 @@ def _next_frame_metadata(reader, *, timeout: float):
         executor.shutdown(wait=False, cancel_futures=True)
 
 
-def _probe_video_duration(path: Path) -> float:
+def _probe_video_duration(path: Path, cancel_event=None) -> float:
     """Read duration through bounded ffprobe instead of frame counting."""
 
     ffprobe = _find_ffprobe()
     if not ffprobe:
         return 0.0
     try:
-        result = subprocess.run(
-            [
+        command = [
                 ffprobe,
                 "-v", "error",
                 "-select_streams", "v:0",
                 "-show_entries", "format=duration:stream=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 display_path(path),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=FFMPEG_INFO_TIMEOUT_SECONDS,
+            ]
+        process_kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": _process_timeout("FFMPEG_INFO_TIMEOUT_SECONDS", FFMPEG_INFO_TIMEOUT_SECONDS),
             **_hidden_subprocess_kwargs(),
-        )
+        }
+        if cancel_event is None:
+            result = subprocess.run(command, **process_kwargs)
+        else:
+            result = run_cancellable_process(
+                command,
+                cancel_event=cancel_event,
+                **process_kwargs,
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("读取视频时长超时") from exc
     except (OSError, UnicodeError, subprocess.SubprocessError):
         return 0.0
     if result.returncode != 0:
@@ -1005,7 +1098,9 @@ def _probe_video_duration(path: Path) -> float:
     return max(values, default=0.0)
 
 
-def video_info(path: Path):
+def video_info(path: Path, cancel_event=None):
+    if _cancel_requested(cancel_event):
+        raise TimeoutError("读取视频媒体信息已取消")
     snapshot = file_snapshot(path)
     if snapshot is None:
         raise RuntimeError(f"视频文件暂时不可读取：{path}")
@@ -1017,9 +1112,24 @@ def video_info(path: Path):
     reader = None
     try:
         reader = imageio_ffmpeg.read_frames(display_path(path))
-        metadata = _next_frame_metadata(reader, timeout=FFMPEG_INFO_TIMEOUT_SECONDS)
+        metadata = (
+            _next_frame_metadata(
+                reader,
+                timeout=_process_timeout("FFMPEG_INFO_TIMEOUT_SECONDS", FFMPEG_INFO_TIMEOUT_SECONDS),
+            )
+            if cancel_event is None
+            else _next_frame_metadata(
+                reader,
+                timeout=_process_timeout("FFMPEG_INFO_TIMEOUT_SECONDS", FFMPEG_INFO_TIMEOUT_SECONDS),
+                cancel_event=cancel_event,
+            )
+        )
     except StopIteration as exc:
         raise RuntimeError(f"视频没有可读取的媒体流：{path}") from exc
+    except TimeoutError:
+        # Preserve the transient category so preflight can defer a network
+        # timeout and retry it on the next run instead of marking it damaged.
+        raise
     except Exception as exc:
         raise RuntimeError(
             f"无法读取视频媒体信息：{path}\n"
@@ -1036,7 +1146,11 @@ def video_info(path: Path):
     if not size or len(size) != 2:
         raise RuntimeError(f"FFmpeg 无法读取分辨率：{path.name}")
     if duration <= 0:
-        duration = _probe_video_duration(path)
+        duration = (
+            _probe_video_duration(path)
+            if cancel_event is None
+            else _probe_video_duration(path, cancel_event=cancel_event)
+        )
     width, height = int(size[0]), int(size[1])
     if width <= 1 or height <= 1 or duration <= 0:
         raise RuntimeError(f"视频媒体属性异常：{path.name} | {width}x{height} | {duration:.3f}s")
@@ -1084,21 +1198,29 @@ def build_thumbnail(path: Path, cancel_event=None):
         except OSError:
             pass
         try:
-            result = subprocess.run(
-                [
+            command = [
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                     "-ss", str(second), "-i", display_path(path), "-frames:v", "1",
                     "-vf", "scale=640:640:force_original_aspect_ratio=decrease",
                     "-q:v", "3", str(temp_path),
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=FFMPEG_THUMBNAIL_TIMEOUT_SECONDS,
+                ]
+            run_kwargs = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.PIPE,
+                "text": True,
+                "encoding": "utf-8",
+                "errors": "replace",
+                "timeout": _process_timeout("FFMPEG_THUMBNAIL_TIMEOUT_SECONDS", FFMPEG_THUMBNAIL_TIMEOUT_SECONDS),
                 **process_kwargs,
-            )
+            }
+            if cancel_event is None:
+                result = subprocess.run(command, **run_kwargs)
+            else:
+                result = run_cancellable_process(
+                    command,
+                    cancel_event=cancel_event,
+                    **run_kwargs,
+                )
             last_error = result.stderr.strip() or f"FFmpeg 退出码 {result.returncode}"
             return result.returncode == 0 and temp_path.exists() and temp_path.stat().st_size > 0
         except (OSError, subprocess.SubprocessError, TimeoutError) as exc:
@@ -1133,28 +1255,14 @@ def build_thumbnail(path: Path, cancel_event=None):
 def prepare_video(path: Path, cancel_event=None):
     """Read all local video data required before a Telegram request."""
 
-    info = video_info(path)
+    info = (
+        video_info(path)
+        if cancel_event is None
+        else video_info(path, cancel_event=cancel_event)
+    )
     if cfg.VIDEO_GENERATE_THUMBNAIL:
         build_thumbnail(path, cancel_event)
     return info
-
-
-def _ordered_bounded_map(executor, items, worker, max_workers: int):
-    """Yield worker results in input order with a bounded task queue."""
-    iterator = iter(items)
-    pending = deque()
-    for _ in range(max(1, int(max_workers))):
-        try:
-            pending.append(executor.submit(worker, next(iterator)))
-        except StopIteration:
-            break
-
-    while pending:
-        yield pending.popleft().result()
-        try:
-            pending.append(executor.submit(worker, next(iterator)))
-        except StopIteration:
-            pass
 
 
 def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
@@ -1176,7 +1284,7 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
                 path,
                 expected_size=item.get("scan_size"),
                 expected_mtime_ns=item.get("scan_mtime_ns"),
-                attempts=READINESS_ATTEMPTS,
+                **_readiness_options(),
                 cancel_event=cancel_event,
             )
             if not readiness.ready:
@@ -1209,10 +1317,14 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
                 ),
             }
 
-    worker_count = io_worker_count(cfg.VIDEO_DIR, local=MEDIA_DATE_MAX_WORKERS, network=2)
+    worker_count = io_worker_count(
+        cfg.VIDEO_DIR,
+        local=getattr(cfg, "IO_WORKERS_LOCAL", MEDIA_DATE_MAX_WORKERS),
+        network=getattr(cfg, "IO_WORKERS_NETWORK", 2),
+    )
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tdlib-preflight") as executor:
         for index, result in enumerate(
-            _ordered_bounded_map(executor, items, worker, worker_count),
+            ordered_bounded_map(executor, items, worker, worker_count),
             1,
         ):
             if _cancel_requested(cancel_event):
@@ -1304,7 +1416,7 @@ def input_video(item, caption: str, cancel_event=None):
         path,
         expected_size=item.get("scan_size"),
         expected_mtime_ns=item.get("scan_mtime_ns"),
-        attempts=READINESS_ATTEMPTS,
+        **_readiness_options(),
         cancel_event=cancel_event,
     )
     if not readiness.ready:
@@ -1684,8 +1796,13 @@ def main():
     version = verify_tdjson_version()
     UI.log(f"tdjson / TDLib 绑定版本：{version}（已锁定）")
 
-    videos = scan_videos()
     cancel_event = getattr(UI, "cancel_event", None)
+    cleanup_staging_cache(startup=True)
+    videos = (
+        scan_videos()
+        if cancel_event is None
+        else scan_videos(cancel_event=cancel_event)
+    )
     if LAST_SCAN_SIZE_SKIPS:
         report_scan_size_skips(LAST_SCAN_SIZE_SKIPS)
     if not videos:
@@ -1853,23 +1970,19 @@ def main():
                     continue
                 month_album_number = plan["number"]
                 if ready_items != album_items and getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False):
+                    # Keep the already-built media inputs.  Rebuilding the
+                    # Album here would start FFmpeg a second time for every
+                    # surviving video and could reintroduce a transient
+                    # failure after the JIT check.  Only the first content
+                    # carries the caption, so update that field in place.
                     label = with_filename_description(
                         plan["caption"]["text"],
                         ready_items,
                         True,
                         include_filename_numbers(),
                     )
-                    contents, rebuilt_items, rebuilt_skipped = build_video_contents(
-                        ready_items,
-                        label,
-                    )
-                    if rebuilt_skipped:
-                        skipped_items.extend(rebuilt_skipped)
-                        progress.skip_items([record["item"] for record in rebuilt_skipped])
-                    ready_items = rebuilt_items
-                    if not ready_items:
-                        UI.warning("当前 Album 没有可读取的视频，已跳过。")
-                        continue
+                    if contents:
+                        contents[0]["caption"] = formatted_text(label)
                 album_global += 1
                 progress.begin_album(ready_items, month_key, album_global, total_albums)
                 UI.log("")
@@ -1906,3 +2019,4 @@ def main():
     finally:
         client.remove_update_callback(progress.handle_update)
         client.close()
+        cleanup_staging_cache()

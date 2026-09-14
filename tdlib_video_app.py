@@ -270,8 +270,13 @@ def main():
 
     UI.info(f"扫描视频目录：{cfg.VIDEO_DIR}")
 
-    videos = core.scan_videos()
     cancel_event = getattr(UI, "cancel_event", None)
+    core.cleanup_staging_cache(startup=True)
+    videos = (
+        core.scan_videos()
+        if cancel_event is None
+        else core.scan_videos(cancel_event=cancel_event)
+    )
 
     if not videos:
         UI.warning("没有找到支持的视频文件。")
@@ -591,3 +596,4 @@ def main():
         )
 
         client.close()
+        core.cleanup_staging_cache()

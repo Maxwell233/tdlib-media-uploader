@@ -20,19 +20,20 @@ from PIL import Image
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
 from path_utils import (
     display_path,
-    file_mtime,
     file_snapshot,
     io_worker_count,
     iter_files,
-    natural_sort,
+    media_path_sort,
+    ordered_bounded_map,
     relative_name as stable_relative_name,
+    run_cancellable_process,
     stable_path,
     wait_for_file_ready,
 )
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
-from staging import stage_file
+from staging import cleanup_staging, stage_file
 
 PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = APP_DATA_DIR / ".image_state"
@@ -42,10 +43,30 @@ DEFERRED_STATUS = "DEFERRED"
 IMAGE_UPLOAD_PATHS: dict[str, Path] = {}
 IMAGE_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
 COMPRESSED_IMAGE_DIR = APP_DATA_DIR / ".image_compression"
-FFMPEG_COMPRESS_TIMEOUT_SECONDS = 45
-READINESS_ATTEMPTS = 3
+FFMPEG_COMPRESS_TIMEOUT_SECONDS = float(
+    getattr(cfg, "FFMPEG_COMPRESSION_TIMEOUT_SECONDS", 45)
+)
+READINESS_ATTEMPTS = int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", 3))
 
 UI = HeadlessUI()
+
+
+def _readiness_options() -> dict:
+    """Return the shared, bounded source-file readiness configuration."""
+
+    return {
+        "attempts": int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", READINESS_ATTEMPTS)),
+        "stable_interval": float(getattr(cfg, "SCAN_STABILITY_INTERVAL_SECONDS", 0.05)),
+        "stable_checks": int(getattr(cfg, "SCAN_STABILITY_CHECKS", 2)),
+        "probe_bytes": int(getattr(cfg, "SCAN_READ_PROBE_BYTES", 64 * 1024)),
+    }
+
+
+def _process_timeout(config_name: str, fallback: float) -> float:
+    try:
+        return max(1.0, float(getattr(cfg, config_name, fallback)))
+    except (TypeError, ValueError):
+        return float(fallback)
 
 
 def format_size(value: float) -> str:
@@ -70,6 +91,19 @@ def relative_name(path: Path) -> str:
     return stable_relative_name(path, cfg.IMAGE_DIR)
 
 
+def cleanup_staging_cache(*, startup: bool = False) -> None:
+    """Prune stale local staging artifacts without affecting source state."""
+
+    if not getattr(cfg, "STAGING_ENABLED", False):
+        return
+    if startup and not getattr(cfg, "STAGING_CLEANUP_ON_START", True):
+        return
+    cleanup_staging(
+        cfg.STAGING_DIR,
+        max_age_seconds=float(getattr(cfg, "STAGING_CLEANUP_DAYS", 7)) * 86400,
+    )
+
+
 def _snapshot_for_path(path: Path):
     return file_snapshot(path) or IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
 
@@ -83,12 +117,14 @@ def file_signature(path: Path, snapshot=None) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def scan_images() -> list[Path]:
+def scan_images(cancel_event=None) -> list[Path]:
     global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS, IMAGE_SCAN_SNAPSHOTS
     root = cfg.IMAGE_DIR
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"图片目录不存在或不是目录：{root}")
-    images, LAST_SCAN_ERRORS = iter_files(root, cfg.IMAGE_EXTENSIONS)
+    images, LAST_SCAN_ERRORS = iter_files(
+        root, cfg.IMAGE_EXTENSIONS, cancel_event=cancel_event
+    )
     LAST_SCAN_SIZE_SKIPS = []
     IMAGE_SCAN_SNAPSHOTS = {}
     accepted = []
@@ -117,14 +153,13 @@ def scan_images() -> list[Path]:
         IMAGE_SCAN_SNAPSHOTS[stable_path(path)] = snapshot
     images = accepted
 
-    if cfg.IMAGE_SORT_MODE == "mtime":
-        images.sort(key=lambda p: (file_mtime(p), relative_name(p)))
-    else:
-        # ``sorted(..., key=str.casefold)`` puts x.100 before x.41.  Use the
-        # shared natural comparator so numeric filename runs are compared as
-        # integers (largest sequence number first).
-        images = natural_sort(images, key=relative_name)
-    return images
+    mode = "mtime" if cfg.IMAGE_SORT_MODE == "mtime" else "name"
+    return media_path_sort(
+        images,
+        root,
+        mode=mode,
+        mtime_key=lambda path: IMAGE_SCAN_SNAPSHOTS.get(stable_path(path), (0, 0))[1],
+    )
 
 
 _IMAGE_INFO_CACHE = {}
@@ -210,8 +245,7 @@ def compress_image(path: Path, cancel_event=None) -> Path:
             )
             temp_path.unlink(missing_ok=True)
             try:
-                result = subprocess.run(
-                    [
+                command = [
                         ffmpeg,
                         "-hide_banner",
                         "-loglevel",
@@ -230,15 +264,27 @@ def compress_image(path: Path, cancel_event=None) -> Path:
                         "-q:v",
                         str(quality),
                         str(temp_path),
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=FFMPEG_COMPRESS_TIMEOUT_SECONDS,
+                    ]
+                process_kwargs = {
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.PIPE,
+                    "text": True,
+                    "encoding": "utf-8",
+                    "errors": "replace",
+                    "timeout": _process_timeout(
+                        "FFMPEG_COMPRESSION_TIMEOUT_SECONDS",
+                        FFMPEG_COMPRESS_TIMEOUT_SECONDS,
+                    ),
                     **_hidden_subprocess_kwargs(),
-                )
+                }
+                if cancel_event is None:
+                    result = subprocess.run(command, **process_kwargs)
+                else:
+                    result = run_cancellable_process(
+                        command,
+                        cancel_event=cancel_event,
+                        **process_kwargs,
+                    )
                 last_error = result.stderr.strip() or f"FFmpeg 退出码 {result.returncode}"
                 if result.returncode == 0 and temp_path.is_file() and temp_path.stat().st_size > 0:
                     with Image.open(temp_path) as image:
@@ -296,24 +342,6 @@ def image_info(path: Path) -> tuple[int, int]:
     return result
 
 
-def _ordered_bounded_map(executor, items, worker, max_workers: int):
-    """Yield worker results in input order with a bounded task queue."""
-    iterator = iter(items)
-    pending = deque()
-    for _ in range(max(1, int(max_workers))):
-        try:
-            pending.append(executor.submit(worker, next(iterator)))
-        except StopIteration:
-            break
-
-    while pending:
-        yield pending.popleft().result()
-        try:
-            pending.append(executor.submit(worker, next(iterator)))
-        except StopIteration:
-            pass
-
-
 def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
     """Find unreadable images without aborting the complete upload task."""
 
@@ -328,7 +356,7 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
                 path,
                 expected_size=expected[0] if expected else None,
                 expected_mtime_ns=expected[1] if expected else None,
-                attempts=READINESS_ATTEMPTS,
+                **_readiness_options(),
                 cancel_event=cancel_event,
             )
             if not readiness.ready:
@@ -361,10 +389,14 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
                 ),
             }
 
-    worker_count = io_worker_count(cfg.IMAGE_DIR, local=4, network=2)
+    worker_count = io_worker_count(
+        cfg.IMAGE_DIR,
+        local=getattr(cfg, "IO_WORKERS_LOCAL", 4),
+        network=getattr(cfg, "IO_WORKERS_NETWORK", 2),
+    )
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tdlib-preflight") as executor:
         for index, result in enumerate(
-            _ordered_bounded_map(executor, paths, worker, worker_count),
+            ordered_bounded_map(executor, paths, worker, worker_count),
             1,
         ):
             if cancel_event is not None and cancel_event.is_set():
@@ -447,7 +479,7 @@ def input_photo(
         path,
         expected_size=expected_size,
         expected_mtime_ns=expected_mtime_ns,
-        attempts=READINESS_ATTEMPTS,
+        **_readiness_options(),
         cancel_event=cancel_event,
     )
     if not readiness.ready:
@@ -863,9 +895,14 @@ def main():
         accent="magenta",
     )
 
-    UI.info(f"扫描图片目录：{cfg.IMAGE_DIR}")
-    images = scan_images()
     cancel_event = getattr(UI, "cancel_event", None)
+    cleanup_staging_cache(startup=True)
+    UI.info(f"扫描图片目录：{cfg.IMAGE_DIR}")
+    images = (
+        scan_images()
+        if cancel_event is None
+        else scan_images(cancel_event=cancel_event)
+    )
     report_scan_size_skips(LAST_SCAN_SIZE_SKIPS, UI)
     if not images:
         UI.warning("没有找到支持的图片。")
@@ -972,23 +1009,16 @@ def main():
                 UI.warning("当前图片 Album 没有可读取的图片，已跳过。")
                 continue
             if ready_paths != album_paths and getattr(cfg, "IMAGE_CAPTION_INCLUDE_FILENAMES", False):
+                # ``build_image_contents`` has already validated and created
+                # the inputs.  Reusing them avoids a second image decode when
+                # a later file is deferred during JIT revalidation.
                 caption = with_filename_description(
                     plan["caption"]["text"],
                     ready_paths,
                     True,
                 )
-                contents, rebuilt_paths, rebuilt_skipped = build_image_contents(
-                    ready_paths,
-                    caption,
-                    UI,
-                )
-                if rebuilt_skipped:
-                    skipped_items.extend(rebuilt_skipped)
-                    progress.skip_items([record["path"] for record in rebuilt_skipped])
-                ready_paths = rebuilt_paths
-                if not ready_paths:
-                    UI.warning("当前图片 Album 没有可读取的图片，已跳过。")
-                    continue
+                if contents:
+                    contents[0]["caption"] = formatted_text(caption)
             album_global += 1
             progress.begin_album(ready_paths, album_global, total_albums)
             UI.album(
@@ -1019,4 +1049,5 @@ def main():
     finally:
         client.remove_update_callback(progress.handle_update)
         client.close()
+        cleanup_staging_cache()
         cleanup_compressed_images()

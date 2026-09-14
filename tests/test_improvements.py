@@ -44,7 +44,7 @@ class ImprovementsTest(unittest.TestCase):
         )
         self.assertEqual(names.splitlines(), ["clip", "archive.tar", ".hidden"])
 
-    def test_natural_filename_sort_uses_descending_numeric_runs(self):
+    def test_natural_filename_sort_uses_ascending_numeric_runs(self):
         names = [
             "x.1",
             "x.10",
@@ -58,7 +58,72 @@ class ImprovementsTest(unittest.TestCase):
         ]
         self.assertEqual(
             path_utils.natural_sort(names),
-            ["x.410", "x.409", "x.103", "x.102", "x.101", "x.100", "x.41", "x.10", "x.1"],
+            ["x.1", "x.10", "x.41", "x.100", "x.101", "x.102", "x.103", "x.409", "x.410"],
+        )
+
+    def test_natural_sort_handles_unicode_numeric_runs_and_folder_names(self):
+        self.assertEqual(
+            path_utils.natural_sort(["a（10）", "a（1）", "a（11）", "a（5）"]),
+            ["a（1）", "a（5）", "a（10）", "a（11）"],
+        )
+        root = Path("root")
+        paths = [
+            root / "Folder20" / "clip1.jpg",
+            root / "Folder2" / "clip1.jpg",
+            root / "Folder10" / "clip1.jpg",
+            root / "Folder1" / "clip1.jpg",
+        ]
+        ordered = path_utils.media_path_sort(paths, root)
+        self.assertEqual(
+            [path_utils.relative_name(path, root) for path in ordered],
+            [
+                "Folder1/clip1.jpg",
+                "Folder2/clip1.jpg",
+                "Folder10/clip1.jpg",
+                "Folder20/clip1.jpg",
+            ],
+        )
+
+    def test_natural_path_sort_compares_each_directory_component_first(self):
+        root = Path("root")
+        paths = [
+            root / "Day2" / "x.100.jpg",
+            root / "Day10" / "x.1.jpg",
+            root / "Day2" / "x.10.jpg",
+        ]
+        ordered = path_utils.media_path_sort(paths, root)
+        self.assertEqual(
+            [path_utils.relative_name(path, root) for path in ordered],
+            ["Day2/x.10.jpg", "Day2/x.100.jpg", "Day10/x.1.jpg"],
+        )
+
+    def test_relative_path_sort_compares_directories_before_filenames(self):
+        root = Path("root")
+        paths = [
+            root / "B2" / "x.41.jpg",
+            root / "A" / "x.1.jpg",
+            root / "B2" / "x.410.jpg",
+            root / "A" / "x.100.jpg",
+            root / "B10" / "x.2.jpg",
+        ]
+        ordered = path_utils.media_path_sort(paths, root)
+        self.assertEqual(
+            [path_utils.relative_name(path, root) for path in ordered],
+            ["A/x.1.jpg", "A/x.100.jpg", "B2/x.41.jpg", "B2/x.410.jpg", "B10/x.2.jpg"],
+        )
+
+    def test_relative_path_sort_mtime_ties_use_the_same_path_comparator(self):
+        root = Path("root")
+        paths = [root / "B" / "x.1", root / "A" / "x.410", root / "A" / "x.41"]
+        ordered = path_utils.media_path_sort(
+            paths,
+            root,
+            mode="mtime",
+            mtime_key=lambda _path: 100,
+        )
+        self.assertEqual(
+            [path_utils.relative_name(path, root) for path in ordered],
+            ["A/x.41", "A/x.410", "B/x.1"],
         )
 
     def test_image_filename_scan_uses_natural_numeric_order(self):
@@ -76,7 +141,7 @@ class ImprovementsTest(unittest.TestCase):
                 paths = core.scan_images()
             self.assertEqual(
                 [path.name for path in paths],
-                ["x.410.jpg", "x.100.jpg", "x.41.jpg", "x.10.jpg", "x.1.jpg"],
+                ["x.1.jpg", "x.10.jpg", "x.41.jpg", "x.100.jpg", "x.410.jpg"],
             )
 
     def test_video_filename_scan_uses_natural_numeric_order(self):
@@ -95,7 +160,71 @@ class ImprovementsTest(unittest.TestCase):
                 paths = core.scan_videos()
             self.assertEqual(
                 [path.name for path in paths],
-                ["x.410.mp4", "x.409.mp4", "x.41.mp4", "x.10.mp4", "x.1.mp4"],
+                ["x.1.mp4", "x.10.mp4", "x.41.mp4", "x.409.mp4", "x.410.mp4"],
+            )
+
+    def test_all_media_scanners_keep_directory_order_before_basename_order(self):
+        import tdlib_image_album_uploader as image_core
+        import tdlib_mixed_album_uploader as mixed_core
+        import tdlib_video_album_uploader as video_core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = ["A/x.1", "A/x.100", "B/x.41", "B/x.410"]
+            image_root = root / "images"
+            video_root = root / "videos"
+            mixed_root = root / "mixed"
+            for base, extension in ((image_root, ".jpg"), (video_root, ".mp4")):
+                for relative in expected:
+                    path = base / f"{relative}{extension}"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"media")
+            for relative in expected:
+                path = mixed_root / f"{relative}.jpg" if relative.startswith("A/") else mixed_root / f"{relative}.mp4"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"media")
+
+            with patch.object(image_core.cfg, "IMAGE_DIR", image_root), \
+                    patch.object(image_core.cfg, "IMAGE_EXTENSIONS", {".jpg"}), \
+                    patch.object(image_core.cfg, "IMAGE_MAX_BYTES", 100), \
+                    patch.object(image_core.cfg, "IMAGE_SORT_MODE", "path"):
+                image_names = [path.relative_to(image_root).with_suffix("").as_posix() for path in image_core.scan_images()]
+            with patch.object(video_core.cfg, "VIDEO_DIR", video_root), \
+                    patch.object(video_core.cfg, "VIDEO_EXTENSIONS", {".mp4"}), \
+                    patch.object(video_core.cfg, "VIDEO_MAX_BYTES", 100), \
+                    patch.object(video_core.cfg, "VIDEO_READ_DATES", False):
+                video_names = [path.relative_to(video_root).with_suffix("").as_posix() for path in video_core.scan_videos()]
+            with patch.object(mixed_core.cfg, "MIXED_DIR", mixed_root), \
+                    patch.object(mixed_core.cfg, "MIXED_IMAGE_EXTENSIONS", {".jpg"}), \
+                    patch.object(mixed_core.cfg, "MIXED_VIDEO_EXTENSIONS", {".mp4"}), \
+                    patch.object(mixed_core.cfg, "MIXED_EXTENSIONS", {".jpg", ".mp4"}), \
+                    patch.object(mixed_core.cfg, "MIXED_ALBUM_SIZE", 10), \
+                    patch.object(mixed_core.cfg, "MIXED_SORT_MODE", "name"):
+                mixed_groups = mixed_core.scan_mixed_groups()
+                mixed_names = [
+                    f"{group['group_name']}/{path_utils.relative_name(item['path'], group['group_path']).rsplit('.', 1)[0]}"
+                    for group in mixed_groups
+                    for item in group["items"]
+                ]
+            self.assertEqual(image_names, expected)
+            self.assertEqual(video_names, expected)
+            self.assertEqual(mixed_names, expected)
+
+    def test_gui_fallback_uses_the_shared_path_sorter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative in ("Day2/x.100.jpg", "Day10/x.1.jpg", "Day2/x.10.jpg"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"image")
+            with patch.object(gui.cfg, "IMAGE_DIR", root), \
+                    patch.object(gui.cfg, "IMAGE_EXTENSIONS", {".jpg"}), \
+                    patch.object(gui.cfg, "IMAGE_MAX_BYTES", 100), \
+                    patch.object(gui.cfg, "IMAGE_SORT_MODE", "path"):
+                paths = gui._basic_paths("image")
+            self.assertEqual(
+                [path_utils.relative_name(path, root) for path in paths],
+                ["Day2/x.10.jpg", "Day2/x.100.jpg", "Day10/x.1.jpg"],
             )
 
     def test_unknown_media_kind_is_rejected(self):
@@ -261,6 +390,103 @@ class ImprovementsTest(unittest.TestCase):
             self.assertEqual([p.name for p in files], ["a.jpg"])
             self.assertFalse(errors)
             self.assertEqual(len(calls), 0)
+
+    def test_directory_scan_can_be_cancelled_and_skips_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "real.jpg").write_bytes(b"image")
+            nested = root / "nested"
+            nested.mkdir()
+            (nested / "inside.jpg").write_bytes(b"image")
+            cancel = __import__("threading").Event()
+            cancel.set()
+            files, errors = path_utils.iter_files(root, {".jpg"}, cancel_event=cancel)
+            self.assertEqual(files, [])
+            self.assertIn("目录扫描已取消", errors)
+            try:
+                link = root / "link"
+                link.symlink_to(nested, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                link = None
+            if link is not None:
+                files, errors = path_utils.iter_files(root, {".jpg"})
+                self.assertNotIn(link / "inside.jpg", files)
+                self.assertTrue(any("符号链接" in error for error in errors))
+
+    def test_readiness_supports_multiple_stability_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stable.bin"
+            path.write_bytes(b"stable")
+            result = path_utils.check_file_readiness(
+                path,
+                stable_checks=3,
+                stable_interval=0,
+                probe=True,
+                probe_bytes=2,
+            )
+            self.assertTrue(result.ready)
+            self.assertEqual(result.snapshot.size, 6)
+
+    def test_macos_network_mounts_are_recognized(self):
+        with patch.object(path_utils.sys, "platform", "darwin"):
+            self.assertTrue(path_utils.is_network_path("/Volumes/CameraShare/media"))
+            self.assertTrue(path_utils.is_network_path("/Network/nas/media"))
+        self.assertTrue(path_utils.is_network_path(r"\\server\share\media"))
+
+    def test_staging_cleanup_removes_only_stale_files(self):
+        from staging import cleanup_staging
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "staging"
+            root.mkdir()
+            stale = root / "stale.bin"
+            fresh = root / "fresh.bin"
+            temporary = root / "partial.tmp"
+            stale.write_bytes(b"stale")
+            fresh.write_bytes(b"fresh")
+            temporary.write_bytes(b"partial")
+            old = __import__("time").time() - 3600
+            os.utime(stale, (old, old))
+            cleanup_staging(root, max_age_seconds=60)
+            self.assertFalse(stale.exists())
+            self.assertTrue(fresh.exists())
+            self.assertFalse(temporary.exists())
+
+    def test_mixed_extension_conflicts_are_rejected(self):
+        import tdlib_mixed_album_uploader as core
+
+        with patch.object(core.cfg, "MIXED_IMAGE_EXTENSIONS", {".jpg"}), \
+                patch.object(core.cfg, "MIXED_VIDEO_EXTENSIONS", {".jpg"}):
+            with self.assertRaises(RuntimeError):
+                core._validate_extensions()
+
+    def test_tdlib_upload_failure_logs_source_diagnosis(self):
+        import tdlib_common
+
+        class UI:
+            def __init__(self):
+                self.messages = []
+
+            def warning(self, text):
+                self.messages.append(str(text))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "clip.mp4"
+            path.write_bytes(b"video")
+            client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
+            client.ui = UI()
+            client.request = lambda _query: (_ for _ in ()).throw(
+                tdlib_common.TDLibError(400, "FILE_READ")
+            )
+            with patch.object(tdlib_common, "write_app_log") as write:
+                with self.assertRaises(tdlib_common.TDLibError):
+                    client.send_contents(
+                        [{"@type": "inputMessageVideo"}],
+                        items=[{"path": path, "scan_size": 5, "scan_mtime_ns": path.stat().st_mtime_ns}],
+                    )
+            self.assertTrue(write.called)
+            self.assertIn("源文件可读取", write.call_args.args[1])
+            self.assertTrue(client.ui.messages)
 
     def test_file_mtime_uses_os_stat_and_keeps_fallback(self):
         result = SimpleNamespace(st_mtime=123.5)
@@ -525,6 +751,8 @@ class ImprovementsTest(unittest.TestCase):
             root = Path(directory)
             executable = root / "exiftool"
             executable.write_bytes(b"tool")
+            clip = root / "clip.mp4"
+            clip.write_bytes(b"video")
             output = json.dumps([{"SourceFile": str(root / "clip.mp4")}])
             completed = subprocess.CompletedProcess([], 0, output, "")
             with patch.object(core.cfg, "EXIFTOOL_PATH", executable), \
@@ -537,8 +765,9 @@ class ImprovementsTest(unittest.TestCase):
                 self.assertIn("-charset", command)
                 self.assertIn("FileName=UTF8", command)
                 self.assertEqual(command[-2:], ["-@", "-"])
-                self.assertEqual(run.call_args.kwargs["input"], f"{root}\n")
+                self.assertEqual(run.call_args.kwargs["input"], f"{clip}\n")
                 self.assertNotIn(str(root), command)
+                self.assertNotIn("-r", command)
                 self.assertIn("-time:all", command)
                 self.assertNotIn("-fast", command)
 

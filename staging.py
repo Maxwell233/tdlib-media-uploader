@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from pathlib import Path
 
 from path_utils import (
@@ -93,8 +94,20 @@ def stage_file(
         temporary.unlink(missing_ok=True)
 
 
-def cleanup_staging(staging_dir: Path, *, remove_empty: bool = False) -> None:
-    """Remove incomplete staging files; optionally remove the cache itself."""
+def cleanup_staging(
+    staging_dir: Path,
+    *,
+    max_age_seconds: float | None = None,
+    remove_empty: bool = False,
+) -> None:
+    """Remove incomplete and optionally stale staging files.
+
+    A running upload can still be using a staged file, so cleanup is age
+    based and intended for startup/finally hooks.  Temporary ``*.tmp`` files
+    are always safe to remove because ``stage_file`` writes them atomically.
+    Cleanup is best effort: an offline share or a file locked by another
+    process must never abort an upload.
+    """
 
     root = Path(staging_dir)
     if not root.exists():
@@ -104,6 +117,20 @@ def cleanup_staging(staging_dir: Path, *, remove_empty: bool = False) -> None:
             item.unlink()
         except OSError:
             continue
+    if max_age_seconds is not None:
+        try:
+            age = max(0.0, float(max_age_seconds))
+        except (TypeError, ValueError):
+            age = 0.0
+        cutoff = time.time() - age
+        for item in root.rglob("*"):
+            if not item.is_file() or item.name.endswith(".tmp"):
+                continue
+            try:
+                if item.stat().st_mtime < cutoff:
+                    item.unlink()
+            except OSError:
+                continue
     if remove_empty:
         for directory in sorted((p for p in root.rglob("*") if p.is_dir()), reverse=True):
             try:

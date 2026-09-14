@@ -113,6 +113,30 @@ def _extensions(values):
     return result
 
 
+def _bounded_int(section, key: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(section.get(key, default))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"config.toml 中的 {key} 必须是整数。") from exc
+    if not minimum <= value <= maximum:
+        raise RuntimeError(
+            f"config.toml 中的 {key} 必须在 {minimum}~{maximum} 范围内。"
+        )
+    return value
+
+
+def _bounded_float(section, key: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(section.get(key, default))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"config.toml 中的 {key} 必须是数字。") from exc
+    if not minimum <= value <= maximum:
+        raise RuntimeError(
+            f"config.toml 中的 {key} 必须在 {minimum}~{maximum} 范围内。"
+        )
+    return value
+
+
 telegram = _section("telegram")
 paths = _section("paths")
 video = _section("video")
@@ -121,6 +145,8 @@ mixed = _optional_section("mixed")
 tdlib = _section("tdlib")
 proxy = _optional_section("proxy")
 staging = _optional_section("staging")
+scan = _optional_section("scan")
+process = _optional_section("process")
 
 
 # Telegram
@@ -480,6 +506,35 @@ IMAGE_COMPRESS_OVERSIZE = bool(
 )
 
 
+# 扫描/媒体读取的共享 I/O 参数。旧配置不存在这些段时沿用当前默认值。
+SCAN_STABILITY_CHECKS = _bounded_int(scan, "stability_checks", 2, 1, 8)
+SCAN_STABILITY_INTERVAL_SECONDS = _bounded_float(
+    scan, "stability_interval_seconds", 0.05, 0.0, 5.0
+)
+SCAN_READINESS_ATTEMPTS = _bounded_int(scan, "readiness_attempts", 3, 1, 8)
+SCAN_READ_PROBE_BYTES = _bounded_int(scan, "read_probe_bytes", 64 * 1024, 1, 4 * 1024 * 1024)
+IO_WORKERS_LOCAL = _bounded_int(scan, "io_workers_local", 4, 1, 32)
+IO_WORKERS_NETWORK = _bounded_int(scan, "io_workers_network", 2, 1, 16)
+
+
+# 外部媒体工具必须有上限；将超时集中到 [process]，避免各入口出现不一致。
+EXIFTOOL_TIMEOUT_SECONDS = _bounded_float(
+    process, "exiftool_timeout_seconds", 120.0, 1.0, 86_400.0
+)
+FFMPEG_METADATA_TIMEOUT_SECONDS = _bounded_float(
+    process, "ffmpeg_metadata_timeout_seconds", 30.0, 1.0, 86_400.0
+)
+FFMPEG_INFO_TIMEOUT_SECONDS = _bounded_float(
+    process, "ffmpeg_info_timeout_seconds", 30.0, 1.0, 86_400.0
+)
+FFMPEG_THUMBNAIL_TIMEOUT_SECONDS = _bounded_float(
+    process, "ffmpeg_thumbnail_timeout_seconds", 45.0, 1.0, 86_400.0
+)
+FFMPEG_COMPRESSION_TIMEOUT_SECONDS = _bounded_float(
+    process, "ffmpeg_compression_timeout_seconds", 45.0, 1.0, 86_400.0
+)
+
+
 # 混合上传：旧版配置没有 [mixed] 时使用兼容默认值。混合目录下的一级
 # 子目录是独立组，图片和视频直接继承 [image]/[video] 的扩展名与上限。
 MIXED_DIR = _resolve_path(
@@ -530,6 +585,17 @@ if not STAGING_DIR.is_absolute():
     # Application data is writable in frozen one-folder/one-file builds,
     # whereas RESOURCE_DIR can live inside a read-only bundle.
     STAGING_DIR = APP_DATA_DIR / STAGING_DIR
+STAGING_CLEANUP_ON_START = bool(staging.get("cleanup_on_start", True))
+STAGING_CLEANUP_DAYS = _bounded_int(staging, "cleanup_days", 7, 0, 3650)
+
+
+# [image] 与 [video] 的扩展名必须互斥，否则 mixed 无法确定媒体类型。
+EXTENSION_CONFLICTS = IMAGE_EXTENSIONS & VIDEO_EXTENSIONS
+if EXTENSION_CONFLICTS:
+    values = ", ".join(sorted(EXTENSION_CONFLICTS))
+    raise RuntimeError(
+        f"图片和视频扩展名不能重复（{values}）。请从 [image].extensions 或 [video].extensions 中移除冲突项。"
+    )
 
 
 # 网络代理（由 TDLib 原生处理；默认关闭时明确使用直连）

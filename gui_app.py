@@ -24,7 +24,13 @@ from pathlib import Path
 
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
 from app_logging import APP_LOG_PATH, LOG_DIR, TDLIB_LOG_PATH, write_app_log, write_exception
-from path_utils import file_mtime, iter_files, natural_sort, stable_path
+from path_utils import (
+    file_mtime,
+    is_link_or_junction,
+    iter_files,
+    media_path_sort,
+    stable_path,
+)
 from PySide6.QtCore import QLibraryInfo, QObject, QThread, QTimer, Signal, Slot, Qt
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
@@ -34,6 +40,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -217,7 +224,7 @@ def _path_text(value) -> str:
     return str(value) if value is not None else ""
 
 
-def _basic_paths(kind: str) -> list[Path]:
+def _basic_paths(kind: str, cancel_event=None) -> list[Path]:
     kind = str(kind).strip().lower()
     path_key = KIND_PATH_KEYS.get(kind)
     extension_key = {
@@ -232,24 +239,21 @@ def _basic_paths(kind: str) -> list[Path]:
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"{kind} 目录不存在或不是目录：{root}")
     if kind == "mixed":
-        groups, _ignored, _errors, _skips = _basic_mixed_scan(root)
+        groups, _ignored, _errors, _skips = _basic_mixed_scan(
+            root, cancel_event=cancel_event
+        )
         return [item["path"] for group in groups for item in group["items"]]
-    paths, _errors = iter_files(root, extensions)
-    if kind == "image" and _cfg("IMAGE_SORT_MODE", "mtime") == "mtime":
-        paths.sort(key=lambda item: (file_mtime(item), str(item)))
-    elif (
-        kind == "video"
-        and _cfg("VIDEO_READ_DATES", True)
-        and _cfg("VIDEO_SORT_MODE", "mtime") == "mtime"
-    ):
-        paths.sort(key=lambda item: (file_mtime(item), str(item)))
+    paths, _errors = iter_files(root, extensions, cancel_event=cancel_event)
+    if kind == "image":
+        mode = "mtime" if _cfg("IMAGE_SORT_MODE", "mtime") == "mtime" else "name"
     else:
-        paths = natural_sort(paths, key=lambda item: str(item))
-        if kind == "video":
-            # The video scanner historically compares the basename first and
-            # uses the full path only as a deterministic tie-breaker.
-            paths = natural_sort(paths, key=lambda item: item.name)
-    return paths
+        mode = (
+            "mtime"
+            if _cfg("VIDEO_READ_DATES", True)
+            and _cfg("VIDEO_SORT_MODE", "mtime") == "mtime"
+            else "name"
+        )
+    return media_path_sort(paths, root, mode=mode)
 
 
 @functools.lru_cache(maxsize=32768)
@@ -307,13 +311,21 @@ def _apply_size_limits(paths: list[Path], kind: str) -> tuple[list[Path], list[d
     return accepted, skipped
 
 
-def _basic_mixed_scan(root: Path) -> tuple[list[dict], list[Path], list[str], list[dict]]:
+def _basic_mixed_scan(
+    root: Path, cancel_event=None
+) -> tuple[list[dict], list[Path], list[str], list[dict]]:
     """Build a dependency-free mixed preview with the same group rules."""
 
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"mixed 目录不存在或不是目录：{root}")
+    if is_link_or_junction(root):
+        raise RuntimeError(f"mixed 目录不能是符号链接或 junction：{root}")
     image_extensions = set(_cfg("IMAGE_EXTENSIONS", set()))
     video_extensions = set(_cfg("VIDEO_EXTENSIONS", set()))
+    overlap = image_extensions & video_extensions
+    if overlap:
+        values = ", ".join(sorted(overlap))
+        raise RuntimeError(f"图片和视频扩展名不能重复：{values}")
     accepted_extensions = image_extensions | video_extensions
     try:
         entries = list(os.scandir(root))
@@ -323,8 +335,14 @@ def _basic_mixed_scan(root: Path) -> tuple[list[dict], list[Path], list[str], li
     ignored = []
     errors = []
     for entry in entries:
+        if cancel_event is not None and cancel_event.is_set():
+            errors.append("目录扫描已取消")
+            break
         try:
             path = Path(entry.path)
+            if is_link_or_junction(entry):
+                errors.append(f"跳过符号链接或 junction：{entry.path}")
+                continue
             if entry.is_dir(follow_symlinks=False):
                 directories.append(path)
             elif entry.is_file(follow_symlinks=False) and path.suffix.lower() in accepted_extensions:
@@ -333,8 +351,10 @@ def _basic_mixed_scan(root: Path) -> tuple[list[dict], list[Path], list[str], li
             errors.append(f"{entry.path}: {exc}")
     groups = []
     size_skips = []
-    for group_path in natural_sort(directories, key=lambda item: item.name):
-        paths, walk_errors = iter_files(group_path, accepted_extensions)
+    for group_path in media_path_sort(directories, root, mode="name"):
+        paths, walk_errors = iter_files(
+            group_path, accepted_extensions, cancel_event=cancel_event
+        )
         errors.extend(walk_errors)
         accepted, skipped = _apply_size_limits(paths, "mixed")
         size_skips.extend(skipped)
@@ -347,13 +367,13 @@ def _basic_mixed_scan(root: Path) -> tuple[list[dict], list[Path], list[str], li
                 "media_kind": media_kind,
                 "group_name": group_path.name,
             })
-        if str(_cfg("MIXED_SORT_MODE", "name")).lower() == "mtime":
-            media_items.sort(key=lambda item: (file_mtime(item["path"]), str(item["path"])))
-        else:
-            media_items = natural_sort(
-                media_items,
-                key=lambda item: str(item["path"]),
-            )
+        sort_mode = str(_cfg("MIXED_SORT_MODE", "name")).strip().lower()
+        media_items = media_path_sort(
+            media_items,
+            group_path,
+            mode=sort_mode,
+            path_key=lambda item: item["path"],
+        )
         if media_items:
             groups.append({
                 "group_name": group_path.name,
@@ -378,6 +398,8 @@ def _update_toml_value(text: str, section: str, key: str, value) -> str:
         literal = "true" if value else "false"
     elif isinstance(value, int):
         literal = str(value)
+    elif isinstance(value, float):
+        literal = repr(value)
     else:
         literal = json.dumps(str(value), ensure_ascii=False)
 
@@ -572,7 +594,11 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
     if kind == "video":
         if core is not None:
             core.STATE_DIR = APP_DATA_DIR / ".video_state"
-            paths = core.scan_videos()
+            paths = (
+                core.scan_videos()
+                if cancel_event is None
+                else core.scan_videos(cancel_event=cancel_event)
+            )
             scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
             scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
             metadata = {}
@@ -626,7 +652,9 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
                 )
             state = core.UploadState()
         else:
-            paths, scan_size_skips = _apply_size_limits(_basic_paths(kind), kind)
+            paths, scan_size_skips = _apply_size_limits(
+                _basic_paths(kind, cancel_event=cancel_event), kind
+            )
             missing = []
             items = []
             if not _cfg("VIDEO_READ_DATES", True):
@@ -656,7 +684,11 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
     elif kind == "mixed":
         if core is not None:
             core.STATE_DIR = APP_DATA_DIR / ".mixed_state"
-            mixed_groups = core.scan_mixed_groups()
+            mixed_groups = (
+                core.scan_mixed_groups()
+                if cancel_event is None
+                else core.scan_mixed_groups(cancel_event=cancel_event)
+            )
             items = core.flatten_items(mixed_groups)
             scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
             scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
@@ -664,17 +696,25 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
             state = core.UploadState()
         else:
             root = Path(_cfg("MIXED_DIR", PROJECT_DIR))
-            mixed_groups, ignored_root_media, scan_errors, scan_size_skips = _basic_mixed_scan(root)
+            mixed_groups, ignored_root_media, scan_errors, scan_size_skips = _basic_mixed_scan(
+                root, cancel_event=cancel_event
+            )
             items = [item for group in mixed_groups for item in group["items"]]
         missing = []
     else:
         if core is not None:
-            paths = core.scan_images()
+            paths = (
+                core.scan_images()
+                if cancel_event is None
+                else core.scan_images(cancel_event=cancel_event)
+            )
             scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
             scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
             state = core.UploadState()
         else:
-            paths, scan_size_skips = _apply_size_limits(_basic_paths(kind), kind)
+            paths, scan_size_skips = _apply_size_limits(
+                _basic_paths(kind, cancel_event=cancel_event), kind
+            )
         items = paths
         missing = []
 
@@ -933,6 +973,7 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
         "state_path": str(state.path) if state is not None else "",
         "core_available": core is not None,
         "warning": warning,
+        "cancelled": bool(cancel_event is not None and cancel_event.is_set()),
         "scan_size_skips": scan_size_skips,
         "scan_skipped_files": len(scan_rejected),
         "scan_compress_files": len(scan_compressing),
@@ -1278,6 +1319,7 @@ class UploadPage(QWidget):
     start_requested = Signal(str)
     path_selected = Signal(str, str)
     scan_requested = Signal(str)
+    scan_cancel_requested = Signal(str)
     edit_target_requested = Signal(str)
 
     def __init__(self, kind: str):
@@ -1363,7 +1405,7 @@ class UploadPage(QWidget):
         self.status_label.setObjectName("mutedLabel")
         self.scan_button = QPushButton("扫描目录")
         self.scan_button.setObjectName("secondaryButton")
-        self.scan_button.clicked.connect(lambda: self.scan_requested.emit(self.kind))
+        self.scan_button.clicked.connect(self._scan_button_clicked)
         self.start_button = QPushButton("开始上传")
         self.start_button.setObjectName("primaryButton")
         self.start_button.setEnabled(False)
@@ -1400,9 +1442,18 @@ class UploadPage(QWidget):
         if path != saved:
             self.path_selected.emit(self.kind, path)
 
+    def _scan_button_clicked(self):
+        if self._scanning:
+            self.scan_cancel_requested.emit(self.kind)
+        else:
+            self.scan_requested.emit(self.kind)
+
     def set_scanning(self, active: bool):
         self._scanning = active
-        self.scan_button.setEnabled(not active and not self._running)
+        self.scan_button.setText("停止扫描" if active else "扫描目录")
+        # Keep the control available while scanning so a network traversal can
+        # be cancelled without waiting for the current directory to finish.
+        self.scan_button.setEnabled(not self._running)
         if active:
             self.clear_scan_result()
             self.status_label.setText("正在扫描…")
@@ -1515,7 +1566,14 @@ class UploadPage(QWidget):
             self.status_label.setText("预览可用；安装完整依赖后才能上传")
         else:
             self.status_label.setText("扫描完成，可开始上传")
-        self.start_button.setEnabled(bool(result["pending_files"] and result["core_available"] and not self._running))
+        self.start_button.setEnabled(
+            bool(
+                result["pending_files"]
+                and result["core_available"]
+                and not result.get("cancelled")
+                and not self._running
+            )
+        )
 
     def _edit_album(self, item, _column=0):
         if item is None or self._running or self._scanning:
@@ -2023,7 +2081,7 @@ class TargetDialog(QDialog):
             group_form = QFormLayout(group_box)
             self.video_sort = QComboBox()
             self.video_sort.addItem("按修改时间", "mtime")
-            self.video_sort.addItem("按文件名（自然数字，从大到小）", "name")
+            self.video_sort.addItem("按文件名（自然数字，从小到大）", "name")
             sort_index = self.video_sort.findData(_cfg("VIDEO_SORT_MODE", "mtime"))
             self.video_sort.setCurrentIndex(sort_index if sort_index >= 0 else 0)
             self.video_sort.setToolTip(
@@ -2087,7 +2145,7 @@ class TargetDialog(QDialog):
             image_form = QFormLayout(image_box)
             self.image_sort = QComboBox()
             self.image_sort.addItem("文件修改时间", "mtime")
-            self.image_sort.addItem("文件名/路径（自然数字，从大到小）", "path")
+            self.image_sort.addItem("文件名/路径（自然数字，从小到大）", "path")
             self.image_sort.setCurrentIndex(max(0, self.image_sort.findData(_cfg("IMAGE_SORT_MODE", "mtime"))))
             image_form.addRow("排序方式", self.image_sort)
 
@@ -2124,7 +2182,7 @@ class TargetDialog(QDialog):
             mixed_box = QGroupBox("混合分组与标题")
             mixed_form = QFormLayout(mixed_box)
             self.mixed_sort = QComboBox()
-            self.mixed_sort.addItem("文件名（自然数字，从大到小）", "name")
+            self.mixed_sort.addItem("文件名（自然数字，从小到大）", "name")
             self.mixed_sort.addItem("文件修改时间（从旧到新）", "mtime")
             self.mixed_sort.setCurrentIndex(
                 max(0, self.mixed_sort.findData(_cfg("MIXED_SORT_MODE", "name")))
@@ -2294,7 +2352,93 @@ class ConfigDialog(QDialog):
         self.staging_enabled.setChecked(bool(_cfg("STAGING_ENABLED", False)))
         form.addRow("上传暂存", self.staging_enabled)
         form.addRow("暂存目录", field("staging_dir", _cfg("STAGING_DIR", PROJECT_DIR / ".staging")))
+        self.staging_cleanup_on_start = QCheckBox("启动时清理过期暂存文件")
+        self.staging_cleanup_on_start.setChecked(
+            bool(_cfg("STAGING_CLEANUP_ON_START", True))
+        )
+        form.addRow("暂存清理", self.staging_cleanup_on_start)
+        self.staging_cleanup_days = QSpinBox()
+        self.staging_cleanup_days.setRange(0, 3650)
+        self.staging_cleanup_days.setValue(int(_cfg("STAGING_CLEANUP_DAYS", 7)))
+        self.staging_cleanup_days.setSuffix(" 天")
+        form.addRow("暂存保留时间", self.staging_cleanup_days)
         layout.addLayout(form)
+
+        scan_box = QGroupBox("扫描与外部工具")
+        scan_form = QFormLayout(scan_box)
+
+        def integer_option(name, value, minimum, maximum, suffix=""):
+            widget = QSpinBox()
+            widget.setRange(minimum, maximum)
+            widget.setValue(int(value))
+            if suffix:
+                widget.setSuffix(suffix)
+            return widget
+
+        def decimal_option(name, value, minimum, maximum, decimals=2, suffix=""):
+            widget = QDoubleSpinBox()
+            widget.setRange(minimum, maximum)
+            widget.setDecimals(decimals)
+            widget.setValue(float(value))
+            if suffix:
+                widget.setSuffix(suffix)
+            return widget
+
+        self.scan_stability_checks = integer_option(
+            "stability_checks", _cfg("SCAN_STABILITY_CHECKS", 2), 1, 8, " 次"
+        )
+        self.scan_stability_interval = decimal_option(
+            "stability_interval_seconds",
+            _cfg("SCAN_STABILITY_INTERVAL_SECONDS", 0.05),
+            0.0,
+            5.0,
+            2,
+            " 秒",
+        )
+        self.scan_readiness_attempts = integer_option(
+            "readiness_attempts", _cfg("SCAN_READINESS_ATTEMPTS", 3), 1, 8, " 次"
+        )
+        self.scan_probe_bytes = integer_option(
+            "read_probe_bytes", _cfg("SCAN_READ_PROBE_BYTES", 65536), 1, 4 * 1024 * 1024, " 字节"
+        )
+        self.scan_workers_local = integer_option(
+            "io_workers_local", _cfg("IO_WORKERS_LOCAL", 4), 1, 32, " 个"
+        )
+        self.scan_workers_network = integer_option(
+            "io_workers_network", _cfg("IO_WORKERS_NETWORK", 2), 1, 16, " 个"
+        )
+        scan_form.addRow("稳定性检查次数", self.scan_stability_checks)
+        scan_form.addRow("稳定性检查间隔", self.scan_stability_interval)
+        scan_form.addRow("不可读重试次数", self.scan_readiness_attempts)
+        scan_form.addRow("读探针大小", self.scan_probe_bytes)
+        scan_form.addRow("本地 I/O 并发", self.scan_workers_local)
+        scan_form.addRow("网络 I/O 并发", self.scan_workers_network)
+
+        self.process_timeouts = {}
+        for key, label, default in (
+            ("exiftool_timeout_seconds", "ExifTool 超时", 120),
+            ("ffmpeg_metadata_timeout_seconds", "FFmpeg 日期超时", 30),
+            ("ffmpeg_info_timeout_seconds", "FFmpeg 信息超时", 30),
+            ("ffmpeg_thumbnail_timeout_seconds", "FFmpeg 封面超时", 45),
+            ("ffmpeg_compression_timeout_seconds", "FFmpeg 压缩超时", 45),
+        ):
+            widget = decimal_option(
+                key,
+                _cfg({
+                    "exiftool_timeout_seconds": "EXIFTOOL_TIMEOUT_SECONDS",
+                    "ffmpeg_metadata_timeout_seconds": "FFMPEG_METADATA_TIMEOUT_SECONDS",
+                    "ffmpeg_info_timeout_seconds": "FFMPEG_INFO_TIMEOUT_SECONDS",
+                    "ffmpeg_thumbnail_timeout_seconds": "FFMPEG_THUMBNAIL_TIMEOUT_SECONDS",
+                    "ffmpeg_compression_timeout_seconds": "FFMPEG_COMPRESSION_TIMEOUT_SECONDS",
+                }[key], default),
+                1.0,
+                86400.0,
+                1,
+                " 秒",
+            )
+            self.process_timeouts[key] = widget
+            scan_form.addRow(label, widget)
+        layout.addWidget(scan_box)
 
         proxy_box = QGroupBox("网络代理（独立设置，默认关闭）")
         proxy_form = QFormLayout(proxy_box)
@@ -2405,6 +2549,14 @@ class ConfigDialog(QDialog):
             ("paths", "exiftool_path"): self.fields["exiftool_path"].text().strip(),
             ("staging", "enabled"): self.staging_enabled.isChecked(),
             ("staging", "directory"): self.fields["staging_dir"].text().strip(),
+            ("staging", "cleanup_on_start"): self.staging_cleanup_on_start.isChecked(),
+            ("staging", "cleanup_days"): self.staging_cleanup_days.value(),
+            ("scan", "stability_checks"): self.scan_stability_checks.value(),
+            ("scan", "stability_interval_seconds"): self.scan_stability_interval.value(),
+            ("scan", "readiness_attempts"): self.scan_readiness_attempts.value(),
+            ("scan", "read_probe_bytes"): self.scan_probe_bytes.value(),
+            ("scan", "io_workers_local"): self.scan_workers_local.value(),
+            ("scan", "io_workers_network"): self.scan_workers_network.value(),
             ("proxy", "enabled"): self.proxy_enabled.isChecked(),
             ("proxy", "type"): self.proxy_type.currentData() or "socks5",
             ("proxy", "server"): self.proxy_server.text().strip(),
@@ -2414,6 +2566,7 @@ class ConfigDialog(QDialog):
             ("proxy", "secret"): self.proxy_secret.text().strip(),
             ("proxy", "http_only"): self.proxy_http_only.isChecked(),
         }
+        values.update({("process", key): widget.value() for key, widget in self.process_timeouts.items()})
         if values[("proxy", "enabled")]:
             if not values[("proxy", "server")]:
                 QMessageBox.critical(self, "保存失败", "启用代理时必须填写代理服务器。")
@@ -2549,6 +2702,7 @@ class MainWindow(QMainWindow):
         self.home.open_settings.connect(lambda: self.sidebar.setCurrentRow(self.sidebar_rows["settings"]))
         for page in self.upload_pages.values():
             page.scan_requested.connect(self._scan)
+            page.scan_cancel_requested.connect(self._stop_scan)
             page.start_requested.connect(self._start_upload)
             page.path_selected.connect(self._save_source_path)
             page.edit_target_requested.connect(self._edit_target)
@@ -2592,6 +2746,16 @@ class MainWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.start()
 
+    @Slot(str)
+    def _stop_scan(self, kind: str):
+        scanner = self.scanners.get(kind)
+        if scanner is None or not scanner.isRunning():
+            return
+        scanner.request_stop()
+        page = self.upload_pages.get(kind, self.video_page)
+        page.status_label.setText("正在取消扫描…")
+        self.statusBar().showMessage(f"正在取消{_kind_label(kind)}扫描…")
+
     @Slot(str, object)
     def _scan_progress(self, kind: str, payload: object):
         if not isinstance(payload, dict):
@@ -2612,12 +2776,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
 
     def _scan_done(self, kind: str, result: dict):
-        self.scanners.pop(kind, None)
+        scanner = self.scanners.pop(kind, None)
         page = self.upload_pages.get(kind, self.video_page)
         page.set_scanning(False)
         page.set_result(result)
         self.home.update_scan(result)
-        self.statusBar().showMessage(f"{_kind_label(kind)}扫描完成")
+        if result.get("cancelled") or (scanner is not None and scanner.cancel_event.is_set()):
+            page.status_label.setText("扫描已取消；请重新扫描以获取完整列表")
+            page.start_button.setEnabled(False)
+            self.statusBar().showMessage(f"{_kind_label(kind)}扫描已取消")
+        else:
+            self.statusBar().showMessage(f"{_kind_label(kind)}扫描完成")
 
     def _scan_failed(self, kind: str, message: str):
         self.scanners.pop(kind, None)

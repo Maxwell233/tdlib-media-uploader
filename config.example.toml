@@ -117,7 +117,7 @@ quicktime_utc_target_zone = ""
 # 旧版 force_ten_per_album 仍可读取，但新配置请使用 group_mode。
 group_mode = "date"
 
-# 扫描顺序只能二选一：mtime=修改时间，name=文件名（自然数字从大到小）。
+# 扫描顺序只能二选一：mtime=修改时间，name=文件名和目录（自然数字从小到大）。
 sort_mode = "mtime"
 
 # 每组 1~10 个视频；按日期模式表示每个月上限，固定模式表示固定组大小。
@@ -151,7 +151,7 @@ reset_state = false
 
 # 递归收集每个一级子文件夹中的图片和视频，混合组成 Album。
 # 扩展名直接继承 [image].extensions 和 [video].extensions。
-# name：按文件名中的自然数字从大到小排序；mtime：按修改时间从旧到新排序。
+# name：按相对路径逐层自然排序（文件夹和文件名中的数字按整数从小到大）；mtime：按修改时间从旧到新排序，路径用于并列时排序。
 sort_mode = "name"
 album_size = 10
 caption_include_group_title = true
@@ -169,6 +169,32 @@ reset_state = false
 # 断点仍以原始媒体路径为准；关闭时直接读取源文件。
 enabled = false
 directory = ".staging"
+cleanup_on_start = true
+cleanup_days = 7
+
+
+[scan]
+
+# 文件必须在多次检查中保持大小和修改时间不变，才会进入媒体读取/上传。
+# 检查次数和等待间隔都可调；网络盘建议保持默认或适当增加次数。
+stability_checks = 2
+stability_interval_seconds = 0.05
+readiness_attempts = 3
+read_probe_bytes = 65536
+
+# 所有扫描/预检共用这两个并发上限；网络盘自动使用 network 值。
+io_workers_local = 4
+io_workers_network = 2
+
+
+[process]
+
+# ExifTool/FFmpeg 单次调用的最长时间（秒）。超时后会按现有重试/隔离策略处理。
+exiftool_timeout_seconds = 120
+ffmpeg_metadata_timeout_seconds = 30
+ffmpeg_info_timeout_seconds = 30
+ffmpeg_thumbnail_timeout_seconds = 45
+ffmpeg_compression_timeout_seconds = 45
 
 
 [image]
@@ -187,7 +213,7 @@ album_caption_separator = " · "
 caption_include_filenames = false
 
 # "mtime" = 按文件修改时间从旧到新
-# "path"  = 按目录/文件名自然数字排序（数字从大到小）
+# "path"  = 按目录/文件名自然数字排序（数字从小到大）
 sort_mode = "mtime"
 
 show_file_list = true

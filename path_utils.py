@@ -7,7 +7,10 @@ import ntpath
 import os
 import re
 import stat
+import subprocess
+import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from functools import cmp_to_key
 from typing import Callable, TypeVar
@@ -93,6 +96,21 @@ def is_network_path(path) -> bool:
             return int(ctypes.windll.kernel32.GetDriveTypeW(drive)) == 4
         except (AttributeError, OSError, TypeError, ValueError):
             pass
+    # macOS mounts SMB/NFS shares under /Volumes and /Network.  Linux/BSD
+    # systems commonly expose NFS/SMB through /mnt, /net or /run/mount.  The
+    # prefix check is intentionally conservative and only lowers concurrency;
+    # it never changes path semantics or rejects a local disk mounted there.
+    posix_value = _text(path).replace("\\", "/")
+    if not posix_value.startswith("/"):
+        return False
+    prefixes = (
+        ("/Volumes", "/Network", "/net", "/mnt", "/run/mount")
+        if sys.platform == "darwin"
+        else ("/net", "/mnt", "/run/mount", "/Volumes", "/Network")
+    )
+    for prefix in prefixes:
+        if posix_value == prefix or posix_value.startswith(prefix + "/"):
+            return True
     return False
 
 
@@ -152,11 +170,17 @@ def check_file_readiness(
     expected_size=None,
     expected_mtime_ns=None,
     stable_interval: float = 0.05,
+    stable_checks: int = 2,
     probe: bool = True,
     probe_bytes: int = 64 * 1024,
     cancel_event=None,
 ) -> FileReadiness:
-    """Perform one bounded stat/read/stat readiness check."""
+    """Perform a bounded stat/read/stat readiness check.
+
+    ``stable_checks`` is the number of observations that must agree.  The
+    default keeps the historical two-observation check while allowing callers
+    scanning a busy network share to require a few additional confirmations.
+    """
 
     first = _snapshot_object(path)
     if first is None:
@@ -170,18 +194,23 @@ def check_file_readiness(
             probe_readable(path, snapshot=first, probe_bytes=probe_bytes)
     except (OSError, ValueError) as exc:
         return FileReadiness(DEFERRED, first, f"文件读取失败：{path} · {exc}", 1)
-    if stable_interval > 0:
+    checks = max(1, int(stable_checks))
+    current = first
+    for _index in range(1, checks):
         # Do not make a user wait the complete stability interval after a
-        # cancellation request.  ``cancelable_sleep`` also keeps this path
+        # cancellation request. ``cancelable_sleep`` also keeps this path
         # easy to interrupt when a scan is running on a network share.
-        if not cancelable_sleep(min(float(stable_interval), 0.5), cancel_event):
-            return FileReadiness(DEFERRED, first, "文件稳定性检查被取消", 1)
-    second = _snapshot_object(path)
-    if second is None:
-        return FileReadiness(DEFERRED, first, f"文件在检查期间变得不可读取：{path}", 1)
-    if second.as_tuple() != first.as_tuple():
-        return FileReadiness(DEFERRED, second, f"文件仍在写入或网络连接不稳定：{path}", 1)
-    return FileReadiness(READY, second, attempts=1)
+        if stable_interval > 0 and not cancelable_sleep(
+            min(float(stable_interval), 0.5), cancel_event
+        ):
+            return FileReadiness(DEFERRED, current, "文件稳定性检查被取消", 1)
+        observed = _snapshot_object(path)
+        if observed is None:
+            return FileReadiness(DEFERRED, current, f"文件在检查期间变得不可读取：{path}", 1)
+        if observed.as_tuple() != current.as_tuple():
+            return FileReadiness(DEFERRED, observed, f"文件仍在写入或网络连接不稳定：{path}", 1)
+        current = observed
+    return FileReadiness(READY, current, attempts=1)
 
 
 def wait_for_file_ready(
@@ -193,6 +222,7 @@ def wait_for_file_ready(
     initial_delay: float = 0.12,
     backoff: float = 2.0,
     stable_interval: float = 0.05,
+    stable_checks: int = 2,
     probe: bool = True,
     probe_bytes: int = 64 * 1024,
     cancel_event=None,
@@ -209,6 +239,7 @@ def wait_for_file_ready(
             expected_size=expected_size,
             expected_mtime_ns=expected_mtime_ns,
             stable_interval=stable_interval,
+            stable_checks=stable_checks,
             probe=probe,
             probe_bytes=probe_bytes,
             cancel_event=cancel_event,
@@ -245,13 +276,11 @@ def _natural_parts(value) -> list[tuple[int, object]]:
     return parts
 
 
-def natural_compare(left, right, *, numeric_descending: bool = True) -> int:
-    """Compare names naturally while keeping numeric runs deterministic.
+def natural_compare(left, right) -> int:
+    """Compare names using case-insensitive text and ascending integer runs.
 
-    Text portions remain ascending. Numeric portions are compared as integers,
-    so ``x.410`` is adjacent to ``x.409`` instead of being placed beside
-    ``x.41``; the default direction follows the uploader's filename ordering
-    setting and puts larger sequence numbers first.
+    Consecutive digits are compared as integers, so ``x.1``, ``x.10`` and
+    ``x.100`` keep their natural numeric order instead of lexical order.
     """
 
     a_parts = _natural_parts(left)
@@ -261,8 +290,6 @@ def natural_compare(left, right, *, numeric_descending: bool = True) -> int:
             result = -1 if a_type < b_type else 1
         elif a_value == b_value:
             continue
-        elif a_type == 1 and numeric_descending:
-            result = -1 if a_value > b_value else 1
         else:
             result = -1 if a_value < b_value else 1
         return result
@@ -274,7 +301,7 @@ def natural_compare(left, right, *, numeric_descending: bool = True) -> int:
     return -1 if len(a_parts) < len(b_parts) else 1
 
 
-def natural_sort(values, *, numeric_descending: bool = True, key=None) -> list:
+def natural_sort(values, *, key=None) -> list:
     """Return a naturally ordered copy of *values*.
 
     ``key`` follows ``sorted`` and is evaluated once per value, which matters
@@ -285,12 +312,93 @@ def natural_sort(values, *, numeric_descending: bool = True, key=None) -> list:
     decorated = [(key(value), index, value) for index, value in enumerate(values)]
 
     def compare(left, right):
-        result = natural_compare(
-            left[0], right[0], numeric_descending=numeric_descending
-        )
+        result = natural_compare(left[0], right[0])
         return result or (left[1] - right[1])
 
     return [value for _, _, value in sorted(decorated, key=cmp_to_key(compare))]
+
+
+def _relative_components(path, root=None) -> tuple[str, ...]:
+    """Return normalized relative path components for deterministic sorting."""
+
+    if root is None:
+        value = _text(path)
+    else:
+        value = relative_name(path, root)
+    value = value.replace("\\", "/")
+    # Drive/UNC prefixes are not expected after relative_name(), but keeping
+    # non-empty components makes this helper safe for callers that omit root.
+    return tuple(component for component in value.split("/") if component not in {"", "."})
+
+
+def relative_path_compare(left, right, root=None) -> int:
+    """Compare two paths component by component using the natural comparator.
+
+    Directory components are compared before their descendants.  This is the
+    shared ordering contract for video, image, mixed and GUI fallback scans:
+    text runs sort case-insensitively ascending and numeric runs sort as
+    integers ascending.
+    """
+
+    left_parts = _relative_components(left, root)
+    right_parts = _relative_components(right, root)
+    for left_part, right_part in zip(left_parts, right_parts):
+        result = natural_compare(left_part, right_part)
+        if result:
+            return result
+    if len(left_parts) != len(right_parts):
+        return -1 if len(left_parts) < len(right_parts) else 1
+    # Equal primary components (case or leading-zero variants) are resolved
+    # by the original relative spelling so the result is deterministic while
+    # preserving natural numeric ordering as the primary rule.
+    left_raw = "/".join(left_parts).casefold()
+    right_raw = "/".join(right_parts).casefold()
+    return (left_raw > right_raw) - (left_raw < right_raw)
+
+
+def media_path_sort(
+    values,
+    root,
+    *,
+    mode: str = "name",
+    path_key=None,
+    mtime_key=None,
+) -> list:
+    """Sort media values with one shared relative-path/mtime implementation.
+
+    ``mode="name"`` compares every relative directory and filename component
+    with :func:`natural_compare`.  ``mode="mtime"`` keeps the historical
+    oldest-first order and uses the exact same relative-path comparator for
+    ties.  ``path_key`` and ``mtime_key`` support dict-backed mixed items.
+    """
+
+    normalized_mode = str(mode).strip().lower()
+    # ``path`` is the historical image configuration value.  Treat it as
+    # the shared name mode so older callers reach exactly the same comparator.
+    if normalized_mode == "path":
+        normalized_mode = "name"
+    if normalized_mode not in {"name", "mtime"}:
+        raise ValueError(f"不支持的媒体排序方式：{mode}")
+    path_key = path_key or (lambda value: value)
+    decorated = []
+    for index, value in enumerate(values):
+        path = path_key(value)
+        mtime = None
+        if normalized_mode == "mtime":
+            try:
+                raw_mtime = mtime_key(value) if mtime_key is not None else file_mtime(path)
+                mtime = float(raw_mtime)
+            except (OSError, TypeError, ValueError):
+                mtime = 0.0
+        decorated.append((path, mtime, index, value))
+
+    def compare(left, right):
+        if normalized_mode == "mtime" and left[1] != right[1]:
+            return -1 if left[1] < right[1] else 1
+        result = relative_path_compare(left[0], right[0], root)
+        return result or (left[2] - right[2])
+
+    return [value for _, _, _, value in sorted(decorated, key=cmp_to_key(compare))]
 
 
 def retry_with_backoff(
@@ -319,6 +427,91 @@ def retry_with_backoff(
             if not cancelable_sleep(initial_delay * (float(backoff) ** (attempt - 1)), cancel_event):
                 raise TimeoutError("操作已取消") from exc
     raise RuntimeError("重试操作未返回结果")
+
+
+def ordered_bounded_map(executor, items, worker, max_workers: int):
+    """Yield worker results in input order with a bounded pending queue.
+
+    Scanning and media preflight use this helper so local and network roots
+    share the same queue discipline. At most ``max_workers`` operations are
+    submitted at once; a large directory therefore cannot allocate one
+    future per file before the first result is consumed.
+    """
+
+    iterator = iter(items)
+    pending = deque()
+    limit = max(1, int(max_workers))
+    for _ in range(limit):
+        try:
+            pending.append(executor.submit(worker, next(iterator)))
+        except StopIteration:
+            break
+    while pending:
+        yield pending.popleft().result()
+        try:
+            pending.append(executor.submit(worker, next(iterator)))
+        except StopIteration:
+            pass
+
+
+def run_cancellable_process(command, *, cancel_event=None, timeout=None, **kwargs):
+    """Run a bounded external process and honour cancellation while waiting.
+
+    The no-event path deliberately delegates to :func:`subprocess.run` so
+    existing integrations can continue to patch or instrument it.  A caller
+    that supplies an event gets a small polling wrapper which terminates the
+    child promptly instead of waiting for the full timeout.
+    """
+
+    if cancel_event is None:
+        return subprocess.run(command, timeout=timeout, **kwargs)
+    if _cancelled(cancel_event):
+        raise TimeoutError("外部进程已取消")
+    input_data = kwargs.pop("input", None)
+    if input_data is not None:
+        kwargs.setdefault("stdin", subprocess.PIPE)
+    process = subprocess.Popen(command, **kwargs)
+    if input_data is not None and process.stdin is not None:
+        try:
+            process.stdin.write(input_data)
+            process.stdin.close()
+        except (BrokenPipeError, OSError):
+            # The child may reject a batch before consuming stdin; its exit
+            # status/stderr below remains the authoritative diagnostic.
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+    started = time.monotonic()
+    try:
+        while process.poll() is None:
+            if _cancelled(cancel_event):
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                process.communicate()
+                raise TimeoutError("外部进程已取消")
+            if timeout is not None and time.monotonic() - started >= float(timeout):
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                process.communicate()
+                raise subprocess.TimeoutExpired(command, timeout)
+            time.sleep(0.05)
+        stdout, stderr = process.communicate()
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
 
 
 def is_unc_path(path) -> bool:
@@ -365,11 +558,12 @@ def file_snapshot(path):
     return snapshot.as_tuple() if snapshot is not None else None
 
 
-def is_file_stable(path, interval: float = 0.03) -> bool:
-    """Check that a file remains unchanged across two short observations."""
+def is_file_stable(path, interval: float = 0.03, stable_checks: int = 2) -> bool:
+    """Check that a file remains unchanged across bounded observations."""
     result = check_file_readiness(
         path,
         stable_interval=interval,
+        stable_checks=stable_checks,
         probe=False,
     )
     return result.ready
@@ -409,11 +603,41 @@ def _entry_suffix(name: str) -> str:
     return name[dot:] if 0 < dot < len(name) - 1 else ""
 
 
-def iter_files(root, extensions):
-    """Walk a local or UNC tree, skipping entries unavailable to the share."""
+def is_link_or_junction(value) -> bool:
+    """Return whether *value* is a symlink or a Windows reparse junction."""
+
+    try:
+        # ``Path.is_symlink()`` delegates to ``Path.stat()`` on some Python
+        # versions.  Use lstat for Path/string values so a directory walk
+        # still needs only the single ``DirEntry.stat`` performed below.
+        if isinstance(value, os.DirEntry):
+            if value.is_symlink():
+                return True
+            info = value.stat(follow_symlinks=False)
+        else:
+            info = os.lstat(_text(value))
+    except (OSError, ValueError, TypeError):
+        # An entry that cannot be inspected is treated as unsafe to recurse
+        # into; the caller will report the original access error separately.
+        return False
+    return _is_reparse_info(info)
+
+
+def _is_reparse_info(info) -> bool:
+    if stat.S_ISLNK(getattr(info, "st_mode", 0)):
+        return True
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return bool(int(getattr(info, "st_file_attributes", 0)) & reparse_flag)
+
+
+def iter_files(root, extensions, cancel_event=None):
+    """Walk a local or UNC tree without following links or blocking forever."""
     accepted = {str(ext).lower() for ext in extensions}
     paths = []
     errors = []
+
+    if is_link_or_junction(root):
+        return paths, [f"跳过符号链接或 junction：{root}"]
 
     # Keep the traversal iterative. A recursive scanner can hit Python's
     # recursion limit on exported camera/archive trees with many nested
@@ -421,12 +645,28 @@ def iter_files(root, extensions):
     # stack. ``follow_symlinks=False`` retains os.walk's default behavior.
     stack = [_text(root)]
     while stack:
+        if _cancelled(cancel_event):
+            errors.append("目录扫描已取消")
+            break
         directory = stack.pop()
+        if is_link_or_junction(directory):
+            errors.append(f"跳过符号链接或 junction：{directory}")
+            continue
         try:
             with os.scandir(directory) as it:
                 for entry in it:
+                    if _cancelled(cancel_event):
+                        errors.append("目录扫描已取消")
+                        break
                     try:
-                        if entry.is_dir(follow_symlinks=False):
+                        if entry.is_symlink():
+                            errors.append(f"跳过符号链接或 junction：{entry.path}")
+                            continue
+                        info = entry.stat(follow_symlinks=False)
+                        if _is_reparse_info(info):
+                            errors.append(f"跳过符号链接或 junction：{entry.path}")
+                            continue
+                        if stat.S_ISDIR(info.st_mode):
                             stack.append(entry.path)
                             continue
 
@@ -437,7 +677,6 @@ def iter_files(root, extensions):
                         ext = _entry_suffix(entry.name)
                         if ext.lower() not in accepted:
                             continue
-                        info = entry.stat()
                         if stat.S_ISREG(info.st_mode) and info.st_size > 0:
                             paths.append(Path(entry.path))
                     except OSError as error:

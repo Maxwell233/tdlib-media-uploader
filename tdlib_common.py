@@ -18,6 +18,7 @@ import tdjson
 
 import app_config as cfg
 from app_logging import TDLIB_LOG_PATH, write_app_log, write_exception
+from path_utils import probe_readable, snapshot_file, stable_path
 from runtime_paths import APP_DATA_DIR
 
 REQUIRED_TDJSON_VERSION = "1.8.64.post1"
@@ -657,6 +658,72 @@ class TDJsonClient:
                 self.send_events.pop(old_id, None)
         return sent_ids
 
+    @staticmethod
+    def _item_source(item):
+        """Get the original local source path from a media item when present."""
+
+        if isinstance(item, dict):
+            value = item.get("path")
+        else:
+            value = item
+        return Path(value) if value else None
+
+    def _diagnose_upload_failure(self, contents, items, exc) -> None:
+        """Persist source-file health details for otherwise opaque TDLib errors."""
+
+        records = []
+        for index, item in enumerate(items or [], 1):
+            path = self._item_source(item)
+            if path is None:
+                records.append(f"媒体 {index}: 未提供本地源路径")
+                continue
+            snapshot = snapshot_file(path)
+            if snapshot is None:
+                records.append(f"媒体 {index}: 源文件不存在或不可 stat · {path}")
+                continue
+            try:
+                probe_readable(path, snapshot=snapshot, probe_bytes=4096)
+                state = "源文件可读取"
+            except Exception as probe_error:
+                state = f"源文件读取失败：{type(probe_error).__name__}: {probe_error}"
+            # Keep this comparison defensive for legacy callers that pass
+            # tuples/Path objects instead of scanner item dictionaries.
+            if isinstance(item, dict):
+                expected_size = item.get("scan_size")
+                expected_mtime_ns = item.get("scan_mtime_ns")
+                if expected_size is not None and expected_mtime_ns is not None and (
+                    int(expected_size), int(expected_mtime_ns)
+                ) != snapshot.as_tuple():
+                    state += "；相对扫描快照已发生变化"
+            records.append(
+                f"媒体 {index}: {state} · {path}"
+                f" (size={snapshot.size}, mtime_ns={snapshot.mtime_ns}, id={stable_path(path)})"
+            )
+        detail = "\n".join(records) or "未提供媒体列表，无法检查本地源文件"
+        message = (
+            f"TDLib 上传失败源诊断：{type(exc).__name__}: {exc}\n"
+            f"{detail}"
+        )
+        write_app_log("ERROR", message, source="upload")
+        warning = getattr(self.ui, "warning", None)
+        if callable(warning):
+            try:
+                warning("TDLib 上传失败，已记录源文件诊断；请查看运行日志。")
+            except Exception:
+                pass
+
+    def _safe_diagnose_upload_failure(self, contents, items, exc) -> None:
+        """Never let diagnostics hide the original upload exception."""
+
+        try:
+            self._diagnose_upload_failure(contents, items, exc)
+        except Exception as diagnostic_error:
+            write_exception(
+                "TDLib 上传失败源诊断自身失败",
+                diagnostic_error,
+                source="upload",
+            )
+
     def send_contents(self, contents, progress=None, items=None):
         try:
             if len(contents) == 1:
@@ -684,7 +751,11 @@ class TDJsonClient:
                     raise RuntimeError(
                         f"TDLib sendMessageAlbum 返回消息数量异常：{len(messages)}/{len(contents)}"
                     )
+            if progress is not None and items is not None:
+                progress.register_messages(messages, items)
+            return self.wait_for_send_results(messages)
         except TDLibError as exc:
+            self._safe_diagnose_upload_failure(contents, items, exc)
             error_text = exc.message.lower()
             forbidden = any(
                 marker in error_text
@@ -699,9 +770,9 @@ class TDJsonClient:
             if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel" and forbidden:
                 raise RuntimeError("当前账号没有在该频道发布内容的权限。") from exc
             raise
-        if progress is not None and items is not None:
-            progress.register_messages(messages, items)
-        return self.wait_for_send_results(messages)
+        except Exception as exc:
+            self._safe_diagnose_upload_failure(contents, items, exc)
+            raise
 
     def close(self):
         try:
