@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""TDLib Media Uploader V1.8.11 视频上传流程。
+"""TDLib Media Uploader V1.9.0 视频上传流程。
 
 核心上传/断点/缩略图逻辑复用 tdlib_video_album_uploader.py；
 本文件负责视频扫描、mtime 日期策略和 GUI 使用的上传流程。
@@ -17,8 +17,10 @@ from album_metadata import with_filename_description
 UI = core.UI
 
 
-def read_metadata():
+def read_metadata(videos=None):
     """读取批量日期元数据；没有 ExifTool 时保留 FFmpeg 媒体日期回退。"""
+    if not core.video_dates_enabled():
+        return {}, False
     if not cfg.EXIFTOOL_PATH.exists():
         if cfg.VIDEO_READ_MEDIA_CREATION_DATE:
             UI.warning(
@@ -38,7 +40,15 @@ def read_metadata():
             '当前未启用媒体创建日期，且 missing_date_policy="error"，必须安装 ExifTool。'
         )
 
-    return core.read_exif_metadata(), True
+    try:
+        # Pass the Python scanner's accepted paths so the upload entry point
+        # does not walk the source directory a second time.
+        return core.read_exif_metadata(videos), True
+    except Exception as exc:
+        # A transient network share or malformed ExifTool response must not
+        # prevent the normal media-date/mtime fallback from running.
+        UI.warning(f"ExifTool 读取失败，将使用后备日期：{exc}")
+        return {}, False
 
 
 def _source_label(item):
@@ -94,12 +104,18 @@ def show_file_list(items, state):
         for item in month_items:
             path = item["path"]
             completed = state.is_completed(path)
+            capture_time = item.get("capture_time")
+            capture_text = (
+                capture_time.strftime("%m-%d %H:%M:%S")
+                if capture_time is not None
+                else "未读取日期"
+            )
 
             rows.append(
                 (
                     global_index[path],
                     "✓ 已完成" if completed else "• 待上传",
-                    item["capture_time"].strftime("%m-%d %H:%M:%S"),
+                    capture_text,
                     core.format_size(path.stat().st_size),
                     core.relative_name(path),
                 )
@@ -193,6 +209,8 @@ def show_upload_summary(
             if cfg.VIDEO_READ_MEDIA_CREATION_DATE
             else "EXIF 优先；缺失时 mtime"
         )
+    elif not core.video_dates_enabled():
+        date_mode = "不读取日期（按文件名排序）"
     elif cfg.VIDEO_READ_MEDIA_CREATION_DATE:
         date_mode = "媒体创建日期（FFmpeg）；缺失时 mtime"
     else:
@@ -260,9 +278,12 @@ def main():
         UI.warning("没有找到支持的视频文件。")
         return
 
-    UI.info("读取视频日期信息…")
-
-    metadata_index, exiftool_used = read_metadata()
+    if core.video_dates_enabled():
+        UI.info("读取视频日期信息…")
+        metadata_index, exiftool_used = read_metadata(videos)
+    else:
+        UI.info("已关闭日期读取，将按文件名处理…")
+        metadata_index, exiftool_used = {}, False
 
     items, missing = core.build_items(
         videos,

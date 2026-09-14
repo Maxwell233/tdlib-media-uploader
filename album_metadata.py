@@ -23,10 +23,12 @@ PROJECT_DIR = APP_DATA_DIR
 
 
 def path_for(kind: str) -> Path:
-    return PROJECT_DIR / (
-        ".video_album_captions.json" if kind == "video"
-        else ".image_album_captions.json"
-    )
+    names = {
+        "video": ".video_album_captions.json",
+        "image": ".image_album_captions.json",
+        "mixed": ".mixed_album_captions.json",
+    }
+    return PROJECT_DIR / names.get(str(kind).lower(), ".image_album_captions.json")
 
 
 def _item_path(item):
@@ -69,7 +71,10 @@ def filename_description(
     """Format an Album's local filenames for a generated caption."""
     lines = []
     for index, item in enumerate(items, 1):
-        name = Path(_item_path(item)).name
+        # Captions identify the media rather than its transport format. Remove
+        # only the final suffix, preserving names such as ``archive.tar`` from
+        # ``archive.tar.gz``.
+        name = Path(_item_path(item)).stem
         lines.append(f"{index}. {name}" if numbered else name)
     text = "\n".join(lines)
     if len(text) <= max_chars:

@@ -18,7 +18,15 @@ from pathlib import Path
 from PIL import Image
 
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
-from path_utils import display_path, file_mtime, iter_files, relative_name as stable_relative_name, stable_path
+from path_utils import (
+    display_path,
+    file_mtime,
+    file_snapshot,
+    iter_files,
+    relative_name as stable_relative_name,
+    revalidate_file,
+    stable_path,
+)
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
@@ -27,7 +35,9 @@ PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = APP_DATA_DIR / ".image_state"
 LAST_SCAN_ERRORS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
+DEFERRED_STATUS = "DEFERRED"
 IMAGE_UPLOAD_PATHS: dict[str, Path] = {}
+IMAGE_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
 COMPRESSED_IMAGE_DIR = APP_DATA_DIR / ".image_compression"
 
 UI = HeadlessUI()
@@ -62,19 +72,20 @@ def file_signature(path: Path) -> str:
 
 
 def scan_images() -> list[Path]:
-    global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS
+    global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS, IMAGE_SCAN_SNAPSHOTS
     root = cfg.IMAGE_DIR
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"图片目录不存在或不是目录：{root}")
     images, LAST_SCAN_ERRORS = iter_files(root, cfg.IMAGE_EXTENSIONS)
     LAST_SCAN_SIZE_SKIPS = []
+    IMAGE_SCAN_SNAPSHOTS = {}
     accepted = []
     for path in images:
-        try:
-            size = path.stat().st_size
-        except OSError as exc:
-            LAST_SCAN_ERRORS.append(f"{path}: {exc}")
+        snapshot = file_snapshot(path)
+        if snapshot is None:
+            LAST_SCAN_ERRORS.append(f"{path}: 文件暂时不可读取或为空")
             continue
+        size, _mtime_ns = snapshot
         if size > cfg.IMAGE_MAX_BYTES:
             record = {
                 "path": path,
@@ -91,6 +102,7 @@ def scan_images() -> list[Path]:
             if not cfg.IMAGE_COMPRESS_OVERSIZE:
                 continue
         accepted.append(path)
+        IMAGE_SCAN_SNAPSHOTS[stable_path(path)] = snapshot
     images = accepted
 
     if cfg.IMAGE_SORT_MODE == "mtime":
@@ -293,7 +305,12 @@ def preflight_images(paths, ui=None) -> list[dict]:
 
     def worker(path):
         try:
-            size = path.stat().st_size
+            expected = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
+            size = revalidate_file(
+                path,
+                expected_size=expected[0] if expected else None,
+                expected_mtime_ns=expected[1] if expected else None,
+            )[0]
             if size > cfg.IMAGE_MAX_BYTES:
                 reason = (
                     f"文件大小 {format_size(size)} 超过 Telegram Photo 上限 "
@@ -313,7 +330,12 @@ def preflight_images(paths, ui=None) -> list[dict]:
             return {
                 "path": path,
                 "reason": f"{type(exc).__name__}: {exc}",
-                "category": "size" if "Telegram Photo 上限" in str(exc) else "unreadable",
+                "category": (
+                    "size" if "Telegram Photo 上限" in str(exc)
+                    else "deferred" if isinstance(exc, (OSError, TimeoutError))
+                    or any(marker in str(exc) for marker in ("暂时不可读取", "发生变化", "SMB", "网络"))
+                    else "unreadable"
+                ),
             }
 
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="tdlib-preflight") as executor:
@@ -342,12 +364,15 @@ def report_skipped_images(skipped, ui=None, *, final=False) -> None:
     target = ui or UI
     prefix = "本次任务结束" if final else "图片预检完成"
     size_count = sum(record.get("category") == "size" for record in skipped)
-    unreadable_count = len(skipped) - size_count
+    deferred_count = sum(record.get("category") == "deferred" for record in skipped)
+    unreadable_count = len(skipped) - size_count - deferred_count
     parts = []
     if unreadable_count:
         parts.append(f"{unreadable_count} 个无法读取的图片")
     if size_count:
         parts.append(f"{size_count} 个超过 10 MiB 上限的图片")
+    if deferred_count:
+        parts.append(f"{deferred_count} 个暂时不可读的图片（DEFERRED）")
     target.warning(
         f"{prefix}：已跳过{'、'.join(parts) or f'{len(skipped)} 个图片'}；"
         "这些文件未写入上传断点，修复后可重新扫描上传。"
@@ -380,10 +405,19 @@ def report_scan_size_skips(skipped, ui=None) -> None:
         )
 
 
-def input_photo(path: Path, caption: str = "") -> dict:
+def input_photo(path: Path, caption: str = "", *, expected_size=None, expected_mtime_ns=None) -> dict:
+    if expected_size is None and expected_mtime_ns is None:
+        expected = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
+        if expected is not None:
+            expected_size, expected_mtime_ns = expected
+    snapshot = revalidate_file(
+        path,
+        expected_size=expected_size,
+        expected_mtime_ns=expected_mtime_ns,
+    )
     source_path = upload_path(path)
-    if path.stat().st_size > cfg.IMAGE_MAX_BYTES and cfg.IMAGE_COMPRESS_OVERSIZE:
-        original_size = path.stat().st_size
+    if snapshot[0] > cfg.IMAGE_MAX_BYTES and cfg.IMAGE_COMPRESS_OVERSIZE:
+        original_size = snapshot[0]
         UI.warning(
             f"图片开始上传，正在使用 FFmpeg 生成临时压缩副本：{relative_name(path)}"
         )
@@ -393,9 +427,9 @@ def input_photo(path: Path, caption: str = "") -> dict:
             f"图片压缩完成：{relative_name(path)} · "
             f"{format_size(original_size)} → {format_size(source_path.stat().st_size)}；原文件未修改"
         )
-    elif path.stat().st_size > cfg.IMAGE_MAX_BYTES:
+    elif snapshot[0] > cfg.IMAGE_MAX_BYTES:
         raise RuntimeError(
-            f"文件大小 {format_size(path.stat().st_size)} 超过 Telegram Photo 上限 "
+            f"文件大小 {format_size(snapshot[0])} 超过 Telegram Photo 上限 "
             f"{format_size(cfg.IMAGE_MAX_BYTES)}"
         )
     source_path = upload_path(path)
@@ -423,7 +457,21 @@ def build_image_contents(paths, caption: str, ui=None):
     skipped = []
     for path in paths:
         try:
-            contents.append(input_photo(path, caption if not valid_paths else ""))
+            expected = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
+            item_caption = caption if not valid_paths else ""
+            if expected is None:
+                # Keep the historical two-argument call shape for embedding
+                # integrations that provide their own input_photo wrapper.
+                contents.append(input_photo(path, item_caption))
+            else:
+                contents.append(
+                    input_photo(
+                        path,
+                        item_caption,
+                        expected_size=expected[0],
+                        expected_mtime_ns=expected[1],
+                    )
+                )
             valid_paths.append(path)
         except Exception as exc:
             try:
@@ -435,6 +483,10 @@ def build_image_contents(paths, caption: str, ui=None):
                 "reason": f"{type(exc).__name__}: {exc}",
                 "category": "size" if current_size > cfg.IMAGE_MAX_BYTES else "unreadable",
             }
+            if isinstance(exc, (OSError, TimeoutError)) or any(
+                marker in str(exc) for marker in ("暂时不可读取", "发生变化", "SMB", "网络")
+            ):
+                record["category"] = "deferred"
             skipped.append(record)
             target.warning(f"跳过上传前变得无法读取的图片：{relative_name(path)}")
             target.log(f"跳过图片详情：{path}\n原因：{record['reason']}")

@@ -37,6 +37,84 @@ class ImprovementsTest(unittest.TestCase):
                 self.assertEqual(set(saved), {"first", "second", "third"})
                 self.assertEqual(store.get("third", "3")["custom_text"], "本次编辑")
 
+    def test_filename_captions_use_stem_without_extension(self):
+        names = metadata.filename_description(
+            [Path("clip.mp4"), Path("archive.tar.gz"), Path(".hidden")],
+            numbered=False,
+        )
+        self.assertEqual(names.splitlines(), ["clip", "archive.tar", ".hidden"])
+
+    def test_mixed_scan_groups_and_splits_albums(self):
+        import tdlib_mixed_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "mixed"
+            first = root / "旅行"
+            second = root / "工作"
+            (first / "nested").mkdir(parents=True)
+            second.mkdir(parents=True)
+            (first / "b.mp4").write_bytes(b"video")
+            (first / "a.jpg").write_bytes(b"image")
+            (first / "nested" / "c.png").write_bytes(b"image")
+            (second / "x.mov").write_bytes(b"video")
+            state_dir = Path(directory) / "state"
+            with patch.object(core.cfg, "MIXED_DIR", root), \
+                    patch.object(core.cfg, "MIXED_IMAGE_EXTENSIONS", {".jpg", ".png"}), \
+                    patch.object(core.cfg, "MIXED_VIDEO_EXTENSIONS", {".mp4", ".mov"}), \
+                    patch.object(core.cfg, "MIXED_EXTENSIONS", {".jpg", ".png", ".mp4", ".mov"}), \
+                    patch.object(core.cfg, "MIXED_ALBUM_SIZE", 2), \
+                    patch.object(core.cfg, "MIXED_RESET_STATE", False), \
+                    patch.object(core, "STATE_DIR", state_dir), \
+                    patch.object(metadata, "PROJECT_DIR", Path(directory)):
+                groups = core.scan_mixed_groups()
+                self.assertEqual([group["group_name"] for group in groups], ["工作", "旅行"])
+                self.assertEqual(
+                    [item["path"].name for item in groups[1]["items"]],
+                    ["a.jpg", "b.mp4", "c.png"],
+                )
+                state = core.UploadState()
+                plans = core.build_album_plans(groups, state)
+            self.assertEqual([len(plan["items"]) for plan in plans], [1, 2, 1])
+            self.assertTrue(all(plan["group_name"] in {"工作", "旅行"} for plan in plans))
+
+    def test_mixed_contents_keep_photo_video_order(self):
+        import tdlib_mixed_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            photo = root / "photo.jpg"
+            video = root / "video.mp4"
+            photo.write_bytes(b"photo")
+            video.write_bytes(b"video")
+            items = [
+                {"path": photo, "media_kind": "image"},
+                {"path": video, "media_kind": "video"},
+            ]
+            with patch.object(core.image_core, "input_photo", side_effect=lambda path, caption: {"@type": "photo", "caption": caption}), \
+                    patch.object(core, "_mixed_input_video", side_effect=lambda item, caption: {"@type": "video", "caption": caption}):
+                contents, valid, skipped = core.build_mixed_contents(items, "标题")
+            self.assertFalse(skipped)
+            self.assertEqual(valid, items)
+            self.assertEqual([item["@type"] for item in contents], ["photo", "video"])
+            self.assertEqual(contents[0]["caption"], "标题")
+            self.assertEqual(contents[1]["caption"], "")
+
+    def test_exiftool_empty_output_is_a_nonfatal_empty_result(self):
+        import subprocess
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "exiftool"
+            executable.write_bytes(b"tool")
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with patch.object(core.cfg, "EXIFTOOL_PATH", executable), \
+                    patch.object(core.cfg, "VIDEO_DIR", root), \
+                    patch.object(core.cfg, "VIDEO_EXTENSIONS", {".mp4"}), \
+                    patch.object(core.cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True), \
+                    patch.object(core.subprocess, "run", return_value=completed):
+                self.assertEqual(core.read_exif_metadata(), {})
+
     def test_invalid_config_rolls_back(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.toml"
@@ -304,6 +382,62 @@ class ImprovementsTest(unittest.TestCase):
                 saved = json.loads(state.path.read_text(encoding="utf-8"))
             self.assertTrue(all(record["capture_time"] is None for record in saved["completed"].values()))
 
+    def test_filename_only_video_list_handles_missing_dates(self):
+        import tdlib_video_app as entry
+        import tdlib_video_album_uploader as core
+
+        class State:
+            @staticmethod
+            def is_completed(_path):
+                return False
+
+        class UI:
+            def __init__(self):
+                self.messages = []
+
+            def info(self, text):
+                self.messages.append(str(text))
+
+            def files(self, *args, **kwargs):
+                self.messages.append(kwargs.get("caption", ""))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "clip.mp4"
+            path.write_bytes(b"video")
+            item = {
+                "path": path,
+                "capture_time": None,
+                "month_key": core.FORCED_GROUP_KEY,
+                "date_tag": "未读取日期",
+                "fallback": False,
+            }
+            ui = UI()
+            with patch.object(core.cfg, "VIDEO_READ_DATES", False), patch.object(entry, "UI", ui):
+                entry.show_file_list([item], State())
+            self.assertTrue(any("未读取日期" in message for message in ui.messages))
+
+    def test_jit_revalidation_detects_video_changes_after_scan(self):
+        import tdlib_video_album_uploader as core
+
+        class UI:
+            def warning(self, _text):
+                pass
+
+            def log(self, _text):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "clip.mp4"
+            path.write_bytes(b"video")
+            with patch.object(core.cfg, "VIDEO_MISSING_DATE_POLICY", "mtime"), \
+                    patch.object(core.cfg, "VIDEO_READ_MEDIA_CREATION_DATE", False):
+                items, _missing = core.build_items([path], {})
+            path.write_bytes(b"video changed")
+            with patch.object(core, "prepare_video") as prepare:
+                skipped = core.preflight_videos(items, UI())
+            prepare.assert_not_called()
+            self.assertEqual(skipped[0]["category"], "deferred")
+
     def test_exiftool_date_query_keeps_full_time_batch(self):
         import subprocess
         import tdlib_video_album_uploader as core
@@ -422,6 +556,28 @@ class ImprovementsTest(unittest.TestCase):
             self.assertIsNotNone(media)
             self.assertEqual(media[1], "Media:stream:creation_time")
             self.assertEqual(ffmpeg.call_count, 1)
+
+    def test_media_date_failure_is_not_negative_cached(self):
+        import datetime
+        import tdlib_video_album_uploader as core
+
+        core._media_creation_metadata.cache_clear()
+        successful = (
+            datetime.datetime(2024, 6, 29, 5, 48, tzinfo=datetime.timezone.utc),
+            "Media:creation_time",
+            True,
+        )
+        with patch.object(
+            core,
+            "_read_media_creation_metadata",
+            side_effect=[None, successful],
+        ) as reader:
+            self.assertIsNone(core._media_creation_metadata("share/clip.mp4", 1, 2))
+            self.assertEqual(
+                core._media_creation_metadata("share/clip.mp4", 1, 2),
+                successful,
+            )
+        self.assertEqual(reader.call_count, 2)
 
     def test_title_edit_keeps_tree_rows(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(metadata, "PROJECT_DIR", Path(directory)):

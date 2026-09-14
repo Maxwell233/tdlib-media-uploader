@@ -22,7 +22,15 @@ import imageio_ffmpeg
 from PIL import Image
 
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
-from path_utils import display_path, file_mtime, iter_files, relative_name as stable_relative_name, stable_path
+from path_utils import (
+    display_path,
+    file_mtime,
+    file_snapshot,
+    iter_files,
+    relative_name as stable_relative_name,
+    revalidate_file,
+    stable_path,
+)
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
@@ -32,6 +40,7 @@ STATE_DIR = APP_DATA_DIR / ".state"
 THUMB_CACHE_DIR = APP_DATA_DIR / ".thumb_cache"
 LAST_SCAN_ERRORS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
+DEFERRED_STATUS = "DEFERRED"
 
 
 def _hidden_subprocess_kwargs() -> dict:
@@ -246,7 +255,85 @@ def parse_exif_datetime(value):
     return None
 
 
-def read_exif_metadata() -> dict[str, dict]:
+EXIFTOOL_BATCH_SIZE = 256
+EXIFTOOL_MAX_RETRIES = 1
+EXIFTOOL_TIMEOUT_SECONDS = 120
+
+
+def _exiftool_command(*, recursive: bool) -> list[str]:
+    command = [
+        str(cfg.EXIFTOOL_PATH),
+        "-charset", "FileName=UTF8",
+        "-j", "-a", "-G1", "-s",
+        "-api", "LargeFileSupport=1",
+        "-d", "%Y-%m-%d %H:%M:%S%z",
+        "-time:all",
+    ]
+    if recursive:
+        command.append("-r")
+    for ext in sorted(cfg.VIDEO_EXTENSIONS):
+        command += ["-ext", ext.lstrip(".")]
+    # Keep all paths in an UTF-8 argument stream. This avoids Windows codepage
+    # conversion and also lets callers pass the exact files accepted by the
+    # Python scanner, so ExifTool does not perform a second directory walk.
+    command += ["-@", "-"]
+    return command
+
+
+def _exiftool_rows(batch, *, recursive: bool) -> tuple[list[dict], str | None]:
+    """Run one ExifTool batch and return rows plus a non-fatal diagnostic."""
+    input_text = (
+        f"{cfg.VIDEO_DIR}\n"
+        if batch is None
+        else "\n".join(str(path) for path in batch) + ("\n" if batch else "")
+    )
+    last_error = ""
+    for attempt in range(EXIFTOOL_MAX_RETRIES + 1):
+        try:
+            result = subprocess.run(
+                _exiftool_command(recursive=recursive),
+                input=input_text,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=EXIFTOOL_TIMEOUT_SECONDS,
+                **_hidden_subprocess_kwargs(),
+            )
+        except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            continue
+        stdout = str(result.stdout or "").lstrip("\ufeff").strip()
+        stderr = str(result.stderr or "").strip()
+        if result.returncode in (0, 1) and not stdout:
+            # ExifTool legitimately emits an empty result for a directory with
+            # no matching media. Never turn that into a JSONDecodeError.
+            return [], stderr or None
+        if result.returncode not in (0, 1):
+            last_error = stderr or f"退出码 {result.returncode}"
+            continue
+        try:
+            rows = json.loads(stdout)
+        except (json.JSONDecodeError, TypeError) as exc:
+            last_error = f"JSON 输出无法解析：{exc}"
+            continue
+        if not isinstance(rows, list):
+            last_error = "JSON 输出不是数组"
+            continue
+        return [row for row in rows if isinstance(row, dict)], stderr or None
+    return [], last_error or "ExifTool 未返回有效结果"
+
+
+def read_exif_metadata(paths=None) -> dict[str, dict]:
+    """Read EXIF metadata without letting one bad network file abort a scan.
+
+    ``paths=None`` retains the legacy recursive-directory behavior for CLI and
+    integrations.  GUI scans pass the already accepted paths; those are
+    queried in bounded batches and recursively isolated when ExifTool returns
+    malformed output or a transient share error.
+    """
+    global LAST_SCAN_ERRORS
     if not video_dates_enabled():
         return {}
     if not cfg.EXIFTOOL_PATH.exists():
@@ -254,44 +341,39 @@ def read_exif_metadata() -> dict[str, dict]:
             f"找不到 ExifTool：{cfg.EXIFTOOL_PATH}\n"
             "请把对应平台的 ExifTool 可执行文件放入 tools 目录，或在设置中指定路径。"
         )
-    command = [
-        str(cfg.EXIFTOOL_PATH),
-        "-charset", "FileName=UTF8",
-        "-j", "-r", "-a", "-G1", "-s",
-        "-api", "LargeFileSupport=1",
-        "-d", "%Y-%m-%d %H:%M:%S%z",
-        "-time:all",
-    ]
-    for ext in sorted(cfg.VIDEO_EXTENSIONS):
-        command += ["-ext", ext.lstrip(".")]
-    # Windows may recode command-line arguments through the active code page
-    # before ExifTool sees them.  Passing the directory through a UTF-8
-    # argument stream keeps non-ASCII paths intact while ``-charset`` enables
-    # ExifTool's Unicode filename handling.  The final newline closes stdin
-    # after the single directory argument, so the batch query remains one
-    # ExifTool process.
-    command += ["-@", "-"]
-    result = subprocess.run(
-        command,
-        input=f"{cfg.VIDEO_DIR}\n",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **_hidden_subprocess_kwargs(),
-    )
-    if result.returncode not in (0, 1):
-        raise RuntimeError("ExifTool 执行失败：\n" + result.stderr.strip())
-    try:
-        rows = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("ExifTool JSON 输出无法解析") from exc
-    return {
-        normalize_path(row["SourceFile"]): row
-        for row in rows
-        if row.get("SourceFile")
-    }
+    requested = None if paths is None else [Path(path) for path in paths]
+    if requested == []:
+        return {}
+    if requested is None:
+        batches = [(None, True)]
+    else:
+        batches = [
+            (requested[offset:offset + EXIFTOOL_BATCH_SIZE], False)
+            for offset in range(0, len(requested), EXIFTOOL_BATCH_SIZE)
+        ]
+    index = {}
+    diagnostics = []
+
+    def collect(batch, recursive):
+        rows, diagnostic = _exiftool_rows(batch, recursive=recursive)
+        if diagnostic and not rows and batch is not None and len(batch) > 1:
+            midpoint = max(1, len(batch) // 2)
+            collect(batch[:midpoint], False)
+            collect(batch[midpoint:], False)
+            return
+        if diagnostic and not rows:
+            label = str(cfg.VIDEO_DIR) if batch is None else str(batch[0])
+            diagnostics.append(f"{label}: {diagnostic}")
+        for row in rows:
+            source = row.get("SourceFile")
+            if source:
+                index[normalize_path(source)] = row
+
+    for batch, recursive in batches:
+        collect(batch, recursive)
+    if diagnostics:
+        LAST_SCAN_ERRORS.extend(f"ExifTool：{message}" for message in diagnostics)
+    return index
 
 
 MEDIA_DATE_MAX_WORKERS = 4
@@ -316,8 +398,7 @@ def _valid_media_datetime(value):
     return dt
 
 
-@functools.lru_cache(maxsize=4096)
-def _media_creation_metadata(path_text: str, size: int, mtime_ns: int):
+def _read_media_creation_metadata(path_text: str, size: int, mtime_ns: int):
     """Read media creation metadata with one FFmpeg process.
 
     The global and first-video-stream metadata are written by the same
@@ -390,6 +471,31 @@ def _media_creation_metadata(path_text: str, size: int, mtime_ns: int):
             Path(stream_metadata_path).unlink()
         except OSError:
             pass
+
+
+class _NoMediaDate(Exception):
+    """Internal signal used to keep transient/negative results out of cache."""
+
+
+@functools.lru_cache(maxsize=4096)
+def _cached_media_creation_metadata(path_text: str, size: int, mtime_ns: int):
+    result = _read_media_creation_metadata(path_text, size, mtime_ns)
+    if result is None:
+        # Exceptions are not retained by functools.lru_cache.  This prevents
+        # a temporary SMB/FFmpeg failure from becoming a permanent negative
+        # cache entry for the rest of the process.
+        raise _NoMediaDate
+    return result
+
+
+def _media_creation_metadata(path_text: str, size: int, mtime_ns: int):
+    try:
+        return _cached_media_creation_metadata(path_text, size, mtime_ns)
+    except _NoMediaDate:
+        return None
+
+
+_media_creation_metadata.cache_clear = _cached_media_creation_metadata.cache_clear
 
 
 def read_media_creation_time(path: Path):
@@ -587,6 +693,13 @@ def _probe_media_dates(paths, progress_callback=None):
 def build_items(videos, metadata_index, progress_callback=None):
     items, missing = [], []
     metadata_index = metadata_index or {}
+
+    def snapshot_fields(path):
+        snapshot = file_snapshot(path)
+        if snapshot is None:
+            return {}
+        return {"scan_size": snapshot[0], "scan_mtime_ns": snapshot[1]}
+
     if not video_dates_enabled():
         _emit_scan_progress(
             progress_callback,
@@ -653,13 +766,17 @@ def build_items(videos, metadata_index, progress_callback=None):
             missing.append(path)
             continue
         dt = selected["datetime"]
-        items.append({
+        item = {
             "path": path,
             "capture_time": dt,
             "month_key": dt.strftime("%Y-%m"),
             "date_tag": selected["tag"],
             "fallback": selected["fallback"],
-        })
+        }
+        snapshot = file_snapshot(path)
+        if snapshot is not None:
+            item["scan_size"], item["scan_mtime_ns"] = snapshot
+        items.append(item)
     if not force_ten_per_album():
         items.sort(
             key=lambda item: (
@@ -839,7 +956,12 @@ def preflight_videos(items, ui=None) -> list[dict]:
     def worker(item):
         path = item["path"]
         try:
-            size = path.stat().st_size
+            snapshot = revalidate_file(
+                path,
+                expected_size=item.get("scan_size"),
+                expected_mtime_ns=item.get("scan_mtime_ns"),
+            )
+            size = snapshot[0]
             if size > cfg.VIDEO_MAX_BYTES:
                 raise RuntimeError(
                     f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
@@ -852,7 +974,12 @@ def preflight_videos(items, ui=None) -> list[dict]:
                 "item": item,
                 "path": path,
                 "reason": f"{type(exc).__name__}: {exc}",
-                "category": "size" if "超过 Telegram 视频上限" in str(exc) else "unreadable",
+                "category": (
+                    "size" if "超过 Telegram 视频上限" in str(exc)
+                    else "deferred" if isinstance(exc, (OSError, TimeoutError))
+                    or any(marker in str(exc) for marker in ("暂时不可读取", "发生变化", "SMB", "网络"))
+                    else "unreadable"
+                ),
             }
 
     with ThreadPoolExecutor(max_workers=MEDIA_DATE_MAX_WORKERS, thread_name_prefix="tdlib-preflight") as executor:
@@ -893,12 +1020,15 @@ def report_skipped_videos(skipped, ui=None, *, final=False) -> None:
     target = ui or UI
     prefix = "本次任务结束" if final else "视频预检完成"
     size_count = sum(record.get("category") == "size" for record in skipped)
-    unreadable_count = len(skipped) - size_count
+    deferred_count = sum(record.get("category") == "deferred" for record in skipped)
+    unreadable_count = len(skipped) - size_count - deferred_count
     parts = []
     if unreadable_count:
         parts.append(f"{unreadable_count} 个无法读取的视频")
     if size_count:
         parts.append(f"{size_count} 个超过 4 GiB 上限的视频")
+    if deferred_count:
+        parts.append(f"{deferred_count} 个暂时不可读的视频（DEFERRED）")
     target.warning(
         f"{prefix}：已跳过{'、'.join(parts) or f'{len(skipped)} 个视频'}；"
         "这些文件未写入上传断点，修复后可重新扫描上传。"
@@ -922,6 +1052,11 @@ def build_video_contents(items, caption: str, ui=None):
                 "item": item,
                 "path": path,
                 "reason": f"{type(exc).__name__}: {exc}",
+                "category": (
+                    "deferred" if isinstance(exc, (OSError, TimeoutError))
+                    or any(marker in str(exc) for marker in ("暂时不可读取", "发生变化", "SMB", "网络"))
+                    else "unreadable"
+                ),
             }
             skipped.append(record)
             target.warning(f"跳过上传前变得无法读取的视频：{relative_name(path)}")
@@ -931,6 +1066,11 @@ def build_video_contents(items, caption: str, ui=None):
 
 def input_video(item, caption: str):
     path = item["path"]
+    revalidate_file(
+        path,
+        expected_size=item.get("scan_size"),
+        expected_mtime_ns=item.get("scan_mtime_ns"),
+    )
     info = video_info(path)
     thumbnail = None
     if cfg.VIDEO_GENERATE_THUMBNAIL:
@@ -1296,7 +1436,7 @@ def main():
             "正在使用 ExifTool 批量读取 EXIF"
             + ("；缺少 EXIF 的视频再读取媒体创建日期..." if getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True) else "...")
         )
-        metadata_index = read_exif_metadata()
+        metadata_index = read_exif_metadata(videos)
     elif getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True):
         UI.warning(
             f"未找到 ExifTool：{cfg.EXIFTOOL_PATH}。"

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.8.11.
+"""PySide6 desktop interface for TDLib Media Uploader V1.9.0.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -65,7 +65,15 @@ from runtime_paths import APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONF
 
 PROJECT_DIR = RESOURCE_DIR
 HISTORY_PATH = APP_DATA_DIR / ".gui_history.json"
-APP_VERSION = "1.8.11"
+APP_VERSION = "1.9.0"
+MEDIA_KINDS = ("video", "image", "mixed")
+KIND_LABELS = {"video": "视频", "image": "图片", "mixed": "混合"}
+KIND_PATH_KEYS = {"video": "VIDEO_DIR", "image": "IMAGE_DIR", "mixed": "MIXED_DIR"}
+KIND_PATH_CONFIG_KEYS = {"video": "video_dir", "image": "image_dir", "mixed": "mixed_dir"}
+
+
+def _kind_label(kind: str) -> str:
+    return KIND_LABELS.get(str(kind).lower(), str(kind))
 ICON_NAME = "tdlib_media_uploader_icon.png" if sys.platform == "darwin" else "tdlib_media_uploader_icon.ico"
 ICON_PATH = PROJECT_DIR / "assets" / ICON_NAME
 WINDOWS_APP_USER_MODEL_ID = "Maxwell233.TDLibMediaUploader"
@@ -207,12 +215,22 @@ def _path_text(value) -> str:
 
 
 def _basic_paths(kind: str) -> list[Path]:
-    root = Path(_cfg("VIDEO_DIR" if kind == "video" else "IMAGE_DIR", PROJECT_DIR))
-    extensions = set(_cfg("VIDEO_EXTENSIONS" if kind == "video" else "IMAGE_EXTENSIONS", set()))
+    path_key = KIND_PATH_KEYS.get(kind)
+    extension_key = {
+        "video": "VIDEO_EXTENSIONS",
+        "image": "IMAGE_EXTENSIONS",
+        "mixed": "MIXED_EXTENSIONS",
+    }.get(kind)
+    if path_key is None or extension_key is None:
+        raise ValueError(f"未知媒体类型：{kind}")
+    root = Path(_cfg(path_key, PROJECT_DIR))
+    extensions = set(_cfg(extension_key, set()))
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"{kind} 目录不存在或不是目录：{root}")
     paths, _errors = iter_files(root, extensions)
-    if kind == "image" and _cfg("IMAGE_SORT_MODE", "mtime") == "mtime":
+    if kind == "mixed":
+        paths.sort(key=lambda item: (item.name.casefold(), str(item).casefold()))
+    elif kind == "image" and _cfg("IMAGE_SORT_MODE", "mtime") == "mtime":
         paths.sort(key=lambda item: (file_mtime(item), item.name.lower()))
     elif (
         kind == "video"
@@ -240,28 +258,38 @@ def _item_size(item) -> int:
 def _apply_size_limits(paths: list[Path], kind: str) -> tuple[list[Path], list[dict]]:
     """Apply Telegram size limits for the GUI fallback scanner."""
 
-    limit = int(
-        _cfg(
-            "VIDEO_MAX_BYTES" if kind == "video" else "IMAGE_MAX_BYTES",
-            4 * 1024 ** 3 if kind == "video" else 10 * 1024 ** 2,
-        )
-    )
-    compress_images = kind == "image" and bool(_cfg("IMAGE_COMPRESS_OVERSIZE", False))
+    if kind not in {"video", "image", "mixed"}:
+        raise ValueError(f"不支持基础扫描类型：{kind}")
     accepted = []
     skipped = []
     for path in paths:
+        if kind == "mixed":
+            suffix = path.suffix.lower()
+            media_kind = (
+                "video"
+                if suffix in set(_cfg("MIXED_VIDEO_EXTENSIONS", set()))
+                else "image"
+            )
+        else:
+            media_kind = kind
+        limit_key = "VIDEO_MAX_BYTES" if media_kind == "video" else "IMAGE_MAX_BYTES"
+        default_limit = 4 * 1024 ** 3 if media_kind == "video" else 10 * 1024 ** 2
+        limit = int(_cfg(limit_key, default_limit))
+        compress_images = media_kind == "image" and bool(_cfg("IMAGE_COMPRESS_OVERSIZE", False))
+        media_label = "视频" if media_kind == "video" else "Photo"
         size = _path_size(str(path))
         if size > limit:
             action = "compress" if compress_images else "skip"
             skipped.append({
                 "path": path,
+                "media_kind": media_kind,
                 "size": size,
                 "limit": limit,
                 "category": "size",
                 "action": action,
                 "reason": (
                     f"文件大小 {_fmt_size(size)} 超过 Telegram "
-                    f"{'视频' if kind == 'video' else 'Photo'} 上限 {_fmt_size(limit)}"
+                    f"{media_label} 上限 {_fmt_size(limit)}"
                 ),
             })
             if action == "skip":
@@ -355,9 +383,11 @@ CACHE_TARGETS = {
     "video_state": ("视频上传状态", APP_DATA_DIR / ".video_state"),
     "legacy_video_state": ("旧版视频状态", APP_DATA_DIR / ".state"),
     "image_state": ("图片上传状态", APP_DATA_DIR / ".image_state"),
+    "mixed_state": ("混合上传状态", APP_DATA_DIR / ".mixed_state"),
     "thumb_cache": ("视频封面缓存", APP_DATA_DIR / ".thumb_cache"),
     "video_album_captions": ("视频 Album 标题", APP_DATA_DIR / ".video_album_captions.json"),
     "image_album_captions": ("图片 Album 标题", APP_DATA_DIR / ".image_album_captions.json"),
+    "mixed_album_captions": ("混合 Album 标题", APP_DATA_DIR / ".mixed_album_captions.json"),
     "gui_history": ("GUI 历史记录", HISTORY_PATH),
     "logs": ("运行日志", LOG_DIR),
 }
@@ -451,14 +481,19 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
         activate(kind)
 
     core = None
+    mixed_groups = []
     warning = ""
     scan_errors: list[str] = []
     scan_size_skips: list[dict] = []
     try:
         if kind == "video":
             import tdlib_video_album_uploader as core_module
-        else:
+        elif kind == "image":
             import tdlib_image_album_uploader as core_module
+        elif kind == "mixed":
+            import tdlib_mixed_album_uploader as core_module
+        else:
+            raise ValueError(f"未知媒体类型：{kind}")
         core = core_module
     except Exception as exc:
         warning = f"当前环境尚未加载完整上传依赖，预览使用基础扫描：{exc}"
@@ -482,7 +517,14 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
             if not read_dates:
                 warning = "已关闭日期读取，将按文件名扫描并按固定数量分组。"
             elif exiftool.exists():
-                metadata = core.read_exif_metadata()
+                try:
+                    metadata = core.read_exif_metadata(paths)
+                except Exception as exc:
+                    # A transient network share/tool failure should not make a
+                    # complete preview disappear. build_items will still use
+                    # media-date/mtime fallback according to configuration.
+                    warning = f"ExifTool 读取失败，将使用后备日期：{exc}"
+                    scan_errors.append(str(exc))
             elif _cfg("VIDEO_READ_MEDIA_CREATION_DATE", True):
                 warning = (
                     "未找到 ExifTool，EXIF 日期不可用；"
@@ -529,6 +571,24 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
                             "fallback": True,
                         }
                     )
+    elif kind == "mixed":
+        if core is not None:
+            core.STATE_DIR = APP_DATA_DIR / ".mixed_state"
+            mixed_groups = core.scan_mixed_groups()
+            items = core.flatten_items(mixed_groups)
+            scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
+            scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
+            state = core.UploadState()
+        else:
+            paths, scan_size_skips = _apply_size_limits(_basic_paths("mixed"), "mixed")
+            root = Path(_cfg("MIXED_DIR", PROJECT_DIR))
+            items = []
+            for path in paths:
+                suffix = path.suffix.lower()
+                media_kind = "video" if suffix in set(_cfg("MIXED_VIDEO_EXTENSIONS", set())) else "image"
+                items.append({"path": path, "media_kind": media_kind, "group_name": root.name or str(root)})
+            mixed_groups = [{"group_name": root.name or str(root), "group_path": root, "items": items}] if items else []
+        missing = []
     else:
         if core is not None:
             paths = core.scan_images()
@@ -626,7 +686,57 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
                     "album_plans": plans,
                 }
             )
-    else:
+    elif kind == "mixed":
+        if core is not None:
+            plans = core.build_album_plans(mixed_groups, state)
+        else:
+            plans = []
+            album_size = int(_cfg("MIXED_ALBUM_SIZE", 10))
+            include_title = bool(_cfg("MIXED_CAPTION_INCLUDE_GROUP_TITLE", True))
+            for mixed_group in mixed_groups:
+                group_name = str(mixed_group["group_name"])
+                for offset in range(0, len(mixed_group["items"]), album_size):
+                    album_items = list(mixed_group["items"][offset:offset + album_size])
+                    number = offset // album_size + 1
+                    key = album_key("mixed", f"{group_name}:{number}", album_items)
+                    record = caption_store.get(key, group_name)
+                    base_label = record["base_label"] if include_title else ""
+                    plans.append({
+                        "key": key,
+                        "group_name": group_name,
+                        "group_path": mixed_group.get("group_path"),
+                        "number": number,
+                        "items": album_items,
+                        "pending_items": [item for item in album_items if not completed(item)],
+                        "caption": {
+                            "base_label": base_label,
+                            "custom_text": record["custom_text"],
+                            "text": compose_caption(base_label, record["custom_text"], " · "),
+                        },
+                    })
+        for mixed_group in mixed_groups:
+            group_name = str(mixed_group["group_name"])
+            group_path = mixed_group.get("group_path")
+            group_items = list(mixed_group.get("items", []))
+            group_plans = [
+                plan for plan in plans
+                if (
+                    plan.get("group_path") == group_path
+                    if group_path is not None
+                    else plan.get("group_name") == group_name
+                )
+            ]
+            pending = [item for item in group_items if not completed(item)]
+            groups.append({
+                "label": group_name,
+                "caption": group_plans[0]["caption"]["text"] if group_plans else "",
+                "items": group_items,
+                "pending": len(pending),
+                "completed": len(group_items) - len(pending),
+                "albums": sum(bool(plan.get("pending_items")) for plan in group_plans),
+                "album_plans": group_plans,
+            })
+    elif kind == "image":
         album_size = int(_cfg("IMAGE_ALBUM_SIZE", 10))
         if core is not None:
             plans = core.build_album_plans(items, state)
@@ -696,9 +806,14 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
         )
         notices = []
         if scan_rejected:
+            limit_label = {
+                "video": "视频 4 GiB",
+                "image": "Photo 10 MiB",
+                "mixed": "图片/视频",
+            }.get(kind, _kind_label(kind))
             notices.append(
                 f"扫描时跳过 {len(scan_rejected)} 个超过 "
-                f"Telegram {'视频 4 GiB' if kind == 'video' else 'Photo 10 MiB'} 上限的项目"
+                f"Telegram {limit_label} 上限的项目"
             )
         if scan_compressing:
             notices.append(
@@ -723,7 +838,7 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
             for item in items
             if completed(item)
         ],
-        "source_dir": str(_cfg("VIDEO_DIR" if kind == "video" else "IMAGE_DIR", "")),
+        "source_dir": str(_cfg(KIND_PATH_KEYS.get(kind, "IMAGE_DIR"), "")),
         "state_path": str(state.path) if state is not None else "",
         "core_available": core is not None,
         "warning": warning,
@@ -933,11 +1048,19 @@ class UploadWorker(QThread):
                 core.UI = self.ui
                 entry.UI = self.ui
                 entry.main()
-            else:
+            elif self.kind == "image":
                 import tdlib_image_album_uploader as core
 
                 core.UI = self.ui
                 core.main()
+            elif self.kind == "mixed":
+                import tdlib_mixed_album_uploader as core
+
+                core.STATE_DIR = APP_DATA_DIR / ".mixed_state"
+                core.UI = self.ui
+                core.main()
+            else:
+                raise ValueError(f"未知媒体类型：{self.kind}")
             if self.ui.stop_requested:
                 self.completed.emit(False, "任务已立即停止；完整完成的 Album 已保存断点。")
             else:
@@ -1003,13 +1126,17 @@ class HomePage(QWidget):
         video.setObjectName("primaryButton")
         image = QPushButton("上传图片")
         image.setObjectName("secondaryButton")
+        mixed = QPushButton("混合上传")
+        mixed.setObjectName("secondaryButton")
         settings = QPushButton("配置与诊断")
         settings.setObjectName("secondaryButton")
         video.clicked.connect(lambda: self.start_upload.emit("video"))
         image.clicked.connect(lambda: self.start_upload.emit("image"))
+        mixed.clicked.connect(lambda: self.start_upload.emit("mixed"))
         settings.clicked.connect(self.open_settings)
         task_layout.addWidget(video)
         task_layout.addWidget(image)
+        task_layout.addWidget(mixed)
         task_layout.addWidget(settings)
         task_layout.addStretch(1)
         layout.addWidget(task_box)
@@ -1017,7 +1144,7 @@ class HomePage(QWidget):
         note = QGroupBox(f"V{APP_VERSION} 运行提示")
         note_layout = QVBoxLayout(note)
         note_body = QLabel(
-            "先配置 Telegram 信息，再选择目录并扫描。视频和图片可分别设置上传目标。\n"
+            "先配置 Telegram 信息，再选择目录并扫描。视频、图片和混合上传可分别设置目标。\n"
             "选中媒体组即可编辑标题；确认预览后开始上传。\n"
             "一次只能运行一个任务。安全停止后重新扫描，已完成的媒体组会自动跳过。"
         )
@@ -1054,7 +1181,7 @@ class UploadPage(QWidget):
         self.result = None
         self._running = False
         self._scanning = False
-        accent = "视频" if kind == "video" else "图片"
+        accent = _kind_label(kind)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 24)
@@ -1144,7 +1271,7 @@ class UploadPage(QWidget):
         self.refresh_config()
 
     def refresh_config(self):
-        path_name = "VIDEO_DIR" if self.kind == "video" else "IMAGE_DIR"
+        path_name = KIND_PATH_KEYS.get(self.kind, "IMAGE_DIR")
         self.source_edit.setText(_path_text(_cfg(path_name, "")))
         target = _target_for(self.kind)
         mode = str(target.get("target_mode", "forum_topic"))
@@ -1164,7 +1291,7 @@ class UploadPage(QWidget):
 
     def _commit_source(self):
         path = self.source_edit.text().strip()
-        saved = str(_cfg("VIDEO_DIR" if self.kind == "video" else "IMAGE_DIR", ""))
+        saved = str(_cfg(KIND_PATH_KEYS.get(self.kind, "IMAGE_DIR"), ""))
         if path != saved:
             self.path_selected.emit(self.kind, path)
 
@@ -1187,7 +1314,7 @@ class UploadPage(QWidget):
                 f"{group['albums']} 组待上传"
             )
             top = QTreeWidgetItem(["分组", group["label"], "", label])
-            if self.kind == "video":
+            if self.kind in {"video", "mixed"}:
                 self.tree.addTopLevelItem(top)
                 top.setExpanded(True)
             plans = group.get("album_plans") or [{
@@ -1207,13 +1334,17 @@ class UploadPage(QWidget):
                     bool(_cfg(
                         "VIDEO_CAPTION_INCLUDE_FILENAMES"
                         if self.kind == "video"
+                        else "MIXED_CAPTION_INCLUDE_FILENAMES"
+                        if self.kind == "mixed"
                         else "IMAGE_CAPTION_INCLUDE_FILENAMES",
                         False,
                     )),
                     bool(_cfg(
                         "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS"
                         if self.kind == "video"
-                        else "IMAGE_CAPTION_INCLUDE_FILENAMES",
+                        else "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS"
+                        if self.kind == "mixed"
+                        else "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
                         True,
                     )),
                 )
@@ -1233,6 +1364,8 @@ class UploadPage(QWidget):
                     path = item["path"] if isinstance(item, dict) else item
                     completed = stable_path(path) in completed_paths
                     date_value = item.get("capture_time") if isinstance(item, dict) else None
+                    if self.kind == "mixed" and isinstance(item, dict):
+                        date_value = "图片" if item.get("media_kind") == "image" else "视频"
                     row = QTreeWidgetItem([
                         "待上传" if not completed else "已完成",
                         _fmt_date(date_value),
@@ -1291,7 +1424,14 @@ class UploadPage(QWidget):
         current = plan.get("caption") or {}
         base_label = str(current.get("base_label", ""))
         custom_text = str(current.get("custom_text", ""))
-        separator = str(_cfg("VIDEO_ALBUM_CAPTION_SEPARATOR" if self.kind == "video" else "IMAGE_ALBUM_CAPTION_SEPARATOR", " · "))
+        separator = str(_cfg(
+            "VIDEO_ALBUM_CAPTION_SEPARATOR"
+            if self.kind == "video"
+            else "MIXED_ALBUM_CAPTION_SEPARATOR"
+            if self.kind == "mixed"
+            else "IMAGE_ALBUM_CAPTION_SEPARATOR",
+            " · ",
+        ))
         dialog = QDialog(self)
         dialog.setWindowTitle("编辑媒体组标题")
         dialog.resize(560, 350)
@@ -1302,7 +1442,11 @@ class UploadPage(QWidget):
         custom_edit.setPlaceholderText("可输入多行；留空表示不追加")
         preview = QPlainTextEdit()
         preview.setReadOnly(True)
-        include_base = self.kind == "video" or _cfg("IMAGE_ALBUM_NUMBERING", True)
+        include_base = (
+            self.kind == "video"
+            or self.kind == "mixed" and _cfg("MIXED_CAPTION_INCLUDE_GROUP_TITLE", True)
+            or self.kind == "image" and _cfg("IMAGE_ALBUM_NUMBERING", True)
+        )
         def update_preview():
             caption = compose_caption(base_edit.text() if include_base else "", custom_edit.toPlainText(), separator)
             preview.setPlainText(with_filename_description(
@@ -1311,20 +1455,24 @@ class UploadPage(QWidget):
                 bool(_cfg(
                     "VIDEO_CAPTION_INCLUDE_FILENAMES"
                     if self.kind == "video"
+                    else "MIXED_CAPTION_INCLUDE_FILENAMES"
+                    if self.kind == "mixed"
                     else "IMAGE_CAPTION_INCLUDE_FILENAMES",
                     False,
                 )),
                 bool(_cfg(
                     "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS"
                     if self.kind == "video"
-                    else "IMAGE_CAPTION_INCLUDE_FILENAMES",
+                    else "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS"
+                    if self.kind == "mixed"
+                    else "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
                     True,
                 )),
             ))
         base_edit.textChanged.connect(update_preview)
         custom_edit.textChanged.connect(update_preview)
         update_preview()
-        form.addRow("基础标题" if self.kind == "video" else "媒体组编号", base_edit)
+        form.addRow("基础标题" if self.kind in {"video", "mixed"} else "媒体组编号", base_edit)
         form.addRow("追加文字", custom_edit)
         form.addRow("标题预览", preview)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
@@ -1336,7 +1484,10 @@ class UploadPage(QWidget):
         base_label = base_edit.text().strip()
         custom_text = custom_edit.toPlainText().strip()
         store = CaptionStore(self.kind)
-        if self.kind == "video" and _cfg("VIDEO_CAPTION_INCLUDE_GROUP_TITLE", True) and not base_label:
+        if self.kind in {"video", "mixed"} and _cfg(
+            "VIDEO_CAPTION_INCLUDE_GROUP_TITLE" if self.kind == "video" else "MIXED_CAPTION_INCLUDE_GROUP_TITLE",
+            True,
+        ) and not base_label:
             QMessageBox.warning(self, "未保存", "请填写基础标题。")
             return
         try:
@@ -1347,7 +1498,11 @@ class UploadPage(QWidget):
         plan["caption"] = {
             "base_label": base_label,
             "custom_text": custom_text,
-            "text": compose_caption(base_label if (self.kind == "video" or _cfg("IMAGE_ALBUM_NUMBERING", True)) else "", custom_text, separator),
+            "text": compose_caption(
+                base_label if include_base else "",
+                custom_text,
+                separator,
+            ),
         }
         item.setText(1, self._album_title(plan))
         item.setToolTip(1, preview.toPlainText())
@@ -1455,7 +1610,7 @@ class TaskPage(QWidget):
         layout.addLayout(bottom)
 
     def start_session(self, kind: str, result: dict):
-        self.title.setText(f"任务中心 · {'视频' if kind == 'video' else '图片'}")
+        self.title.setText(f"任务中心 · {_kind_label(kind)}")
         self.task_status.setText("正在启动…")
         self.stop_button.setEnabled(True)
         self.progress.setValue(0)
@@ -1520,7 +1675,7 @@ class HistoryPage(QWidget):
         for row, record in enumerate(records):
             values = [
                 record.get("finished_at", record.get("started_at", "")),
-                "视频" if record.get("kind") == "video" else "图片",
+                _kind_label(record.get("kind", "image")),
                 record.get("source_dir", ""),
                 str(record.get("total_files", 0)),
                 _fmt_size(record.get("total_bytes", 0)),
@@ -1567,7 +1722,7 @@ class SettingsPage(QWidget):
         edit.setObjectName("primaryButton")
         edit.clicked.connect(self.open_editor)
         config_layout.addWidget(edit)
-        config_layout.addWidget(QLabel("GUI 会保留现有 config.toml 注释；视频和图片目标可分别设置。"))
+        config_layout.addWidget(QLabel("GUI 会保留现有 config.toml 注释；视频、图片和混合目标可分别设置。"))
         config_layout.addStretch(1)
         layout.addWidget(config_box)
 
@@ -1602,7 +1757,7 @@ class SettingsPage(QWidget):
         self.cache_status.setWordWrap(True)
         cache_layout.addWidget(self.cache_status)
         cache_hint = QLabel(
-            "清理所有会清空上传状态、旧版状态、视频封面和 GUI 历史记录；"
+            "清理所有会清空视频/图片/混合上传状态、旧版状态、视频封面和 GUI 历史记录；"
             "同时删除运行日志，但不会删除 config.toml 或 Telegram 登录数据库。"
         )
         cache_hint.setObjectName("mutedLabel")
@@ -1673,8 +1828,8 @@ class TargetDialog(QDialog):
             parent = kind if parent is None else parent
             kind = "video"
         super().__init__(parent)
-        self.kind = kind if kind in {"video", "image"} else "video"
-        accent = "视频" if self.kind == "video" else "图片"
+        self.kind = kind if kind in MEDIA_KINDS else "video"
+        accent = _kind_label(self.kind)
         self.setWindowTitle(f"编辑{accent}上传目标与配置 · V{APP_VERSION}")
         self.setMinimumWidth(700)
         self.resize(760, 640 if self.kind == "video" else 560)
@@ -1705,6 +1860,9 @@ class TargetDialog(QDialog):
                 "视频的分组方式、每组数量、组标题、文件名和序号都集中在“视频分组与标题”中。"
                 "关闭“读取视频日期信息”后会自动按文件名和固定分组处理。"
                 if self.kind == "video"
+                else "混合上传按一级子文件夹分组，图片和视频按同一顺序组成 Album；"
+                "组标题、文件名和序号选项集中在混合设置中。"
+                if self.kind == "mixed"
                 else "图片的排序、分组数量、标题和文件名选项都集中在图片设置中。"
             )
         )
@@ -1816,7 +1974,7 @@ class TargetDialog(QDialog):
             self.video_filename_numbers.setEnabled(self.video_filenames.isChecked())
             self.video_read_dates.toggled.connect(self._update_video_date_fields)
             self._update_video_date_fields()
-        else:
+        elif self.kind == "image":
             image_box = QGroupBox("图片分组与标题")
             image_form = QFormLayout(image_box)
             self.image_sort = QComboBox()
@@ -1854,6 +2012,32 @@ class TargetDialog(QDialog):
             )
             process_form.addRow("超限处理", self.image_compress)
             self.media_layout.addWidget(process_box)
+        else:
+            mixed_box = QGroupBox("混合分组与标题")
+            mixed_form = QFormLayout(mixed_box)
+            self.mixed_album = QSpinBox()
+            self.mixed_album.setRange(1, 10)
+            self.mixed_album.setValue(int(_cfg("MIXED_ALBUM_SIZE", 10)))
+            self.mixed_album.setToolTip("每个一级子文件夹按扫描顺序拆分，每组 1~10 个媒体。")
+            mixed_form.addRow("每组媒体数", self.mixed_album)
+            self.mixed_group_title = QCheckBox("带文件夹组标题")
+            self.mixed_group_title.setChecked(bool(_cfg("MIXED_CAPTION_INCLUDE_GROUP_TITLE", True)))
+            self.mixed_group_title.setToolTip("默认使用一级子文件夹名称作为 Album 标题。")
+            mixed_form.addRow("组标题", self.mixed_group_title)
+            self.mixed_filenames = QCheckBox("带文件名（仅标题，不含扩展名）")
+            self.mixed_filenames.setChecked(bool(_cfg("MIXED_CAPTION_INCLUDE_FILENAMES", False)))
+            mixed_form.addRow("文件名列表", self.mixed_filenames)
+            self.mixed_filename_numbers = QCheckBox("文件名带序号（1、2、3…）")
+            self.mixed_filename_numbers.setChecked(bool(_cfg("MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS", True)))
+            self.mixed_filename_numbers.setEnabled(self.mixed_filenames.isChecked())
+            self.mixed_filenames.toggled.connect(self.mixed_filename_numbers.setEnabled)
+            mixed_form.addRow("文件名格式", self.mixed_filename_numbers)
+            self.mixed_separator = QLineEdit(str(_cfg("MIXED_ALBUM_CAPTION_SEPARATOR", " · ")))
+            mixed_form.addRow("标题分隔符", self.mixed_separator)
+            self.mixed_thumbnail = QCheckBox("视频生成缩略图")
+            self.mixed_thumbnail.setChecked(bool(_cfg("MIXED_GENERATE_THUMBNAIL", True)))
+            mixed_form.addRow("视频处理", self.mixed_thumbnail)
+            self.media_layout.addWidget(mixed_box)
 
     def _load_target(self):
         target = _target_for(self.kind)
@@ -1940,7 +2124,7 @@ class TargetDialog(QDialog):
                 ("video", "caption_include_filename_numbers"): self.video_filename_numbers.isChecked(),
                 ("video", "generate_thumbnail"): self.thumbnail.isChecked(),
             })
-        else:
+        elif self.kind == "image":
             values.update({
                 ("image", "sort_mode"): self.image_sort.currentData(),
                 ("image", "album_size"): self.image_album.value(),
@@ -1948,6 +2132,15 @@ class TargetDialog(QDialog):
                 ("image", "album_caption_separator"): self.image_separator.text(),
                 ("image", "caption_include_filenames"): self.image_filenames.isChecked(),
                 ("image", "compress_oversize"): self.image_compress.isChecked(),
+            })
+        else:
+            values.update({
+                ("mixed", "album_size"): self.mixed_album.value(),
+                ("mixed", "caption_include_group_title"): self.mixed_group_title.isChecked(),
+                ("mixed", "caption_include_filenames"): self.mixed_filenames.isChecked(),
+                ("mixed", "caption_include_filename_numbers"): self.mixed_filename_numbers.isChecked(),
+                ("mixed", "album_caption_separator"): self.mixed_separator.text(),
+                ("mixed", "generate_thumbnail"): self.mixed_thumbnail.isChecked(),
             })
         error = _write_config_values(values)
         if error:
@@ -1976,6 +2169,7 @@ class ConfigDialog(QDialog):
         form.addRow("API Hash", field("api_hash", _cfg("API_HASH", "YOUR_API_HASH"), True))
         form.addRow("视频目录", field("video_dir", _cfg("VIDEO_DIR", "")))
         form.addRow("图片目录", field("image_dir", _cfg("IMAGE_DIR", "")))
+        form.addRow("混合目录", field("mixed_dir", _cfg("MIXED_DIR", "")))
         default_exiftool = "tools/exiftool.exe" if os.name == "nt" else "tools/exiftool"
         form.addRow("ExifTool 路径", field("exiftool_path", _cfg("EXIFTOOL_PATH", default_exiftool)))
         layout.addLayout(form)
@@ -2035,7 +2229,7 @@ class ConfigDialog(QDialog):
         layout.addWidget(proxy_box)
 
         hint = QLabel(
-            "视频/图片的 Album、Caption 和处理选项请在各自上传页面的“编辑目标”中设置。"
+            "视频、图片和混合上传的 Album、Caption 及处理选项请在各自上传页面的“编辑目标”中设置。"
             "API Hash、代理认证信息和 MTProto Secret 只写入本地 config.toml，不会写入 GUI 日志。"
             "代理由 TDLib 原生支持；tdjson 版本仍由项目固定要求控制。"
         )
@@ -2084,6 +2278,7 @@ class ConfigDialog(QDialog):
             ("telegram", "api_hash"): self.fields["api_hash"].text().strip(),
             ("paths", "video_dir"): self.fields["video_dir"].text().strip(),
             ("paths", "image_dir"): self.fields["image_dir"].text().strip(),
+            ("paths", "mixed_dir"): self.fields["mixed_dir"].text().strip(),
             ("paths", "exiftool_path"): self.fields["exiftool_path"].text().strip(),
             ("proxy", "enabled"): self.proxy_enabled.isChecked(),
             ("proxy", "type"): self.proxy_type.currentData() or "socks5",
@@ -2190,7 +2385,7 @@ class MainWindow(QMainWindow):
         self.sidebar = QListWidget()
         self.sidebar.setObjectName("sidebar")
         self.sidebar.setFixedWidth(215)
-        for label in ("概览", "视频上传", "图片上传", "任务中心", "历史记录", "设置与诊断"):
+        for label in ("概览", "视频上传", "图片上传", "混合上传", "任务中心", "历史记录", "设置与诊断"):
             self.sidebar.addItem(QListWidgetItem(label))
         root.addWidget(self.sidebar)
 
@@ -2198,10 +2393,17 @@ class MainWindow(QMainWindow):
         self.home = HomePage()
         self.video_page = UploadPage("video")
         self.image_page = UploadPage("image")
+        self.mixed_page = UploadPage("mixed")
         self.task_page = TaskPage()
         self.history_page = HistoryPage()
         self.settings_page = SettingsPage()
-        for page in (self.home, self.video_page, self.image_page, self.task_page, self.history_page, self.settings_page):
+        self.upload_pages = {
+            "video": self.video_page,
+            "image": self.image_page,
+            "mixed": self.mixed_page,
+        }
+        self.sidebar_rows = {"video": 1, "image": 2, "mixed": 3, "task": 4, "history": 5, "settings": 6}
+        for page in (self.home, self.video_page, self.image_page, self.mixed_page, self.task_page, self.history_page, self.settings_page):
             if isinstance(page, UploadPage):
                 # Upload pages contain several stacked sections.  Keeping
                 # them in a scroll area prevents the Telegram target and
@@ -2219,15 +2421,12 @@ class MainWindow(QMainWindow):
         self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.sidebar.setCurrentRow(0)
         self.home.start_upload.connect(self._open_upload)
-        self.home.open_settings.connect(lambda: self.sidebar.setCurrentRow(5))
-        self.video_page.scan_requested.connect(self._scan)
-        self.image_page.scan_requested.connect(self._scan)
-        self.video_page.start_requested.connect(self._start_upload)
-        self.image_page.start_requested.connect(self._start_upload)
-        self.video_page.path_selected.connect(self._save_source_path)
-        self.image_page.path_selected.connect(self._save_source_path)
-        self.video_page.edit_target_requested.connect(self._edit_target)
-        self.image_page.edit_target_requested.connect(self._edit_target)
+        self.home.open_settings.connect(lambda: self.sidebar.setCurrentRow(self.sidebar_rows["settings"]))
+        for page in self.upload_pages.values():
+            page.scan_requested.connect(self._scan)
+            page.start_requested.connect(self._start_upload)
+            page.path_selected.connect(self._save_source_path)
+            page.edit_target_requested.connect(self._edit_target)
         self.task_page.stop_requested.connect(self._stop_upload)
         self.settings_page.open_editor.connect(self._edit_config)
         self.settings_page.clear_all_requested.connect(self._clear_all_cache)
@@ -2238,13 +2437,14 @@ class MainWindow(QMainWindow):
     def _refresh_pages(self):
         self.video_page.refresh_config()
         self.image_page.refresh_config()
+        self.mixed_page.refresh_config()
         self.settings_page.refresh()
         self.history_page.reload_records()
         if _CONFIG_CREATED:
             self.statusBar().showMessage("已创建 config.toml，请先在设置中填写 Telegram 信息")
 
     def _open_upload(self, kind: str):
-        self.sidebar.setCurrentRow(1 if kind == "video" else 2)
+        self.sidebar.setCurrentRow(self.sidebar_rows.get(kind, 1))
         self._scan(kind)
 
     def _scan(self, kind: str):
@@ -2259,7 +2459,7 @@ class MainWindow(QMainWindow):
             return
         worker = ScanWorker(kind)
         self.scanners[kind] = worker
-        page = self.video_page if kind == "video" else self.image_page
+        page = self.upload_pages.get(kind, self.video_page)
         page.set_scanning(True)
         worker.completed.connect(lambda result, k=kind: self._scan_done(k, result))
         worker.failed.connect(lambda message, k=kind: self._scan_failed(k, message))
@@ -2271,7 +2471,7 @@ class MainWindow(QMainWindow):
     def _scan_progress(self, kind: str, payload: object):
         if not isinstance(payload, dict):
             return
-        page = self.video_page if kind == "video" else self.image_page
+        page = self.upload_pages.get(kind, self.video_page)
         phase = str(payload.get("phase", "scan"))
         completed = max(0, int(payload.get("completed", 0) or 0))
         total = max(0, int(payload.get("total", 0) or 0))
@@ -2288,35 +2488,35 @@ class MainWindow(QMainWindow):
 
     def _scan_done(self, kind: str, result: dict):
         self.scanners.pop(kind, None)
-        page = self.video_page if kind == "video" else self.image_page
+        page = self.upload_pages.get(kind, self.video_page)
         page.set_scanning(False)
         page.set_result(result)
         self.home.update_scan(result)
-        self.statusBar().showMessage(f"{kind} 扫描完成")
+        self.statusBar().showMessage(f"{_kind_label(kind)}扫描完成")
 
     def _scan_failed(self, kind: str, message: str):
         self.scanners.pop(kind, None)
-        page = self.video_page if kind == "video" else self.image_page
+        page = self.upload_pages.get(kind, self.video_page)
         page.set_scanning(False)
         page.status_label.setText(message)
         self.statusBar().showMessage(message)
 
     def _save_source_path(self, kind: str, path: str):
         if not self._can_change_configuration():
-            (self.video_page if kind == "video" else self.image_page).refresh_config()
+            self.upload_pages.get(kind, self.video_page).refresh_config()
             return
         path = path.strip().strip('"')
         if not path or not Path(path).is_dir():
-            (self.video_page if kind == "video" else self.image_page).refresh_config()
+            self.upload_pages.get(kind, self.video_page).refresh_config()
             QMessageBox.warning(self, "目录不可用", "请输入可访问的目录路径。")
             return
-        section_key = ("paths", "video_dir" if kind == "video" else "image_dir")
-        if path == str(_cfg("VIDEO_DIR" if kind == "video" else "IMAGE_DIR", "")):
+        section_key = ("paths", KIND_PATH_CONFIG_KEYS.get(kind, "image_dir"))
+        if path == str(_cfg(KIND_PATH_KEYS.get(kind, "IMAGE_DIR"), "")):
             return
         error = _write_config_values({section_key: path})
         if error:
             QMessageBox.critical(self, "保存失败", error)
-            (self.video_page if kind == "video" else self.image_page).refresh_config()
+            self.upload_pages.get(kind, self.video_page).refresh_config()
         else:
             self._invalidate_previews()
             self._refresh_pages()
@@ -2329,7 +2529,7 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.warning(self, "任务运行中", "图片和视频任务不能同时运行。")
             return
-        page = self.video_page if kind == "video" else self.image_page
+        page = self.upload_pages.get(kind, self.video_page)
         result = page.result
         if not result or not result.get("pending_files"):
             QMessageBox.information(self, "无需上传", "当前没有待上传项目。")
@@ -2339,7 +2539,7 @@ class MainWindow(QMainWindow):
             return
         if _cfg("API_ID", 12345678) == 12345678 or _cfg("API_HASH", "YOUR_API_HASH") == "YOUR_API_HASH":
             QMessageBox.warning(self, "尚未配置", "请先在设置中填写 Telegram API ID 和 API Hash。")
-            self.sidebar.setCurrentRow(5)
+            self.sidebar.setCurrentRow(self.sidebar_rows["settings"])
             return
 
         answer = QMessageBox.question(
@@ -2359,7 +2559,7 @@ class MainWindow(QMainWindow):
         self.active_result = result
         self.started_at = _dt.datetime.now().isoformat(timespec="seconds")
         self.task_page.start_session(kind, result)
-        self.sidebar.setCurrentRow(3)
+        self.sidebar.setCurrentRow(self.sidebar_rows["task"])
         worker = UploadWorker(kind, self.auth_bridge)
         self.worker = worker
         worker.ui.message_added.connect(self.task_page.add_message)
@@ -2368,9 +2568,9 @@ class MainWindow(QMainWindow):
         worker.ui.target_changed.connect(self._target_from_worker)
         worker.completed.connect(self._upload_finished)
         worker.finished.connect(lambda w=worker: self._worker_thread_finished(w))
-        self.video_page.set_running(True)
-        self.image_page.set_running(True)
-        self.home.task_value.setText(f"{'视频' if kind == 'video' else '图片'}上传中")
+        for upload_page in self.upload_pages.values():
+            upload_page.set_running(True)
+        self.home.task_value.setText(f"{_kind_label(kind)}上传中")
         self.home.set_connection("上传中", True)
         self.statusBar().showMessage("上传任务已启动")
         worker.start()
@@ -2378,7 +2578,7 @@ class MainWindow(QMainWindow):
     def _target_from_worker(self, payload: dict):
         self.home.set_connection("已连接", True)
         kind = payload.get("kind") or self.active_kind
-        page = self.video_page if kind == "video" else self.image_page
+        page = self.upload_pages.get(kind, self.video_page)
         is_channel = str(payload.get("target_mode") or _target_for(kind).get("target_mode")) == "channel"
         page.chat_label.setText(
             f"{'频道' if is_channel else '超级群组'} · "
@@ -2429,9 +2629,9 @@ class MainWindow(QMainWindow):
             _save_history(records)
 
         self.task_page.finish_session(success, message)
-        page = self.video_page if self.active_kind == "video" else self.image_page
-        self.video_page.set_running(False)
-        self.image_page.set_running(False)
+        page = self.upload_pages.get(self.active_kind, self.video_page)
+        for upload_page in self.upload_pages.values():
+            upload_page.set_running(False)
         page.clear_scan_result()
         self.home.task_value.setText("无")
         self.home.set_connection("已连接" if success else "未连接", success)
@@ -2457,8 +2657,8 @@ class MainWindow(QMainWindow):
         removed, errors = _clear_cache(keys)
         self.settings_page.refresh()
         if reset_scan:
-            self.video_page.clear_scan_result()
-            self.image_page.clear_scan_result()
+            for upload_page in self.upload_pages.values():
+                upload_page.clear_scan_result()
             self.home.clear_scan()
             self.history_page.reload_records()
         if errors:
@@ -2479,7 +2679,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.warning(
             self,
             "确认清理所有缓存",
-            "将清空视频/图片上传状态、旧版状态、视频封面缓存、GUI 历史记录和运行日志，保留目录本身。\n\n"
+            "将清空视频/图片/混合上传状态、旧版状态、视频封面缓存、GUI 历史记录和运行日志，保留目录本身。\n\n"
             "config.toml 和 Telegram 登录数据库不会被删除。是否继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -2509,7 +2709,7 @@ class MainWindow(QMainWindow):
             self._refresh_pages()
             saved_kind = dialog.kind
             self.statusBar().showMessage(
-                f"{'视频' if saved_kind == 'video' else '图片'}上传目标已保存"
+                f"{_kind_label(saved_kind)}上传目标已保存"
             )
 
     def _edit_config(self):
@@ -2528,8 +2728,8 @@ class MainWindow(QMainWindow):
         return True
 
     def _invalidate_previews(self):
-        self.video_page.clear_scan_result()
-        self.image_page.clear_scan_result()
+        for upload_page in self.upload_pages.values():
+            upload_page.clear_scan_result()
         self.home.clear_scan()
 
     @Slot(str, bool)

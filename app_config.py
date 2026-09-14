@@ -9,7 +9,7 @@ from pathlib import Path
 
 from runtime_paths import CONFIG_PATH, RESOURCE_DIR
 
-APP_VERSION = "1.8.11"
+APP_VERSION = "1.9.0"
 PROJECT_DIR = RESOURCE_DIR
 
 # Telegram's current upload limits used by this application.  Keep these
@@ -117,6 +117,7 @@ telegram = _section("telegram")
 paths = _section("paths")
 video = _section("video")
 image = _section("image")
+mixed = _optional_section("mixed")
 tdlib = _section("tdlib")
 proxy = _optional_section("proxy")
 
@@ -171,11 +172,12 @@ if _BASE_TARGET["target_mode"] == "forum_topic":
 _TARGETS = {
     "video": _parse_target(_target_section("video"), _BASE_TARGET),
     "image": _parse_target(_target_section("image"), _BASE_TARGET),
+    "mixed": _parse_target(_target_section("mixed"), _BASE_TARGET),
 }
 
 
 def target_for(kind: str) -> dict:
-    """Return the effective target for an image or video upload."""
+    """Return the effective target for a media upload type."""
     return dict(_TARGETS.get(str(kind).lower(), _BASE_TARGET))
 
 
@@ -472,6 +474,42 @@ IMAGE_COMPRESS_OVERSIZE = bool(
         False,
     )
 )
+
+
+# 混合上传：旧版配置没有 [mixed] 时使用兼容默认值。混合目录下的一级
+# 子目录是独立组，图片和视频沿用各自的扩展名与 Telegram 上限。
+MIXED_DIR = _resolve_path(
+    paths.get("mixed_dir", str(PROJECT_DIR / "Mixed"))
+)
+MIXED_IMAGE_EXTENSIONS = _extensions(
+    mixed.get("image_extensions", list(IMAGE_EXTENSIONS))
+)
+MIXED_VIDEO_EXTENSIONS = _extensions(
+    mixed.get("video_extensions", list(VIDEO_EXTENSIONS))
+)
+MIXED_EXTENSIONS = MIXED_IMAGE_EXTENSIONS | MIXED_VIDEO_EXTENSIONS
+MIXED_ALBUM_SIZE = int(mixed.get("album_size", 10))
+if not 1 <= MIXED_ALBUM_SIZE <= 10:
+    raise RuntimeError("[mixed].album_size 必须为 1~10。")
+MIXED_CAPTION_INCLUDE_GROUP_TITLE = bool(
+    mixed.get("caption_include_group_title", True)
+)
+MIXED_CAPTION_INCLUDE_FILENAMES = bool(
+    mixed.get("caption_include_filenames", False)
+)
+MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS = bool(
+    mixed.get("caption_include_filename_numbers", True)
+)
+MIXED_ALBUM_CAPTION_SEPARATOR = str(
+    mixed.get("album_caption_separator", " · ")
+)
+MIXED_GENERATE_THUMBNAIL = bool(
+    mixed.get("generate_thumbnail", VIDEO_GENERATE_THUMBNAIL)
+)
+MIXED_VERIFY_MEDIA = bool(
+    mixed.get("verify_media_before_upload", False)
+)
+MIXED_RESET_STATE = bool(mixed.get("reset_state", False))
 
 
 # 网络代理（由 TDLib 原生处理；默认关闭时明确使用直连）

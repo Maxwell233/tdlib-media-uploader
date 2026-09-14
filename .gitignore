@@ -20,10 +20,13 @@ __pycache__/
 /.video_state/
 /.state/
 /.image_state/
+/.mixed_state/
 /.thumb_cache/
+/.image_compression/
 /.gui_history.json
 /.video_album_captions.json
 /.image_album_captions.json
+/.mixed_album_captions.json
 /logs/
 
 # Optional local tools / binaries

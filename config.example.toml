@@ -1,5 +1,5 @@
 # ============================================================
-# TDLib Media Uploader V1.8.11
+# TDLib Media Uploader V1.9.0
 #
 # 首次使用：
 #   1. 复制本文件为 config.toml
@@ -29,9 +29,9 @@ target_mode = "forum_topic"
 # 频道 Chat ID。选择 channel 时必须填写；选择 forum_topic 时可保持 0。
 channel_chat_id = 0
 
-# 可选：分别为视频和图片覆盖 Telegram 目标。
+# 可选：分别为视频、图片和混合上传覆盖 Telegram 目标。
 # 未填写对应小节时，该上传类型继承上面 [telegram] 的公共目标。
-# GUI 的“视频上传”和“图片上传”页面也可以分别编辑这里的目标。
+# GUI 的三个上传页面也可以分别编辑这里的目标。
 #
 # [telegram.video]
 # target_mode = "forum_topic"
@@ -44,6 +44,12 @@ channel_chat_id = 0
 # chat_id = -1001234567890
 # channel_chat_id = -1009876543210
 # forum_topic_id = 0
+#
+# [telegram.mixed]
+# target_mode = "forum_topic"
+# chat_id = -1001234567890
+# channel_chat_id = 0
+# forum_topic_id = 12345
 
 
 [proxy]
@@ -71,6 +77,8 @@ http_only = false
 # 会递归扫描所有子文件夹
 video_dir = '~/Movies/TDLib Media Uploader/Videos'
 image_dir = '~/Pictures/TDLib Media Uploader/Images'
+# 混合上传目录；其下的一级子文件夹分别作为独立组
+mixed_dir = '~/Movies/TDLib Media Uploader/Mixed'
 
 # 可选：ExifTool 路径
 # Windows 使用 tools/exiftool.exe，macOS/Linux 使用 tools/exiftool。
@@ -136,6 +144,21 @@ show_file_list = true
 verify_all_metadata_before_upload = false
 
 # 仅在需要清空视频断点时临时改为 true
+reset_state = false
+
+
+[mixed]
+
+# 递归收集每个一级子文件夹中的图片和视频，按相对路径排序后混合组成 Album。
+image_extensions = [".jpg", ".jpeg", ".png", ".webp"]
+video_extensions = [".mp4", ".mov", ".m4v"]
+album_size = 10
+caption_include_group_title = true
+caption_include_filenames = false
+caption_include_filename_numbers = true
+album_caption_separator = " · "
+generate_thumbnail = true
+verify_media_before_upload = false
 reset_state = false
 
 

@@ -78,6 +78,7 @@ hiddenimports = [
     "tdlib_common",
     "tdlib_image_album_uploader",
     "tdlib_video_album_uploader",
+    "tdlib_mixed_album_uploader",
     "tdlib_video_app",
     "tdjson",
     "PIL",

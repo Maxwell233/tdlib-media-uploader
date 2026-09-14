@@ -6,6 +6,7 @@ from __future__ import annotations
 import ntpath
 import os
 import stat
+import time
 from pathlib import Path
 
 
@@ -49,6 +50,42 @@ def file_mtime(path, fallback: float = 0.0) -> float:
         return float(os.stat(path).st_mtime)
     except OSError:
         return fallback
+
+
+def file_snapshot(path):
+    """Return a lightweight identity snapshot for a regular media file."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+        return None
+    mtime_ns = getattr(info, "st_mtime_ns", None)
+    if mtime_ns is None:
+        mtime_ns = int(info.st_mtime * 1_000_000_000)
+    return int(info.st_size), int(mtime_ns)
+
+
+def is_file_stable(path, interval: float = 0.03) -> bool:
+    """Check that a file remains unchanged across two short observations."""
+    first = file_snapshot(path)
+    if first is None:
+        return False
+    if interval > 0:
+        time.sleep(min(float(interval), 0.25))
+    return first == file_snapshot(path)
+
+
+def revalidate_file(path, *, expected_size=None, expected_mtime_ns=None):
+    """Validate a source file immediately before handing it to a media tool."""
+    snapshot = file_snapshot(path)
+    if snapshot is None:
+        raise RuntimeError(f"文件暂时不可读取或已被删除：{path}")
+    if expected_size is not None and int(expected_size) != snapshot[0]:
+        raise RuntimeError(f"文件在扫描后发生变化：{path}")
+    if expected_mtime_ns is not None and int(expected_mtime_ns) != snapshot[1]:
+        raise RuntimeError(f"文件在扫描后发生变化：{path}")
+    return snapshot
 
 
 def relative_name(path, root) -> str:

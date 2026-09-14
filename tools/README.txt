@@ -1,7 +1,7 @@
 ExifTool（可选）
 ================
 
-V1.8.11 默认 missing_date_policy = "mtime"，因此没有 ExifTool 也能上传视频。
+V1.9.0 默认 missing_date_policy = "mtime"，因此没有 ExifTool 也能上传视频。
 
 如果希望脚本优先读取视频内部的 EXIF，以及可选的媒体/QuickTime 创建时间，可安装 ExifTool：
 
@@ -47,6 +47,14 @@ macOS:  exiftool_path = 'tools/exiftool'
 - album_size 可设为 1~10；sort_mode 可在修改时间和文件名之间二选一。
 - caption_include_group_title、caption_include_filenames、caption_include_filename_numbers
   分别控制组标题、文件名和文件名序号。
+- “带文件名”统一只显示 stem，不显示最后的扩展名；视频、图片和混合上传均适用。
+
+混合上传：
+- 在 [paths] 设置 mixed_dir；每个一级子文件夹作为一个独立组，递归收集其中的图片和视频。
+- [mixed] 的 album_size 可设为 1~10，组超过该数量会拆成多个 Telegram Album。
+- 可在 [telegram.mixed] 配置独立 Chat/Topic 或频道目标；旧版配置会继承 [telegram]。
+- caption_include_group_title、caption_include_filenames、caption_include_filename_numbers
+  控制文件夹标题、文件名和序号。
 
 FFmpeg（源码运行视频功能）
 ============================
