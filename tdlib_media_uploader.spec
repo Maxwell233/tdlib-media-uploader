@@ -76,6 +76,7 @@ hiddenimports = [
     "album_metadata",
     "path_utils",
     "tdlib_common",
+    "upload_journal",
     "tdlib_image_album_uploader",
     "tdlib_video_album_uploader",
     "tdlib_mixed_album_uploader",

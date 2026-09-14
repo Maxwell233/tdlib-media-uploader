@@ -468,13 +468,14 @@ IMAGE_SORT_MODE = str(
     )
 ).strip().lower()
 
-if IMAGE_SORT_MODE not in {
-    "mtime",
-    "path",
-}:
+if IMAGE_SORT_MODE == "path":
+    # ``path`` was the image-only spelling before the shared media sorter.
+    # Normalize it immediately so newly written configuration is consistent.
+    IMAGE_SORT_MODE = "name"
+if IMAGE_SORT_MODE not in {"mtime", "name"}:
     raise RuntimeError(
         '[image].sort_mode 只能是 '
-        '"mtime" 或 "path"。'
+        '"mtime" 或 "name"。'
     )
 
 IMAGE_SHOW_FILE_LIST = bool(
@@ -506,10 +507,42 @@ IMAGE_COMPRESS_OVERSIZE = bool(
 )
 
 
-# 扫描/媒体读取的共享 I/O 参数。旧配置不存在这些段时沿用当前默认值。
+# 扫描/媒体读取的共享 I/O 参数。新配置按本地/网络盘分别设置；旧配置
+# 的全局字段继续作为两者的兼容回退。
 SCAN_STABILITY_CHECKS = _bounded_int(scan, "stability_checks", 2, 1, 8)
 SCAN_STABILITY_INTERVAL_SECONDS = _bounded_float(
     scan, "stability_interval_seconds", 0.05, 0.0, 5.0
+)
+SCAN_STABILITY_CHECKS_LOCAL = _bounded_int(
+    scan, "stability_checks_local", SCAN_STABILITY_CHECKS, 1, 8
+)
+SCAN_STABILITY_INTERVAL_LOCAL_SECONDS = _bounded_float(
+    scan,
+    "stability_interval_local_seconds",
+    SCAN_STABILITY_INTERVAL_SECONDS,
+    0.0,
+    30.0,
+)
+SCAN_STABILITY_CHECKS_NETWORK = _bounded_int(
+    scan,
+    "stability_checks_network",
+    SCAN_STABILITY_CHECKS if "stability_checks" in scan else 3,
+    1,
+    8,
+)
+SCAN_STABILITY_INTERVAL_NETWORK_SECONDS = _bounded_float(
+    scan,
+    "stability_interval_network_seconds",
+    SCAN_STABILITY_INTERVAL_SECONDS if "stability_interval_seconds" in scan else 0.5,
+    0.0,
+    60.0,
+)
+SCAN_DISCOVERY_ATTEMPTS = _bounded_int(scan, "discovery_attempts", 3, 1, 8)
+SCAN_DISCOVERY_INITIAL_DELAY_SECONDS = _bounded_float(
+    scan, "discovery_initial_delay_seconds", 0.15, 0.0, 10.0
+)
+SCAN_DISCOVERY_MAX_DELAY_SECONDS = _bounded_float(
+    scan, "discovery_max_delay_seconds", 1.0, 0.0, 60.0
 )
 SCAN_READINESS_ATTEMPTS = _bounded_int(scan, "readiness_attempts", 3, 1, 8)
 SCAN_READ_PROBE_BYTES = _bounded_int(scan, "read_probe_bytes", 64 * 1024, 1, 4 * 1024 * 1024)
@@ -533,6 +566,8 @@ FFMPEG_THUMBNAIL_TIMEOUT_SECONDS = _bounded_float(
 FFMPEG_COMPRESSION_TIMEOUT_SECONDS = _bounded_float(
     process, "ffmpeg_compression_timeout_seconds", 45.0, 1.0, 86_400.0
 )
+EXIFTOOL_BATCH_SIZE = _bounded_int(process, "exiftool_batch_size", 256, 1, 4096)
+EXIFTOOL_RETRIES = _bounded_int(process, "exiftool_retries", 2, 0, 5)
 
 
 # 混合上传：旧版配置没有 [mixed] 时使用兼容默认值。混合目录下的一级
@@ -576,7 +611,15 @@ MIXED_RESET_STATE = bool(mixed.get("reset_state", False))
 
 # 可选本地暂存：源文件仍以原路径参与断点和标题键，发送前才复制到本地
 # 缓存，适合不稳定的 SMB/NAS。旧配置没有此段时保持关闭。
-STAGING_ENABLED = bool(staging.get("enabled", False))
+# ``enabled`` remains the legacy switch.  The new mode lets callers stage only
+# network paths while preserving the old true/false behavior exactly.
+_legacy_staging_enabled = bool(staging.get("enabled", False))
+STAGING_MODE = str(
+    staging.get("mode", "always" if _legacy_staging_enabled else "off")
+).strip().lower()
+if STAGING_MODE not in {"off", "network", "always"}:
+    raise RuntimeError('[staging].mode 只能是 "off"、"network" 或 "always"。')
+STAGING_ENABLED = STAGING_MODE != "off"
 _staging_value = str(staging.get("directory", ".staging")).strip()
 if not _staging_value:
     raise RuntimeError("config.toml 中的 staging.directory 不能为空。")
@@ -587,6 +630,7 @@ if not STAGING_DIR.is_absolute():
     STAGING_DIR = APP_DATA_DIR / STAGING_DIR
 STAGING_CLEANUP_ON_START = bool(staging.get("cleanup_on_start", True))
 STAGING_CLEANUP_DAYS = _bounded_int(staging, "cleanup_days", 7, 0, 3650)
+STAGING_CLEANUP_AFTER_SUCCESS = bool(staging.get("cleanup_after_success", True))
 
 
 # [image] 与 [video] 的扩展名必须互斥，否则 mixed 无法确定媒体类型。

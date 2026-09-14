@@ -3,7 +3,12 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import json
+import random
+import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -60,6 +65,256 @@ class ImprovementsTest(unittest.TestCase):
             path_utils.natural_sort(names),
             ["x.1", "x.10", "x.41", "x.100", "x.101", "x.102", "x.103", "x.409", "x.410"],
         )
+
+    def test_natural_sort_is_deterministic_for_equal_case_and_leading_zero_runs(self):
+        values = ["x001", "a1", "x1", "A1", "x01"]
+        expected = ["A1", "a1", "x1", "x01", "x001"]
+        for _ in range(8):
+            shuffled = list(values)
+            random.shuffle(shuffled)
+            self.assertEqual(path_utils.natural_sort(shuffled), expected)
+
+    def test_cancellable_process_drains_pipes_and_passes_utf8_input(self):
+        script = (
+            "import sys; data=sys.stdin.read(); "
+            "sys.stdout.write(data); sys.stdout.flush(); "
+            "sys.stderr.write('e'*1200000); sys.stderr.flush()"
+        )
+        result = path_utils.run_cancellable_process(
+            [sys.executable, "-u", "-c", script],
+            input="中文输入",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cancel_event=threading.Event(),
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "中文输入")
+        self.assertGreaterEqual(len(result.stderr), 1_200_000)
+
+    def test_cancellable_process_drains_large_stdout_and_stderr(self):
+        script = (
+            "import sys; sys.stdout.write('o'*1200000); sys.stdout.flush(); "
+            "sys.stderr.write('e'*1200000); sys.stderr.flush()"
+        )
+        result = path_utils.run_cancellable_process(
+            [sys.executable, "-u", "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            cancel_event=threading.Event(),
+            timeout=10,
+        )
+        self.assertEqual(len(result.stdout), 1_200_000)
+        self.assertEqual(len(result.stderr), 1_200_000)
+
+    def test_cancellable_process_cancel_and_timeout_reap_child(self):
+        cancel = threading.Event()
+        timer = threading.Timer(0.15, cancel.set)
+        timer.start()
+        try:
+            with self.assertRaises(TimeoutError):
+                path_utils.run_cancellable_process(
+                    [sys.executable, "-u", "-c", "import time; time.sleep(30)"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cancel_event=cancel,
+                    timeout=5,
+                )
+        finally:
+            timer.cancel()
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            path_utils.run_cancellable_process(
+                [sys.executable, "-u", "-c", "import time; time.sleep(30)"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cancel_event=threading.Event(),
+                timeout=0.15,
+            )
+        self.assertLess(time.monotonic() - started, 4)
+
+    def test_cancellable_process_kills_child_that_ignores_terminate(self):
+        cancel = threading.Event()
+        timer = threading.Timer(0.15, cancel.set)
+        timer.start()
+        script = (
+            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "time.sleep(30)"
+        )
+        started = time.monotonic()
+        try:
+            with self.assertRaises(TimeoutError):
+                path_utils.run_cancellable_process(
+                    [sys.executable, "-u", "-c", script],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cancel_event=cancel,
+                    timeout=5,
+                )
+        finally:
+            timer.cancel()
+        self.assertLess(time.monotonic() - started, 4)
+
+    def test_discovery_retries_scandir_and_stat(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "clip.jpg").write_bytes(b"image")
+            original_scandir = path_utils.os.scandir
+            calls = {"scandir": 0}
+
+            def flaky_scandir(path):
+                calls["scandir"] += 1
+                if calls["scandir"] == 1:
+                    raise OSError("share temporarily offline")
+                return original_scandir(path)
+
+            with patch.object(path_utils.os, "scandir", side_effect=flaky_scandir):
+                result = path_utils.iter_files(
+                    root,
+                    {".jpg"},
+                    discovery_attempts=3,
+                    discovery_initial_delay=0,
+                    discovery_max_delay=0,
+                )
+            self.assertEqual([path.name for path in result.paths], ["clip.jpg"])
+            self.assertEqual(calls["scandir"], 2)
+
+            class Entry:
+                name = "retry.jpg"
+                path = str(root / name)
+
+                def __init__(self):
+                    self.calls = 0
+
+                def is_symlink(self):
+                    return False
+
+                def stat(self, follow_symlinks=False):
+                    self.calls += 1
+                    if self.calls == 1:
+                        raise OSError("stat temporarily offline")
+                    return (root / self.name).stat()
+
+            entry = Entry()
+
+            class Entries:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def __iter__(self):
+                    return iter([entry])
+
+            (root / "retry.jpg").write_bytes(b"image")
+            with patch.object(path_utils.os, "scandir", return_value=Entries()):
+                result = path_utils.iter_files(
+                    root,
+                    {".jpg"},
+                    discovery_attempts=3,
+                    discovery_initial_delay=0,
+                    discovery_max_delay=0,
+                )
+            self.assertEqual([path.name for path in result.paths], ["retry.jpg"])
+            self.assertEqual(entry.calls, 2)
+
+    def test_discovery_retry_can_be_cancelled_and_scan_result_separates_warnings(self):
+        cancel = threading.Event()
+        cancel.set()
+        with self.assertRaises(TimeoutError):
+            path_utils.retry_fs_operation(
+                lambda: (_ for _ in ()).throw(OSError("offline")),
+                attempts=5,
+                initial_delay=1,
+                cancel_event=cancel,
+            )
+        result = path_utils.ScanResult([], ["read failed"], ["link skipped"], True)
+        self.assertEqual(result.errors, ["read failed"])
+        self.assertEqual(result.warnings, ["link skipped"])
+        self.assertTrue(result.cancelled)
+        _paths, legacy_errors = result
+        self.assertIn("link skipped", legacy_errors)
+        self.assertIn("目录扫描已取消", legacy_errors)
+
+    def test_inflight_journal_blocks_unknown_until_manual_reconciliation(self):
+        from upload_journal import InflightJournal, UNKNOWN
+
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("mixed", "album-key", [{"path": "clip.jpg"}])
+            journal.submitted("mixed", "album-key", [11])
+            journal.unknown("mixed", "album-key", "confirmation timeout")
+            self.assertEqual(journal.unresolved("mixed", "album-key")["status"], UNKNOWN)
+            self.assertEqual(len(journal.list_unresolved()), 1)
+            journal.mark_not_sent("mixed", "album-key")
+            self.assertIsNone(journal.unresolved("mixed", "album-key"))
+            journal.prepare("mixed", "album-key", [{"path": "clip.jpg"}])
+            journal.confirmed("mixed", "album-key", [12])
+            self.assertIsNone(journal.get("mixed", "album-key"))
+
+    def test_confirmed_inflight_record_blocks_until_finalization(self):
+        from upload_journal import CONFIRMED, InflightJournal
+
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "album-key", [{"path": "clip.jpg"}])
+            journal.update("image", "album-key", CONFIRMED, message_ids=[7])
+            self.assertEqual(
+                journal.unresolved("image", "album-key")["status"],
+                CONFIRMED,
+            )
+            journal.confirmed("image", "album-key", [7])
+            self.assertIsNone(journal.unresolved("image", "album-key"))
+
+    def test_immediate_tdlib_send_failure_is_recorded_as_failed(self):
+        import tdlib_common
+        from upload_journal import FAILED, InflightJournal
+
+        class UI:
+            def warning(self, _text):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
+            client.ui = UI()
+            client.inflight_journal = journal
+            client.cancel_event = threading.Event()
+            client.request = lambda _query: {
+                "id": 17,
+                "sending_state": {"@type": "messageSendingStateFailed"},
+            }
+            with patch.object(client, "_safe_diagnose_upload_failure"):
+                with self.assertRaises(RuntimeError):
+                    client.send_contents(
+                        [{"@type": "inputMessagePhoto"}],
+                        album_key="album-key",
+                        kind="image",
+                    )
+            record = journal.get("image", "album-key")
+            self.assertIsNotNone(record)
+            self.assertEqual(record["status"], FAILED)
+
+    def test_inflight_kind_can_be_inferred_for_manual_reconciliation(self):
+        import tdlib_common
+
+        with tempfile.TemporaryDirectory() as directory:
+            journal = __import__("upload_journal").InflightJournal(Path(directory))
+            journal.prepare("mixed", "album-key", [{"path": "clip.jpg"}])
+            journal.unknown("mixed", "album-key", "connection lost")
+            client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
+            client.inflight_journal = journal
+            client.reconcile_inflight("album-key", sent=False)
+            self.assertIsNone(journal.get("mixed", "album-key"))
 
     def test_natural_sort_handles_unicode_numeric_runs_and_folder_names(self):
         self.assertEqual(
@@ -432,6 +687,20 @@ class ImprovementsTest(unittest.TestCase):
             self.assertTrue(path_utils.is_network_path("/Volumes/CameraShare/media"))
             self.assertTrue(path_utils.is_network_path("/Network/nas/media"))
         self.assertTrue(path_utils.is_network_path(r"\\server\share\media"))
+
+    def test_macos_mount_type_distinguishes_network_and_local_volumes(self):
+        mount_output = (
+            "/dev/disk3s1 on /Volumes/Local (apfs, local, journaled)\n"
+            "//user@nas/share on /Volumes/Camera Share (smbfs, nodev)\n"
+        )
+        completed = subprocess.CompletedProcess(
+            ["/sbin/mount"], 0, mount_output, ""
+        )
+        with patch.object(path_utils.sys, "platform", "darwin"), \
+                patch.object(path_utils, "_MAC_MOUNT_CACHE", None), \
+                patch.object(path_utils, "run_cancellable_process", return_value=completed):
+            self.assertFalse(path_utils.is_network_path("/Volumes/Local/clip.mp4"))
+            self.assertTrue(path_utils.is_network_path("/Volumes/Camera Share/clip.mp4"))
 
     def test_staging_cleanup_removes_only_stale_files(self):
         from staging import cleanup_staging

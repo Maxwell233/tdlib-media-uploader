@@ -20,6 +20,12 @@ import app_config as cfg
 from app_logging import TDLIB_LOG_PATH, write_app_log, write_exception
 from path_utils import probe_readable, snapshot_file, stable_path
 from runtime_paths import APP_DATA_DIR
+from upload_journal import (
+    CONFIRMED,
+    FAILED,
+    InflightJournal,
+    UNKNOWN,
+)
 
 REQUIRED_TDJSON_VERSION = "1.8.64.post1"
 PROJECT_DIR = APP_DATA_DIR
@@ -36,6 +42,10 @@ class TDLibError(RuntimeError):
 
 class TDLibCancelled(RuntimeError):
     """Raised when a GUI or caller requests an immediate upload stop."""
+
+
+class UploadUnknownError(RuntimeError):
+    """The Telegram request may have been accepted but was not confirmed."""
 
 
 def verify_tdjson_version() -> str:
@@ -182,6 +192,7 @@ class TDJsonClient:
         self.update_callbacks = []
         self.stop_event = threading.Event()
         self.cancel_event = threading.Event()
+        self.inflight_journal = InflightJournal()
         register_client = getattr(self.ui, "register_client", None)
         if callable(register_client):
             register_client(self)
@@ -724,7 +735,81 @@ class TDJsonClient:
                 source="upload",
             )
 
-    def send_contents(self, contents, progress=None, items=None):
+    def send_contents(
+        self,
+        contents,
+        progress=None,
+        items=None,
+        *,
+        album_key: str | None = None,
+        kind: str | None = None,
+    ):
+        return self._send_contents(
+            contents,
+            progress=progress,
+            items=items,
+            album_key=album_key,
+            kind=kind,
+        )
+
+    @staticmethod
+    def _infer_upload_kind(contents) -> str:
+        kinds = set()
+        for content in contents or []:
+            content_type = str((content or {}).get("@type", ""))
+            if "Photo" in content_type:
+                kinds.add("image")
+            elif "Video" in content_type:
+                kinds.add("video")
+        if len(kinds) == 1:
+            return next(iter(kinds))
+        if len(kinds) > 1:
+            return "mixed"
+        return "unknown"
+
+    def finalize_inflight(self, album_key: str, *, kind: str | None = None, message_ids=None) -> None:
+        """Remove a confirmed journal after the uploader persisted its state."""
+
+        if not album_key:
+            return
+        selected_kind = kind or self._journal_kind_for(album_key)
+        self.inflight_journal.confirmed(selected_kind, album_key, message_ids)
+
+    def reconcile_inflight(self, album_key: str, *, sent: bool, kind: str | None = None, message_ids=None) -> None:
+        """Manually resolve an UNKNOWN send without querying Telegram history."""
+
+        selected_kind = kind or self._journal_kind_for(album_key)
+        if sent:
+            self.inflight_journal.mark_sent(selected_kind, album_key, message_ids)
+        else:
+            self.inflight_journal.mark_not_sent(selected_kind, album_key)
+
+    def _journal_kind_for(self, album_key: str) -> str:
+        record = self.inflight_journal.find_album(album_key)
+        if record:
+            value = str(record.get("kind", "")).strip().lower()
+            if value:
+                return value
+        return "unknown"
+
+    def _send_contents(self, contents, progress=None, items=None, *, album_key=None, kind=None):
+        """Send media and persist PREPARED/SUBMITTED/UNKNOWN transitions."""
+        journal = getattr(self, "inflight_journal", None)
+        selected_kind = kind or self._infer_upload_kind(contents)
+        journal_active = bool(album_key and journal is not None)
+        submitted = False
+        if journal_active:
+            unresolved = journal.unresolved(selected_kind, album_key)
+            if unresolved is not None:
+                message = (
+                    "发送状态未知，为避免重复未自动重试："
+                    f"{selected_kind} Album {album_key}。请在 Telegram 中确认后再手动处理。"
+                )
+                warning = getattr(self.ui, "warning", None)
+                if callable(warning):
+                    warning(message)
+                raise UploadUnknownError(message)
+            journal.prepare(selected_kind, album_key, items)
         try:
             if len(contents) == 1:
                 message = self.request({
@@ -751,10 +836,36 @@ class TDJsonClient:
                     raise RuntimeError(
                         f"TDLib sendMessageAlbum 返回消息数量异常：{len(messages)}/{len(contents)}"
                     )
+            # A response can already carry messageSendingStateFailed.  It is
+            # an explicit Telegram rejection, not an ambiguous submission;
+            # leave ``submitted`` false so the exception path records FAILED.
+            initial_send_failed = any(
+                isinstance(message, dict)
+                and (message.get("sending_state") or {}).get("@type")
+                == "messageSendingStateFailed"
+                for message in messages
+            )
+            if journal_active and not initial_send_failed:
+                journal.submitted(
+                    selected_kind,
+                    album_key,
+                    [message.get("id") for message in messages],
+                )
+                submitted = True
             if progress is not None and items is not None:
                 progress.register_messages(messages, items)
-            return self.wait_for_send_results(messages)
+            result = self.wait_for_send_results(messages)
+            if journal_active:
+                journal.update(
+                    selected_kind,
+                    album_key,
+                    CONFIRMED,
+                    message_ids=result,
+                )
+            return result
         except TDLibError as exc:
+            if journal_active:
+                journal.failed(selected_kind, album_key, str(exc))
             self._safe_diagnose_upload_failure(contents, items, exc)
             error_text = exc.message.lower()
             forbidden = any(
@@ -770,7 +881,17 @@ class TDJsonClient:
             if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel" and forbidden:
                 raise RuntimeError("当前账号没有在该频道发布内容的权限。") from exc
             raise
+        except (TimeoutError, TDLibCancelled) as exc:
+            if journal_active:
+                journal.unknown(selected_kind, album_key, str(exc))
+            self._safe_diagnose_upload_failure(contents, items, exc)
+            raise
         except Exception as exc:
+            if journal_active:
+                if submitted:
+                    journal.unknown(selected_kind, album_key, str(exc))
+                else:
+                    journal.failed(selected_kind, album_key, str(exc))
             self._safe_diagnose_upload_failure(contents, items, exc)
             raise
 

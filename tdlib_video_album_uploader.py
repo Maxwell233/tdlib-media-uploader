@@ -33,26 +33,33 @@ from path_utils import (
     display_path,
     file_mtime,
     file_snapshot,
+    FileReadinessError,
+    is_network_path,
     io_worker_count,
     iter_files,
     media_path_sort,
     ordered_bounded_map,
     relative_name as stable_relative_name,
     run_cancellable_process,
+    readiness_category,
+    raise_for_file_readiness,
     stable_path,
+    retry_fs_operation,
     wait_for_file_ready,
 )
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
-from staging import cleanup_staging, stage_file
+from staging import cleanup_staging, remove_staged_file, should_stage, stage_file
 
 PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = APP_DATA_DIR / ".state"
 THUMB_CACHE_DIR = APP_DATA_DIR / ".thumb_cache"
 LAST_SCAN_ERRORS: list[str] = []
+LAST_SCAN_WARNINGS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
 LAST_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
+STAGED_UPLOAD_PATHS: dict[str, Path] = {}
 DEFERRED_STATUS = "DEFERRED"
 
 
@@ -201,14 +208,26 @@ def video_dates_enabled() -> bool:
 def cleanup_staging_cache(*, startup: bool = False) -> None:
     """Prune stale local staging artifacts without affecting source state."""
 
-    if not getattr(cfg, "STAGING_ENABLED", False):
-        return
     if startup and not getattr(cfg, "STAGING_CLEANUP_ON_START", True):
         return
+    # Keep pruning previously-created artifacts even after staging has been
+    # switched off. The mode controls new copies; it must not strand stale
+    # files left by an older configuration.
     cleanup_staging(
         cfg.STAGING_DIR,
         max_age_seconds=float(getattr(cfg, "STAGING_CLEANUP_DAYS", 7)) * 86400,
     )
+
+
+def cleanup_confirmed_staging(paths) -> None:
+    """Delete staged copies only after the corresponding Album is confirmed."""
+
+    if not getattr(cfg, "STAGING_CLEANUP_AFTER_SUCCESS", True):
+        return
+    for path in paths or []:
+        staged = STAGED_UPLOAD_PATHS.pop(stable_path(path), None)
+        if staged is not None:
+            remove_staged_file(staged)
 
 
 def force_ten_per_album() -> bool:
@@ -244,18 +263,31 @@ def month_caption(month_key: str) -> str:
 
 
 def scan_videos(cancel_event=None) -> list[Path]:
-    global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_SNAPSHOTS
+    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_SNAPSHOTS
     root = cfg.VIDEO_DIR
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"视频目录不存在或不是目录：{root}")
-    videos, LAST_SCAN_ERRORS = iter_files(
-        root, cfg.VIDEO_EXTENSIONS, cancel_event=cancel_event
+    scan_result = iter_files(
+        root,
+        cfg.VIDEO_EXTENSIONS,
+        cancel_event=cancel_event,
+        discovery_attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
+        discovery_initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+        discovery_max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
     )
+    videos = scan_result.paths
+    LAST_SCAN_ERRORS = list(scan_result.errors)
+    LAST_SCAN_WARNINGS = list(scan_result.warnings)
+    if scan_result.cancelled:
+        LAST_SCAN_WARNINGS.append("目录扫描已取消")
     LAST_SCAN_SIZE_SKIPS = []
-    LAST_SCAN_SNAPSHOTS = {}
+    LAST_SCAN_SNAPSHOTS = {
+        key: snapshot.as_tuple()
+        for key, snapshot in getattr(scan_result, "snapshots", {}).items()
+    }
     accepted = []
     for path in videos:
-        snapshot = file_snapshot(path)
+        snapshot = LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or file_snapshot(path)
         if snapshot is None:
             LAST_SCAN_ERRORS.append(f"{path}: 文件暂时不可读取或为空")
             continue
@@ -272,7 +304,7 @@ def scan_videos(cancel_event=None) -> list[Path]:
                 ),
             })
             continue
-        LAST_SCAN_SNAPSHOTS[normalize_path(path)] = snapshot
+        LAST_SCAN_SNAPSHOTS[normalize_path(path)] = (int(size), int(mtime_ns))
         accepted.append(path)
     videos = accepted
     sort_mode = "name"
@@ -309,8 +341,8 @@ def parse_exif_datetime(value):
     return None
 
 
-EXIFTOOL_BATCH_SIZE = 256
-EXIFTOOL_MAX_RETRIES = 2
+EXIFTOOL_BATCH_SIZE = int(getattr(cfg, "EXIFTOOL_BATCH_SIZE", 256))
+EXIFTOOL_MAX_RETRIES = int(getattr(cfg, "EXIFTOOL_RETRIES", 2))
 # Keep module-level names for integrations that patch them, while taking the
 # defaults from the shared [process]/[scan] configuration.
 EXIFTOOL_TIMEOUT_SECONDS = float(getattr(cfg, "EXIFTOOL_TIMEOUT_SECONDS", 120))
@@ -326,14 +358,41 @@ def _cancel_requested(cancel_event=None) -> bool:
     return bool(getattr(UI, "stop_requested", False))
 
 
-def _readiness_options() -> dict:
+def _readiness_options(path=None) -> dict:
     """Return the shared, bounded source-file readiness configuration."""
 
+    network = is_network_path(path or cfg.VIDEO_DIR)
+    legacy_interval = getattr(cfg, "SCAN_STABILITY_INTERVAL_SECONDS", None)
+    legacy_checks = getattr(cfg, "SCAN_STABILITY_CHECKS", None)
+    interval_default = 0.5 if network else 0.05
+    checks_default = 3 if network else 2
     return {
         "attempts": int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", READINESS_ATTEMPTS)),
-        "stable_interval": float(getattr(cfg, "SCAN_STABILITY_INTERVAL_SECONDS", 0.05)),
-        "stable_checks": int(getattr(cfg, "SCAN_STABILITY_CHECKS", 2)),
+        "stable_interval": float(getattr(
+            cfg,
+            "SCAN_STABILITY_INTERVAL_NETWORK_SECONDS" if network else "SCAN_STABILITY_INTERVAL_LOCAL_SECONDS",
+            legacy_interval if legacy_interval is not None else interval_default,
+        )),
+        "stable_checks": int(getattr(
+            cfg,
+            "SCAN_STABILITY_CHECKS_NETWORK" if network else "SCAN_STABILITY_CHECKS_LOCAL",
+            legacy_checks if legacy_checks is not None else checks_default,
+        )),
         "probe_bytes": int(getattr(cfg, "SCAN_READ_PROBE_BYTES", 64 * 1024)),
+    }
+
+
+def _readiness_record(exc: BaseException) -> dict | None:
+    """Return a structured skip record for a readiness failure."""
+
+    if not isinstance(exc, FileReadinessError):
+        return None
+    readiness = exc.readiness
+    return {
+        "readiness_status": readiness.status,
+        "readiness_code": readiness.code,
+        "readiness_attempts": readiness.attempts,
+        "category": readiness_category(readiness),
     }
 
 
@@ -393,14 +452,20 @@ def _exiftool_rows_detailed(
                 "timeout": _process_timeout("EXIFTOOL_TIMEOUT_SECONDS", EXIFTOOL_TIMEOUT_SECONDS),
                 **_hidden_subprocess_kwargs(),
             }
-            if cancel_event is None:
-                result = subprocess.run(command, **process_kwargs)
-            else:
-                result = run_cancellable_process(
-                    command,
-                    cancel_event=cancel_event,
-                    **process_kwargs,
-                )
+            result = run_cancellable_process(
+                command,
+                cancel_event=cancel_event,
+                **process_kwargs,
+            )
+        except TimeoutError as exc:
+            # The cancellable wrapper uses TimeoutError for an explicit stop;
+            # do not turn that user action into a noisy ExifTool diagnostic.
+            if _cancel_requested(cancel_event):
+                return [], "ExifTool 读取已取消", False
+            last_error = f"{type(exc).__name__}: {exc}"
+            if attempt < EXIFTOOL_MAX_RETRIES:
+                cancelable_sleep(min(0.25 * (2 ** attempt), 2.0), cancel_event)
+            continue
         except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             if attempt < EXIFTOOL_MAX_RETRIES:
@@ -607,14 +672,11 @@ def _read_media_creation_metadata(
             "timeout": _process_timeout("FFMPEG_METADATA_TIMEOUT_SECONDS", FFMPEG_METADATA_TIMEOUT_SECONDS),
             **_hidden_subprocess_kwargs(),
         }
-        if cancel_event is None:
-            result = subprocess.run(command, **process_kwargs)
-        else:
-            result = run_cancellable_process(
-                command,
-                cancel_event=cancel_event,
-                **process_kwargs,
-            )
+        result = run_cancellable_process(
+            command,
+            cancel_event=cancel_event,
+            **process_kwargs,
+        )
         if result.returncode != 0:
             return None
         try:
@@ -683,7 +745,7 @@ def read_media_creation_time(path: Path, cancel_event=None):
             return None
         readiness = wait_for_file_ready(
             path,
-            **_readiness_options(),
+            **_readiness_options(path),
             probe=True,
             cancel_event=cancel_event,
         )
@@ -1073,14 +1135,11 @@ def _probe_video_duration(path: Path, cancel_event=None) -> float:
             "timeout": _process_timeout("FFMPEG_INFO_TIMEOUT_SECONDS", FFMPEG_INFO_TIMEOUT_SECONDS),
             **_hidden_subprocess_kwargs(),
         }
-        if cancel_event is None:
-            result = subprocess.run(command, **process_kwargs)
-        else:
-            result = run_cancellable_process(
-                command,
-                cancel_event=cancel_event,
-                **process_kwargs,
-            )
+        result = run_cancellable_process(
+            command,
+            cancel_event=cancel_event,
+            **process_kwargs,
+        )
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError("读取视频时长超时") from exc
     except (OSError, UnicodeError, subprocess.SubprocessError):
@@ -1213,14 +1272,11 @@ def build_thumbnail(path: Path, cancel_event=None):
                 "timeout": _process_timeout("FFMPEG_THUMBNAIL_TIMEOUT_SECONDS", FFMPEG_THUMBNAIL_TIMEOUT_SECONDS),
                 **process_kwargs,
             }
-            if cancel_event is None:
-                result = subprocess.run(command, **run_kwargs)
-            else:
-                result = run_cancellable_process(
-                    command,
-                    cancel_event=cancel_event,
-                    **run_kwargs,
-                )
+            result = run_cancellable_process(
+                command,
+                cancel_event=cancel_event,
+                **run_kwargs,
+            )
             last_error = result.stderr.strip() or f"FFmpeg 退出码 {result.returncode}"
             return result.returncode == 0 and temp_path.exists() and temp_path.stat().st_size > 0
         except (OSError, subprocess.SubprocessError, TimeoutError) as exc:
@@ -1284,11 +1340,10 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
                 path,
                 expected_size=item.get("scan_size"),
                 expected_mtime_ns=item.get("scan_mtime_ns"),
-                **_readiness_options(),
+                **_readiness_options(path),
                 cancel_event=cancel_event,
             )
-            if not readiness.ready:
-                raise RuntimeError(readiness.reason or f"文件暂时不可读取：{path}")
+            raise_for_file_readiness(path, readiness)
             snapshot = readiness.snapshot.as_tuple()
             size = snapshot[0]
             if size > cfg.VIDEO_MAX_BYTES:
@@ -1305,17 +1360,21 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
                 prepare_video(path, cancel_event)
             return None
         except Exception as exc:
-            return {
+            readiness_record = _readiness_record(exc)
+            record = {
                 "item": item,
                 "path": path,
                 "reason": f"{type(exc).__name__}: {exc}",
                 "category": (
                     "size" if "超过 Telegram 视频上限" in str(exc)
+                    else readiness_record["category"] if readiness_record
                     else "deferred" if isinstance(exc, (OSError, TimeoutError))
-                    or any(marker in str(exc) for marker in ("暂时不可读取", "发生变化", "SMB", "网络"))
                     else "unreadable"
                 ),
             }
+            if readiness_record:
+                record.update(readiness_record)
+            return record
 
     worker_count = io_worker_count(
         cfg.VIDEO_DIR,
@@ -1363,7 +1422,8 @@ def report_skipped_videos(skipped, ui=None, *, final=False) -> None:
     prefix = "本次任务结束" if final else "视频预检完成"
     size_count = sum(record.get("category") == "size" for record in skipped)
     deferred_count = sum(record.get("category") == "deferred" for record in skipped)
-    unreadable_count = len(skipped) - size_count - deferred_count
+    cancelled_count = sum(record.get("category") == "cancelled" for record in skipped)
+    unreadable_count = len(skipped) - size_count - deferred_count - cancelled_count
     parts = []
     if unreadable_count:
         parts.append(f"{unreadable_count} 个无法读取的视频")
@@ -1371,6 +1431,8 @@ def report_skipped_videos(skipped, ui=None, *, final=False) -> None:
         parts.append(f"{size_count} 个超过 4 GiB 上限的视频")
     if deferred_count:
         parts.append(f"{deferred_count} 个暂时不可读的视频（DEFERRED）")
+    if cancelled_count:
+        parts.append(f"{cancelled_count} 个因取消而未检查的视频")
     target.warning(
         f"{prefix}：已跳过{'、'.join(parts) or f'{len(skipped)} 个视频'}；"
         "这些文件未写入上传断点，修复后可重新扫描上传。"
@@ -1400,10 +1462,13 @@ def build_video_contents(items, caption: str, ui=None, cancel_event=None):
                 "reason": f"{type(exc).__name__}: {exc}",
                 "category": (
                     "deferred" if isinstance(exc, (OSError, TimeoutError))
-                    or any(marker in str(exc) for marker in ("暂时不可读取", "发生变化", "SMB", "网络"))
                     else "unreadable"
                 ),
             }
+            readiness_record = _readiness_record(exc)
+            if readiness_record:
+                record.update(readiness_record)
+                record["category"] = readiness_record["category"]
             skipped.append(record)
             target.warning(f"跳过上传前变得无法读取的视频：{relative_name(path)}")
             target.log(f"跳过视频详情：{path}\n原因：{record['reason']}")
@@ -1416,19 +1481,22 @@ def input_video(item, caption: str, cancel_event=None):
         path,
         expected_size=item.get("scan_size"),
         expected_mtime_ns=item.get("scan_mtime_ns"),
-        **_readiness_options(),
+        **_readiness_options(path),
         cancel_event=cancel_event,
     )
-    if not readiness.ready:
-        raise RuntimeError(readiness.reason or f"文件暂时不可读取：{path}")
+    raise_for_file_readiness(path, readiness)
     source_path = path
-    if getattr(cfg, "STAGING_ENABLED", False):
+    staging_mode = getattr(cfg, "STAGING_MODE", None)
+    if staging_mode is None or (staging_mode == "off" and getattr(cfg, "STAGING_ENABLED", False)):
+        staging_mode = "always" if getattr(cfg, "STAGING_ENABLED", False) else "off"
+    if should_stage(path, staging_mode):
         source_path = stage_file(
             path,
             readiness.snapshot,
             staging_dir=cfg.STAGING_DIR,
             cancel_event=cancel_event,
         )
+        STAGED_UPLOAD_PATHS[stable_path(path)] = source_path
     info = video_info(source_path)
     thumbnail = None
     if cfg.VIDEO_GENERATE_THUMBNAIL:
@@ -1805,6 +1873,9 @@ def main():
     )
     if LAST_SCAN_SIZE_SKIPS:
         report_scan_size_skips(LAST_SCAN_SIZE_SKIPS)
+    if LAST_SCAN_WARNINGS:
+        UI.warning("视频目录扫描提醒：" + "；".join(LAST_SCAN_WARNINGS[:5]))
+        UI.log("视频目录扫描提醒详情：\n" + "\n".join(LAST_SCAN_WARNINGS))
     if not videos:
         UI.log("没有找到视频文件。")
         return
@@ -2003,12 +2074,20 @@ def main():
                         f"{format_size((_snapshot_for_path(path) or (0, 0))[0]):>10}  {relative_name(path)}"
                     )
                 try:
-                    message_ids = client.send_contents(contents, progress, ready_items)
+                    message_ids = client.send_contents(
+                        contents,
+                        progress,
+                        ready_items,
+                        album_key=plan["key"],
+                        kind="video",
+                    )
                 except Exception:
                     UI.finish()
                     UI.log("当前 Album 未写入断点。")
                     raise
                 state.mark_album_completed(ready_items, message_ids)
+                client.finalize_inflight(plan["key"], kind="video", message_ids=message_ids)
+                cleanup_confirmed_staging([item["path"] for item in ready_items])
                 progress.finish_album(ready_items)
                 UI.log(f"Album 发送完成，Caption={label or '无'}，断点已保存。")
 

@@ -16,10 +16,22 @@ from pathlib import Path
 
 from path_utils import (
     FileSnapshot,
+    is_network_path,
     probe_readable,
     snapshot_file,
     stable_path,
 )
+
+
+def should_stage(path, mode: str = "off") -> bool:
+    """Return whether a source should use the local staging cache."""
+
+    normalized = str(mode or "off").strip().lower()
+    if normalized == "always":
+        return True
+    if normalized == "network":
+        return is_network_path(path)
+    return False
 
 
 def _snapshot_values(snapshot) -> tuple[int, int]:
@@ -143,4 +155,16 @@ def cleanup_staging(
             pass
 
 
-__all__ = ["stage_file", "cleanup_staging"]
+def remove_staged_file(path) -> bool:
+    """Remove a confirmed staged file without touching its source path."""
+
+    if not path:
+        return False
+    try:
+        Path(path).unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+__all__ = ["stage_file", "cleanup_staging", "remove_staged_file", "should_stage"]

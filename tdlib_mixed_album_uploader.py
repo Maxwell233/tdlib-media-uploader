@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import threading
 import time
 from collections import deque
@@ -23,21 +24,28 @@ from pathlib import Path
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
 from path_utils import (
     display_path,
+    CHANGED,
+    DEFERRED,
+    FileReadinessError,
     file_snapshot,
     io_worker_count,
     iter_files,
+    is_network_path,
     media_path_sort,
     file_mtime,
     is_link_or_junction,
     ordered_bounded_map,
+    readiness_category,
     relative_name as stable_relative_name,
+    raise_for_file_readiness,
+    retry_fs_operation,
     stable_path,
     wait_for_file_ready,
 )
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
-from staging import cleanup_staging, stage_file
+from staging import cleanup_staging, remove_staged_file, should_stage, stage_file
 
 import tdlib_image_album_uploader as image_core
 import tdlib_video_album_uploader as video_core
@@ -46,6 +54,7 @@ import tdlib_video_album_uploader as video_core
 PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = APP_DATA_DIR / ".mixed_state"
 LAST_SCAN_ERRORS: list[str] = []
+LAST_SCAN_WARNINGS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
 LAST_SCAN_IGNORED_ROOT_MEDIA: list[Path] = []
 DEFERRED_STATUS = "DEFERRED"
@@ -54,12 +63,39 @@ MEDIA_DATE_MAX_WORKERS = 4
 READINESS_ATTEMPTS = 3
 
 
-def _readiness_options() -> dict:
+def _readiness_options(path=None) -> dict:
+    network = is_network_path(path or cfg.MIXED_DIR)
+    legacy_interval = getattr(cfg, "SCAN_STABILITY_INTERVAL_SECONDS", None)
+    legacy_checks = getattr(cfg, "SCAN_STABILITY_CHECKS", None)
+    interval_default = 0.5 if network else 0.05
+    checks_default = 3 if network else 2
     return {
         "attempts": int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", READINESS_ATTEMPTS)),
-        "stable_interval": float(getattr(cfg, "SCAN_STABILITY_INTERVAL_SECONDS", 0.05)),
-        "stable_checks": int(getattr(cfg, "SCAN_STABILITY_CHECKS", 2)),
+        "stable_interval": float(getattr(
+            cfg,
+            "SCAN_STABILITY_INTERVAL_NETWORK_SECONDS" if network else "SCAN_STABILITY_INTERVAL_LOCAL_SECONDS",
+            legacy_interval if legacy_interval is not None else interval_default,
+        )),
+        "stable_checks": int(getattr(
+            cfg,
+            "SCAN_STABILITY_CHECKS_NETWORK" if network else "SCAN_STABILITY_CHECKS_LOCAL",
+            legacy_checks if legacy_checks is not None else checks_default,
+        )),
         "probe_bytes": int(getattr(cfg, "SCAN_READ_PROBE_BYTES", 64 * 1024)),
+    }
+
+
+def _readiness_record(exc: BaseException) -> dict | None:
+    """Return structured readiness fields for a skipped mixed item."""
+
+    if not isinstance(exc, FileReadinessError):
+        return None
+    readiness = exc.readiness
+    return {
+        "readiness_status": readiness.status,
+        "readiness_code": readiness.code,
+        "readiness_attempts": readiness.attempts,
+        "category": readiness_category(readiness),
     }
 
 
@@ -90,14 +126,32 @@ def relative_name(path: Path, root=None) -> str:
 def cleanup_staging_cache(*, startup: bool = False) -> None:
     """Prune stale local staging artifacts without affecting source state."""
 
-    if not getattr(cfg, "STAGING_ENABLED", False):
-        return
     if startup and not getattr(cfg, "STAGING_CLEANUP_ON_START", True):
         return
+    # Existing staged copies remain safe to prune when the new mode is off;
+    # disabling staging should not leave its old cache behind indefinitely.
     cleanup_staging(
         cfg.STAGING_DIR,
         max_age_seconds=float(getattr(cfg, "STAGING_CLEANUP_DAYS", 7)) * 86400,
     )
+
+
+def cleanup_confirmed_staging(items) -> None:
+    """Delete staged copies only after a mixed Album is confirmed."""
+
+    if not getattr(cfg, "STAGING_CLEANUP_AFTER_SUCCESS", True):
+        return
+    for item in items or []:
+        path = item.get("path") if isinstance(item, dict) else item
+        if path is None:
+            continue
+        for mapping in (
+            getattr(image_core, "STAGED_UPLOAD_PATHS", {}),
+            getattr(video_core, "STAGED_UPLOAD_PATHS", {}),
+        ):
+            staged = mapping.pop(stable_path(path), None)
+            if staged is not None:
+                remove_staged_file(staged)
 
 
 def file_signature(path: Path, snapshot=None) -> str:
@@ -120,11 +174,11 @@ def _kind_for(path: Path) -> str | None:
     return None
 
 
-def _item_for_path(path: Path, group_name: str) -> dict | None:
+def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
     media_kind = _kind_for(path)
     if media_kind is None:
         return None
-    snapshot = file_snapshot(path)
+    snapshot = snapshot or file_snapshot(path)
     if snapshot is None:
         LAST_SCAN_ERRORS.append(f"{path}: 文件暂时不可读取或为空")
         return None
@@ -157,13 +211,24 @@ def _item_for_path(path: Path, group_name: str) -> dict | None:
 
 
 def _group_items(group_path: Path, group_name: str, cancel_event=None) -> list[dict]:
-    candidates, errors = iter_files(
-        group_path, cfg.MIXED_EXTENSIONS, cancel_event=cancel_event
+    scan_result = iter_files(
+        group_path,
+        cfg.MIXED_EXTENSIONS,
+        cancel_event=cancel_event,
+        discovery_attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
+        discovery_initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+        discovery_max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
     )
-    LAST_SCAN_ERRORS.extend(errors)
+    LAST_SCAN_ERRORS.extend(scan_result.errors)
+    LAST_SCAN_WARNINGS.extend(scan_result.warnings)
+    if scan_result.cancelled:
+        LAST_SCAN_WARNINGS.append("目录扫描已取消")
+    candidates = scan_result.paths
+    snapshots = getattr(scan_result, "snapshots", {})
     items = []
     for path in candidates:
-        item = _item_for_path(path, group_name)
+        snapshot = snapshots.get(stable_path(path))
+        item = _item_for_path(path, group_name, snapshot.as_tuple() if snapshot else None)
         if item is not None:
             items.append(item)
     sort_mode = str(getattr(cfg, "MIXED_SORT_MODE", "name")).strip().lower()
@@ -181,7 +246,7 @@ def _group_items(group_path: Path, group_name: str, cancel_event=None) -> list[d
 
 def scan_mixed_groups(cancel_event=None) -> list[dict]:
     """Scan each first-level directory as a separate mixed-media group."""
-    global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_IGNORED_ROOT_MEDIA
+    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_IGNORED_ROOT_MEDIA
     root = Path(cfg.MIXED_DIR)
     _validate_extensions()
     if is_link_or_junction(root):
@@ -189,29 +254,47 @@ def scan_mixed_groups(cancel_event=None) -> list[dict]:
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"混合上传目录不存在或不是目录：{root}")
     LAST_SCAN_ERRORS = []
+    LAST_SCAN_WARNINGS = []
     LAST_SCAN_SIZE_SKIPS = []
     LAST_SCAN_IGNORED_ROOT_MEDIA = []
     groups = []
-    try:
-        entries = list(os.scandir(root))
-    except OSError as exc:
-        raise RuntimeError(f"无法读取混合上传目录：{root}\n{exc}") from exc
     directories = []
     root_files = []
-    for entry in entries:
-        if cancel_event is not None and cancel_event.is_set():
-            LAST_SCAN_ERRORS.append("目录扫描已取消")
-            break
-        try:
-            if is_link_or_junction(entry):
-                LAST_SCAN_ERRORS.append(f"跳过符号链接或 junction：{entry.path}")
-                continue
-            if entry.is_dir(follow_symlinks=False):
-                directories.append(Path(entry.path))
-            elif entry.is_file(follow_symlinks=False) and _kind_for(Path(entry.path)):
-                root_files.append(Path(entry.path))
-        except OSError as exc:
-            LAST_SCAN_ERRORS.append(f"{entry.path}: {exc}")
+    try:
+        # Iterate the root directly so a large mixed directory can honour
+        # cancellation between entries instead of waiting for list(scandir).
+        with retry_fs_operation(
+            lambda: os.scandir(root),
+            attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
+            initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+            max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+            cancel_event=cancel_event,
+        ) as entries:
+            for entry in entries:
+                if cancel_event is not None and cancel_event.is_set():
+                    LAST_SCAN_WARNINGS.append("目录扫描已取消")
+                    break
+                try:
+                    if is_link_or_junction(entry):
+                        LAST_SCAN_WARNINGS.append(f"跳过符号链接或 junction：{entry.path}")
+                        continue
+                    info = retry_fs_operation(
+                        lambda entry=entry: entry.stat(follow_symlinks=False),
+                        attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
+                        initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+                        max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+                        cancel_event=cancel_event,
+                    )
+                    if stat.S_ISDIR(info.st_mode):
+                        directories.append(Path(entry.path))
+                    elif stat.S_ISREG(info.st_mode) and _kind_for(Path(entry.path)):
+                        root_files.append(Path(entry.path))
+                except OSError as exc:
+                    LAST_SCAN_ERRORS.append(f"{entry.path}: {exc}")
+    except TimeoutError:
+        LAST_SCAN_WARNINGS.append("目录扫描已取消")
+    except OSError as exc:
+        raise RuntimeError(f"无法读取混合上传目录：{root}\n{exc}") from exc
     directories = media_path_sort(directories, root, mode="name")
     for group_path in directories:
         items = _group_items(group_path, group_path.name, cancel_event=cancel_event)
@@ -351,9 +434,9 @@ def build_album_plans(groups, state=None) -> list[dict]:
 
 
 def _deferred(exc: Exception) -> bool:
-    return isinstance(exc, (OSError, TimeoutError)) or any(
-        marker in str(exc) for marker in ("暂时不可读取", "发生变化", "SMB", "网络")
-    )
+    if isinstance(exc, FileReadinessError):
+        return exc.readiness.status in {DEFERRED, CHANGED}
+    return isinstance(exc, (OSError, TimeoutError))
 
 
 def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
@@ -367,11 +450,10 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
                 path,
                 expected_size=item.get("scan_size"),
                 expected_mtime_ns=item.get("scan_mtime_ns"),
-                **_readiness_options(),
+                **_readiness_options(path),
                 cancel_event=cancel_event,
             )
-            if not readiness.ready:
-                raise RuntimeError(readiness.reason or f"文件暂时不可读取：{path}")
+            raise_for_file_readiness(path, readiness)
             snapshot = readiness.snapshot.as_tuple()
             if item.get("media_kind") == "video":
                 if snapshot[0] > cfg.VIDEO_MAX_BYTES:
@@ -391,7 +473,16 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
         except Exception as exc:
             text = str(exc)
             category = "size" if "超过 Telegram" in text else "deferred" if _deferred(exc) else "unreadable"
-            return {"item": item, "path": path, "reason": f"{type(exc).__name__}: {exc}", "category": category}
+            readiness_record = _readiness_record(exc)
+            record = {
+                "item": item,
+                "path": path,
+                "reason": f"{type(exc).__name__}: {exc}",
+                "category": readiness_record["category"] if readiness_record else category,
+            }
+            if readiness_record:
+                record.update(readiness_record)
+            return record
 
     worker_count = io_worker_count(
         cfg.MIXED_DIR,
@@ -420,7 +511,8 @@ def report_skipped_mixed(skipped, ui=None):
     target = ui or UI
     deferred = sum(record.get("category") == "deferred" for record in skipped)
     size = sum(record.get("category") == "size" for record in skipped)
-    unreadable = len(skipped) - deferred - size
+    cancelled = sum(record.get("category") == "cancelled" for record in skipped)
+    unreadable = len(skipped) - deferred - size - cancelled
     parts = []
     if unreadable:
         parts.append(f"{unreadable} 个无法读取的混合媒体")
@@ -428,6 +520,8 @@ def report_skipped_mixed(skipped, ui=None):
         parts.append(f"{size} 个超限媒体")
     if deferred:
         parts.append(f"{deferred} 个暂时不可读媒体（DEFERRED）")
+    if cancelled:
+        parts.append(f"{cancelled} 个因取消而未检查媒体")
     target.warning("混合上传跳过：" + "、".join(parts))
 
 
@@ -463,19 +557,27 @@ def _mixed_input_video(item, caption, cancel_event=None):
         path,
         expected_size=item.get("scan_size"),
         expected_mtime_ns=item.get("scan_mtime_ns"),
-        **_readiness_options(),
+        **_readiness_options(path),
         cancel_event=cancel_event,
     )
-    if not readiness.ready:
-        raise RuntimeError(readiness.reason or f"文件暂时不可读取：{path}")
+    raise_for_file_readiness(path, readiness)
     source_path = path
-    if getattr(cfg, "STAGING_ENABLED", False):
+    staging_mode = getattr(cfg, "STAGING_MODE", None)
+    if staging_mode is None or (
+        staging_mode == "off" and getattr(cfg, "STAGING_ENABLED", False)
+    ):
+        staging_mode = "always" if getattr(cfg, "STAGING_ENABLED", False) else "off"
+    if should_stage(path, staging_mode):
         source_path = stage_file(
             path,
             readiness.snapshot,
             staging_dir=cfg.STAGING_DIR,
             cancel_event=cancel_event,
         )
+        # Mixed video input is built here rather than through the standalone
+        # video uploader; register the copy in its shared cleanup map so a
+        # confirmed Album removes it while FAILED/UNKNOWN copies remain.
+        video_core.STAGED_UPLOAD_PATHS[stable_path(path)] = source_path
     info = (
         video_core.video_info(source_path)
         if cancel_event is None
@@ -567,6 +669,10 @@ def build_mixed_contents(items, caption: str, ui=None, cancel_event=None):
                 "reason": f"{type(exc).__name__}: {exc}",
                 "category": "deferred" if _deferred(exc) else "unreadable",
             }
+            readiness_record = _readiness_record(exc)
+            if readiness_record:
+                record.update(readiness_record)
+                record["category"] = readiness_record["category"]
             skipped.append(record)
             target.warning(f"跳过上传前无法读取的混合媒体：{relative_name(path)}")
             target.log(f"跳过混合媒体详情：{path}\n原因：{record['reason']}")
@@ -743,6 +849,9 @@ def main():
             "网络恢复后重新扫描即可重试。"
         )
         UI.log("混合目录扫描详情：\n" + "\n".join(LAST_SCAN_ERRORS))
+    if LAST_SCAN_WARNINGS:
+        UI.warning("混合目录扫描提醒：" + "；".join(LAST_SCAN_WARNINGS[:5]))
+        UI.log("混合目录扫描提醒详情：\n" + "\n".join(LAST_SCAN_WARNINGS))
     if LAST_SCAN_IGNORED_ROOT_MEDIA:
         UI.warning(
             f"混合根目录中有 {len(LAST_SCAN_IGNORED_ROOT_MEDIA)} 个媒体已忽略；"
@@ -854,8 +963,16 @@ def main():
                     for item in ready
                 ],
             )
-            message_ids = client.send_contents(contents, progress, ready)
+            message_ids = client.send_contents(
+                contents,
+                progress,
+                ready,
+                album_key=plan["key"],
+                kind="mixed",
+            )
             state.mark_album_completed(ready, message_ids)
+            client.finalize_inflight(plan["key"], kind="mixed", message_ids=message_ids)
+            cleanup_confirmed_staging(ready)
             progress.finish_album(ready)
             UI.success(f"混合 Album 发送成功：{plan['group_name']} / {plan['number']}")
         report_skipped_mixed(skipped, UI)

@@ -484,35 +484,18 @@ def main():
                     UI.warning("当前 Album 没有可读取的视频，已跳过。")
                     continue
                 if ready_items != album_items and getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False):
+                    # ``build_video_contents`` has already performed the JIT
+                    # readiness check and built the media inputs.  Reusing
+                    # those inputs avoids launching FFmpeg a second time for
+                    # every surviving video when one member was deferred.
                     label = with_filename_description(
                         plan["caption"]["text"],
                         ready_items,
                         True,
                         core.include_filename_numbers(),
                     )
-                    if cancel_event is None:
-                        contents, rebuilt_items, rebuilt_skipped = core.build_video_contents(
-                            ready_items,
-                            label,
-                            UI,
-                        )
-                    else:
-                        contents, rebuilt_items, rebuilt_skipped = core.build_video_contents(
-                            ready_items,
-                            label,
-                            UI,
-                            cancel_event,
-                        )
-                    if rebuilt_skipped:
-                        skipped_items.extend(rebuilt_skipped)
-                        progress.skip_items([
-                            record["item"]
-                            for record in rebuilt_skipped
-                        ])
-                    ready_items = rebuilt_items
-                    if not ready_items:
-                        UI.warning("当前 Album 没有可读取的视频，已跳过。")
-                        continue
+                    if contents:
+                        contents[0]["caption"] = core.formatted_text(label)
 
                 album_global += 1
 
@@ -552,6 +535,8 @@ def main():
                             contents,
                             progress,
                             ready_items,
+                            album_key=plan["key"],
+                            kind="video",
                         )
                     )
 
@@ -569,6 +554,8 @@ def main():
                     ready_items,
                     message_ids,
                 )
+                client.finalize_inflight(plan["key"], kind="video", message_ids=message_ids)
+                core.cleanup_confirmed_staging([item["path"] for item in ready_items])
 
                 progress.finish_album(
                     ready_items

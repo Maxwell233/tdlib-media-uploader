@@ -6,12 +6,13 @@ from __future__ import annotations
 import ntpath
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
-from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cmp_to_key
 from typing import Callable, TypeVar
 from pathlib import Path
@@ -20,6 +21,17 @@ from pathlib import Path
 READY = "READY"
 DEFERRED = "DEFERRED"
 UNREADABLE = "UNREADABLE"
+CHANGED = "CHANGED"
+CANCELLED = "CANCELLED"
+
+# Discovery defaults are deliberately conservative but bounded.  Callers can
+# override them from config.toml without making the filesystem walker depend on
+# the configuration module (which would introduce an import cycle).
+DISCOVERY_ATTEMPTS = 3
+DISCOVERY_INITIAL_DELAY_SECONDS = 0.15
+DISCOVERY_MAX_DELAY_SECONDS = 1.0
+_MAC_MOUNT_CACHE_LOCK = threading.Lock()
+_MAC_MOUNT_CACHE: tuple[float, tuple[tuple[str, str], ...]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,17 +65,58 @@ class FileReadiness:
     snapshot: FileSnapshot | None = None
     reason: str = ""
     attempts: int = 0
+    code: str = ""
 
     @property
     def ready(self) -> bool:
         return self.status == READY and self.snapshot is not None
 
 
+class FileReadinessError(RuntimeError):
+    """A source file failed the shared readiness contract.
+
+    The human-readable reason remains available for logs, while callers use
+    ``readiness.status`` and ``readiness.code`` for branching.  Keeping this
+    as a ``RuntimeError`` preserves the historical exception contract for
+    integrations that catch that base class.
+    """
+
+    def __init__(self, path, readiness: FileReadiness):
+        self.path = path
+        self.readiness = readiness
+        reason = readiness.reason or f"文件暂时不可读取：{path}"
+        super().__init__(reason)
+
+
+def readiness_category(readiness: FileReadiness) -> str:
+    """Map a readiness result to the stable upload reporting categories."""
+
+    if readiness.status == CANCELLED or readiness.code == "cancelled":
+        return "cancelled"
+    if readiness.status in {DEFERRED, CHANGED}:
+        return "deferred"
+    if readiness.status == UNREADABLE:
+        return "unreadable"
+    return "unreadable"
+
+
+def raise_for_file_readiness(path, readiness: FileReadiness) -> None:
+    """Raise a structured error when *readiness* is not READY."""
+
+    if not readiness.ready:
+        raise FileReadinessError(path, readiness)
+
+
 def _snapshot_object(path) -> FileSnapshot | None:
     value = _text(path)
     try:
-        info = os.stat(value)
+        # Do not follow a link that appeared after discovery. This closes the
+        # small scan-to-upload race where a regular file is replaced by a
+        # symlink or Windows junction between the two phases.
+        info = os.lstat(value)
     except OSError:
+        return None
+    if _is_reparse_info(info):
         return None
     if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
         return None
@@ -71,6 +124,26 @@ def _snapshot_object(path) -> FileSnapshot | None:
     if mtime_ns is None:
         mtime_ns = int(info.st_mtime * 1_000_000_000)
     return FileSnapshot(value, int(info.st_size), int(mtime_ns))
+
+
+def _snapshot_object_with_code(path) -> tuple[FileSnapshot | None, str]:
+    """Return a snapshot and a machine-readable reason when it is absent."""
+
+    value = _text(path)
+    try:
+        info = os.lstat(value)
+    except OSError:
+        return None, "stat_failed"
+    if _is_reparse_info(info):
+        return None, "link_or_junction"
+    if not stat.S_ISREG(info.st_mode):
+        return None, "not_regular"
+    if info.st_size <= 0:
+        return None, "empty"
+    mtime_ns = getattr(info, "st_mtime_ns", None)
+    if mtime_ns is None:
+        mtime_ns = int(info.st_mtime * 1_000_000_000)
+    return FileSnapshot(value, int(info.st_size), int(mtime_ns)), "ready"
 
 
 def _text(path) -> str:
@@ -96,13 +169,30 @@ def is_network_path(path) -> bool:
             return int(ctypes.windll.kernel32.GetDriveTypeW(drive)) == 4
         except (AttributeError, OSError, TypeError, ValueError):
             pass
-    # macOS mounts SMB/NFS shares under /Volumes and /Network.  Linux/BSD
-    # systems commonly expose NFS/SMB through /mnt, /net or /run/mount.  The
-    # prefix check is intentionally conservative and only lowers concurrency;
-    # it never changes path semantics or rejects a local disk mounted there.
+    # On macOS, inspect the actual mount type before falling back to the
+    # conventional /Volumes prefix.  This avoids treating an external APFS
+    # disk as a network share while still recognizing SMB/NFS/WebDAV mounts.
     posix_value = _text(path).replace("\\", "/")
     if not posix_value.startswith("/"):
         return False
+    if sys.platform == "darwin":
+        filesystem_type = _macos_filesystem_type(posix_value)
+        if filesystem_type:
+            network_types = {
+                "smbfs", "nfs", "webdav", "afpfs", "sshfs", "cifs", "9p",
+            }
+            local_types = {
+                "apfs", "hfs", "hfsplus", "exfat", "msdos", "ufs", "zfs",
+            }
+            normalized = filesystem_type.casefold()
+            if normalized in network_types:
+                return True
+            if normalized in local_types:
+                return False
+    # Linux/BSD systems commonly expose NFS/SMB through /mnt, /net or
+    # /run/mount.  The prefix check is intentionally conservative and only
+    # lowers concurrency; it never changes path semantics or rejects a local
+    # disk mounted there.
     prefixes = (
         ("/Volumes", "/Network", "/net", "/mnt", "/run/mount")
         if sys.platform == "darwin"
@@ -112,6 +202,63 @@ def is_network_path(path) -> bool:
         if posix_value == prefix or posix_value.startswith(prefix + "/"):
             return True
     return False
+
+
+def _macos_filesystem_type(path: str) -> str | None:
+    """Return the filesystem type for a macOS path when it is available.
+
+    ``mount`` is queried only on macOS and with a short timeout.  A failure is
+    harmless: callers then use the documented conservative prefix fallback.
+    Keeping this helper separate also lets tests and embedding applications
+    provide a platform-specific implementation without touching the walker.
+    """
+
+    if sys.platform != "darwin":
+        return None
+    now = time.monotonic()
+    global _MAC_MOUNT_CACHE
+    with _MAC_MOUNT_CACHE_LOCK:
+        if _MAC_MOUNT_CACHE is None or now - _MAC_MOUNT_CACHE[0] >= 5.0:
+            mounts: list[tuple[str, str]] = []
+            try:
+                result = run_cancellable_process(
+                    ["/sbin/mount"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=2.0,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                result = None
+            for raw_line in str(result.stdout if result is not None else "").splitlines():
+                # Typical output: //user@host/share on /Volumes/Share (smbfs, ...)
+                marker = " on "
+                if marker not in raw_line or "(" not in raw_line:
+                    continue
+                _source, mount_and_options = raw_line.split(marker, 1)
+                mount_point, options = mount_and_options.split("(", 1)
+                mount_point = (
+                    mount_point.strip()
+                    .replace("\\040", " ")
+                    .replace("\\011", "\t")
+                )
+                filesystem = options.split(",", 1)[0].strip().rstrip(")")
+                if mount_point and filesystem:
+                    mounts.append((mount_point, filesystem))
+            _MAC_MOUNT_CACHE = (now, tuple(mounts))
+        mounts = _MAC_MOUNT_CACHE[1]
+
+    best_mount = ""
+    best_type = None
+    for mount_point, filesystem in mounts:
+        if path == mount_point or path.startswith(mount_point + "/"):
+            if len(mount_point) >= len(best_mount):
+                best_mount = mount_point
+                best_type = filesystem
+    return best_type
 
 
 def io_worker_count(root, *, local: int = 4, network: int = 2) -> int:
@@ -141,10 +288,14 @@ def probe_readable(path, *, snapshot: FileSnapshot | None = None, probe_bytes: i
         raise OSError(f"文件暂时不可读取或为空：{path}")
     amount = max(1, int(probe_bytes))
     with open(current.path, "rb") as stream:
-        stream.read(min(amount, current.size))
+        head = stream.read(min(amount, current.size))
+        if not head:
+            raise OSError("读探针未返回数据")
         if current.size > amount:
             stream.seek(max(0, current.size - amount))
-            stream.read(min(amount, current.size))
+            tail = stream.read(min(amount, current.size))
+            if not tail:
+                raise OSError("读探针未返回文件尾部数据")
 
 
 def _cancelled(cancel_event) -> bool:
@@ -182,18 +333,50 @@ def check_file_readiness(
     scanning a busy network share to require a few additional confirmations.
     """
 
-    first = _snapshot_object(path)
+    first, first_code = _snapshot_object_with_code(path)
     if first is None:
-        return FileReadiness(DEFERRED, reason=f"文件暂时不可读取或为空：{path}", attempts=1)
+        status = UNREADABLE if first_code in {
+            "not_regular",
+            "empty",
+            "link_or_junction",
+        } else DEFERRED
+        return FileReadiness(
+            status,
+            reason=(
+                f"文件不是可读取的普通文件：{path}"
+                if first_code in {"not_regular", "link_or_junction"}
+                else f"文件为空或不可读取：{path}"
+            ),
+            attempts=1,
+            code=first_code,
+        )
     if expected_size is not None and int(expected_size) != first.size:
-        return FileReadiness(DEFERRED, first, f"文件在扫描后大小发生变化：{path}", 1)
+        return FileReadiness(
+            CHANGED,
+            first,
+            f"文件在扫描后大小发生变化：{path}",
+            1,
+            "size_changed",
+        )
     if expected_mtime_ns is not None and int(expected_mtime_ns) != first.mtime_ns:
-        return FileReadiness(DEFERRED, first, f"文件在扫描后修改时间发生变化：{path}", 1)
+        return FileReadiness(
+            CHANGED,
+            first,
+            f"文件在扫描后修改时间发生变化：{path}",
+            1,
+            "mtime_changed",
+        )
     try:
         if probe:
             probe_readable(path, snapshot=first, probe_bytes=probe_bytes)
     except (OSError, ValueError) as exc:
-        return FileReadiness(DEFERRED, first, f"文件读取失败：{path} · {exc}", 1)
+        return FileReadiness(
+            DEFERRED,
+            first,
+            f"文件读取失败：{path} · {exc}",
+            1,
+            "read_failed",
+        )
     checks = max(1, int(stable_checks))
     current = first
     for _index in range(1, checks):
@@ -203,14 +386,37 @@ def check_file_readiness(
         if stable_interval > 0 and not cancelable_sleep(
             min(float(stable_interval), 0.5), cancel_event
         ):
-            return FileReadiness(DEFERRED, current, "文件稳定性检查被取消", 1)
-        observed = _snapshot_object(path)
+            return FileReadiness(
+                CANCELLED,
+                current,
+                "文件稳定性检查被取消",
+                1,
+                "cancelled",
+            )
+        observed, observed_code = _snapshot_object_with_code(path)
         if observed is None:
-            return FileReadiness(DEFERRED, current, f"文件在检查期间变得不可读取：{path}", 1)
+            status = UNREADABLE if observed_code in {
+                "not_regular",
+                "empty",
+                "link_or_junction",
+            } else DEFERRED
+            return FileReadiness(
+                status,
+                current,
+                f"文件在检查期间变得不可读取：{path}",
+                1,
+                observed_code,
+            )
         if observed.as_tuple() != current.as_tuple():
-            return FileReadiness(DEFERRED, observed, f"文件仍在写入或网络连接不稳定：{path}", 1)
+            return FileReadiness(
+                CHANGED,
+                observed,
+                f"文件仍在写入或网络连接不稳定：{path}",
+                1,
+                "unstable",
+            )
         current = observed
-    return FileReadiness(READY, current, attempts=1)
+    return FileReadiness(READY, current, attempts=1, code="ready")
 
 
 def wait_for_file_ready(
@@ -230,10 +436,16 @@ def wait_for_file_ready(
     """Retry readiness checks with bounded exponential backoff."""
 
     limit = max(1, int(attempts))
-    last = FileReadiness(DEFERRED, reason=f"文件暂时不可读取：{path}")
+    last = FileReadiness(DEFERRED, reason=f"文件暂时不可读取：{path}", code="stat_failed")
     for attempt in range(1, limit + 1):
         if _cancelled(cancel_event):
-            return FileReadiness(DEFERRED, last.snapshot, "操作已取消", attempt - 1)
+            return FileReadiness(
+                CANCELLED,
+                last.snapshot,
+                "操作已取消",
+                attempt - 1,
+                "cancelled",
+            )
         result = check_file_readiness(
             path,
             expected_size=expected_size,
@@ -244,16 +456,31 @@ def wait_for_file_ready(
             probe_bytes=probe_bytes,
             cancel_event=cancel_event,
         )
-        last = FileReadiness(result.status, result.snapshot, result.reason, attempt)
+        last = FileReadiness(
+            result.status,
+            result.snapshot,
+            result.reason,
+            attempt,
+            result.code,
+        )
         if result.ready:
             return last
         # An expected scan snapshot changing is definitive for this run. Do
         # not spend the remaining backoff window waiting for a file that must
         # be rescanned before it can be uploaded safely.
-        if any(marker in result.reason for marker in ("大小发生变化", "修改时间发生变化")):
+        if result.status in {CHANGED, UNREADABLE} or result.code in {
+            "size_changed",
+            "mtime_changed",
+        }:
             return last
         if attempt < limit and not cancelable_sleep(initial_delay * (float(backoff) ** (attempt - 1)), cancel_event):
-            return FileReadiness(DEFERRED, result.snapshot, "操作已取消", attempt)
+            return FileReadiness(
+                CANCELLED,
+                result.snapshot,
+                "操作已取消",
+                attempt,
+                "cancelled",
+            )
     return last
 
 
@@ -262,17 +489,22 @@ _T = TypeVar("_T")
 _NATURAL_PART_RE = re.compile(r"(\d+)")
 
 
-def _natural_parts(value) -> list[tuple[int, object]]:
-    """Split text into case-folded text and integer runs."""
+def _natural_parts(value) -> list[tuple[int, object, str]]:
+    """Split text into case-folded text and integer runs.
+
+    The original spelling is retained for deterministic ties.  Numeric runs
+    carry both their integer value and their raw spelling so ``1 < 01 < 001``
+    remains stable when the primary numeric value is equal.
+    """
 
     parts = []
     for part in _NATURAL_PART_RE.split(str(value)):
         if not part:
             continue
         if part.isdigit():
-            parts.append((1, int(part)))
+            parts.append((1, int(part), part))
         else:
-            parts.append((0, part.casefold()))
+            parts.append((0, part.casefold(), part))
     return parts
 
 
@@ -285,18 +517,26 @@ def natural_compare(left, right) -> int:
 
     a_parts = _natural_parts(left)
     b_parts = _natural_parts(right)
-    for (a_type, a_value), (b_type, b_value) in zip(a_parts, b_parts):
+    for (a_type, a_value, a_raw), (b_type, b_value, b_raw) in zip(a_parts, b_parts):
         if a_type != b_type:
             result = -1 if a_type < b_type else 1
         elif a_value == b_value:
-            continue
+            if a_type == 1 and len(a_raw) != len(b_raw):
+                result = -1 if len(a_raw) < len(b_raw) else 1
+            elif a_raw != b_raw:
+                # Text primary comparison is case-insensitive; when that ties,
+                # preserve the original Unicode spelling as a deterministic
+                # secondary key (for example ``A1`` before ``a1``).
+                result = (a_raw > b_raw) - (a_raw < b_raw)
+            else:
+                continue
         else:
             result = -1 if a_value < b_value else 1
         return result
     if len(a_parts) == len(b_parts):
-        # Numeric values such as 01 and 1 compare equal above; use the raw
-        # spelling only as a stable final tie-breaker.
-        a_text, b_text = str(left).casefold(), str(right).casefold()
+        # All component tokens have the same primary values.  Use the complete
+        # original spelling as a final deterministic tie-breaker.
+        a_text, b_text = str(left), str(right)
         return (a_text > b_text) - (a_text < b_text)
     return -1 if len(a_parts) < len(b_parts) else 1
 
@@ -387,7 +627,14 @@ def media_path_sort(
         if normalized_mode == "mtime":
             try:
                 raw_mtime = mtime_key(value) if mtime_key is not None else file_mtime(path)
-                mtime = float(raw_mtime)
+                # Keep nanosecond integer snapshots exact. Converting a large
+                # ``st_mtime_ns`` to float can collapse distinct files into a
+                # false tie before the path comparator is reached.
+                mtime = (
+                    raw_mtime
+                    if isinstance(raw_mtime, (int, float))
+                    else float(raw_mtime)
+                )
             except (OSError, TypeError, ValueError):
                 mtime = 0.0
         decorated.append((path, mtime, index, value))
@@ -418,7 +665,7 @@ def retry_with_backoff(
             raise TimeoutError("操作已取消")
         try:
             return operation()
-        except BaseException as exc:
+        except Exception as exc:
             should_retry = retry_if(exc) if retry_if is not None else isinstance(
                 exc, (OSError, TimeoutError)
             )
@@ -427,6 +674,39 @@ def retry_with_backoff(
             if not cancelable_sleep(initial_delay * (float(backoff) ** (attempt - 1)), cancel_event):
                 raise TimeoutError("操作已取消") from exc
     raise RuntimeError("重试操作未返回结果")
+
+
+def retry_fs_operation(
+    operation: Callable[[], _T],
+    *,
+    attempts: int = DISCOVERY_ATTEMPTS,
+    initial_delay: float = DISCOVERY_INITIAL_DELAY_SECONDS,
+    max_delay: float = DISCOVERY_MAX_DELAY_SECONDS,
+    cancel_event=None,
+) -> _T:
+    """Retry a bounded filesystem operation after transient ``OSError``.
+
+    The operation is intentionally generic so both ``os.scandir`` and
+    ``DirEntry.stat`` can share exactly the same cancellation/backoff policy.
+    All errors remain bounded and the final exception is returned to the
+    caller for structured scan reporting.
+    """
+
+    limit = max(1, int(attempts))
+    delay = max(0.0, float(initial_delay))
+    ceiling = max(0.0, float(max_delay))
+    for attempt in range(1, limit + 1):
+        if _cancelled(cancel_event):
+            raise TimeoutError("目录扫描已取消")
+        try:
+            return operation()
+        except OSError:
+            if attempt >= limit:
+                raise
+            wait_seconds = min(ceiling, delay * (2 ** (attempt - 1)))
+            if not cancelable_sleep(wait_seconds, cancel_event):
+                raise TimeoutError("目录扫描已取消")
+    raise RuntimeError("文件系统重试未返回结果")
 
 
 def ordered_bounded_map(executor, items, worker, max_workers: int):
@@ -438,29 +718,114 @@ def ordered_bounded_map(executor, items, worker, max_workers: int):
     future per file before the first result is consumed.
     """
 
+    from concurrent.futures import FIRST_COMPLETED, wait
+
     iterator = iter(items)
-    pending = deque()
+    pending = {}
+    ready = {}
     limit = max(1, int(max_workers))
-    for _ in range(limit):
+    next_index = 0
+    next_output = 0
+
+    def submit_one(index):
         try:
-            pending.append(executor.submit(worker, next(iterator)))
+            item = next(iterator)
         except StopIteration:
+            return False
+        pending[executor.submit(worker, item)] = index
+        return True
+
+    for index in range(limit):
+        if not submit_one(index):
             break
+        next_index += 1
     while pending:
-        yield pending.popleft().result()
-        try:
-            pending.append(executor.submit(worker, next(iterator)))
-        except StopIteration:
-            pass
+        done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+        for future in done:
+            index = pending.pop(future)
+            ready[index] = future
+        while next_output in ready:
+            future = ready.pop(next_output)
+            # Calling result here preserves input-order exception semantics.
+            yield future.result()
+            next_output += 1
+        # Refill only after yielding contiguous results.  Keeping
+        # ``pending + ready`` at most ``limit`` prevents a fast worker from
+        # building an unbounded completed-result backlog while an earlier
+        # item is still running.
+        while len(pending) + len(ready) < limit:
+            if not submit_one(next_index):
+                break
+            next_index += 1
 
 
-def run_cancellable_process(command, *, cancel_event=None, timeout=None, **kwargs):
+@dataclass
+class ScanResult:
+    """Structured directory scan result with a legacy tuple adapter."""
+
+    paths: list[Path]
+    errors: list[str]
+    warnings: list[str]
+    cancelled: bool = False
+    # The discovery stat is already the snapshot needed by size checks and
+    # upload revalidation.  Reusing it avoids a second network ``stat`` for
+    # every matching file while retaining the old two-value unpacking API.
+    snapshots: dict[str, FileSnapshot] = field(default_factory=dict)
+
+    def __iter__(self):
+        # Existing integrations unpack ``paths, errors``.  Keep that API while
+        # exposing warnings/cancelled separately to new callers.
+        legacy_errors = list(self.errors) + list(self.warnings)
+        if self.cancelled:
+            legacy_errors.append("目录扫描已取消")
+        yield self.paths
+        yield legacy_errors
+
+    def __len__(self):
+        # A few older integrations treated the result as a two-item tuple.
+        return 2
+
+    def __getitem__(self, index):
+        if index not in (0, 1, -2, -1):
+            raise IndexError(index)
+        legacy_errors = list(self.errors) + list(self.warnings)
+        if self.cancelled:
+            legacy_errors.append("目录扫描已取消")
+        return (self.paths, legacy_errors)[index]
+
+
+def _open_scandir(
+    directory,
+    *,
+    attempts: int,
+    initial_delay: float,
+    max_delay: float,
+    cancel_event=None,
+):
+    return retry_fs_operation(
+        lambda: os.scandir(directory),
+        attempts=attempts,
+        initial_delay=initial_delay,
+        max_delay=max_delay,
+        cancel_event=cancel_event,
+    )
+
+
+def run_cancellable_process(
+    command,
+    *,
+    cancel_event=None,
+    timeout=None,
+    terminate_grace_seconds: float = 0.5,
+    **kwargs,
+):
     """Run a bounded external process and honour cancellation while waiting.
 
     The no-event path deliberately delegates to :func:`subprocess.run` so
-    existing integrations can continue to patch or instrument it.  A caller
-    that supplies an event gets a small polling wrapper which terminates the
-    child promptly instead of waiting for the full timeout.
+    existing integrations can continue to patch or instrument it.  For a
+    cancellable call, one worker owns ``communicate`` for the entire lifetime
+    of the child.  That continuously drains stdout/stderr and keeps stdin
+    handling out of the polling thread, avoiding pipe back-pressure deadlocks.
     """
 
     if cancel_event is None:
@@ -468,50 +833,132 @@ def run_cancellable_process(command, *, cancel_event=None, timeout=None, **kwarg
     if _cancelled(cancel_event):
         raise TimeoutError("外部进程已取消")
     input_data = kwargs.pop("input", None)
+    check = bool(kwargs.pop("check", False))
+    capture_output = bool(kwargs.pop("capture_output", False))
+    if capture_output:
+        kwargs.setdefault("stdout", subprocess.PIPE)
+        kwargs.setdefault("stderr", subprocess.PIPE)
     if input_data is not None:
         kwargs.setdefault("stdin", subprocess.PIPE)
+    # Give cancellable POSIX children their own process group so a tool that
+    # spawns a helper cannot keep our pipes open after the parent is killed.
+    # Windows uses the native ``kill`` path below; callers' explicit setting
+    # always wins on either platform.
+    process_group_enabled = os.name != "nt" and kwargs.get("start_new_session", True)
+    if os.name != "nt":
+        kwargs.setdefault("start_new_session", True)
     process = subprocess.Popen(command, **kwargs)
-    if input_data is not None and process.stdin is not None:
+
+    result_holder = {}
+    communication_done = threading.Event()
+
+    def communicate_worker():
         try:
-            process.stdin.write(input_data)
-            process.stdin.close()
-        except (BrokenPipeError, OSError):
-            # The child may reject a batch before consuming stdin; its exit
-            # status/stderr below remains the authoritative diagnostic.
-            try:
-                process.stdin.close()
-            except OSError:
-                pass
+            result_holder["result"] = process.communicate(input=input_data)
+        except BaseException as exc:  # propagate the exact subprocess error
+            result_holder["error"] = exc
+        finally:
+            communication_done.set()
+
+    worker = threading.Thread(
+        target=communicate_worker,
+        name="tdlib-process-communicate",
+        daemon=True,
+    )
+    worker.start()
     started = time.monotonic()
-    try:
-        while process.poll() is None:
-            if _cancelled(cancel_event):
+    stop_reason = None
+
+    def stop_child():
+        if process_group_enabled:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except (OSError, ProcessLookupError):
                 try:
                     process.terminate()
                 except OSError:
                     pass
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-                process.communicate()
-                raise TimeoutError("外部进程已取消")
-            if timeout is not None and time.monotonic() - started >= float(timeout):
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-                process.communicate()
-                raise subprocess.TimeoutExpired(command, timeout)
-            time.sleep(0.05)
-        stdout, stderr = process.communicate()
-        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-    finally:
-        if process.poll() is None:
+        else:
             try:
-                process.kill()
+                process.terminate()
             except OSError:
                 pass
+        grace = max(0.0, float(terminate_grace_seconds))
+        deadline = time.monotonic() + grace
+        while process.poll() is None and time.monotonic() < deadline:
+            communication_done.wait(min(0.05, max(0.0, deadline - time.monotonic())))
+        if process.poll() is None:
+            if process_group_enabled:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+            else:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+        # kill/terminate must be followed by wait; communicate_worker drains
+        # any remaining pipe data and then exits.
+        try:
+            process.wait(timeout=max(1.0, grace + 1.0))
+        except (OSError, subprocess.TimeoutExpired):
+            if process_group_enabled:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+            else:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+            try:
+                process.wait(timeout=1.0)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+    while not communication_done.wait(0.05):
+        if _cancelled(cancel_event):
+            stop_reason = "cancelled"
+            stop_child()
+            break
+        if timeout is not None and time.monotonic() - started >= float(timeout):
+            stop_reason = "timeout"
+            stop_child()
+            break
+
+    if stop_reason is not None:
+        # A killed process should make communicate return promptly.  Do not
+        # call communicate a second time from this thread.
+        worker.join(timeout=max(1.0, float(terminate_grace_seconds) + 1.0))
+        stdout, stderr = result_holder.get("result", (None, None))
+        if stop_reason == "cancelled":
+            raise TimeoutError("外部进程已取消")
+        error = subprocess.TimeoutExpired(command, timeout)
+        error.output = stdout
+        error.stderr = stderr
+        raise error
+
+    worker.join(timeout=1.0)
+    if "error" in result_holder:
+        raise result_holder["error"]
+    stdout, stderr = result_holder.get("result", (None, None))
+    completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    if check and completed.returncode:
+        raise subprocess.CalledProcessError(
+            completed.returncode,
+            command,
+            output=stdout,
+            stderr=stderr,
+        )
+    return completed
 
 
 def is_unc_path(path) -> bool:
@@ -630,14 +1077,38 @@ def _is_reparse_info(info) -> bool:
     return bool(int(getattr(info, "st_file_attributes", 0)) & reparse_flag)
 
 
-def iter_files(root, extensions, cancel_event=None):
-    """Walk a local or UNC tree without following links or blocking forever."""
+def iter_files(
+    root,
+    extensions,
+    cancel_event=None,
+    *,
+    discovery_attempts: int = DISCOVERY_ATTEMPTS,
+    discovery_initial_delay: float = DISCOVERY_INITIAL_DELAY_SECONDS,
+    discovery_max_delay: float = DISCOVERY_MAX_DELAY_SECONDS,
+):
+    """Walk a local or UNC tree without following links or blocking forever.
+
+    Directory opening and each ``DirEntry.stat`` use the same bounded retry
+    policy.  The structured result separates warnings (links/junctions) and
+    cancellation from actual read errors while ``ScanResult.__iter__`` keeps
+    the historical ``paths, errors = iter_files(...)`` adapter.
+    """
+
     accepted = {str(ext).lower() for ext in extensions}
-    paths = []
-    errors = []
+    paths: list[Path] = []
+    errors: list[str] = []
+    warnings: list[str] = []
+    snapshots: dict[str, FileSnapshot] = {}
+    cancelled = False
 
     if is_link_or_junction(root):
-        return paths, [f"跳过符号链接或 junction：{root}"]
+        return ScanResult(
+            paths,
+            errors,
+            [f"跳过符号链接或 junction：{root}"],
+            False,
+            snapshots,
+        )
 
     # Keep the traversal iterative. A recursive scanner can hit Python's
     # recursion limit on exported camera/archive trees with many nested
@@ -646,25 +1117,40 @@ def iter_files(root, extensions, cancel_event=None):
     stack = [_text(root)]
     while stack:
         if _cancelled(cancel_event):
-            errors.append("目录扫描已取消")
+            cancelled = True
             break
         directory = stack.pop()
         if is_link_or_junction(directory):
-            errors.append(f"跳过符号链接或 junction：{directory}")
+            warnings.append(f"跳过符号链接或 junction：{directory}")
             continue
         try:
-            with os.scandir(directory) as it:
+            iterator = _open_scandir(
+                directory,
+                attempts=discovery_attempts,
+                initial_delay=discovery_initial_delay,
+                max_delay=discovery_max_delay,
+                cancel_event=cancel_event,
+            )
+            with iterator as it:
                 for entry in it:
                     if _cancelled(cancel_event):
-                        errors.append("目录扫描已取消")
+                        cancelled = True
                         break
                     try:
-                        if entry.is_symlink():
-                            errors.append(f"跳过符号链接或 junction：{entry.path}")
-                            continue
-                        info = entry.stat(follow_symlinks=False)
+                        # The non-following stat is both the type check and
+                        # the discovery snapshot.  Avoid a separate
+                        # ``is_symlink`` syscall so a transient SMB stat
+                        # failure gets the same bounded retry as every other
+                        # entry and matching files are inspected only once.
+                        info = retry_fs_operation(
+                            lambda entry=entry: entry.stat(follow_symlinks=False),
+                            attempts=discovery_attempts,
+                            initial_delay=discovery_initial_delay,
+                            max_delay=discovery_max_delay,
+                            cancel_event=cancel_event,
+                        )
                         if _is_reparse_info(info):
-                            errors.append(f"跳过符号链接或 junction：{entry.path}")
+                            warnings.append(f"跳过符号链接或 junction：{entry.path}")
                             continue
                         if stat.S_ISDIR(info.st_mode):
                             stack.append(entry.path)
@@ -678,10 +1164,31 @@ def iter_files(root, extensions, cancel_event=None):
                         if ext.lower() not in accepted:
                             continue
                         if stat.S_ISREG(info.st_mode) and info.st_size > 0:
-                            paths.append(Path(entry.path))
+                            path = Path(entry.path)
+                            paths.append(path)
+                            mtime_ns = getattr(info, "st_mtime_ns", None)
+                            if mtime_ns is None:
+                                mtime_ns = int(info.st_mtime * 1_000_000_000)
+                            snapshots[stable_path(path)] = FileSnapshot(
+                                _text(path),
+                                int(info.st_size),
+                                int(mtime_ns),
+                            )
+                    except TimeoutError as error:
+                        if _cancelled(cancel_event):
+                            cancelled = True
+                            break
+                        errors.append(f"{entry.path}: {error}")
                     except OSError as error:
                         errors.append(f"{entry.path}: {error}")
+                if cancelled:
+                    break
+        except TimeoutError as error:
+            if _cancelled(cancel_event):
+                cancelled = True
+                break
+            errors.append(f"{directory}: {error}")
         except OSError as error:
             errors.append(str(error))
 
-    return paths, errors
+    return ScanResult(paths, errors, warnings, cancelled, snapshots)

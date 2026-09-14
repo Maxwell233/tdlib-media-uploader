@@ -20,12 +20,16 @@ from PIL import Image
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
 from path_utils import (
     display_path,
+    FileReadinessError,
     file_snapshot,
+    is_network_path,
     io_worker_count,
     iter_files,
     media_path_sort,
     ordered_bounded_map,
+    readiness_category,
     relative_name as stable_relative_name,
+    raise_for_file_readiness,
     run_cancellable_process,
     stable_path,
     wait_for_file_ready,
@@ -33,14 +37,16 @@ from path_utils import (
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
-from staging import cleanup_staging, stage_file
+from staging import cleanup_staging, remove_staged_file, should_stage, stage_file
 
 PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = APP_DATA_DIR / ".image_state"
 LAST_SCAN_ERRORS: list[str] = []
+LAST_SCAN_WARNINGS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
 DEFERRED_STATUS = "DEFERRED"
 IMAGE_UPLOAD_PATHS: dict[str, Path] = {}
+STAGED_UPLOAD_PATHS: dict[str, Path] = {}
 IMAGE_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
 COMPRESSED_IMAGE_DIR = APP_DATA_DIR / ".image_compression"
 FFMPEG_COMPRESS_TIMEOUT_SECONDS = float(
@@ -51,14 +57,40 @@ READINESS_ATTEMPTS = int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", 3))
 UI = HeadlessUI()
 
 
-def _readiness_options() -> dict:
+def _readiness_options(path=None) -> dict:
     """Return the shared, bounded source-file readiness configuration."""
-
+    network = is_network_path(path or cfg.IMAGE_DIR)
+    legacy_interval = getattr(cfg, "SCAN_STABILITY_INTERVAL_SECONDS", None)
+    legacy_checks = getattr(cfg, "SCAN_STABILITY_CHECKS", None)
+    interval_default = 0.5 if network else 0.05
+    checks_default = 3 if network else 2
     return {
         "attempts": int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", READINESS_ATTEMPTS)),
-        "stable_interval": float(getattr(cfg, "SCAN_STABILITY_INTERVAL_SECONDS", 0.05)),
-        "stable_checks": int(getattr(cfg, "SCAN_STABILITY_CHECKS", 2)),
+        "stable_interval": float(getattr(
+            cfg,
+            "SCAN_STABILITY_INTERVAL_NETWORK_SECONDS" if network else "SCAN_STABILITY_INTERVAL_LOCAL_SECONDS",
+            legacy_interval if legacy_interval is not None else interval_default,
+        )),
+        "stable_checks": int(getattr(
+            cfg,
+            "SCAN_STABILITY_CHECKS_NETWORK" if network else "SCAN_STABILITY_CHECKS_LOCAL",
+            legacy_checks if legacy_checks is not None else checks_default,
+        )),
         "probe_bytes": int(getattr(cfg, "SCAN_READ_PROBE_BYTES", 64 * 1024)),
+    }
+
+
+def _readiness_record(exc: BaseException) -> dict | None:
+    """Return structured readiness fields for a skipped image."""
+
+    if not isinstance(exc, FileReadinessError):
+        return None
+    readiness = exc.readiness
+    return {
+        "readiness_status": readiness.status,
+        "readiness_code": readiness.code,
+        "readiness_attempts": readiness.attempts,
+        "category": readiness_category(readiness),
     }
 
 
@@ -94,14 +126,25 @@ def relative_name(path: Path) -> str:
 def cleanup_staging_cache(*, startup: bool = False) -> None:
     """Prune stale local staging artifacts without affecting source state."""
 
-    if not getattr(cfg, "STAGING_ENABLED", False):
-        return
     if startup and not getattr(cfg, "STAGING_CLEANUP_ON_START", True):
         return
+    # The mode only controls new staging operations. Continue pruning an old
+    # cache after staging is disabled so switching modes cannot strand files.
     cleanup_staging(
         cfg.STAGING_DIR,
         max_age_seconds=float(getattr(cfg, "STAGING_CLEANUP_DAYS", 7)) * 86400,
     )
+
+
+def cleanup_confirmed_staging(paths) -> None:
+    """Delete staged copies only after the corresponding Album is confirmed."""
+
+    if not getattr(cfg, "STAGING_CLEANUP_AFTER_SUCCESS", True):
+        return
+    for path in paths or []:
+        staged = STAGED_UPLOAD_PATHS.pop(stable_path(path), None)
+        if staged is not None:
+            remove_staged_file(staged)
 
 
 def _snapshot_for_path(path: Path):
@@ -118,18 +161,31 @@ def file_signature(path: Path, snapshot=None) -> str:
 
 
 def scan_images(cancel_event=None) -> list[Path]:
-    global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS, IMAGE_SCAN_SNAPSHOTS
+    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, IMAGE_SCAN_SNAPSHOTS
     root = cfg.IMAGE_DIR
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"图片目录不存在或不是目录：{root}")
-    images, LAST_SCAN_ERRORS = iter_files(
-        root, cfg.IMAGE_EXTENSIONS, cancel_event=cancel_event
+    scan_result = iter_files(
+        root,
+        cfg.IMAGE_EXTENSIONS,
+        cancel_event=cancel_event,
+        discovery_attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
+        discovery_initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+        discovery_max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
     )
+    images = scan_result.paths
+    LAST_SCAN_ERRORS = list(scan_result.errors)
+    LAST_SCAN_WARNINGS = list(scan_result.warnings)
+    if scan_result.cancelled:
+        LAST_SCAN_WARNINGS.append("目录扫描已取消")
     LAST_SCAN_SIZE_SKIPS = []
-    IMAGE_SCAN_SNAPSHOTS = {}
+    IMAGE_SCAN_SNAPSHOTS = {
+        key: snapshot.as_tuple()
+        for key, snapshot in getattr(scan_result, "snapshots", {}).items()
+    }
     accepted = []
     for path in images:
-        snapshot = file_snapshot(path)
+        snapshot = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path)) or file_snapshot(path)
         if snapshot is None:
             LAST_SCAN_ERRORS.append(f"{path}: 文件暂时不可读取或为空")
             continue
@@ -277,14 +333,11 @@ def compress_image(path: Path, cancel_event=None) -> Path:
                     ),
                     **_hidden_subprocess_kwargs(),
                 }
-                if cancel_event is None:
-                    result = subprocess.run(command, **process_kwargs)
-                else:
-                    result = run_cancellable_process(
-                        command,
-                        cancel_event=cancel_event,
-                        **process_kwargs,
-                    )
+                result = run_cancellable_process(
+                    command,
+                    cancel_event=cancel_event,
+                    **process_kwargs,
+                )
                 last_error = result.stderr.strip() or f"FFmpeg 退出码 {result.returncode}"
                 if result.returncode == 0 and temp_path.is_file() and temp_path.stat().st_size > 0:
                     with Image.open(temp_path) as image:
@@ -356,11 +409,10 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
                 path,
                 expected_size=expected[0] if expected else None,
                 expected_mtime_ns=expected[1] if expected else None,
-                **_readiness_options(),
+                **_readiness_options(path),
                 cancel_event=cancel_event,
             )
-            if not readiness.ready:
-                raise RuntimeError(readiness.reason or f"文件暂时不可读取：{path}")
+            raise_for_file_readiness(path, readiness)
             size = readiness.snapshot.size
             if size > cfg.IMAGE_MAX_BYTES:
                 reason = (
@@ -378,16 +430,20 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
                 image_info(path)
                 return None
         except Exception as exc:
-            return {
+            readiness_record = _readiness_record(exc)
+            record = {
                 "path": path,
                 "reason": f"{type(exc).__name__}: {exc}",
                 "category": (
                     "size" if "Telegram Photo 上限" in str(exc)
+                    else readiness_record["category"] if readiness_record
                     else "deferred" if isinstance(exc, (OSError, TimeoutError))
-                    or any(marker in str(exc) for marker in ("暂时不可读取", "发生变化", "SMB", "网络"))
                     else "unreadable"
                 ),
             }
+            if readiness_record:
+                record.update(readiness_record)
+            return record
 
     worker_count = io_worker_count(
         cfg.IMAGE_DIR,
@@ -423,7 +479,8 @@ def report_skipped_images(skipped, ui=None, *, final=False) -> None:
     prefix = "本次任务结束" if final else "图片预检完成"
     size_count = sum(record.get("category") == "size" for record in skipped)
     deferred_count = sum(record.get("category") == "deferred" for record in skipped)
-    unreadable_count = len(skipped) - size_count - deferred_count
+    cancelled_count = sum(record.get("category") == "cancelled" for record in skipped)
+    unreadable_count = len(skipped) - size_count - deferred_count - cancelled_count
     parts = []
     if unreadable_count:
         parts.append(f"{unreadable_count} 个无法读取的图片")
@@ -431,6 +488,8 @@ def report_skipped_images(skipped, ui=None, *, final=False) -> None:
         parts.append(f"{size_count} 个超过 10 MiB 上限的图片")
     if deferred_count:
         parts.append(f"{deferred_count} 个暂时不可读的图片（DEFERRED）")
+    if cancelled_count:
+        parts.append(f"{cancelled_count} 个因取消而未检查的图片")
     target.warning(
         f"{prefix}：已跳过{'、'.join(parts) or f'{len(skipped)} 个图片'}；"
         "这些文件未写入上传断点，修复后可重新扫描上传。"
@@ -479,20 +538,23 @@ def input_photo(
         path,
         expected_size=expected_size,
         expected_mtime_ns=expected_mtime_ns,
-        **_readiness_options(),
+        **_readiness_options(path),
         cancel_event=cancel_event,
     )
-    if not readiness.ready:
-        raise RuntimeError(readiness.reason or f"文件暂时不可读取：{path}")
+    raise_for_file_readiness(path, readiness)
     snapshot = readiness.snapshot.as_tuple()
     source_path = upload_path(path)
-    if getattr(cfg, "STAGING_ENABLED", False):
+    staging_mode = getattr(cfg, "STAGING_MODE", None)
+    if staging_mode is None or (staging_mode == "off" and getattr(cfg, "STAGING_ENABLED", False)):
+        staging_mode = "always" if getattr(cfg, "STAGING_ENABLED", False) else "off"
+    if should_stage(path, staging_mode):
         source_path = stage_file(
             path,
             readiness.snapshot,
             staging_dir=cfg.STAGING_DIR,
             cancel_event=cancel_event,
         )
+        STAGED_UPLOAD_PATHS[stable_path(path)] = source_path
     if snapshot[0] > cfg.IMAGE_MAX_BYTES and cfg.IMAGE_COMPRESS_OVERSIZE:
         original_size = snapshot[0]
         UI.warning(
@@ -565,9 +627,11 @@ def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
                 "reason": f"{type(exc).__name__}: {exc}",
                 "category": "size" if current_size > cfg.IMAGE_MAX_BYTES else "unreadable",
             }
-            if isinstance(exc, (OSError, TimeoutError)) or any(
-                marker in str(exc) for marker in ("暂时不可读取", "发生变化", "SMB", "网络")
-            ):
+            readiness_record = _readiness_record(exc)
+            if readiness_record:
+                record.update(readiness_record)
+                record["category"] = readiness_record["category"]
+            elif isinstance(exc, (OSError, TimeoutError)):
                 record["category"] = "deferred"
             skipped.append(record)
             target.warning(f"跳过上传前变得无法读取的图片：{relative_name(path)}")
@@ -904,6 +968,9 @@ def main():
         else scan_images(cancel_event=cancel_event)
     )
     report_scan_size_skips(LAST_SCAN_SIZE_SKIPS, UI)
+    if LAST_SCAN_WARNINGS:
+        UI.warning("图片目录扫描提醒：" + "；".join(LAST_SCAN_WARNINGS[:5]))
+        UI.log("图片目录扫描提醒详情：\n" + "\n".join(LAST_SCAN_WARNINGS))
     if not images:
         UI.warning("没有找到支持的图片。")
         return
@@ -1031,12 +1098,20 @@ def main():
                 ],
             )
             try:
-                message_ids = client.send_contents(contents, progress, ready_paths)
+                message_ids = client.send_contents(
+                    contents,
+                    progress,
+                    ready_paths,
+                    album_key=plan["key"],
+                    kind="image",
+                )
             except Exception:
                 UI.finish()
                 UI.error("当前图片 Album 未写入断点；下次会重新处理这一组。")
                 raise
             state.mark_album_completed(ready_paths, message_ids)
+            client.finalize_inflight(plan["key"], kind="image", message_ids=message_ids)
+            cleanup_confirmed_staging(ready_paths)
             progress.finish_album(ready_paths)
             UI.success(f"图片 Album {album_number} 发送成功 · Caption={caption or '无'} · 断点已保存。")
 
