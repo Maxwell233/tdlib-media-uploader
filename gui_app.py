@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PySide6 desktop interface for TDLib Media Uploader V1.8.10.
+"""PySide6 desktop interface for TDLib Media Uploader V1.8.11.
 
 The GUI is the only user-facing interface.  Upload cores remain the source of
 truth for scanning, Album creation, TDLib requests and resumable state.
@@ -65,7 +65,7 @@ from runtime_paths import APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONF
 
 PROJECT_DIR = RESOURCE_DIR
 HISTORY_PATH = APP_DATA_DIR / ".gui_history.json"
-APP_VERSION = "1.8.10"
+APP_VERSION = "1.8.11"
 ICON_NAME = "tdlib_media_uploader_icon.png" if sys.platform == "darwin" else "tdlib_media_uploader_icon.ico"
 ICON_PATH = PROJECT_DIR / "assets" / ICON_NAME
 WINDOWS_APP_USER_MODEL_ID = "Maxwell233.TDLibMediaUploader"
@@ -224,7 +224,7 @@ def _basic_paths(kind: str) -> list[Path]:
 @functools.lru_cache(maxsize=32768)
 def _path_size(path_str: str) -> int:
     try:
-        return Path(path_str).stat().st_size
+        return int(os.stat(path_str).st_size)
     except OSError:
         return 0
 
@@ -372,19 +372,23 @@ def _cache_usage(path: Path) -> tuple[int, int]:
         count = 0
         total = 0
 
-        stack = [str(path)]
+        stack = [os.fspath(path)]
         while stack:
             current_dir = stack.pop()
             try:
                 with os.scandir(current_dir) as it:
                     for entry in it:
                         try:
-                            if entry.is_symlink():
+                            is_junction = getattr(entry, "is_junction", None)
+                            if entry.is_symlink() or (
+                                callable(is_junction) and is_junction()
+                            ):
                                 continue
-                            if entry.is_file():
+                            info = entry.stat(follow_symlinks=False)
+                            if stat.S_ISREG(info.st_mode):
                                 count += 1
-                                total += entry.stat(follow_symlinks=False).st_size
-                            elif entry.is_dir():
+                                total += info.st_size
+                            elif stat.S_ISDIR(info.st_mode):
                                 stack.append(entry.path)
                         except OSError:
                             continue
@@ -489,16 +493,18 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
         else:
             paths, scan_size_skips = _apply_size_limits(_basic_paths(kind), kind)
             missing = []
-            items = [
-                {
-                    "path": path,
-                    "capture_time": _dt.datetime.fromtimestamp(file_mtime(path)),
-                    "month_key": _dt.datetime.fromtimestamp(file_mtime(path)).strftime("%Y-%m"),
-                    "date_tag": "FileSystem:ModifyTime",
-                    "fallback": True,
-                }
-                for path in paths
-            ]
+            items = []
+            for path in paths:
+                capture_time = _dt.datetime.fromtimestamp(file_mtime(path))
+                items.append(
+                    {
+                        "path": path,
+                        "capture_time": capture_time,
+                        "month_key": capture_time.strftime("%Y-%m"),
+                        "date_tag": "FileSystem:ModifyTime",
+                        "fallback": True,
+                    }
+                )
     else:
         if core is not None:
             paths = core.scan_images()

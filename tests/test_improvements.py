@@ -496,6 +496,15 @@ class ImprovementsTest(unittest.TestCase):
             self.assertTrue(log_dir.is_dir())
             self.assertEqual(list(log_dir.iterdir()), [])
 
+    def test_cache_usage_counts_regular_files_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nested = root / "nested"
+            nested.mkdir()
+            (root / "one.bin").write_bytes(b"123")
+            (nested / "two.bin").write_bytes(b"4567")
+            self.assertEqual(gui._cache_usage(root), (2, 7))
+
     def test_app_log_is_persistent_and_utf8(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

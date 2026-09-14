@@ -101,6 +101,7 @@ def scan_images() -> list[Path]:
 
 
 _IMAGE_INFO_CACHE = {}
+_IMAGE_INFO_CACHE_LOCK = threading.Lock()
 
 
 def _hidden_subprocess_kwargs() -> dict:
@@ -247,8 +248,10 @@ def cleanup_compressed_images() -> None:
 def image_info(path: Path) -> tuple[int, int]:
     stat = path.stat()
     key = (stable_path(path), stat.st_size, stat.st_mtime_ns)
-    if key in _IMAGE_INFO_CACHE:
-        return _IMAGE_INFO_CACHE[key]
+    with _IMAGE_INFO_CACHE_LOCK:
+        cached = _IMAGE_INFO_CACHE.get(key)
+    if cached is not None:
+        return cached
     try:
         with Image.open(path) as image:
             width, height = int(image.width), int(image.height)
@@ -257,8 +260,28 @@ def image_info(path: Path) -> tuple[int, int]:
         raise RuntimeError(f"无法读取图片：{path}\n{type(exc).__name__}: {exc}") from exc
     if width <= 0 or height <= 0:
         raise RuntimeError(f"图片尺寸异常：{path}")
-    _IMAGE_INFO_CACHE[key] = (width, height)
-    return width, height
+    result = (width, height)
+    with _IMAGE_INFO_CACHE_LOCK:
+        _IMAGE_INFO_CACHE[key] = result
+    return result
+
+
+def _ordered_bounded_map(executor, items, worker, max_workers: int):
+    """Yield worker results in input order with a bounded task queue."""
+    iterator = iter(items)
+    pending = deque()
+    for _ in range(max(1, int(max_workers))):
+        try:
+            pending.append(executor.submit(worker, next(iterator)))
+        except StopIteration:
+            break
+
+    while pending:
+        yield pending.popleft().result()
+        try:
+            pending.append(executor.submit(worker, next(iterator)))
+        except StopIteration:
+            pass
 
 
 def preflight_images(paths, ui=None) -> list[dict]:
@@ -294,7 +317,10 @@ def preflight_images(paths, ui=None) -> list[dict]:
             }
 
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="tdlib-preflight") as executor:
-        for index, result in enumerate(executor.map(worker, paths), 1):
+        for index, result in enumerate(
+            _ordered_bounded_map(executor, paths, worker, 4),
+            1,
+        ):
             if result and result.get("oversize"):
                 target.info(
                     f"预检发现超限图片，将在上传时使用 FFmpeg 压缩：{relative_name(result['path'])}"

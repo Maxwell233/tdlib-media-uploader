@@ -9,7 +9,7 @@ from pathlib import Path
 
 from runtime_paths import CONFIG_PATH, RESOURCE_DIR
 
-APP_VERSION = "1.8.10"
+APP_VERSION = "1.8.11"
 PROJECT_DIR = RESOURCE_DIR
 
 # Telegram's current upload limits used by this application.  Keep these

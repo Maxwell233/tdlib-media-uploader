@@ -628,13 +628,16 @@ def build_items(videos, metadata_index, progress_callback=None):
 
 
 _VIDEO_INFO_CACHE = {}
+_VIDEO_INFO_CACHE_LOCK = threading.Lock()
 
 
 def video_info(path: Path):
     stat = path.stat()
     key = (stable_path(path), stat.st_size, stat.st_mtime_ns)
-    if key in _VIDEO_INFO_CACHE:
-        return _VIDEO_INFO_CACHE[key]
+    with _VIDEO_INFO_CACHE_LOCK:
+        cached = _VIDEO_INFO_CACHE.get(key)
+    if cached is not None:
+        return cached
     reader = None
     try:
         reader = imageio_ffmpeg.read_frames(str(path))
@@ -666,7 +669,8 @@ def video_info(path: Path):
     if width <= 1 or height <= 1 or duration <= 0:
         raise RuntimeError(f"视频媒体属性异常：{path.name} | {width}x{height} | {duration:.3f}s")
     result = {"width": width, "height": height, "duration": duration}
-    _VIDEO_INFO_CACHE[key] = result
+    with _VIDEO_INFO_CACHE_LOCK:
+        _VIDEO_INFO_CACHE[key] = result
     return result
 
 
@@ -759,6 +763,24 @@ def prepare_video(path: Path):
     return info
 
 
+def _ordered_bounded_map(executor, items, worker, max_workers: int):
+    """Yield worker results in input order with a bounded task queue."""
+    iterator = iter(items)
+    pending = deque()
+    for _ in range(max(1, int(max_workers))):
+        try:
+            pending.append(executor.submit(worker, next(iterator)))
+        except StopIteration:
+            break
+
+    while pending:
+        yield pending.popleft().result()
+        try:
+            pending.append(executor.submit(worker, next(iterator)))
+        except StopIteration:
+            pass
+
+
 def preflight_videos(items, ui=None) -> list[dict]:
     """Find unreadable videos before login and Album construction.
 
@@ -791,7 +813,10 @@ def preflight_videos(items, ui=None) -> list[dict]:
             }
 
     with ThreadPoolExecutor(max_workers=MEDIA_DATE_MAX_WORKERS, thread_name_prefix="tdlib-preflight") as executor:
-        for index, result in enumerate(executor.map(worker, items), 1):
+        for index, result in enumerate(
+            _ordered_bounded_map(executor, items, worker, MEDIA_DATE_MAX_WORKERS),
+            1,
+        ):
             if getattr(cfg, "VIDEO_VERIFY_ALL_METADATA", False):
                 target.info(f"预检视频 {index}/{total} · {items[index-1]['path'].name}")
             if result:
