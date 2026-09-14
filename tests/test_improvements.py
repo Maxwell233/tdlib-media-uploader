@@ -44,6 +44,66 @@ class ImprovementsTest(unittest.TestCase):
         )
         self.assertEqual(names.splitlines(), ["clip", "archive.tar", ".hidden"])
 
+    def test_natural_filename_sort_uses_descending_numeric_runs(self):
+        names = [
+            "x.1",
+            "x.10",
+            "x.100",
+            "x.101",
+            "x.102",
+            "x.103",
+            "x.409",
+            "x.41",
+            "x.410",
+        ]
+        self.assertEqual(
+            path_utils.natural_sort(names),
+            ["x.410", "x.409", "x.103", "x.102", "x.101", "x.100", "x.41", "x.10", "x.1"],
+        )
+
+    def test_image_filename_scan_uses_natural_numeric_order(self):
+        import tdlib_image_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ["x.1.jpg", "x.10.jpg", "x.100.jpg", "x.41.jpg", "x.410.jpg"]
+            for name in names:
+                (root / name).write_bytes(b"image")
+            with patch.object(core.cfg, "IMAGE_DIR", root), \
+                    patch.object(core.cfg, "IMAGE_EXTENSIONS", {".jpg"}), \
+                    patch.object(core.cfg, "IMAGE_MAX_BYTES", 100), \
+                    patch.object(core.cfg, "IMAGE_SORT_MODE", "path"):
+                paths = core.scan_images()
+            self.assertEqual(
+                [path.name for path in paths],
+                ["x.410.jpg", "x.100.jpg", "x.41.jpg", "x.10.jpg", "x.1.jpg"],
+            )
+
+    def test_video_filename_scan_uses_natural_numeric_order(self):
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ["x.1.mp4", "x.10.mp4", "x.41.mp4", "x.409.mp4", "x.410.mp4"]
+            for name in names:
+                (root / name).write_bytes(b"video")
+            with patch.object(core.cfg, "VIDEO_DIR", root), \
+                    patch.object(core.cfg, "VIDEO_EXTENSIONS", {".mp4"}), \
+                    patch.object(core.cfg, "VIDEO_MAX_BYTES", 100), \
+                    patch.object(core.cfg, "VIDEO_READ_DATES", False), \
+                    patch.object(core.cfg, "VIDEO_SORT_MODE", "name"):
+                paths = core.scan_videos()
+            self.assertEqual(
+                [path.name for path in paths],
+                ["x.410.mp4", "x.409.mp4", "x.41.mp4", "x.10.mp4", "x.1.mp4"],
+            )
+
+    def test_unknown_media_kind_is_rejected(self):
+        with self.assertRaises(ValueError):
+            metadata.path_for("audio")
+        with self.assertRaises(ValueError):
+            gui._target_for("audio")
+
     def test_mixed_scan_groups_and_splits_albums(self):
         import tdlib_mixed_album_uploader as core
 
@@ -57,6 +117,8 @@ class ImprovementsTest(unittest.TestCase):
             (first / "a.jpg").write_bytes(b"image")
             (first / "nested" / "c.png").write_bytes(b"image")
             (second / "x.mov").write_bytes(b"video")
+            root_media = root / "root.mp4"
+            root_media.write_bytes(b"video")
             state_dir = Path(directory) / "state"
             with patch.object(core.cfg, "MIXED_DIR", root), \
                     patch.object(core.cfg, "MIXED_IMAGE_EXTENSIONS", {".jpg", ".png"}), \
@@ -67,6 +129,7 @@ class ImprovementsTest(unittest.TestCase):
                     patch.object(core, "STATE_DIR", state_dir), \
                     patch.object(metadata, "PROJECT_DIR", Path(directory)):
                 groups = core.scan_mixed_groups()
+                self.assertEqual(core.LAST_SCAN_IGNORED_ROOT_MEDIA, [root_media])
                 self.assertEqual([group["group_name"] for group in groups], ["工作", "旅行"])
                 self.assertEqual(
                     [item["path"].name for item in groups[1]["items"]],
@@ -437,6 +500,22 @@ class ImprovementsTest(unittest.TestCase):
                 skipped = core.preflight_videos(items, UI())
             prepare.assert_not_called()
             self.assertEqual(skipped[0]["category"], "deferred")
+
+    def test_local_staging_copies_a_validated_snapshot(self):
+        from staging import stage_file
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.bin"
+            staging = root / "staging"
+            source.write_bytes(b"stable media")
+            snapshot = path_utils.snapshot_file(source)
+            target = stage_file(source, snapshot, staging_dir=staging)
+            self.assertTrue(target.is_file())
+            self.assertEqual(target.read_bytes(), source.read_bytes())
+            self.assertNotEqual(target, source)
+            # A second call reuses the same snapshot-specific local copy.
+            self.assertEqual(stage_file(source, snapshot, staging_dir=staging), target)
 
     def test_exiftool_date_query_keeps_full_time_batch(self):
         import subprocess

@@ -22,14 +22,17 @@ from path_utils import (
     display_path,
     file_mtime,
     file_snapshot,
+    io_worker_count,
     iter_files,
+    natural_sort,
     relative_name as stable_relative_name,
-    revalidate_file,
     stable_path,
+    wait_for_file_ready,
 )
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
+from staging import stage_file
 
 PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = APP_DATA_DIR / ".image_state"
@@ -39,6 +42,8 @@ DEFERRED_STATUS = "DEFERRED"
 IMAGE_UPLOAD_PATHS: dict[str, Path] = {}
 IMAGE_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
 COMPRESSED_IMAGE_DIR = APP_DATA_DIR / ".image_compression"
+FFMPEG_COMPRESS_TIMEOUT_SECONDS = 45
+READINESS_ATTEMPTS = 3
 
 UI = HeadlessUI()
 
@@ -65,9 +70,16 @@ def relative_name(path: Path) -> str:
     return stable_relative_name(path, cfg.IMAGE_DIR)
 
 
-def file_signature(path: Path) -> str:
-    stat = path.stat()
-    raw = f"{relative_name(path).lower()}|{stat.st_size}|{stat.st_mtime_ns}"
+def _snapshot_for_path(path: Path):
+    return file_snapshot(path) or IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
+
+
+def file_signature(path: Path, snapshot=None) -> str:
+    snapshot = snapshot or _snapshot_for_path(path)
+    if snapshot is None:
+        raise OSError(f"文件暂时不可读取：{path}")
+    size, mtime_ns = snapshot
+    raw = f"{relative_name(path).lower()}|{size}|{mtime_ns}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -106,9 +118,12 @@ def scan_images() -> list[Path]:
     images = accepted
 
     if cfg.IMAGE_SORT_MODE == "mtime":
-        images.sort(key=lambda p: (file_mtime(p), relative_name(p).lower()))
+        images.sort(key=lambda p: (file_mtime(p), relative_name(p)))
     else:
-        images.sort(key=lambda p: relative_name(p).lower())
+        # ``sorted(..., key=str.casefold)`` puts x.100 before x.41.  Use the
+        # shared natural comparator so numeric filename runs are compared as
+        # integers (largest sequence number first).
+        images = natural_sort(images, key=relative_name)
     return images
 
 
@@ -154,7 +169,7 @@ def _compressed_path(path: Path) -> Path:
     return COMPRESSED_IMAGE_DIR / f"{digest}.jpg"
 
 
-def compress_image(path: Path) -> Path:
+def compress_image(path: Path, cancel_event=None) -> Path:
     """Create a temporary JPEG under the Telegram photo limit with FFmpeg."""
 
     target = int(getattr(cfg, "IMAGE_COMPRESSION_TARGET_BYTES", int(9.5 * 1024 ** 2)))
@@ -188,6 +203,8 @@ def compress_image(path: Path) -> Path:
                 f"scale=trunc(iw*{scale}/2)*2:trunc(ih*{scale}/2)*2,format=yuv420p"
             )
         for quality in qualities:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TimeoutError("图片压缩已取消")
             temp_path = final_path.with_name(
                 f".{final_path.stem}.{scale:g}.{quality}.tmp.jpg"
             )
@@ -219,6 +236,7 @@ def compress_image(path: Path) -> Path:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    timeout=FFMPEG_COMPRESS_TIMEOUT_SECONDS,
                     **_hidden_subprocess_kwargs(),
                 )
                 last_error = result.stderr.strip() or f"FFmpeg 退出码 {result.returncode}"
@@ -228,7 +246,7 @@ def compress_image(path: Path) -> Path:
                     if temp_path.stat().st_size <= target:
                         os.replace(temp_path, final_path)
                         return final_path
-            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            except (OSError, subprocess.SubprocessError, ValueError, TimeoutError) as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
             finally:
                 temp_path.unlink(missing_ok=True)
@@ -296,7 +314,7 @@ def _ordered_bounded_map(executor, items, worker, max_workers: int):
             pass
 
 
-def preflight_images(paths, ui=None) -> list[dict]:
+def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
     """Find unreadable images without aborting the complete upload task."""
 
     target = ui or UI
@@ -306,11 +324,16 @@ def preflight_images(paths, ui=None) -> list[dict]:
     def worker(path):
         try:
             expected = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
-            size = revalidate_file(
+            readiness = wait_for_file_ready(
                 path,
                 expected_size=expected[0] if expected else None,
                 expected_mtime_ns=expected[1] if expected else None,
-            )[0]
+                attempts=READINESS_ATTEMPTS,
+                cancel_event=cancel_event,
+            )
+            if not readiness.ready:
+                raise RuntimeError(readiness.reason or f"文件暂时不可读取：{path}")
+            size = readiness.snapshot.size
             if size > cfg.IMAGE_MAX_BYTES:
                 reason = (
                     f"文件大小 {format_size(size)} 超过 Telegram Photo 上限 "
@@ -338,11 +361,14 @@ def preflight_images(paths, ui=None) -> list[dict]:
                 ),
             }
 
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="tdlib-preflight") as executor:
+    worker_count = io_worker_count(cfg.IMAGE_DIR, local=4, network=2)
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tdlib-preflight") as executor:
         for index, result in enumerate(
-            _ordered_bounded_map(executor, paths, worker, 4),
+            _ordered_bounded_map(executor, paths, worker, worker_count),
             1,
         ):
+            if cancel_event is not None and cancel_event.is_set():
+                break
             if result and result.get("oversize"):
                 target.info(
                     f"预检发现超限图片，将在上传时使用 FFmpeg 压缩：{relative_name(result['path'])}"
@@ -405,23 +431,45 @@ def report_scan_size_skips(skipped, ui=None) -> None:
         )
 
 
-def input_photo(path: Path, caption: str = "", *, expected_size=None, expected_mtime_ns=None) -> dict:
+def input_photo(
+    path: Path,
+    caption: str = "",
+    *,
+    expected_size=None,
+    expected_mtime_ns=None,
+    cancel_event=None,
+) -> dict:
     if expected_size is None and expected_mtime_ns is None:
         expected = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
         if expected is not None:
             expected_size, expected_mtime_ns = expected
-    snapshot = revalidate_file(
+    readiness = wait_for_file_ready(
         path,
         expected_size=expected_size,
         expected_mtime_ns=expected_mtime_ns,
+        attempts=READINESS_ATTEMPTS,
+        cancel_event=cancel_event,
     )
+    if not readiness.ready:
+        raise RuntimeError(readiness.reason or f"文件暂时不可读取：{path}")
+    snapshot = readiness.snapshot.as_tuple()
     source_path = upload_path(path)
+    if getattr(cfg, "STAGING_ENABLED", False):
+        source_path = stage_file(
+            path,
+            readiness.snapshot,
+            staging_dir=cfg.STAGING_DIR,
+            cancel_event=cancel_event,
+        )
     if snapshot[0] > cfg.IMAGE_MAX_BYTES and cfg.IMAGE_COMPRESS_OVERSIZE:
         original_size = snapshot[0]
         UI.warning(
             f"图片开始上传，正在使用 FFmpeg 生成临时压缩副本：{relative_name(path)}"
         )
-        source_path = compress_image(path)
+        source_path = compress_image(
+            source_path,
+            cancel_event,
+        ) if cancel_event is not None else compress_image(source_path)
         IMAGE_UPLOAD_PATHS[stable_path(path)] = source_path
         UI.info(
             f"图片压缩完成：{relative_name(path)} · "
@@ -432,7 +480,6 @@ def input_photo(path: Path, caption: str = "", *, expected_size=None, expected_m
             f"文件大小 {format_size(snapshot[0])} 超过 Telegram Photo 上限 "
             f"{format_size(cfg.IMAGE_MAX_BYTES)}"
         )
-    source_path = upload_path(path)
     width, height = image_info(source_path)
     return {
         "@type": "inputMessagePhoto",
@@ -448,7 +495,7 @@ def input_photo(path: Path, caption: str = "", *, expected_size=None, expected_m
     }
 
 
-def build_image_contents(paths, caption: str, ui=None):
+def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
     """Build an Album while isolating images that became unreadable later."""
 
     target = ui or UI
@@ -462,16 +509,19 @@ def build_image_contents(paths, caption: str, ui=None):
             if expected is None:
                 # Keep the historical two-argument call shape for embedding
                 # integrations that provide their own input_photo wrapper.
-                contents.append(input_photo(path, item_caption))
-            else:
                 contents.append(
-                    input_photo(
-                        path,
-                        item_caption,
-                        expected_size=expected[0],
-                        expected_mtime_ns=expected[1],
-                    )
+                    input_photo(path, item_caption, cancel_event=cancel_event)
+                    if cancel_event is not None
+                    else input_photo(path, item_caption)
                 )
+            else:
+                kwargs = {
+                    "expected_size": expected[0],
+                    "expected_mtime_ns": expected[1],
+                }
+                if cancel_event is not None:
+                    kwargs["cancel_event"] = cancel_event
+                contents.append(input_photo(path, item_caption, **kwargs))
             valid_paths.append(path)
         except Exception as exc:
             try:
@@ -545,16 +595,22 @@ class UploadState:
         os.replace(temp, self.path)
 
     def is_completed(self, path: Path) -> bool:
-        return file_signature(path) in self.data["completed"]
+        try:
+            return file_signature(path) in self.data["completed"]
+        except OSError:
+            return False
 
     def mark_album_completed(self, paths: list[Path], message_ids: list[int]):
         with self.lock:
             for index, path in enumerate(paths):
-                stat = path.stat()
-                self.data["completed"][file_signature(path)] = {
+                snapshot = _snapshot_for_path(path)
+                if snapshot is None:
+                    raise RuntimeError(f"上传完成但无法记录图片断点：{path}")
+                size, mtime_ns = snapshot
+                self.data["completed"][file_signature(path, snapshot)] = {
                     "relative_path": relative_name(path),
-                    "size": stat.st_size,
-                    "mtime_ns": stat.st_mtime_ns,
+                    "size": size,
+                    "mtime_ns": mtime_ns,
                     "message_id": message_ids[index] if index < len(message_ids) else None,
                     "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 }
@@ -563,7 +619,10 @@ class UploadState:
 
 class ImageUploadProgress:
     def __init__(self, all_paths: list[Path], completed_paths: list[Path]):
-        self.sizes = {path: path.stat().st_size for path in all_paths}
+        self.sizes = {
+            path: int((_snapshot_for_path(path) or (0, 0))[0])
+            for path in all_paths
+        }
         self.total_bytes = sum(self.sizes.values())
         self.total_files = len(all_paths)
         self.completed_bytes = sum(self.sizes[path] for path in completed_paths)
@@ -691,12 +750,15 @@ class ImageUploadProgress:
 def show_file_list(images, state):
     rows = []
     for index, path in enumerate(images, 1):
-        stat = path.stat()
+        snapshot = _snapshot_for_path(path)
+        if snapshot is None:
+            continue
+        size, mtime_ns = snapshot
         rows.append((
             index,
             "✓ 已完成" if state.is_completed(path) else "• 待上传",
-            datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-            format_size(stat.st_size),
+            datetime.fromtimestamp(mtime_ns / 1_000_000_000).strftime("%Y-%m-%d %H:%M:%S"),
+            format_size(size),
             relative_name(path),
         ))
 
@@ -716,8 +778,8 @@ def show_file_list(images, state):
 
 
 def show_upload_summary(images, state, completed, pending, total_albums, skipped_items):
-    total_bytes = sum(path.stat().st_size for path in images)
-    pending_bytes = sum(path.stat().st_size for path in pending)
+    total_bytes = sum(int((_snapshot_for_path(path) or (0, 0))[0]) for path in images)
+    pending_bytes = sum(int((_snapshot_for_path(path) or (0, 0))[0]) for path in pending)
 
     UI.summary(
         f"上传前确认 · TDLib Media Uploader V{cfg.APP_VERSION}",
@@ -803,6 +865,7 @@ def main():
 
     UI.info(f"扫描图片目录：{cfg.IMAGE_DIR}")
     images = scan_images()
+    cancel_event = getattr(UI, "cancel_event", None)
     report_scan_size_skips(LAST_SCAN_SIZE_SKIPS, UI)
     if not images:
         UI.warning("没有找到支持的图片。")
@@ -815,24 +878,25 @@ def main():
         record for record in LAST_SCAN_SIZE_SKIPS
         if record.get("action") == "skip"
     ]
+    # Album membership is derived from the complete scan.  Preflight only
+    # marks files that cannot be sent in this run; it must never remove them
+    # and let later files move into an earlier Album.
+    plans = build_album_plans(images, state)
+    preflight_skipped_paths = set()
     if pending:
         UI.info(f"检查 {len(pending)} 个待上传图片的媒体数据…")
-        preflight_skipped = preflight_images(pending, UI)
+        preflight_skipped = (
+            preflight_images(pending, UI)
+            if cancel_event is None
+            else preflight_images(pending, UI, cancel_event=cancel_event)
+        )
         skipped_items.extend(preflight_skipped)
-        skipped_paths = {
+        preflight_skipped_paths = {
             stable_path(record["path"])
             for record in preflight_skipped
         }
-        if skipped_paths:
-            images = [
-                path
-                for path in images
-                if stable_path(path) not in skipped_paths
-            ]
-            completed = [path for path in images if state.is_completed(path)]
-            pending = [path for path in images if not state.is_completed(path)]
+        if preflight_skipped_paths:
             report_skipped_images(skipped_items, UI)
-    plans = build_album_plans(images, state)
     pending_plans = [plan for plan in plans if plan["pending_items"]]
     total_albums = len(pending_plans)
 
@@ -842,7 +906,11 @@ def main():
 
     show_upload_summary(images, state, completed, pending, total_albums, skipped_items)
 
-    if not pending:
+    sendable_pending = [
+        path for path in pending
+        if stable_path(path) not in preflight_skipped_paths
+    ]
+    if not pending or not sendable_pending:
         if skipped_items:
             report_skipped_images(skipped_items, UI, final=True)
         else:
@@ -857,6 +925,11 @@ def main():
 
     client = TDJsonClient(UI, "TDLib Image Album Uploader")
     progress = ImageUploadProgress(images, completed)
+    if preflight_skipped_paths:
+        progress.skip_items([
+            path for path in pending
+            if stable_path(path) in preflight_skipped_paths
+        ])
     client.add_update_callback(progress.handle_update)
 
     try:
@@ -866,7 +939,12 @@ def main():
 
         album_global = 0
         for plan in pending_plans:
-            album_paths = plan["pending_items"]
+            album_paths = [
+                path for path in plan["pending_items"]
+                if stable_path(path) not in preflight_skipped_paths
+            ]
+            if not album_paths:
+                continue
             album_number = plan["number"]
             caption = plan["caption"]["text"]
             caption = with_filename_description(
@@ -874,11 +952,19 @@ def main():
                 album_paths,
                 getattr(cfg, "IMAGE_CAPTION_INCLUDE_FILENAMES", False),
             )
-            contents, ready_paths, runtime_skipped = build_image_contents(
-                album_paths,
-                caption,
-                UI,
-            )
+            if cancel_event is None:
+                contents, ready_paths, runtime_skipped = build_image_contents(
+                    album_paths,
+                    caption,
+                    UI,
+                )
+            else:
+                contents, ready_paths, runtime_skipped = build_image_contents(
+                    album_paths,
+                    caption,
+                    UI,
+                    cancel_event,
+                )
             if runtime_skipped:
                 skipped_items.extend(runtime_skipped)
                 progress.skip_items([record["path"] for record in runtime_skipped])
@@ -910,7 +996,7 @@ def main():
                 title=f"Album {album_number} · {album_global}/{total_albums}",
                 subtitle=f"{len(ready_paths)} 张待上传图片 · Caption={caption or '无'}",
                 rows=[
-                    f"{format_size(path.stat().st_size):>10}  {relative_name(path)}"
+                    f"{format_size((_snapshot_for_path(path) or (0, 0))[0]):>10}  {relative_name(path)}"
                     for path in ready_paths
                 ],
             )

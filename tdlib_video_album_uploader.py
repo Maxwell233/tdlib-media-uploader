@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict, deque
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError as FutureTimeoutError, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -21,25 +21,36 @@ from zoneinfo import ZoneInfo
 import imageio_ffmpeg
 from PIL import Image
 
+# Some embedding environments expose ``imageio_ffmpeg`` as a namespace
+# package while loading its helpers lazily.  Keep the public lookup available
+# for those environments and for integrations that patch the executable.
+if not hasattr(imageio_ffmpeg, "get_ffmpeg_exe"):
+    imageio_ffmpeg.get_ffmpeg_exe = lambda: shutil.which("ffmpeg") or "ffmpeg"
+
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
 from path_utils import (
+    cancelable_sleep,
     display_path,
     file_mtime,
     file_snapshot,
+    io_worker_count,
     iter_files,
+    natural_sort,
     relative_name as stable_relative_name,
-    revalidate_file,
     stable_path,
+    wait_for_file_ready,
 )
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
+from staging import stage_file
 
 PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = APP_DATA_DIR / ".state"
 THUMB_CACHE_DIR = APP_DATA_DIR / ".thumb_cache"
 LAST_SCAN_ERRORS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
+LAST_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
 DEFERRED_STATUS = "DEFERRED"
 
 
@@ -122,6 +133,19 @@ def _find_ffmpeg_override() -> str | None:
     return shutil.which("ffmpeg")
 
 
+def _find_ffprobe() -> str | None:
+    configured = os.environ.get("TDLIB_FFPROBE_EXE", "").strip()
+    if configured and Path(configured).is_file():
+        return str(Path(configured).resolve())
+    if _FFMPEG_OVERRIDE:
+        sibling = Path(_FFMPEG_OVERRIDE).with_name(
+            "ffprobe.exe" if os.name == "nt" else "ffprobe"
+        )
+        if sibling.is_file():
+            return str(sibling.resolve())
+    return shutil.which("ffprobe")
+
+
 _FFMPEG_OVERRIDE = _find_ffmpeg_override()
 if _FFMPEG_OVERRIDE:
     # read_frames()/count_frames_and_secs() resolve their executable through
@@ -149,9 +173,16 @@ def normalize_path(path) -> str:
     return stable_path(path)
 
 
-def file_signature(path: Path) -> str:
-    stat = path.stat()
-    raw = f"{relative_name(path).lower()}|{stat.st_size}|{stat.st_mtime_ns}"
+def _snapshot_for_path(path: Path):
+    return file_snapshot(path) or LAST_SCAN_SNAPSHOTS.get(normalize_path(path))
+
+
+def file_signature(path: Path, snapshot=None) -> str:
+    snapshot = snapshot or _snapshot_for_path(path)
+    if snapshot is None:
+        raise OSError(f"文件暂时不可读取：{path}")
+    size, mtime_ns = snapshot
+    raw = f"{relative_name(path).lower()}|{size}|{mtime_ns}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -198,19 +229,20 @@ def month_caption(month_key: str) -> str:
 
 
 def scan_videos() -> list[Path]:
-    global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS
+    global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_SNAPSHOTS
     root = cfg.VIDEO_DIR
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"视频目录不存在或不是目录：{root}")
     videos, LAST_SCAN_ERRORS = iter_files(root, cfg.VIDEO_EXTENSIONS)
     LAST_SCAN_SIZE_SKIPS = []
+    LAST_SCAN_SNAPSHOTS = {}
     accepted = []
     for path in videos:
-        try:
-            size = path.stat().st_size
-        except OSError as exc:
-            LAST_SCAN_ERRORS.append(f"{path}: {exc}")
+        snapshot = file_snapshot(path)
+        if snapshot is None:
+            LAST_SCAN_ERRORS.append(f"{path}: 文件暂时不可读取或为空")
             continue
+        size, mtime_ns = snapshot
         if size > cfg.VIDEO_MAX_BYTES:
             LAST_SCAN_SIZE_SKIPS.append({
                 "path": path,
@@ -223,10 +255,21 @@ def scan_videos() -> list[Path]:
                 ),
             })
             continue
+        LAST_SCAN_SNAPSHOTS[normalize_path(path)] = snapshot
         accepted.append(path)
     videos = accepted
     if not video_dates_enabled() or getattr(cfg, "VIDEO_SORT_MODE", "mtime") == "name":
-        videos.sort(key=lambda p: (p.name.casefold(), relative_name(p).casefold()))
+        # Keep the historical filename-first ordering while comparing each
+        # numeric run as an integer. A stable secondary path order makes files
+        # with the same basename deterministic across directory traversals.
+        videos = natural_sort(
+            videos,
+            key=lambda p: relative_name(p),
+        )
+        videos = natural_sort(
+            videos,
+            key=lambda p: p.name,
+        )
     else:
         videos.sort(key=lambda p: (file_mtime(p), relative_name(p).casefold()))
     return videos
@@ -256,8 +299,18 @@ def parse_exif_datetime(value):
 
 
 EXIFTOOL_BATCH_SIZE = 256
-EXIFTOOL_MAX_RETRIES = 1
+EXIFTOOL_MAX_RETRIES = 2
 EXIFTOOL_TIMEOUT_SECONDS = 120
+FFMPEG_METADATA_TIMEOUT_SECONDS = 30
+FFMPEG_INFO_TIMEOUT_SECONDS = 30
+FFMPEG_THUMBNAIL_TIMEOUT_SECONDS = 45
+READINESS_ATTEMPTS = 3
+
+
+def _cancel_requested(cancel_event=None) -> bool:
+    if cancel_event is not None and cancel_event.is_set():
+        return True
+    return bool(getattr(UI, "stop_requested", False))
 
 
 def _exiftool_command(*, recursive: bool) -> list[str]:
@@ -280,8 +333,13 @@ def _exiftool_command(*, recursive: bool) -> list[str]:
     return command
 
 
-def _exiftool_rows(batch, *, recursive: bool) -> tuple[list[dict], str | None]:
-    """Run one ExifTool batch and return rows plus a non-fatal diagnostic."""
+def _exiftool_rows_detailed(
+    batch,
+    *,
+    recursive: bool,
+    cancel_event=None,
+) -> tuple[list[dict], str | None, bool]:
+    """Run one ExifTool batch and report whether the output is complete."""
     input_text = (
         f"{cfg.VIDEO_DIR}\n"
         if batch is None
@@ -289,6 +347,8 @@ def _exiftool_rows(batch, *, recursive: bool) -> tuple[list[dict], str | None]:
     )
     last_error = ""
     for attempt in range(EXIFTOOL_MAX_RETRIES + 1):
+        if _cancel_requested(cancel_event):
+            return [], "ExifTool 读取已取消", False
         try:
             result = subprocess.run(
                 _exiftool_command(recursive=recursive),
@@ -303,29 +363,76 @@ def _exiftool_rows(batch, *, recursive: bool) -> tuple[list[dict], str | None]:
             )
         except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
             last_error = f"{type(exc).__name__}: {exc}"
+            if attempt < EXIFTOOL_MAX_RETRIES:
+                cancelable_sleep(min(0.25 * (2 ** attempt), 2.0), cancel_event)
             continue
         stdout = str(result.stdout or "").lstrip("\ufeff").strip()
         stderr = str(result.stderr or "").strip()
-        if result.returncode in (0, 1) and not stdout:
-            # ExifTool legitimately emits an empty result for a directory with
-            # no matching media. Never turn that into a JSONDecodeError.
-            return [], stderr or None
+        if not stdout:
+            # An empty explicit-file batch is a failure and must be retried;
+            # an empty legacy recursive directory is a valid no-match result.
+            if batch is None and result.returncode in (0, 1):
+                return [], stderr or None, True
+            last_error = stderr or "ExifTool 对非空文件批次没有返回 JSON"
+            if attempt < EXIFTOOL_MAX_RETRIES:
+                cancelable_sleep(min(0.25 * (2 ** attempt), 2.0), cancel_event)
+            continue
         if result.returncode not in (0, 1):
             last_error = stderr or f"退出码 {result.returncode}"
+            if attempt < EXIFTOOL_MAX_RETRIES:
+                cancelable_sleep(min(0.25 * (2 ** attempt), 2.0), cancel_event)
             continue
         try:
             rows = json.loads(stdout)
         except (json.JSONDecodeError, TypeError) as exc:
             last_error = f"JSON 输出无法解析：{exc}"
+            if attempt < EXIFTOOL_MAX_RETRIES:
+                cancelable_sleep(min(0.25 * (2 ** attempt), 2.0), cancel_event)
             continue
         if not isinstance(rows, list):
             last_error = "JSON 输出不是数组"
+            if attempt < EXIFTOOL_MAX_RETRIES:
+                cancelable_sleep(min(0.25 * (2 ** attempt), 2.0), cancel_event)
             continue
-        return [row for row in rows if isinstance(row, dict)], stderr or None
-    return [], last_error or "ExifTool 未返回有效结果"
+        clean_rows = [row for row in rows if isinstance(row, dict)]
+        complete = result.returncode == 0 and not stderr
+        if complete and batch is not None:
+            requested_paths = {normalize_path(path) for path in batch}
+            returned_paths = {
+                normalize_path(row["SourceFile"])
+                for row in clean_rows
+                if row.get("SourceFile")
+            }
+            missing = requested_paths - returned_paths
+            if missing:
+                complete = False
+                last_error = (
+                    f"ExifTool 输出不完整：批次中有 {len(missing)} 个文件未返回结果"
+                )
+        if complete:
+            return clean_rows, None, True
+        last_error = last_error or stderr or f"退出码 {result.returncode}"
+        # Keep the parsed rows for a one-file batch so a warning attached to a
+        # valid file does not discard otherwise useful metadata. Multi-file
+        # batches are marked incomplete and isolated by ``read_exif_metadata``.
+        if batch is not None and len(batch) <= 1:
+            return clean_rows, last_error, False
+        if attempt < EXIFTOOL_MAX_RETRIES:
+            cancelable_sleep(min(0.25 * (2 ** attempt), 2.0), cancel_event)
+    return [], last_error or "ExifTool 未返回有效结果", False
 
 
-def read_exif_metadata(paths=None) -> dict[str, dict]:
+def _exiftool_rows(batch, *, recursive: bool) -> tuple[list[dict], str | None]:
+    """Backward-compatible two-value wrapper for integrations."""
+
+    rows, diagnostic, _complete = _exiftool_rows_detailed(
+        batch,
+        recursive=recursive,
+    )
+    return rows, diagnostic
+
+
+def read_exif_metadata(paths=None, cancel_event=None) -> dict[str, dict]:
     """Read EXIF metadata without letting one bad network file abort a scan.
 
     ``paths=None`` retains the legacy recursive-directory behavior for CLI and
@@ -336,14 +443,16 @@ def read_exif_metadata(paths=None) -> dict[str, dict]:
     global LAST_SCAN_ERRORS
     if not video_dates_enabled():
         return {}
+    requested = None if paths is None else [Path(path) for path in paths]
+    # An empty scan has no metadata work to do and should remain a successful
+    # no-op even when ExifTool is not installed.
+    if requested == []:
+        return {}
     if not cfg.EXIFTOOL_PATH.exists():
         raise RuntimeError(
             f"找不到 ExifTool：{cfg.EXIFTOOL_PATH}\n"
             "请把对应平台的 ExifTool 可执行文件放入 tools 目录，或在设置中指定路径。"
         )
-    requested = None if paths is None else [Path(path) for path in paths]
-    if requested == []:
-        return {}
     if requested is None:
         batches = [(None, True)]
     else:
@@ -355,8 +464,14 @@ def read_exif_metadata(paths=None) -> dict[str, dict]:
     diagnostics = []
 
     def collect(batch, recursive):
-        rows, diagnostic = _exiftool_rows(batch, recursive=recursive)
-        if diagnostic and not rows and batch is not None and len(batch) > 1:
+        if _cancel_requested(cancel_event):
+            return
+        rows, diagnostic, complete = _exiftool_rows_detailed(
+            batch,
+            recursive=recursive,
+            cancel_event=cancel_event,
+        )
+        if (not complete or diagnostic) and batch is not None and len(batch) > 1:
             midpoint = max(1, len(batch) // 2)
             collect(batch[:midpoint], False)
             collect(batch[midpoint:], False)
@@ -370,6 +485,8 @@ def read_exif_metadata(paths=None) -> dict[str, dict]:
                 index[normalize_path(source)] = row
 
     for batch, recursive in batches:
+        if _cancel_requested(cancel_event):
+            break
         collect(batch, recursive)
     if diagnostics:
         LAST_SCAN_ERRORS.extend(f"ExifTool：{message}" for message in diagnostics)
@@ -412,6 +529,8 @@ def _read_media_creation_metadata(path_text: str, size: int, mtime_ns: int):
     )
     os.close(fd)
     try:
+        if _cancel_requested():
+            return None
         command = [
             executable,
             "-nostdin",
@@ -442,7 +561,7 @@ def _read_media_creation_metadata(path_text: str, size: int, mtime_ns: int):
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=20,
+            timeout=FFMPEG_METADATA_TIMEOUT_SECONDS,
             **_hidden_subprocess_kwargs(),
         )
         if result.returncode != 0:
@@ -498,15 +617,26 @@ def _media_creation_metadata(path_text: str, size: int, mtime_ns: int):
 _media_creation_metadata.cache_clear = _cached_media_creation_metadata.cache_clear
 
 
-def read_media_creation_time(path: Path):
+def read_media_creation_time(path: Path, cancel_event=None):
     if not video_dates_enabled():
         return None
     try:
-        info = path.stat()
+        if _cancel_requested(cancel_event):
+            return None
+        readiness = wait_for_file_ready(
+            path,
+            attempts=2,
+            stable_interval=0.02,
+            probe=True,
+            cancel_event=cancel_event,
+        )
+        if not readiness.ready:
+            return None
+        info = readiness.snapshot
         return _media_creation_metadata(
             display_path(path),
-            info.st_size,
-            info.st_mtime_ns,
+            info.size,
+            info.mtime_ns,
         )
     except (OSError, RuntimeError, subprocess.SubprocessError):
         # Missing tools, unreadable/unsupported files or a timed-out share
@@ -600,8 +730,11 @@ def _fallback_capture_time(path: Path):
     if not video_dates_enabled():
         return None
     if cfg.VIDEO_MISSING_DATE_POLICY == "mtime":
+        snapshot = file_snapshot(path)
+        if snapshot is None:
+            return None
         return {
-            "datetime": datetime.fromtimestamp(path.stat().st_mtime),
+            "datetime": datetime.fromtimestamp(snapshot[1] / 1_000_000_000),
             "tag": "FileSystem:ModifyTime",
             "fallback": True,
         }
@@ -614,6 +747,7 @@ def choose_capture_time(
     *,
     probe_media: bool = True,
     allow_fallback: bool = True,
+    cancel_event=None,
 ):
     if not video_dates_enabled():
         return None
@@ -621,7 +755,7 @@ def choose_capture_time(
     if selected is not None:
         return selected
     if probe_media and getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True):
-        selected = _media_selection(read_media_creation_time(path))
+        selected = _media_selection(read_media_creation_time(path, cancel_event))
         if selected is not None:
             return selected
     return _fallback_capture_time(path) if allow_fallback else None
@@ -637,7 +771,7 @@ def _emit_scan_progress(progress_callback, payload: dict):
         pass
 
 
-def _probe_media_dates(paths, progress_callback=None):
+def _probe_media_dates(paths, progress_callback=None, cancel_event=None):
     if (
         not paths
         or not video_dates_enabled()
@@ -655,17 +789,29 @@ def _probe_media_dates(paths, progress_callback=None):
         {"phase": "media_date", "completed": 0, "total": total},
     )
 
+    worker_count = io_worker_count(
+        cfg.VIDEO_DIR,
+        local=MEDIA_DATE_MAX_WORKERS,
+        network=2,
+    )
+    probe = (
+        (lambda path: read_media_creation_time(path, cancel_event))
+        if cancel_event is not None
+        else read_media_creation_time
+    )
     with ThreadPoolExecutor(
-        max_workers=MEDIA_DATE_MAX_WORKERS,
+        max_workers=worker_count,
         thread_name_prefix="tdlib-media-date",
     ) as executor:
-        for _ in range(min(MEDIA_DATE_MAX_WORKERS, total)):
+        for _ in range(min(worker_count, total)):
             path = next(iterator, None)
             if path is None:
                 break
-            futures[executor.submit(read_media_creation_time, path)] = path
+            futures[executor.submit(probe, path)] = path
 
         while futures:
+            if _cancel_requested(cancel_event):
+                break
             done, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
             for future in done:
                 path = futures.pop(future)
@@ -686,16 +832,16 @@ def _probe_media_dates(paths, progress_callback=None):
                 )
                 next_path = next(iterator, None)
                 if next_path is not None:
-                    futures[executor.submit(read_media_creation_time, next_path)] = next_path
+                    futures[executor.submit(probe, next_path)] = next_path
     return results
 
 
-def build_items(videos, metadata_index, progress_callback=None):
+def build_items(videos, metadata_index, progress_callback=None, cancel_event=None):
     items, missing = [], []
     metadata_index = metadata_index or {}
 
     def snapshot_fields(path):
-        snapshot = file_snapshot(path)
+        snapshot = LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or file_snapshot(path)
         if snapshot is None:
             return {}
         return {"scan_size": snapshot[0], "scan_mtime_ns": snapshot[1]}
@@ -705,21 +851,27 @@ def build_items(videos, metadata_index, progress_callback=None):
             progress_callback,
             {"phase": "date_disabled", "completed": len(videos), "total": len(videos)},
         )
-        return [
-            {
+        filename_items = []
+        for path in videos:
+            item = {
                 "path": path,
                 "capture_time": None,
                 "month_key": FORCED_GROUP_KEY,
                 "date_tag": "未读取日期",
                 "fallback": False,
             }
-            for path in videos
-        ], []
+            snapshot = LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or file_snapshot(path)
+            if snapshot is not None:
+                item["scan_size"], item["scan_mtime_ns"] = snapshot
+            filename_items.append(item)
+        return filename_items, []
     embedded = {}
     pending_media = []
     unavailable = set()
 
     for path in videos:
+        if _cancel_requested(cancel_event):
+            break
         try:
             selected = choose_capture_time(
                 path,
@@ -746,9 +898,15 @@ def build_items(videos, metadata_index, progress_callback=None):
         progress_callback,
         {"phase": "exif", "completed": len(videos), "total": len(videos)},
     )
-    media_dates = _probe_media_dates(pending_media, progress_callback)
+    media_dates = _probe_media_dates(
+        pending_media,
+        progress_callback,
+        cancel_event,
+    )
 
     for path in videos:
+        if _cancel_requested(cancel_event):
+            break
         key = normalize_path(path)
         if key in unavailable:
             continue
@@ -773,7 +931,7 @@ def build_items(videos, metadata_index, progress_callback=None):
             "date_tag": selected["tag"],
             "fallback": selected["fallback"],
         }
-        snapshot = file_snapshot(path)
+        snapshot = LAST_SCAN_SNAPSHOTS.get(key) or file_snapshot(path)
         if snapshot is not None:
             item["scan_size"], item["scan_mtime_ns"] = snapshot
         items.append(item)
@@ -791,17 +949,75 @@ _VIDEO_INFO_CACHE = {}
 _VIDEO_INFO_CACHE_LOCK = threading.Lock()
 
 
+def _next_frame_metadata(reader, *, timeout: float):
+    """Read imageio's header with a timeout and close its child process."""
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tdlib-video-header")
+    future = executor.submit(next, reader)
+    try:
+        return future.result(timeout=max(1.0, float(timeout)))
+    except FutureTimeoutError as exc:
+        try:
+            reader.close()
+        except Exception:
+            pass
+        raise TimeoutError("读取视频媒体信息超时") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _probe_video_duration(path: Path) -> float:
+    """Read duration through bounded ffprobe instead of frame counting."""
+
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return 0.0
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "format=duration:stream=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                display_path(path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=FFMPEG_INFO_TIMEOUT_SECONDS,
+            **_hidden_subprocess_kwargs(),
+        )
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        return 0.0
+    if result.returncode != 0:
+        return 0.0
+    values = []
+    for line in str(result.stdout or "").splitlines():
+        try:
+            value = float(line.strip())
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            values.append(value)
+    return max(values, default=0.0)
+
+
 def video_info(path: Path):
-    stat = path.stat()
-    key = (stable_path(path), stat.st_size, stat.st_mtime_ns)
+    snapshot = file_snapshot(path)
+    if snapshot is None:
+        raise RuntimeError(f"视频文件暂时不可读取：{path}")
+    key = (stable_path(path), snapshot[0], snapshot[1])
     with _VIDEO_INFO_CACHE_LOCK:
         cached = _VIDEO_INFO_CACHE.get(key)
     if cached is not None:
         return cached
     reader = None
     try:
-        reader = imageio_ffmpeg.read_frames(str(path))
-        metadata = next(reader)
+        reader = imageio_ffmpeg.read_frames(display_path(path))
+        metadata = _next_frame_metadata(reader, timeout=FFMPEG_INFO_TIMEOUT_SECONDS)
     except StopIteration as exc:
         raise RuntimeError(f"视频没有可读取的媒体流：{path}") from exc
     except Exception as exc:
@@ -820,11 +1036,7 @@ def video_info(path: Path):
     if not size or len(size) != 2:
         raise RuntimeError(f"FFmpeg 无法读取分辨率：{path.name}")
     if duration <= 0:
-        try:
-            _, duration = imageio_ffmpeg.count_frames_and_secs(str(path))
-            duration = float(duration)
-        except Exception:
-            duration = 0
+        duration = _probe_video_duration(path)
     width, height = int(size[0]), int(size[1])
     if width <= 1 or height <= 1 or duration <= 0:
         raise RuntimeError(f"视频媒体属性异常：{path.name} | {width}x{height} | {duration:.3f}s")
@@ -834,7 +1046,7 @@ def video_info(path: Path):
     return result
 
 
-def build_thumbnail(path: Path):
+def build_thumbnail(path: Path, cancel_event=None):
     THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     stat = path.stat()
     cache_key = hashlib.sha1(
@@ -864,6 +1076,9 @@ def build_thumbnail(path: Path):
 
     def extract(second: float):
         nonlocal last_error
+        if _cancel_requested(cancel_event):
+            last_error = "FFmpeg 缩略图处理已取消"
+            return False
         try:
             temp_path.unlink(missing_ok=True)
         except OSError:
@@ -872,7 +1087,7 @@ def build_thumbnail(path: Path):
             result = subprocess.run(
                 [
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                    "-ss", str(second), "-i", str(path), "-frames:v", "1",
+                    "-ss", str(second), "-i", display_path(path), "-frames:v", "1",
                     "-vf", "scale=640:640:force_original_aspect_ratio=decrease",
                     "-q:v", "3", str(temp_path),
                 ],
@@ -881,11 +1096,12 @@ def build_thumbnail(path: Path):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                timeout=FFMPEG_THUMBNAIL_TIMEOUT_SECONDS,
                 **process_kwargs,
             )
             last_error = result.stderr.strip() or f"FFmpeg 退出码 {result.returncode}"
             return result.returncode == 0 and temp_path.exists() and temp_path.stat().st_size > 0
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, subprocess.SubprocessError, TimeoutError) as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             return False
 
@@ -914,12 +1130,12 @@ def build_thumbnail(path: Path):
     return final_path, width, height
 
 
-def prepare_video(path: Path):
+def prepare_video(path: Path, cancel_event=None):
     """Read all local video data required before a Telegram request."""
 
     info = video_info(path)
     if cfg.VIDEO_GENERATE_THUMBNAIL:
-        build_thumbnail(path)
+        build_thumbnail(path, cancel_event)
     return info
 
 
@@ -941,7 +1157,7 @@ def _ordered_bounded_map(executor, items, worker, max_workers: int):
             pass
 
 
-def preflight_videos(items, ui=None) -> list[dict]:
+def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
     """Find unreadable videos before login and Album construction.
 
     The source file remains in the scan and is intentionally not marked as
@@ -956,18 +1172,29 @@ def preflight_videos(items, ui=None) -> list[dict]:
     def worker(item):
         path = item["path"]
         try:
-            snapshot = revalidate_file(
+            readiness = wait_for_file_ready(
                 path,
                 expected_size=item.get("scan_size"),
                 expected_mtime_ns=item.get("scan_mtime_ns"),
+                attempts=READINESS_ATTEMPTS,
+                cancel_event=cancel_event,
             )
+            if not readiness.ready:
+                raise RuntimeError(readiness.reason or f"文件暂时不可读取：{path}")
+            snapshot = readiness.snapshot.as_tuple()
             size = snapshot[0]
             if size > cfg.VIDEO_MAX_BYTES:
                 raise RuntimeError(
                     f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
                     f"{format_size(cfg.VIDEO_MAX_BYTES)}"
                 )
-            prepare_video(path)
+            # Preserve the historical one-argument call for integrations and
+            # tests that provide a lightweight preparation hook.  The worker
+            # passes cancellation only when a caller requested it.
+            if cancel_event is None:
+                prepare_video(path)
+            else:
+                prepare_video(path, cancel_event)
             return None
         except Exception as exc:
             return {
@@ -982,11 +1209,14 @@ def preflight_videos(items, ui=None) -> list[dict]:
                 ),
             }
 
-    with ThreadPoolExecutor(max_workers=MEDIA_DATE_MAX_WORKERS, thread_name_prefix="tdlib-preflight") as executor:
+    worker_count = io_worker_count(cfg.VIDEO_DIR, local=MEDIA_DATE_MAX_WORKERS, network=2)
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tdlib-preflight") as executor:
         for index, result in enumerate(
-            _ordered_bounded_map(executor, items, worker, MEDIA_DATE_MAX_WORKERS),
+            _ordered_bounded_map(executor, items, worker, worker_count),
             1,
         ):
+            if _cancel_requested(cancel_event):
+                break
             if getattr(cfg, "VIDEO_VERIFY_ALL_METADATA", False):
                 target.info(f"预检视频 {index}/{total} · {items[index-1]['path'].name}")
             if result:
@@ -1035,7 +1265,7 @@ def report_skipped_videos(skipped, ui=None, *, final=False) -> None:
     )
 
 
-def build_video_contents(items, caption: str, ui=None):
+def build_video_contents(items, caption: str, ui=None, cancel_event=None):
     """Build an Album while isolating files that became unreadable later."""
 
     target = ui or UI
@@ -1044,7 +1274,11 @@ def build_video_contents(items, caption: str, ui=None):
     skipped = []
     for item in items:
         try:
-            contents.append(input_video(item, caption if not valid_items else ""))
+            item_caption = caption if not valid_items else ""
+            if cancel_event is None:
+                contents.append(input_video(item, item_caption))
+            else:
+                contents.append(input_video(item, item_caption, cancel_event))
             valid_items.append(item)
         except Exception as exc:
             path = item["path"]
@@ -1064,17 +1298,32 @@ def build_video_contents(items, caption: str, ui=None):
     return contents, valid_items, skipped
 
 
-def input_video(item, caption: str):
+def input_video(item, caption: str, cancel_event=None):
     path = item["path"]
-    revalidate_file(
+    readiness = wait_for_file_ready(
         path,
         expected_size=item.get("scan_size"),
         expected_mtime_ns=item.get("scan_mtime_ns"),
+        attempts=READINESS_ATTEMPTS,
+        cancel_event=cancel_event,
     )
-    info = video_info(path)
+    if not readiness.ready:
+        raise RuntimeError(readiness.reason or f"文件暂时不可读取：{path}")
+    source_path = path
+    if getattr(cfg, "STAGING_ENABLED", False):
+        source_path = stage_file(
+            path,
+            readiness.snapshot,
+            staging_dir=cfg.STAGING_DIR,
+            cancel_event=cancel_event,
+        )
+    info = video_info(source_path)
     thumbnail = None
     if cfg.VIDEO_GENERATE_THUMBNAIL:
-        thumb_path, thumb_width, thumb_height = build_thumbnail(path)
+        if cancel_event is None:
+            thumb_path, thumb_width, thumb_height = build_thumbnail(source_path)
+        else:
+            thumb_path, thumb_width, thumb_height = build_thumbnail(source_path, cancel_event)
         thumbnail = {
             "@type": "inputThumbnail",
             "thumbnail": {"@type": "inputFileLocal", "path": display_path(thumb_path)},
@@ -1083,7 +1332,7 @@ def input_video(item, caption: str):
         }
     return {
         "@type": "inputMessageVideo",
-        "video": {"@type": "inputFileLocal", "path": display_path(path)},
+        "video": {"@type": "inputFileLocal", "path": display_path(source_path)},
         "thumbnail": thumbnail,
         "cover": None,
         "start_timestamp": 0,
@@ -1151,17 +1400,28 @@ class UploadState:
         os.replace(temp, self.path)
 
     def is_completed(self, path: Path):
-        return file_signature(path) in self.data["completed"]
+        try:
+            return file_signature(path) in self.data["completed"]
+        except OSError:
+            return False
 
     def mark_album_completed(self, items, message_ids):
         with self.lock:
             for index, item in enumerate(items):
                 path = item["path"]
-                stat = path.stat()
-                self.data["completed"][file_signature(path)] = {
+                snapshot = _snapshot_for_path(path)
+                if snapshot is None:
+                    expected_size = item.get("scan_size")
+                    expected_mtime_ns = item.get("scan_mtime_ns")
+                    if expected_size is not None and expected_mtime_ns is not None:
+                        snapshot = (int(expected_size), int(expected_mtime_ns))
+                if snapshot is None:
+                    raise RuntimeError(f"上传完成但无法记录视频断点：{path}")
+                size, mtime_ns = snapshot
+                self.data["completed"][file_signature(path, snapshot)] = {
                     "relative_path": relative_name(path),
-                    "size": stat.st_size,
-                    "mtime_ns": stat.st_mtime_ns,
+                    "size": size,
+                    "mtime_ns": mtime_ns,
                     "capture_time": (
                         item["capture_time"].isoformat()
                         if item.get("capture_time") is not None
@@ -1177,7 +1437,10 @@ class UploadState:
 
 class VideoUploadProgress:
     def __init__(self, all_items, completed_items):
-        self.sizes = {item["path"]: item["path"].stat().st_size for item in all_items}
+        self.sizes = {
+            item["path"]: int((_snapshot_for_path(item["path"]) or (0, 0))[0])
+            for item in all_items
+        }
         self.total_bytes = sum(self.sizes.values())
         self.total_files = len(all_items)
         self.completed_bytes = sum(self.sizes[item["path"]] for item in completed_items)
@@ -1399,7 +1662,7 @@ def print_plan(items, state):
             )
             print(
                 f"  {index:>3}. [{status}] {capture_text}  "
-                f"{format_size(path.stat().st_size):>10}  {relative_name(path)}  <{item['date_tag']}>{fallback}"
+                f"{format_size((_snapshot_for_path(path) or (0, 0))[0]):>10}  {relative_name(path)}  <{item['date_tag']}>{fallback}"
             )
 
 
@@ -1422,6 +1685,7 @@ def main():
     UI.log(f"tdjson / TDLib 绑定版本：{version}（已锁定）")
 
     videos = scan_videos()
+    cancel_event = getattr(UI, "cancel_event", None)
     if LAST_SCAN_SIZE_SKIPS:
         report_scan_size_skips(LAST_SCAN_SIZE_SKIPS)
     if not videos:
@@ -1436,7 +1700,11 @@ def main():
             "正在使用 ExifTool 批量读取 EXIF"
             + ("；缺少 EXIF 的视频再读取媒体创建日期..." if getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True) else "...")
         )
-        metadata_index = read_exif_metadata(videos)
+        metadata_index = (
+            read_exif_metadata(videos)
+            if cancel_event is None
+            else read_exif_metadata(videos, cancel_event=cancel_event)
+        )
     elif getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True):
         UI.warning(
             f"未找到 ExifTool：{cfg.EXIFTOOL_PATH}。"
@@ -1454,7 +1722,14 @@ def main():
             f"找不到 ExifTool：{cfg.EXIFTOOL_PATH}\n"
             '当前未启用媒体创建日期，且 missing_date_policy="error"，必须安装 ExifTool。'
         )
-    items, missing = build_items(videos, metadata_index)
+    if cancel_event is None:
+        items, missing = build_items(videos, metadata_index)
+    else:
+        items, missing = build_items(
+            videos,
+            metadata_index,
+            cancel_event=cancel_event,
+        )
     if missing and cfg.VIDEO_MISSING_DATE_POLICY == "error":
         UI.log("以下视频没有找到可用的 EXIF 或媒体创建日期：")
         for path in missing:
@@ -1466,20 +1741,23 @@ def main():
     completed_items = [item for item in items if state.is_completed(item["path"])]
     pending_items = [item for item in items if not state.is_completed(item["path"])]
     skipped_items = []
+    # Build all Album boundaries from the complete scan before preflight.  A
+    # temporarily unavailable file is deferred for this run; removing it
+    # from ``items`` here would incorrectly pull a later file into its Album.
+    plans = build_album_plans(items, state)
+    preflight_skipped_paths = set()
     if pending_items:
         UI.log(f"正在检查 {len(pending_items)} 个待上传视频的媒体数据…")
-        skipped_items = preflight_videos(pending_items)
-        skipped_paths = {stable_path(record["path"]) for record in skipped_items}
-        if skipped_paths:
-            items = [
-                item
-                for item in items
-                if stable_path(item["path"]) not in skipped_paths
-            ]
-            completed_items = [item for item in items if state.is_completed(item["path"])]
-            pending_items = [item for item in items if not state.is_completed(item["path"])]
+        skipped_items = (
+            preflight_videos(pending_items)
+            if cancel_event is None
+            else preflight_videos(pending_items, cancel_event=cancel_event)
+        )
+        preflight_skipped_paths = {
+            stable_path(record["path"]) for record in skipped_items
+        }
+        if preflight_skipped_paths:
             report_skipped_videos(skipped_items)
-    plans = build_album_plans(items, state)
     pending_plans = [plan for plan in plans if plan["pending_items"]]
     total_albums = len(pending_plans)
 
@@ -1488,14 +1766,21 @@ def main():
     print(f"扫描视频：{len(videos)} | 可用日期：{len(items)} | 缺失日期：{len(missing)}")
     print(f"跳过坏视频：{len(skipped_items)}")
     print(f"断点已完成：{len(completed_items)}/{len(items)}")
-    print(f"本次待上传：{len(pending_items)} | {format_size(sum(item['path'].stat().st_size for item in pending_items))}")
+    print(
+        f"本次待上传：{len(pending_items)} | "
+        f"{format_size(sum((_snapshot_for_path(item['path']) or (0, 0))[0] for item in pending_items))}"
+    )
     print(f"本次 Album：{total_albums}")
     print(f"状态文件：{state.path}")
     print("=" * 82)
 
     if cfg.VIDEO_SHOW_FILE_LIST:
         print_plan(items, state)
-    if not pending_items:
+    sendable_pending = [
+        item for item in pending_items
+        if stable_path(item["path"]) not in preflight_skipped_paths
+    ]
+    if not pending_items or not sendable_pending:
         if skipped_items:
             report_skipped_videos(skipped_items, final=True)
             print("\n没有可上传的有效视频；坏视频已跳过并记录。")
@@ -1509,6 +1794,11 @@ def main():
 
     client = TDJsonClient(UI, "TDLib Video Album Uploader")
     progress = VideoUploadProgress(items, completed_items)
+    if preflight_skipped_paths:
+        progress.skip_items([
+            item for item in pending_items
+            if stable_path(item["path"]) in preflight_skipped_paths
+        ])
     client.add_update_callback(progress.handle_update)
 
     try:
@@ -1532,17 +1822,29 @@ def main():
             UI.log("=" * 82)
 
             for plan in month_plans:
-                album_items = plan["pending_items"]
+                album_items = [
+                    item for item in plan["pending_items"]
+                    if stable_path(item["path"]) not in preflight_skipped_paths
+                ]
+                if not album_items:
+                    continue
                 label = with_filename_description(
                     plan["caption"]["text"],
                     album_items,
                     getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False),
                     include_filename_numbers(),
                 )
-                contents, ready_items, runtime_skipped = build_video_contents(
-                    album_items,
-                    label,
-                )
+                if cancel_event is None:
+                    contents, ready_items, runtime_skipped = build_video_contents(
+                        album_items,
+                        label,
+                    )
+                else:
+                    contents, ready_items, runtime_skipped = build_video_contents(
+                        album_items,
+                        label,
+                        cancel_event=cancel_event,
+                    )
                 if runtime_skipped:
                     skipped_items.extend(runtime_skipped)
                     progress.skip_items([record["item"] for record in runtime_skipped])
@@ -1585,7 +1887,7 @@ def main():
                     )
                     UI.log(
                         f"  {capture_text}  "
-                        f"{format_size(path.stat().st_size):>10}  {relative_name(path)}"
+                        f"{format_size((_snapshot_for_path(path) or (0, 0))[0]):>10}  {relative_name(path)}"
                     )
                 try:
                     message_ids = client.send_contents(contents, progress, ready_items)

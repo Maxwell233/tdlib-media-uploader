@@ -7,7 +7,7 @@ import tomllib
 import os
 from pathlib import Path
 
-from runtime_paths import CONFIG_PATH, RESOURCE_DIR
+from runtime_paths import APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR
 
 APP_VERSION = "1.9.0"
 PROJECT_DIR = RESOURCE_DIR
@@ -120,6 +120,7 @@ image = _section("image")
 mixed = _optional_section("mixed")
 tdlib = _section("tdlib")
 proxy = _optional_section("proxy")
+staging = _optional_section("staging")
 
 
 # Telegram
@@ -178,7 +179,10 @@ _TARGETS = {
 
 def target_for(kind: str) -> dict:
     """Return the effective target for a media upload type."""
-    return dict(_TARGETS.get(str(kind).lower(), _BASE_TARGET))
+    normalized = str(kind).strip().lower()
+    if normalized not in {"video", "image", "mixed"}:
+        raise ValueError(f"未知媒体类型：{kind}")
+    return dict(_TARGETS[normalized])
 
 
 def activate_target(kind: str) -> dict:
@@ -477,20 +481,23 @@ IMAGE_COMPRESS_OVERSIZE = bool(
 
 
 # 混合上传：旧版配置没有 [mixed] 时使用兼容默认值。混合目录下的一级
-# 子目录是独立组，图片和视频沿用各自的扩展名与 Telegram 上限。
+# 子目录是独立组，图片和视频直接继承 [image]/[video] 的扩展名与上限。
 MIXED_DIR = _resolve_path(
     paths.get("mixed_dir", str(PROJECT_DIR / "Mixed"))
 )
-MIXED_IMAGE_EXTENSIONS = _extensions(
-    mixed.get("image_extensions", list(IMAGE_EXTENSIONS))
-)
-MIXED_VIDEO_EXTENSIONS = _extensions(
-    mixed.get("video_extensions", list(VIDEO_EXTENSIONS))
-)
+# Keep these public names for older integrations, but deliberately derive them
+# from the primary media settings so mixed uploads cannot drift from the image
+# and video pages. Legacy mixed.image_extensions/video_extensions keys are
+# ignored after the inheritance change.
+MIXED_IMAGE_EXTENSIONS = set(IMAGE_EXTENSIONS)
+MIXED_VIDEO_EXTENSIONS = set(VIDEO_EXTENSIONS)
 MIXED_EXTENSIONS = MIXED_IMAGE_EXTENSIONS | MIXED_VIDEO_EXTENSIONS
 MIXED_ALBUM_SIZE = int(mixed.get("album_size", 10))
 if not 1 <= MIXED_ALBUM_SIZE <= 10:
     raise RuntimeError("[mixed].album_size 必须为 1~10。")
+MIXED_SORT_MODE = str(mixed.get("sort_mode", "name")).strip().lower()
+if MIXED_SORT_MODE not in {"name", "mtime"}:
+    raise RuntimeError('[mixed].sort_mode 只能是 "name" 或 "mtime"。')
 MIXED_CAPTION_INCLUDE_GROUP_TITLE = bool(
     mixed.get("caption_include_group_title", True)
 )
@@ -510,6 +517,19 @@ MIXED_VERIFY_MEDIA = bool(
     mixed.get("verify_media_before_upload", False)
 )
 MIXED_RESET_STATE = bool(mixed.get("reset_state", False))
+
+
+# 可选本地暂存：源文件仍以原路径参与断点和标题键，发送前才复制到本地
+# 缓存，适合不稳定的 SMB/NAS。旧配置没有此段时保持关闭。
+STAGING_ENABLED = bool(staging.get("enabled", False))
+_staging_value = str(staging.get("directory", ".staging")).strip()
+if not _staging_value:
+    raise RuntimeError("config.toml 中的 staging.directory 不能为空。")
+STAGING_DIR = Path(os.path.expandvars(os.path.expanduser(_staging_value)))
+if not STAGING_DIR.is_absolute():
+    # Application data is writable in frozen one-folder/one-file builds,
+    # whereas RESOURCE_DIR can live inside a read-only bundle.
+    STAGING_DIR = APP_DATA_DIR / STAGING_DIR
 
 
 # 网络代理（由 TDLib 原生处理；默认关闭时明确使用直连）

@@ -24,15 +24,17 @@ from album_metadata import CaptionStore, album_key, compose_caption, with_filena
 from path_utils import (
     display_path,
     file_snapshot,
+    io_worker_count,
     iter_files,
-    is_file_stable,
+    natural_sort,
     relative_name as stable_relative_name,
-    revalidate_file,
     stable_path,
+    wait_for_file_ready,
 )
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
+from staging import stage_file
 
 import tdlib_image_album_uploader as image_core
 import tdlib_video_album_uploader as video_core
@@ -42,9 +44,11 @@ PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = APP_DATA_DIR / ".mixed_state"
 LAST_SCAN_ERRORS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
+LAST_SCAN_IGNORED_ROOT_MEDIA: list[Path] = []
 DEFERRED_STATUS = "DEFERRED"
 UI = HeadlessUI()
 MEDIA_DATE_MAX_WORKERS = 4
+READINESS_ATTEMPTS = 3
 
 
 def format_size(value: float | int) -> str:
@@ -123,18 +127,31 @@ def _group_items(group_path: Path, group_name: str) -> list[dict]:
         item = _item_for_path(path, group_name)
         if item is not None:
             items.append(item)
-    items.sort(key=lambda item: (relative_name(item["path"], group_path).casefold(), str(item["path"]).casefold()))
+    sort_mode = str(getattr(cfg, "MIXED_SORT_MODE", "name")).strip().lower()
+    if sort_mode == "mtime":
+        items.sort(
+            key=lambda item: (
+                int(item.get("scan_mtime_ns", 0)),
+                relative_name(item["path"], group_path),
+            )
+        )
+    else:
+        items = natural_sort(
+            items,
+            key=lambda item: relative_name(item["path"], group_path),
+        )
     return items
 
 
 def scan_mixed_groups() -> list[dict]:
     """Scan each first-level directory as a separate mixed-media group."""
-    global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS
+    global LAST_SCAN_ERRORS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_IGNORED_ROOT_MEDIA
     root = Path(cfg.MIXED_DIR)
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"混合上传目录不存在或不是目录：{root}")
     LAST_SCAN_ERRORS = []
     LAST_SCAN_SIZE_SKIPS = []
+    LAST_SCAN_IGNORED_ROOT_MEDIA = []
     groups = []
     try:
         entries = list(os.scandir(root))
@@ -150,7 +167,7 @@ def scan_mixed_groups() -> list[dict]:
                 root_files.append(Path(entry.path))
         except OSError as exc:
             LAST_SCAN_ERRORS.append(f"{entry.path}: {exc}")
-    directories.sort(key=lambda path: (path.name.casefold(), str(path).casefold()))
+    directories = natural_sort(directories, key=lambda path: path.name)
     for group_path in directories:
         items = _group_items(group_path, group_path.name)
         if items:
@@ -159,18 +176,11 @@ def scan_mixed_groups() -> list[dict]:
                 "group_path": group_path,
                 "items": items,
             })
-    # Keep files accidentally placed directly in MIXED_DIR visible instead of
-    # silently dropping them. They form one fallback group named after root.
+    # A mixed root is a container, not an upload group.  Files placed directly
+    # in it are intentionally ignored so they cannot silently change Album
+    # membership or be mixed with a first-level folder.
     if root_files:
-        group_name = root.name or str(root)
-        direct = [
-            item for path in root_files
-            for item in [_item_for_path(path, group_name)]
-            if item is not None
-        ]
-        direct.sort(key=lambda item: (Path(item["path"]).name.casefold(), str(item["path"]).casefold()))
-        if direct:
-            groups.insert(0, {"group_name": group_name, "group_path": root, "items": direct})
+        LAST_SCAN_IGNORED_ROOT_MEDIA = list(root_files)
     return groups
 
 
@@ -301,16 +311,41 @@ def _deferred(exc: Exception) -> bool:
     )
 
 
-def preflight_mixed(items, ui=None) -> list[dict]:
+def _ordered_bounded_map(executor, items, worker, max_workers: int):
+    """Yield results in input order without queueing a whole network tree."""
+
+    iterator = iter(items)
+    pending = deque()
+    for _ in range(max(1, int(max_workers))):
+        try:
+            pending.append(executor.submit(worker, next(iterator)))
+        except StopIteration:
+            break
+    while pending:
+        yield pending.popleft().result()
+        try:
+            pending.append(executor.submit(worker, next(iterator)))
+        except StopIteration:
+            pass
+
+
+def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
     target = ui or UI
     skipped = []
 
     def worker(item):
         path = item["path"]
         try:
-            snapshot = revalidate_file(path, expected_size=item.get("scan_size"), expected_mtime_ns=item.get("scan_mtime_ns"))
-            if not is_file_stable(path, interval=0.02):
-                raise RuntimeError(f"文件仍在写入或网络连接不稳定：{path}")
+            readiness = wait_for_file_ready(
+                path,
+                expected_size=item.get("scan_size"),
+                expected_mtime_ns=item.get("scan_mtime_ns"),
+                attempts=READINESS_ATTEMPTS,
+                cancel_event=cancel_event,
+            )
+            if not readiness.ready:
+                raise RuntimeError(readiness.reason or f"文件暂时不可读取：{path}")
+            snapshot = readiness.snapshot.as_tuple()
             if item.get("media_kind") == "video":
                 if snapshot[0] > cfg.VIDEO_MAX_BYTES:
                     raise RuntimeError("文件大小超过 Telegram 视频上限")
@@ -328,10 +363,14 @@ def preflight_mixed(items, ui=None) -> list[dict]:
             category = "size" if "超过 Telegram" in text else "deferred" if _deferred(exc) else "unreadable"
             return {"item": item, "path": path, "reason": f"{type(exc).__name__}: {exc}", "category": category}
 
-    with ThreadPoolExecutor(max_workers=MEDIA_DATE_MAX_WORKERS, thread_name_prefix="tdlib-mixed-preflight") as executor:
-        futures = [executor.submit(worker, item) for item in items]
-        for index, future in enumerate(futures, 1):
-            result = future.result()
+    worker_count = io_worker_count(cfg.MIXED_DIR, local=MEDIA_DATE_MAX_WORKERS, network=2)
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tdlib-mixed-preflight") as executor:
+        for index, result in enumerate(
+            _ordered_bounded_map(executor, items, worker, worker_count),
+            1,
+        ):
+            if cancel_event is not None and cancel_event.is_set():
+                break
             if result:
                 skipped.append(result)
                 target.warning(f"跳过无法读取的混合媒体：{relative_name(result['path'])}")
@@ -384,13 +423,32 @@ def report_scan_size_skips(skipped, ui=None):
         )
 
 
-def _mixed_input_video(item, caption):
+def _mixed_input_video(item, caption, cancel_event=None):
     path = item["path"]
-    revalidate_file(path, expected_size=item.get("scan_size"), expected_mtime_ns=item.get("scan_mtime_ns"))
-    info = video_core.video_info(path)
+    readiness = wait_for_file_ready(
+        path,
+        expected_size=item.get("scan_size"),
+        expected_mtime_ns=item.get("scan_mtime_ns"),
+        attempts=READINESS_ATTEMPTS,
+        cancel_event=cancel_event,
+    )
+    if not readiness.ready:
+        raise RuntimeError(readiness.reason or f"文件暂时不可读取：{path}")
+    source_path = path
+    if getattr(cfg, "STAGING_ENABLED", False):
+        source_path = stage_file(
+            path,
+            readiness.snapshot,
+            staging_dir=cfg.STAGING_DIR,
+            cancel_event=cancel_event,
+        )
+    info = video_core.video_info(source_path)
     thumbnail = None
     if getattr(cfg, "MIXED_GENERATE_THUMBNAIL", True):
-        thumb_path, width, height = video_core.build_thumbnail(path)
+        if cancel_event is None:
+            thumb_path, width, height = video_core.build_thumbnail(source_path)
+        else:
+            thumb_path, width, height = video_core.build_thumbnail(source_path, cancel_event)
         thumbnail = {
             "@type": "inputThumbnail",
             "thumbnail": {"@type": "inputFileLocal", "path": display_path(thumb_path)},
@@ -399,7 +457,7 @@ def _mixed_input_video(item, caption):
         }
     return {
         "@type": "inputMessageVideo",
-        "video": {"@type": "inputFileLocal", "path": display_path(path)},
+        "video": {"@type": "inputFileLocal", "path": display_path(source_path)},
         "thumbnail": thumbnail,
         "cover": None,
         "start_timestamp": 0,
@@ -415,16 +473,24 @@ def _mixed_input_video(item, caption):
     }
 
 
-def build_mixed_contents(items, caption: str, ui=None):
+def build_mixed_contents(items, caption: str, ui=None, cancel_event=None):
     target = ui or UI
     image_core.UI = target
     video_core.UI = target
     contents, valid, skipped = [], [], []
     for item in items:
+        media_kind = item.get("media_kind")
+        if media_kind not in {"video", "image"}:
+            raise ValueError(f"未知混合媒体类型：{media_kind!r}")
         try:
-            if item.get("media_kind") == "video":
-                content = _mixed_input_video(item, caption if not valid else "")
-            else:
+            if media_kind == "video":
+                item_caption = caption if not valid else ""
+                content = (
+                    _mixed_input_video(item, item_caption, cancel_event)
+                    if cancel_event is not None
+                    else _mixed_input_video(item, item_caption)
+                )
+            elif media_kind == "image":
                 expected_size = item.get("scan_size")
                 expected_mtime_ns = item.get("scan_mtime_ns")
                 if expected_size is not None or expected_mtime_ns is not None:
@@ -446,7 +512,13 @@ def build_mixed_contents(items, caption: str, ui=None):
                         stable_path(item["path"]),
                         None,
                     )
-                content = image_core.input_photo(item["path"], caption if not valid else "")
+                item_caption = caption if not valid else ""
+                if cancel_event is None:
+                    content = image_core.input_photo(item["path"], item_caption)
+                else:
+                    content = image_core.input_photo(
+                        item["path"], item_caption, cancel_event=cancel_event
+                    )
             contents.append(content)
             valid.append(item)
         except Exception as exc:
@@ -620,6 +692,7 @@ def main():
     version = verify_tdjson_version()
     UI.banner(f"TDLib Media Uploader V{cfg.APP_VERSION}", f"混合模式 · tdjson {version}", accent="cyan")
     groups = scan_mixed_groups()
+    cancel_event = getattr(UI, "cancel_event", None)
     report_scan_size_skips(LAST_SCAN_SIZE_SKIPS, UI)
     if LAST_SCAN_ERRORS:
         UI.warning(
@@ -627,6 +700,11 @@ def main():
             "网络恢复后重新扫描即可重试。"
         )
         UI.log("混合目录扫描详情：\n" + "\n".join(LAST_SCAN_ERRORS))
+    if LAST_SCAN_IGNORED_ROOT_MEDIA:
+        UI.warning(
+            f"混合根目录中有 {len(LAST_SCAN_IGNORED_ROOT_MEDIA)} 个媒体已忽略；"
+            "请将文件移动到一级子文件夹后重新扫描。"
+        )
     items = flatten_items(groups)
     if not items:
         UI.warning("没有找到支持的图片或视频。")
@@ -635,54 +713,93 @@ def main():
     completed = [item for item in items if state.is_completed(item["path"])]
     pending = [item for item in items if not state.is_completed(item["path"])]
     skipped = [record for record in LAST_SCAN_SIZE_SKIPS if record.get("action") == "skip"]
-    if pending:
-        preflight = preflight_mixed(pending, UI)
-        skipped.extend(preflight)
-        skipped_paths = {stable_path(record["path"]) for record in preflight}
-        if skipped_paths:
-            for group in groups:
-                group["items"] = [item for item in group["items"] if stable_path(item["path"]) not in skipped_paths]
-            items = flatten_items(groups)
-            completed = [item for item in items if state.is_completed(item["path"])]
-            pending = [item for item in items if not state.is_completed(item["path"])]
+    # Build the complete plans before any preflight.  The plan's ``items``
+    # list is the sole Album boundary; deferred files are filtered only from
+    # this run's send list and never cause later files to move forward.
     plans = build_album_plans(groups, state)
+    preflight_skipped_paths = set()
+    if pending:
+        preflight = (
+            preflight_mixed(pending, UI)
+            if cancel_event is None
+            else preflight_mixed(pending, UI, cancel_event=cancel_event)
+        )
+        skipped.extend(preflight)
+        preflight_skipped_paths = {
+            stable_path(record["path"]) for record in preflight
+        }
     pending_plans = [plan for plan in plans if plan["pending_items"]]
-    if not pending:
+    sendable_pending = [
+        item for item in pending
+        if stable_path(item["path"]) not in preflight_skipped_paths
+    ]
+    if not pending or not sendable_pending:
         report_skipped_mixed(skipped, UI)
-        UI.success("所有混合媒体都已上传完成。")
+        if pending and skipped:
+            UI.warning("本轮没有可上传的混合媒体；暂时不可读文件未写入断点。")
+        else:
+            UI.success("所有混合媒体都已上传完成。")
         return
     if not UI.confirm_upload():
         UI.cancelled()
         return
     client = TDJsonClient(UI, "TDLib Mixed Album Uploader")
     progress = MixedUploadProgress(items, completed)
+    if preflight_skipped_paths:
+        progress.skip_items([
+            item
+            for item in pending
+            if stable_path(item["path"]) in preflight_skipped_paths
+        ])
     client.add_update_callback(progress.handle_update)
     try:
         client.login()
         client.set_fast_options()
         client.validate_target()
         for index, plan in enumerate(pending_plans, 1):
-            album_items = plan["pending_items"]
+            # Keep the original plan boundary even when one item was deferred
+            # during preflight.  Only the current send list is filtered.
+            album_items = [
+                item for item in plan["pending_items"]
+                if stable_path(item["path"]) not in preflight_skipped_paths
+            ]
+            if not album_items:
+                continue
             label = with_filename_description(
                 plan["caption"]["text"],
                 album_items,
                 cfg.MIXED_CAPTION_INCLUDE_FILENAMES,
                 cfg.MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS,
             )
-            contents, ready, runtime_skipped = build_mixed_contents(album_items, label, UI)
+            if cancel_event is None:
+                contents, ready, runtime_skipped = build_mixed_contents(
+                    album_items, label, UI
+                )
+            else:
+                contents, ready, runtime_skipped = build_mixed_contents(
+                    album_items, label, UI, cancel_event
+                )
             if runtime_skipped:
                 skipped.extend(runtime_skipped)
                 progress.skip_items([record["item"] for record in runtime_skipped])
             if not ready:
                 continue
-            if ready != album_items and cfg.MIXED_CAPTION_INCLUDE_FILENAMES:
-                label = with_filename_description(plan["caption"]["text"], ready, True, cfg.MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS)
-                contents, ready, rebuilt_skipped = build_mixed_contents(ready, label, UI)
-                if rebuilt_skipped:
-                    skipped.extend(rebuilt_skipped)
-                    progress.skip_items([record["item"] for record in rebuilt_skipped])
-            if not ready:
-                continue
+            if (
+                ready != album_items
+                and cfg.MIXED_CAPTION_INCLUDE_FILENAMES
+                and contents
+            ):
+                # Keep the stable plan membership, but avoid naming a file
+                # that was deferred at JIT preparation time. Only the first
+                # content carries the Album caption, so no second media read
+                # is needed to update it.
+                label = with_filename_description(
+                    plan["caption"]["text"],
+                    ready,
+                    True,
+                    cfg.MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS,
+                )
+                contents[0]["caption"] = formatted_text(label)
             progress.begin_album(ready, plan["group_name"], index, len(pending_plans))
             UI.album(
                 kind="MIXED",

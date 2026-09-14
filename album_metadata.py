@@ -28,7 +28,10 @@ def path_for(kind: str) -> Path:
         "image": ".image_album_captions.json",
         "mixed": ".mixed_album_captions.json",
     }
-    return PROJECT_DIR / names.get(str(kind).lower(), ".image_album_captions.json")
+    normalized = str(kind).strip().lower()
+    if normalized not in names:
+        raise ValueError(f"未知媒体类型：{kind}")
+    return PROJECT_DIR / names[normalized]
 
 
 def _item_path(item):

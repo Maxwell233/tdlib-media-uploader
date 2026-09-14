@@ -24,7 +24,7 @@ from pathlib import Path
 
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
 from app_logging import APP_LOG_PATH, LOG_DIR, TDLIB_LOG_PATH, write_app_log, write_exception
-from path_utils import file_mtime, iter_files, stable_path
+from path_utils import file_mtime, iter_files, natural_sort, stable_path
 from PySide6.QtCore import QLibraryInfo, QObject, QThread, QTimer, Signal, Slot, Qt
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
@@ -173,8 +173,11 @@ def _cfg(name: str, default=None):
 
 
 def _target_for(kind: str) -> dict:
+    normalized = str(kind).strip().lower()
+    if normalized not in MEDIA_KINDS:
+        raise ValueError(f"未知媒体类型：{kind}")
     if cfg is not None and callable(getattr(cfg, "target_for", None)):
-        return cfg.target_for(kind)
+        return cfg.target_for(normalized)
     return {
         "target_mode": "forum_topic",
         "group_chat_id": _cfg("GROUP_CHAT_ID", _cfg("CHAT_ID", 0)),
@@ -215,31 +218,37 @@ def _path_text(value) -> str:
 
 
 def _basic_paths(kind: str) -> list[Path]:
+    kind = str(kind).strip().lower()
     path_key = KIND_PATH_KEYS.get(kind)
     extension_key = {
         "video": "VIDEO_EXTENSIONS",
         "image": "IMAGE_EXTENSIONS",
         "mixed": "MIXED_EXTENSIONS",
     }.get(kind)
-    if path_key is None or extension_key is None:
+    if kind not in MEDIA_KINDS or path_key is None or extension_key is None:
         raise ValueError(f"未知媒体类型：{kind}")
     root = Path(_cfg(path_key, PROJECT_DIR))
     extensions = set(_cfg(extension_key, set()))
     if not root.exists() or not root.is_dir():
         raise RuntimeError(f"{kind} 目录不存在或不是目录：{root}")
-    paths, _errors = iter_files(root, extensions)
     if kind == "mixed":
-        paths.sort(key=lambda item: (item.name.casefold(), str(item).casefold()))
-    elif kind == "image" and _cfg("IMAGE_SORT_MODE", "mtime") == "mtime":
-        paths.sort(key=lambda item: (file_mtime(item), item.name.lower()))
+        groups, _ignored, _errors, _skips = _basic_mixed_scan(root)
+        return [item["path"] for group in groups for item in group["items"]]
+    paths, _errors = iter_files(root, extensions)
+    if kind == "image" and _cfg("IMAGE_SORT_MODE", "mtime") == "mtime":
+        paths.sort(key=lambda item: (file_mtime(item), str(item)))
     elif (
         kind == "video"
         and _cfg("VIDEO_READ_DATES", True)
         and _cfg("VIDEO_SORT_MODE", "mtime") == "mtime"
     ):
-        paths.sort(key=lambda item: (file_mtime(item), str(item).lower()))
+        paths.sort(key=lambda item: (file_mtime(item), str(item)))
     else:
-        paths.sort(key=lambda item: (item.name.casefold(), str(item).casefold()))
+        paths = natural_sort(paths, key=lambda item: str(item))
+        if kind == "video":
+            # The video scanner historically compares the basename first and
+            # uses the full path only as a deterministic tie-breaker.
+            paths = natural_sort(paths, key=lambda item: item.name)
     return paths
 
 
@@ -296,6 +305,62 @@ def _apply_size_limits(paths: list[Path], kind: str) -> tuple[list[Path], list[d
                 continue
         accepted.append(path)
     return accepted, skipped
+
+
+def _basic_mixed_scan(root: Path) -> tuple[list[dict], list[Path], list[str], list[dict]]:
+    """Build a dependency-free mixed preview with the same group rules."""
+
+    if not root.exists() or not root.is_dir():
+        raise RuntimeError(f"mixed 目录不存在或不是目录：{root}")
+    image_extensions = set(_cfg("IMAGE_EXTENSIONS", set()))
+    video_extensions = set(_cfg("VIDEO_EXTENSIONS", set()))
+    accepted_extensions = image_extensions | video_extensions
+    try:
+        entries = list(os.scandir(root))
+    except OSError as exc:
+        raise RuntimeError(f"无法读取混合目录：{root}\n{exc}") from exc
+    directories = []
+    ignored = []
+    errors = []
+    for entry in entries:
+        try:
+            path = Path(entry.path)
+            if entry.is_dir(follow_symlinks=False):
+                directories.append(path)
+            elif entry.is_file(follow_symlinks=False) and path.suffix.lower() in accepted_extensions:
+                ignored.append(path)
+        except OSError as exc:
+            errors.append(f"{entry.path}: {exc}")
+    groups = []
+    size_skips = []
+    for group_path in natural_sort(directories, key=lambda item: item.name):
+        paths, walk_errors = iter_files(group_path, accepted_extensions)
+        errors.extend(walk_errors)
+        accepted, skipped = _apply_size_limits(paths, "mixed")
+        size_skips.extend(skipped)
+        media_items = []
+        for path in accepted:
+            suffix = path.suffix.lower()
+            media_kind = "video" if suffix in video_extensions else "image"
+            media_items.append({
+                "path": path,
+                "media_kind": media_kind,
+                "group_name": group_path.name,
+            })
+        if str(_cfg("MIXED_SORT_MODE", "name")).lower() == "mtime":
+            media_items.sort(key=lambda item: (file_mtime(item["path"]), str(item["path"])))
+        else:
+            media_items = natural_sort(
+                media_items,
+                key=lambda item: str(item["path"]),
+            )
+        if media_items:
+            groups.append({
+                "group_name": group_path.name,
+                "group_path": group_path,
+                "items": media_items,
+            })
+    return groups, ignored, errors, size_skips
 
 
 @functools.lru_cache(maxsize=128)
@@ -388,6 +453,7 @@ CACHE_TARGETS = {
     "video_album_captions": ("视频 Album 标题", APP_DATA_DIR / ".video_album_captions.json"),
     "image_album_captions": ("图片 Album 标题", APP_DATA_DIR / ".image_album_captions.json"),
     "mixed_album_captions": ("混合 Album 标题", APP_DATA_DIR / ".mixed_album_captions.json"),
+    "staging": ("本地暂存文件", APP_DATA_DIR / ".staging"),
     "gui_history": ("GUI 历史记录", HISTORY_PATH),
     "logs": ("运行日志", LOG_DIR),
 }
@@ -471,8 +537,11 @@ def _clear_cache(keys: tuple[str, ...]) -> tuple[list[str], list[str]]:
     return removed, errors
 
 
-def _scan_result(kind: str, progress_callback=None) -> dict:
+def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
     """Scan using the existing core when available, with a preview fallback."""
+    kind = str(kind).strip().lower()
+    if kind not in MEDIA_KINDS:
+        raise ValueError(f"未知媒体类型：{kind}")
     _path_size.cache_clear()
     if cfg is None:
         raise RuntimeError(_CONFIG_ERROR or "配置不可用。")
@@ -482,6 +551,7 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
 
     core = None
     mixed_groups = []
+    ignored_root_media: list[Path] = []
     warning = ""
     scan_errors: list[str] = []
     scan_size_skips: list[dict] = []
@@ -518,7 +588,11 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
                 warning = "已关闭日期读取，将按文件名扫描并按固定数量分组。"
             elif exiftool.exists():
                 try:
-                    metadata = core.read_exif_metadata(paths)
+                    metadata = (
+                        core.read_exif_metadata(paths)
+                        if cancel_event is None
+                        else core.read_exif_metadata(paths, cancel_event=cancel_event)
+                    )
                 except Exception as exc:
                     # A transient network share/tool failure should not make a
                     # complete preview disappear. build_items will still use
@@ -537,11 +611,19 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
                     "未找到 ExifTool，无法读取 EXIF；"
                     "当前未启用媒体日期回退，缺失日期的视频会被标记。"
                 )
-            items, missing = core.build_items(
-                paths,
-                metadata,
-                progress_callback=progress_callback,
-            )
+            if cancel_event is None:
+                items, missing = core.build_items(
+                    paths,
+                    metadata,
+                    progress_callback=progress_callback,
+                )
+            else:
+                items, missing = core.build_items(
+                    paths,
+                    metadata,
+                    progress_callback=progress_callback,
+                    cancel_event=cancel_event,
+                )
             state = core.UploadState()
         else:
             paths, scan_size_skips = _apply_size_limits(_basic_paths(kind), kind)
@@ -578,16 +660,12 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
             items = core.flatten_items(mixed_groups)
             scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
             scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
+            ignored_root_media = list(getattr(core, "LAST_SCAN_IGNORED_ROOT_MEDIA", []))
             state = core.UploadState()
         else:
-            paths, scan_size_skips = _apply_size_limits(_basic_paths("mixed"), "mixed")
             root = Path(_cfg("MIXED_DIR", PROJECT_DIR))
-            items = []
-            for path in paths:
-                suffix = path.suffix.lower()
-                media_kind = "video" if suffix in set(_cfg("MIXED_VIDEO_EXTENSIONS", set())) else "image"
-                items.append({"path": path, "media_kind": media_kind, "group_name": root.name or str(root)})
-            mixed_groups = [{"group_name": root.name or str(root), "group_path": root, "items": items}] if items else []
+            mixed_groups, ignored_root_media, scan_errors, scan_size_skips = _basic_mixed_scan(root)
+            items = [item for group in mixed_groups for item in group["items"]]
         missing = []
     else:
         if core is not None:
@@ -822,6 +900,19 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
         size_warning = "；".join(notices)
         warning = size_warning + (f"；{warning}" if warning else "")
 
+    if ignored_root_media:
+        write_app_log(
+            "WARNING",
+            "混合根目录中的媒体已忽略（请移动到一级子文件夹）：\n"
+            + "\n".join(str(path) for path in ignored_root_media),
+            source=f"scan/{kind}",
+        )
+        ignored_warning = (
+            f"混合根目录中有 {len(ignored_root_media)} 个媒体已忽略，"
+            "请移动到一级子文件夹后重新扫描"
+        )
+        warning = ignored_warning + (f"；{warning}" if warning else "")
+
     return {
         "kind": kind,
         "items": items,
@@ -845,6 +936,7 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
         "scan_size_skips": scan_size_skips,
         "scan_skipped_files": len(scan_rejected),
         "scan_compress_files": len(scan_compressing),
+        "ignored_root_media": [str(path) for path in ignored_root_media],
         "target": _target_for(kind),
     }
 
@@ -857,6 +949,12 @@ class ScanWorker(QThread):
     def __init__(self, kind: str):
         super().__init__()
         self.kind = kind
+        self.cancel_event = threading.Event()
+
+    def request_stop(self):
+        """Request cancellation without terminating the worker thread."""
+
+        self.cancel_event.set()
 
     def _report_progress(self, payload: dict):
         self.progress_changed.emit(self.kind, payload)
@@ -867,6 +965,7 @@ class ScanWorker(QThread):
                 _scan_result(
                     self.kind,
                     progress_callback=self._report_progress,
+                    cancel_event=self.cancel_event,
                 )
             )
         except Exception as exc:
@@ -922,6 +1021,12 @@ class GuiConsoleUI(QObject):
     @property
     def stop_requested(self) -> bool:
         return self._stop_requested.is_set()
+
+    @property
+    def cancel_event(self):
+        """Expose the shared event to scan/media helpers."""
+
+        return self._stop_requested
 
     def register_client(self, client):
         with self._client_lock:
@@ -1827,8 +1932,10 @@ class TargetDialog(QDialog):
         if not isinstance(kind, str):
             parent = kind if parent is None else parent
             kind = "video"
+        if kind not in MEDIA_KINDS:
+            raise ValueError(f"未知媒体类型：{kind}")
         super().__init__(parent)
-        self.kind = kind if kind in MEDIA_KINDS else "video"
+        self.kind = kind
         accent = _kind_label(self.kind)
         self.setWindowTitle(f"编辑{accent}上传目标与配置 · V{APP_VERSION}")
         self.setMinimumWidth(700)
@@ -1916,7 +2023,7 @@ class TargetDialog(QDialog):
             group_form = QFormLayout(group_box)
             self.video_sort = QComboBox()
             self.video_sort.addItem("按修改时间", "mtime")
-            self.video_sort.addItem("按文件名", "name")
+            self.video_sort.addItem("按文件名（自然数字，从大到小）", "name")
             sort_index = self.video_sort.findData(_cfg("VIDEO_SORT_MODE", "mtime"))
             self.video_sort.setCurrentIndex(sort_index if sort_index >= 0 else 0)
             self.video_sort.setToolTip(
@@ -1980,7 +2087,7 @@ class TargetDialog(QDialog):
             image_form = QFormLayout(image_box)
             self.image_sort = QComboBox()
             self.image_sort.addItem("文件修改时间", "mtime")
-            self.image_sort.addItem("完整路径", "path")
+            self.image_sort.addItem("文件名/路径（自然数字，从大到小）", "path")
             self.image_sort.setCurrentIndex(max(0, self.image_sort.findData(_cfg("IMAGE_SORT_MODE", "mtime"))))
             image_form.addRow("排序方式", self.image_sort)
 
@@ -2016,6 +2123,13 @@ class TargetDialog(QDialog):
         else:
             mixed_box = QGroupBox("混合分组与标题")
             mixed_form = QFormLayout(mixed_box)
+            self.mixed_sort = QComboBox()
+            self.mixed_sort.addItem("文件名（自然数字，从大到小）", "name")
+            self.mixed_sort.addItem("文件修改时间（从旧到新）", "mtime")
+            self.mixed_sort.setCurrentIndex(
+                max(0, self.mixed_sort.findData(_cfg("MIXED_SORT_MODE", "name")))
+            )
+            mixed_form.addRow("排序方式", self.mixed_sort)
             self.mixed_album = QSpinBox()
             self.mixed_album.setRange(1, 10)
             self.mixed_album.setValue(int(_cfg("MIXED_ALBUM_SIZE", 10)))
@@ -2138,6 +2252,7 @@ class TargetDialog(QDialog):
             })
         else:
             values.update({
+                ("mixed", "sort_mode"): self.mixed_sort.currentData(),
                 ("mixed", "album_size"): self.mixed_album.value(),
                 ("mixed", "caption_include_group_title"): self.mixed_group_title.isChecked(),
                 ("mixed", "caption_include_filenames"): self.mixed_filenames.isChecked(),
@@ -2175,6 +2290,10 @@ class ConfigDialog(QDialog):
         form.addRow("混合目录", field("mixed_dir", _cfg("MIXED_DIR", "")))
         default_exiftool = "tools/exiftool.exe" if os.name == "nt" else "tools/exiftool"
         form.addRow("ExifTool 路径", field("exiftool_path", _cfg("EXIFTOOL_PATH", default_exiftool)))
+        self.staging_enabled = QCheckBox("启用本地暂存（适合 SMB/NAS）")
+        self.staging_enabled.setChecked(bool(_cfg("STAGING_ENABLED", False)))
+        form.addRow("上传暂存", self.staging_enabled)
+        form.addRow("暂存目录", field("staging_dir", _cfg("STAGING_DIR", PROJECT_DIR / ".staging")))
         layout.addLayout(form)
 
         proxy_box = QGroupBox("网络代理（独立设置，默认关闭）")
@@ -2235,6 +2354,7 @@ class ConfigDialog(QDialog):
             "视频、图片和混合上传的 Album、Caption 及处理选项请在各自上传页面的“编辑目标”中设置。"
             "API Hash、代理认证信息和 MTProto Secret 只写入本地 config.toml，不会写入 GUI 日志。"
             "代理由 TDLib 原生支持；tdjson 版本仍由项目固定要求控制。"
+            "启用本地暂存后，发送前会把源文件复制到指定本地目录，断点仍以原始路径为准。"
         )
         hint.setObjectName("mutedLabel")
         hint.setWordWrap(True)
@@ -2283,6 +2403,8 @@ class ConfigDialog(QDialog):
             ("paths", "image_dir"): self.fields["image_dir"].text().strip(),
             ("paths", "mixed_dir"): self.fields["mixed_dir"].text().strip(),
             ("paths", "exiftool_path"): self.fields["exiftool_path"].text().strip(),
+            ("staging", "enabled"): self.staging_enabled.isChecked(),
+            ("staging", "directory"): self.fields["staging_dir"].text().strip(),
             ("proxy", "enabled"): self.proxy_enabled.isChecked(),
             ("proxy", "type"): self.proxy_type.currentData() or "socks5",
             ("proxy", "server"): self.proxy_server.text().strip(),

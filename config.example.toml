@@ -117,7 +117,7 @@ quicktime_utc_target_zone = ""
 # 旧版 force_ten_per_album 仍可读取，但新配置请使用 group_mode。
 group_mode = "date"
 
-# 扫描顺序只能二选一：mtime=修改时间，name=文件名。
+# 扫描顺序只能二选一：mtime=修改时间，name=文件名（自然数字从大到小）。
 sort_mode = "mtime"
 
 # 每组 1~10 个视频；按日期模式表示每个月上限，固定模式表示固定组大小。
@@ -149,9 +149,10 @@ reset_state = false
 
 [mixed]
 
-# 递归收集每个一级子文件夹中的图片和视频，按相对路径排序后混合组成 Album。
-image_extensions = [".jpg", ".jpeg", ".png", ".webp"]
-video_extensions = [".mp4", ".mov", ".m4v"]
+# 递归收集每个一级子文件夹中的图片和视频，混合组成 Album。
+# 扩展名直接继承 [image].extensions 和 [video].extensions。
+# name：按文件名中的自然数字从大到小排序；mtime：按修改时间从旧到新排序。
+sort_mode = "name"
 album_size = 10
 caption_include_group_title = true
 caption_include_filenames = false
@@ -160,6 +161,14 @@ album_caption_separator = " · "
 generate_thumbnail = true
 verify_media_before_upload = false
 reset_state = false
+
+
+[staging]
+
+# 可选：先把源文件复制到本地缓存，再交给 TDLib 读取，适合不稳定的 SMB/NAS。
+# 断点仍以原始媒体路径为准；关闭时直接读取源文件。
+enabled = false
+directory = ".staging"
 
 
 [image]
@@ -178,7 +187,7 @@ album_caption_separator = " · "
 caption_include_filenames = false
 
 # "mtime" = 按文件修改时间从旧到新
-# "path"  = 按目录/文件名排序
+# "path"  = 按目录/文件名自然数字排序（数字从大到小）
 sort_mode = "mtime"
 
 show_file_list = true

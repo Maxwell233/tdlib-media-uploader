@@ -201,11 +201,17 @@ jobs:
             shasum -a 256 "$archive" >> release-assets/SHA256SUMS
           done
           version="$(tr -d '[:space:]' < VERSION)"
-          changelog_notes="$(awk -v version="$version" '
-            $0 == "## " version { found=1; print; next }
-            found && /^## / { exit }
-            found { print }
-          ' CHANGELOG.md)"
+          if [[ -f RELEASE_NOTES.md ]]; then
+            # Keep the release page focused on this build.  The full history
+            # remains in CHANGELOG.md and is not copied into every release.
+            changelog_notes="$(cat RELEASE_NOTES.md)"
+          else
+            changelog_notes="$(awk -v version="$version" '
+              $0 == "## " version { found=1; print; next }
+              found && /^## / { exit }
+              found { print }
+            ' CHANGELOG.md)"
+          fi
           if [[ -z "${changelog_notes//[[:space:]]/}" ]]; then
             echo "CHANGELOG.md 中没有找到 ${version} 的更新章节" >&2
             exit 1

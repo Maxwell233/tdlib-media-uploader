@@ -17,7 +17,12 @@ from album_metadata import with_filename_description
 UI = core.UI
 
 
-def read_metadata(videos=None):
+def _path_size(path):
+    snapshot = core._snapshot_for_path(path)
+    return int(snapshot[0]) if snapshot is not None else 0
+
+
+def read_metadata(videos=None, cancel_event=None):
     """读取批量日期元数据；没有 ExifTool 时保留 FFmpeg 媒体日期回退。"""
     if not core.video_dates_enabled():
         return {}, False
@@ -43,7 +48,9 @@ def read_metadata(videos=None):
     try:
         # Pass the Python scanner's accepted paths so the upload entry point
         # does not walk the source directory a second time.
-        return core.read_exif_metadata(videos), True
+        if cancel_event is None:
+            return core.read_exif_metadata(videos), True
+        return core.read_exif_metadata(videos, cancel_event=cancel_event), True
     except Exception as exc:
         # A transient network share or malformed ExifTool response must not
         # prevent the normal media-date/mtime fallback from running.
@@ -85,10 +92,7 @@ def show_file_list(items, state):
             if state.is_completed(item["path"])
         )
         pending_count = len(month_items) - completed_count
-        month_bytes = sum(
-            item["path"].stat().st_size
-            for item in month_items
-        )
+        month_bytes = sum(_path_size(item["path"]) for item in month_items)
 
         source_counts = Counter(
             _source_label(item)
@@ -116,7 +120,7 @@ def show_file_list(items, state):
                     global_index[path],
                     "✓ 已完成" if completed else "• 待上传",
                     capture_text,
-                    core.format_size(path.stat().st_size),
+                    core.format_size(_path_size(path)),
                     core.relative_name(path),
                 )
             )
@@ -187,15 +191,9 @@ def show_upload_summary(
     exiftool_used,
     skipped_items,
 ):
-    pending_bytes = sum(
-        item["path"].stat().st_size
-        for item in pending_items
-    )
+    pending_bytes = sum(_path_size(item["path"]) for item in pending_items)
 
-    total_bytes = sum(
-        item["path"].stat().st_size
-        for item in items
-    )
+    total_bytes = sum(_path_size(item["path"]) for item in items)
 
     fallback_count = sum(
         1
@@ -273,6 +271,7 @@ def main():
     UI.info(f"扫描视频目录：{cfg.VIDEO_DIR}")
 
     videos = core.scan_videos()
+    cancel_event = getattr(UI, "cancel_event", None)
 
     if not videos:
         UI.warning("没有找到支持的视频文件。")
@@ -280,15 +279,19 @@ def main():
 
     if core.video_dates_enabled():
         UI.info("读取视频日期信息…")
-        metadata_index, exiftool_used = read_metadata(videos)
+        metadata_index, exiftool_used = read_metadata(videos, cancel_event)
     else:
         UI.info("已关闭日期读取，将按文件名处理…")
         metadata_index, exiftool_used = {}, False
 
-    items, missing = core.build_items(
-        videos,
-        metadata_index,
-    )
+    if cancel_event is None:
+        items, missing = core.build_items(videos, metadata_index)
+    else:
+        items, missing = core.build_items(
+            videos,
+            metadata_index,
+            cancel_event=cancel_event,
+        )
 
     if (
         missing
@@ -323,32 +326,29 @@ def main():
     ]
 
     skipped_items = []
+    # Build plans from the complete scan before preflight. A deferred file
+    # stays in its original Album boundary and cannot pull a later file
+    # forward into this run's upload list.
+    plans = core.build_album_plans(items, state)
+    preflight_skipped_paths = set()
     if pending_items:
         UI.info(f"检查 {len(pending_items)} 个待上传视频的媒体数据…")
-        skipped_items = core.preflight_videos(pending_items, UI)
-        skipped_paths = {
+        skipped_items = (
+            core.preflight_videos(pending_items, UI)
+            if cancel_event is None
+            else core.preflight_videos(
+                pending_items,
+                UI,
+                cancel_event=cancel_event,
+            )
+        )
+        preflight_skipped_paths = {
             core.stable_path(record["path"])
             for record in skipped_items
         }
-        if skipped_paths:
-            items = [
-                item
-                for item in items
-                if core.stable_path(item["path"]) not in skipped_paths
-            ]
-            completed_items = [
-                item
-                for item in items
-                if state.is_completed(item["path"])
-            ]
-            pending_items = [
-                item
-                for item in items
-                if not state.is_completed(item["path"])
-            ]
+        if preflight_skipped_paths:
             core.report_skipped_videos(skipped_items, UI)
 
-    plans = core.build_album_plans(items, state)
     pending_plans = [plan for plan in plans if plan["pending_items"]]
     total_albums = len(pending_plans)
 
@@ -380,7 +380,11 @@ def main():
         skipped_items=skipped_items,
     )
 
-    if not pending_items:
+    sendable_pending = [
+        item for item in pending_items
+        if core.stable_path(item["path"]) not in preflight_skipped_paths
+    ]
+    if not pending_items or not sendable_pending:
         if skipped_items:
             core.report_skipped_videos(skipped_items, UI, final=True)
         else:
@@ -400,6 +404,11 @@ def main():
         items,
         completed_items,
     )
+    if preflight_skipped_paths:
+        progress.skip_items([
+            item for item in pending_items
+            if core.stable_path(item["path"]) in preflight_skipped_paths
+        ])
 
     client.add_update_callback(
         progress.handle_update
@@ -433,7 +442,12 @@ def main():
             )
 
             for plan in month_plans:
-                album_items = plan["pending_items"]
+                album_items = [
+                    item for item in plan["pending_items"]
+                    if core.stable_path(item["path"]) not in preflight_skipped_paths
+                ]
+                if not album_items:
+                    continue
                 month_album_number = plan["number"]
                 label = with_filename_description(
                     plan["caption"]["text"],
@@ -442,11 +456,19 @@ def main():
                     core.include_filename_numbers(),
                 )
 
-                contents, ready_items, runtime_skipped = core.build_video_contents(
-                    album_items,
-                    label,
-                    UI,
-                )
+                if cancel_event is None:
+                    contents, ready_items, runtime_skipped = core.build_video_contents(
+                        album_items,
+                        label,
+                        UI,
+                    )
+                else:
+                    contents, ready_items, runtime_skipped = core.build_video_contents(
+                        album_items,
+                        label,
+                        UI,
+                        cancel_event,
+                    )
                 if runtime_skipped:
                     skipped_items.extend(runtime_skipped)
                     progress.skip_items([
@@ -463,11 +485,19 @@ def main():
                         True,
                         core.include_filename_numbers(),
                     )
-                    contents, rebuilt_items, rebuilt_skipped = core.build_video_contents(
-                        ready_items,
-                        label,
-                        UI,
-                    )
+                    if cancel_event is None:
+                        contents, rebuilt_items, rebuilt_skipped = core.build_video_contents(
+                            ready_items,
+                            label,
+                            UI,
+                        )
+                    else:
+                        contents, rebuilt_items, rebuilt_skipped = core.build_video_contents(
+                            ready_items,
+                            label,
+                            UI,
+                            cancel_event,
+                        )
                     if rebuilt_skipped:
                         skipped_items.extend(rebuilt_skipped)
                         progress.skip_items([
@@ -504,7 +534,7 @@ def main():
                     rows=[
                         (
                             f"{item['capture_time'].strftime('%Y-%m-%d %H:%M:%S')}  "
-                            f"{core.format_size(item['path'].stat().st_size):>10}  "
+                            f"{core.format_size(_path_size(item['path'])):>10}  "
                             f"{core.relative_name(item['path'])}"
                         )
                         for item in ready_items
