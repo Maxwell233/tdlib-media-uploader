@@ -25,6 +25,7 @@ from upload_journal import (
     FAILED,
     InflightJournal,
     UNKNOWN,
+    normalize_target,
 )
 
 REQUIRED_TDJSON_VERSION = "1.8.64.post1"
@@ -767,25 +768,145 @@ class TDJsonClient:
             return "mixed"
         return "unknown"
 
-    def finalize_inflight(self, album_key: str, *, kind: str | None = None, message_ids=None) -> None:
+    @staticmethod
+    def _target_identity() -> dict:
+        """Capture the effective Telegram destination for journal scoping."""
+
+        return normalize_target({
+            "target_mode": getattr(cfg, "TARGET_MODE", "forum_topic"),
+            "chat_id": getattr(cfg, "CHAT_ID", 0),
+            "forum_topic_id": getattr(cfg, "FORUM_TOPIC_ID", 0),
+            "channel_chat_id": getattr(cfg, "CHANNEL_CHAT_ID", 0),
+        })
+
+    @staticmethod
+    def _journal_target(record: dict) -> dict:
+        nested = record.get("target") if isinstance(record, dict) else None
+        if isinstance(nested, dict):
+            required = {"target_mode", "chat_id", "forum_topic_id", "channel_chat_id"}
+            if not required.issubset(nested):
+                return {}
+            return normalize_target(nested)
+        if not isinstance(record, dict):
+            return {}
+        required = ("target_mode", "chat_id", "forum_topic_id", "channel_chat_id")
+        if not all(key in record for key in required):
+            return {}
+        return normalize_target({key: record.get(key) for key in required})
+
+    @staticmethod
+    def _journal_items(record: dict) -> list[dict]:
+        """Convert both v1 path-only and v2 snapshot records to state items."""
+
+        values = []
+        for raw in record.get("items", []) if isinstance(record, dict) else []:
+            if isinstance(raw, dict):
+                item = dict(raw)
+            else:
+                item = {"path": raw}
+            if not item.get("path"):
+                continue
+            item["path"] = Path(item["path"])
+            # UploadState implementations accept the scanner spelling while
+            # journal records use concise snapshot keys.
+            if item.get("size") is not None and item.get("scan_size") is None:
+                item["scan_size"] = item["size"]
+            if item.get("mtime_ns") is not None and item.get("scan_mtime_ns") is None:
+                item["scan_mtime_ns"] = item["mtime_ns"]
+            # Manual reconciliation must reproduce the exact source identity
+            # that was sent.  UploadState therefore prefers these stored
+            # values over a fresh stat (the source may have changed or gone
+            # offline since the ambiguous request).
+            item["_journal_snapshot"] = True
+            capture_time = item.get("capture_time")
+            if isinstance(capture_time, str) and capture_time:
+                try:
+                    item["capture_time"] = __import__("datetime").datetime.fromisoformat(capture_time)
+                except ValueError:
+                    item["capture_time"] = None
+            values.append(item)
+        return values
+
+    def _state_for_journal(self, kind: str, record: dict):
+        """Create the matching uploader state without touching source files."""
+
+        target = self._journal_target(record) or self._target_identity()
+        if kind == "video":
+            import tdlib_video_album_uploader as module
+            if getattr(module, "STATE_DIR", None) == APP_DATA_DIR / ".state":
+                module.STATE_DIR = APP_DATA_DIR / ".video_state"
+        elif kind == "image":
+            import tdlib_image_album_uploader as module
+            if getattr(module, "STATE_DIR", None) is None:
+                module.STATE_DIR = APP_DATA_DIR / ".image_state"
+        elif kind == "mixed":
+            import tdlib_mixed_album_uploader as module
+            if getattr(module, "STATE_DIR", None) is None:
+                module.STATE_DIR = APP_DATA_DIR / ".mixed_state"
+        else:
+            raise ValueError(f"无法为未知媒体类型恢复上传断点：{kind}")
+        return module.UploadState(target=target)
+
+    def finalize_inflight(
+        self,
+        album_key: str,
+        *,
+        kind: str | None = None,
+        message_ids=None,
+        target=None,
+    ) -> None:
         """Remove a confirmed journal after the uploader persisted its state."""
 
         if not album_key:
             return
         selected_kind = kind or self._journal_kind_for(album_key)
-        self.inflight_journal.confirmed(selected_kind, album_key, message_ids)
+        target = normalize_target(target) or self._target_identity()
+        # The send path already wrote CONFIRMED before the uploader checkpoint
+        # call.  This operation only removes the durable guard after that
+        # checkpoint has succeeded.
+        self.inflight_journal.finalize(selected_kind, album_key, target=target)
 
-    def reconcile_inflight(self, album_key: str, *, sent: bool, kind: str | None = None, message_ids=None) -> None:
+    def reconcile_inflight(
+        self,
+        album_key: str,
+        *,
+        sent: bool,
+        kind: str | None = None,
+        message_ids=None,
+        target=None,
+    ) -> None:
         """Manually resolve an UNKNOWN send without querying Telegram history."""
 
-        selected_kind = kind or self._journal_kind_for(album_key)
-        if sent:
-            self.inflight_journal.mark_sent(selected_kind, album_key, message_ids)
-        else:
-            self.inflight_journal.mark_not_sent(selected_kind, album_key)
+        effective_target = normalize_target(target) or self._target_identity()
+        selected_kind = kind or self._journal_kind_for(album_key, target=effective_target)
+        _path, record = self.inflight_journal.get_entry(selected_kind, album_key, effective_target)
+        if record is None:
+            raise RuntimeError(f"未找到未确认上传记录：{selected_kind} / {album_key}")
+        if not sent:
+            self.inflight_journal.mark_not_sent(selected_kind, album_key, target=effective_target)
+            return
+        items = self._journal_items(record)
+        if not items:
+            # A legacy path-only record can still be resolved when its source
+            # files remain available.  If they do not, retain the journal so
+            # the user is never allowed to accidentally create duplicates.
+            raise RuntimeError("上传日志缺少可恢复的文件快照，已保留记录以避免重复上传。")
+        ids = list(message_ids if message_ids is not None else record.get("message_ids", []))
+        state = self._state_for_journal(selected_kind, record)
+        # ``mark_album_completed`` performs an atomic fsync-backed save.  Do
+        # not touch the journal until it returns; a save failure therefore
+        # leaves the UNKNOWN/SUBMITTED record blocking automatic resends.
+        state.mark_album_completed(items, ids)
+        self.inflight_journal.mark_confirmed(
+            selected_kind,
+            album_key,
+            ids,
+            target=effective_target,
+        )
+        self.inflight_journal.finalize(selected_kind, album_key, target=effective_target)
 
-    def _journal_kind_for(self, album_key: str) -> str:
-        record = self.inflight_journal.find_album(album_key)
+    def _journal_kind_for(self, album_key: str, *, target=None) -> str:
+        record = self.inflight_journal.find_album(album_key, target=target)
         if record:
             value = str(record.get("kind", "")).strip().lower()
             if value:
@@ -797,9 +918,10 @@ class TDJsonClient:
         journal = getattr(self, "inflight_journal", None)
         selected_kind = kind or self._infer_upload_kind(contents)
         journal_active = bool(album_key and journal is not None)
+        journal_target = self._target_identity() if journal_active else None
         submitted = False
         if journal_active:
-            unresolved = journal.unresolved(selected_kind, album_key)
+            unresolved = journal.unresolved(selected_kind, album_key, target=journal_target)
             if unresolved is not None:
                 message = (
                     "发送状态未知，为避免重复未自动重试："
@@ -809,7 +931,7 @@ class TDJsonClient:
                 if callable(warning):
                     warning(message)
                 raise UploadUnknownError(message)
-            journal.prepare(selected_kind, album_key, items)
+            journal.prepare(selected_kind, album_key, items, target=journal_target)
         try:
             if len(contents) == 1:
                 message = self.request({
@@ -850,6 +972,7 @@ class TDJsonClient:
                     selected_kind,
                     album_key,
                     [message.get("id") for message in messages],
+                    target=journal_target,
                 )
                 submitted = True
             if progress is not None and items is not None:
@@ -861,11 +984,12 @@ class TDJsonClient:
                     album_key,
                     CONFIRMED,
                     message_ids=result,
+                    target=journal_target,
                 )
             return result
         except TDLibError as exc:
             if journal_active:
-                journal.failed(selected_kind, album_key, str(exc))
+                journal.failed(selected_kind, album_key, str(exc), target=journal_target)
             self._safe_diagnose_upload_failure(contents, items, exc)
             error_text = exc.message.lower()
             forbidden = any(
@@ -883,15 +1007,15 @@ class TDJsonClient:
             raise
         except (TimeoutError, TDLibCancelled) as exc:
             if journal_active:
-                journal.unknown(selected_kind, album_key, str(exc))
+                journal.unknown(selected_kind, album_key, str(exc), target=journal_target)
             self._safe_diagnose_upload_failure(contents, items, exc)
             raise
         except Exception as exc:
             if journal_active:
                 if submitted:
-                    journal.unknown(selected_kind, album_key, str(exc))
+                    journal.unknown(selected_kind, album_key, str(exc), target=journal_target)
                 else:
-                    journal.failed(selected_kind, album_key, str(exc))
+                    journal.failed(selected_kind, album_key, str(exc), target=journal_target)
             self._safe_diagnose_upload_failure(contents, items, exc)
             raise
 

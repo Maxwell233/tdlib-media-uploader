@@ -31,6 +31,8 @@ from path_utils import (
     media_path_sort,
     retry_fs_operation,
     stable_path,
+    iter_directory_entries_with_retry,
+    validate_scan_root,
 )
 from PySide6.QtCore import QLibraryInfo, QObject, QThread, QTimer, Signal, Slot, Qt
 from PySide6.QtGui import QColor, QIcon, QPalette
@@ -242,8 +244,16 @@ def _basic_paths(kind: str, cancel_event=None) -> list[Path]:
     }[kind]
     root = Path(_cfg(path_key, PROJECT_DIR))
     extensions = set(_cfg(extension_key, set()))
-    if not root.exists() or not root.is_dir():
-        raise RuntimeError(f"{kind} 目录不存在或不是目录：{root}")
+    try:
+        root = validate_scan_root(
+            root,
+            attempts=_cfg("SCAN_DISCOVERY_ATTEMPTS", 3),
+            initial_delay=_cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+            max_delay=_cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+            cancel_event=cancel_event,
+        )
+    except TimeoutError:
+        return []
     if kind == "mixed":
         groups, _ignored, _errors, _warnings, _skips = _basic_mixed_scan(
             root, cancel_event=cancel_event
@@ -330,10 +340,13 @@ def _basic_mixed_scan(
 ) -> tuple[list[dict], list[Path], list[str], list[str], list[dict]]:
     """Build a dependency-free mixed preview with the same group rules."""
 
-    if not root.exists() or not root.is_dir():
-        raise RuntimeError(f"mixed 目录不存在或不是目录：{root}")
-    if is_link_or_junction(root):
-        raise RuntimeError(f"mixed 目录不能是符号链接或 junction：{root}")
+    root = validate_scan_root(
+        root,
+        attempts=_cfg("SCAN_DISCOVERY_ATTEMPTS", 3),
+        initial_delay=_cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+        max_delay=_cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+        cancel_event=cancel_event,
+    )
     image_extensions = set(_cfg("IMAGE_EXTENSIONS", set()))
     video_extensions = set(_cfg("VIDEO_EXTENSIONS", set()))
     overlap = image_extensions & video_extensions
@@ -346,39 +359,38 @@ def _basic_mixed_scan(
     errors = []
     warnings = []
     try:
-        with retry_fs_operation(
-            lambda: os.scandir(root),
+        for entry in iter_directory_entries_with_retry(
+            root,
             attempts=_cfg("SCAN_DISCOVERY_ATTEMPTS", 3),
             initial_delay=_cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
             max_delay=_cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
             cancel_event=cancel_event,
-        ) as entries:
-            for entry in entries:
-                if cancel_event is not None and cancel_event.is_set():
-                    warnings.append("目录扫描已取消")
-                    break
-                try:
-                    path = Path(entry.path)
-                    if is_link_or_junction(entry):
-                        warnings.append(f"跳过符号链接或 junction：{entry.path}")
-                        continue
-                    info = retry_fs_operation(
-                        lambda entry=entry: entry.stat(follow_symlinks=False),
-                        attempts=_cfg("SCAN_DISCOVERY_ATTEMPTS", 3),
-                        initial_delay=_cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
-                        max_delay=_cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
-                        cancel_event=cancel_event,
-                    )
-                    if stat.S_ISDIR(info.st_mode):
-                        directories.append(path)
-                    elif stat.S_ISREG(info.st_mode) and path.suffix.lower() in accepted_extensions:
-                        ignored.append(path)
-                except OSError as exc:
-                    errors.append(f"{entry.path}: {exc}")
+        ):
+            if cancel_event is not None and cancel_event.is_set():
+                warnings.append("目录扫描已取消")
+                break
+            try:
+                path = Path(entry.path)
+                info = retry_fs_operation(
+                    lambda entry=entry: entry.stat(follow_symlinks=False),
+                    attempts=_cfg("SCAN_DISCOVERY_ATTEMPTS", 3),
+                    initial_delay=_cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+                    max_delay=_cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+                    cancel_event=cancel_event,
+                )
+                if is_link_or_junction(entry):
+                    warnings.append(f"跳过符号链接或 junction：{entry.path}")
+                    continue
+                if stat.S_ISDIR(info.st_mode):
+                    directories.append(path)
+                elif stat.S_ISREG(info.st_mode) and path.suffix.lower() in accepted_extensions:
+                    ignored.append(path)
+            except OSError as exc:
+                errors.append(f"{entry.path}: {exc}")
     except TimeoutError:
         warnings.append("目录扫描已取消")
     except OSError as exc:
-        raise RuntimeError(f"无法读取混合目录：{root}\n{exc}") from exc
+        errors.append(f"{root}: {exc}")
     groups = []
     size_skips = []
     for group_path in media_path_sort(directories, root, mode="name"):
@@ -1876,6 +1888,114 @@ class TaskPage(QWidget):
         self.log.appendPlainText(("✓ " if success else "! ") + message)
 
 
+class InflightPage(QWidget):
+    """Review send attempts whose Telegram result was not confirmed."""
+
+    reconciliation_requested = Signal(object, bool)
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+        title_row = QHBoxLayout()
+        title = QLabel("未确认上传")
+        title.setObjectName("pageTitle")
+        self.hint = QLabel("这些记录可能已经发送到 Telegram，请先核对目标中的 Album。")
+        self.hint.setObjectName("mutedLabel")
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        title_row.addWidget(self.hint)
+        layout.addLayout(title_row)
+
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(
+            ["媒体类型", "Album 标识", "状态", "创建时间", "最后更新", "目标", "文件数", "错误原因"]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table, 1)
+
+        buttons = QHBoxLayout()
+        refresh = QPushButton("刷新")
+        refresh.clicked.connect(self.reload_records)
+        self.sent_button = QPushButton("我已确认 Telegram 中存在")
+        self.sent_button.setObjectName("primaryButton")
+        self.sent_button.clicked.connect(lambda: self._emit_choice(True))
+        self.not_sent_button = QPushButton("我已确认 Telegram 中不存在")
+        self.not_sent_button.setObjectName("dangerButton")
+        self.not_sent_button.clicked.connect(lambda: self._emit_choice(False))
+        buttons.addWidget(refresh)
+        buttons.addStretch(1)
+        buttons.addWidget(self.sent_button)
+        buttons.addWidget(self.not_sent_button)
+        layout.addLayout(buttons)
+        self.reload_records()
+
+    def _emit_choice(self, sent: bool):
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "请选择记录", "请先选择一条未确认上传记录。")
+            return
+        item = self.table.item(row, 0)
+        record = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if not isinstance(record, dict):
+            return
+        action = "标记为已发送" if sent else "允许下次重新发送"
+        answer = QMessageBox.warning(
+            self,
+            "确认人工处理",
+            f"将{action}：\n{record.get('album_key', '')}\n\n请确认你已经核对 Telegram 中的目标和 Album。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.reconciliation_requested.emit(record, sent)
+
+    def reload_records(self):
+        try:
+            from upload_journal import InflightJournal, UNRESOLVED
+
+            records = [
+                record for record in InflightJournal().list_unresolved()
+                if str(record.get("status", "")).upper() in UNRESOLVED
+            ]
+        except Exception as exc:
+            self.table.setRowCount(0)
+            self.hint.setText(f"读取未确认记录失败：{exc}")
+            return
+        self.table.setRowCount(len(records))
+        for row, record in enumerate(records):
+            target = record.get("target") if isinstance(record.get("target"), dict) else record
+            target_mode = str(target.get("target_mode", ""))
+            target_id = target.get("chat_id", "")
+            if target_mode != "channel" and target.get("forum_topic_id"):
+                target_id = f"{target_id} / Topic {target.get('forum_topic_id')}"
+            values = [
+                _kind_label(record.get("kind", "unknown")),
+                record.get("album_key", ""),
+                record.get("status", ""),
+                record.get("created_at", ""),
+                record.get("updated_at", ""),
+                target_id or "旧版目标（未记录）",
+                len(record.get("items", []) or []),
+                record.get("error", ""),
+            ]
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(str(value))
+                if column == 0:
+                    cell.setData(Qt.ItemDataRole.UserRole, record)
+                self.table.setItem(row, column, cell)
+        self.table.resizeColumnsToContents()
+        self.hint.setText(
+            f"当前有 {len(records)} 条未确认记录。处理“已发送”前必须先核对 Telegram。"
+            if records else "没有未确认上传记录。"
+        )
+
+
 class HistoryPage(QWidget):
     def __init__(self):
         super().__init__()
@@ -2830,7 +2950,7 @@ class MainWindow(QMainWindow):
         self.sidebar = QListWidget()
         self.sidebar.setObjectName("sidebar")
         self.sidebar.setFixedWidth(215)
-        for label in ("概览", "视频上传", "图片上传", "混合上传", "任务中心", "历史记录", "设置与诊断"):
+        for label in ("概览", "视频上传", "图片上传", "混合上传", "未确认上传", "任务中心", "历史记录", "设置与诊断"):
             self.sidebar.addItem(QListWidgetItem(label))
         root.addWidget(self.sidebar)
 
@@ -2839,6 +2959,7 @@ class MainWindow(QMainWindow):
         self.video_page = UploadPage("video")
         self.image_page = UploadPage("image")
         self.mixed_page = UploadPage("mixed")
+        self.inflight_page = InflightPage()
         self.task_page = TaskPage()
         self.history_page = HistoryPage()
         self.settings_page = SettingsPage()
@@ -2847,8 +2968,8 @@ class MainWindow(QMainWindow):
             "image": self.image_page,
             "mixed": self.mixed_page,
         }
-        self.sidebar_rows = {"video": 1, "image": 2, "mixed": 3, "task": 4, "history": 5, "settings": 6}
-        for page in (self.home, self.video_page, self.image_page, self.mixed_page, self.task_page, self.history_page, self.settings_page):
+        self.sidebar_rows = {"video": 1, "image": 2, "mixed": 3, "inflight": 4, "task": 5, "history": 6, "settings": 7}
+        for page in (self.home, self.video_page, self.image_page, self.mixed_page, self.inflight_page, self.task_page, self.history_page, self.settings_page):
             if isinstance(page, UploadPage):
                 # Upload pages contain several stacked sections.  Keeping
                 # them in a scroll area prevents the Telegram target and
@@ -2874,6 +2995,7 @@ class MainWindow(QMainWindow):
             page.path_selected.connect(self._save_source_path)
             page.edit_target_requested.connect(self._edit_target)
         self.task_page.stop_requested.connect(self._stop_upload)
+        self.inflight_page.reconciliation_requested.connect(self._reconcile_inflight)
         self.settings_page.open_editor.connect(self._edit_config)
         self.settings_page.clear_all_requested.connect(self._clear_all_cache)
         self.settings_page.clear_thumb_requested.connect(self._clear_thumb_cache)
@@ -2885,7 +3007,9 @@ class MainWindow(QMainWindow):
         self.image_page.refresh_config()
         self.mixed_page.refresh_config()
         self.settings_page.refresh()
+        self.inflight_page.reload_records()
         self.history_page.reload_records()
+        self.inflight_page.reload_records()
         if _CONFIG_CREATED:
             self.statusBar().showMessage("已创建 config.toml，请先在设置中填写 Telegram 信息")
 
@@ -3106,11 +3230,51 @@ class MainWindow(QMainWindow):
         self.home.set_connection("已连接" if success else "未连接", success)
         self.statusBar().showMessage(message)
         self.history_page.reload_records()
+        self.inflight_page.reload_records()
 
     def _worker_thread_finished(self, worker: UploadWorker):
         if self.worker is worker:
             self.worker = None
         worker.deleteLater()
+
+    @Slot(object, bool)
+    def _reconcile_inflight(self, record: object, sent: bool):
+        """Apply a confirmed manual decision without querying Telegram."""
+
+        if not isinstance(record, dict):
+            return
+        kind = str(record.get("kind", "")).strip().lower()
+        album_key = str(record.get("album_key", ""))
+        if kind not in MEDIA_KINDS or not album_key:
+            QMessageBox.warning(self, "记录无效", "这条未确认记录缺少媒体类型或 Album 标识。")
+            return
+        try:
+            from tdlib_common import TDJsonClient
+
+            client = TDJsonClient.__new__(TDJsonClient)
+            from upload_journal import InflightJournal
+
+            client.inflight_journal = InflightJournal()
+            target = record.get("target") if isinstance(record.get("target"), dict) else {
+                key: record.get(key)
+                for key in ("target_mode", "chat_id", "forum_topic_id", "channel_chat_id")
+                if key in record
+            }
+            client.reconcile_inflight(
+                album_key,
+                sent=bool(sent),
+                kind=kind,
+                target=target or None,
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "人工处理未完成",
+                f"{exc}\n\n记录仍会保留，以避免重复上传。",
+            )
+            return
+        self.inflight_page.reload_records()
+        self.statusBar().showMessage("未确认上传记录已更新")
 
     def _cache_operation_allowed(self) -> bool:
         if self.worker is not None and self.worker.isRunning():

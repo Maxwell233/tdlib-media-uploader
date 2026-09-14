@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ntpath
 import os
+import errno
 import re
 import signal
 import stat
@@ -384,7 +385,7 @@ def check_file_readiness(
         # cancellation request. ``cancelable_sleep`` also keeps this path
         # easy to interrupt when a scan is running on a network share.
         if stable_interval > 0 and not cancelable_sleep(
-            min(float(stable_interval), 0.5), cancel_event
+            float(stable_interval), cancel_event
         ):
             return FileReadiness(
                 CANCELLED,
@@ -700,8 +701,8 @@ def retry_fs_operation(
             raise TimeoutError("目录扫描已取消")
         try:
             return operation()
-        except OSError:
-            if attempt >= limit:
+        except OSError as exc:
+            if attempt >= limit or not is_transient_fs_error(exc):
                 raise
             wait_seconds = min(ceiling, delay * (2 ** (attempt - 1)))
             if not cancelable_sleep(wait_seconds, cancel_event):
@@ -709,13 +710,79 @@ def retry_fs_operation(
     raise RuntimeError("文件系统重试未返回结果")
 
 
-def ordered_bounded_map(executor, items, worker, max_workers: int):
-    """Yield worker results in input order with a bounded pending queue.
+def is_transient_fs_error(exc: BaseException) -> bool:
+    """Classify filesystem failures that are worth a bounded retry.
 
-    Scanning and media preflight use this helper so local and network roots
-    share the same queue discipline. At most ``max_workers`` operations are
-    submitted at once; a large directory therefore cannot allocate one
-    future per file before the first result is consumed.
+    Network shares often report an ordinary ``OSError`` while reconnecting.
+    Retry those failures, but fail fast for errors that cannot be repaired by
+    waiting (permissions, invalid names and invalid arguments).  Unknown
+    platform-specific errors remain retryable so a new SMB/NFS errno does not
+    silently drop files from a scan.
+    """
+
+    if not isinstance(exc, OSError):
+        return False
+    value = getattr(exc, "errno", None)
+    permanent = {
+        code
+        for code in (
+            getattr(errno, "EACCES", None),
+            getattr(errno, "EPERM", None),
+            getattr(errno, "EINVAL", None),
+            getattr(errno, "ENAMETOOLONG", None),
+            getattr(errno, "ENOTDIR", None),
+        )
+        if code is not None
+    }
+    if value in permanent:
+        return False
+    transient = {
+        code
+        for code in (
+            getattr(errno, "ETIMEDOUT", None),
+            getattr(errno, "ECONNRESET", None),
+            getattr(errno, "ECONNABORTED", None),
+            getattr(errno, "ENETUNREACH", None),
+            getattr(errno, "EHOSTUNREACH", None),
+            getattr(errno, "ENOTCONN", None),
+            getattr(errno, "EAGAIN", None),
+            getattr(errno, "EBUSY", None),
+            getattr(errno, "ESTALE", None),
+            getattr(errno, "EIO", None),
+        )
+        if code is not None
+    }
+    if value in transient:
+        return True
+    # Windows network providers expose these as WinError values while leaving
+    # ``errno`` as None or mapping it to E/O.  Keep the mapping local so this
+    # helper remains harmless on POSIX.
+    winerror = getattr(exc, "winerror", None)
+    if winerror in {21, 32, 33, 53, 64, 121, 1231, 1236, 1450, 995}:
+        return True
+    text = str(exc).casefold()
+    transient_markers = (
+        "timed out", "timeout", "temporarily unavailable", "try again",
+        "connection reset", "connection aborted", "network is unreachable",
+        "network path", "sharing violation", "resource busy", "stale file",
+        "network name", "device not ready", "再试", "暂时不可用", "网络",
+        "连接重置", "共享冲突",
+    )
+    if any(marker in text for marker in transient_markers):
+        return True
+    # A platform-specific or otherwise unmapped OSError is conservatively
+    # retryable.  This is preferable to silently omitting a network file; the
+    # caller still applies a strict attempt limit.
+    return True
+
+
+def ordered_bounded_map(executor, items, worker, max_workers: int, *, max_ready_buffer=None):
+    """Yield worker results in input order while keeping workers busy.
+
+    ``pending`` is the set of running futures and ``ready`` is a bounded
+    reorder buffer.  They have separate limits: a slow first item therefore
+    cannot prevent later items from being submitted, while a producer still
+    cannot allocate one future per file in a large directory.
     """
 
     from concurrent.futures import FIRST_COMPLETED, wait
@@ -724,8 +791,8 @@ def ordered_bounded_map(executor, items, worker, max_workers: int):
     pending = {}
     ready = {}
     limit = max(1, int(max_workers))
-    next_index = 0
     next_output = 0
+    buffer_limit = max(1, int(max_ready_buffer or (limit * 4)))
 
     def submit_one(index):
         try:
@@ -738,7 +805,7 @@ def ordered_bounded_map(executor, items, worker, max_workers: int):
     for index in range(limit):
         if not submit_one(index):
             break
-        next_index += 1
+    next_index = len(pending)
     while pending:
         done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
         for future in done:
@@ -749,11 +816,11 @@ def ordered_bounded_map(executor, items, worker, max_workers: int):
             # Calling result here preserves input-order exception semantics.
             yield future.result()
             next_output += 1
-        # Refill only after yielding contiguous results.  Keeping
-        # ``pending + ready`` at most ``limit`` prevents a fast worker from
-        # building an unbounded completed-result backlog while an earlier
-        # item is still running.
-        while len(pending) + len(ready) < limit:
+        # Keep running futures at the worker limit whenever the reorder buffer
+        # has room.  This is the key difference from the old
+        # ``pending + ready <= limit`` rule, which left workers idle behind a
+        # single slow head item.
+        while len(pending) < limit and len(ready) < buffer_limit:
             if not submit_one(next_index):
                 break
             next_index += 1
@@ -809,6 +876,117 @@ def _open_scandir(
         max_delay=max_delay,
         cancel_event=cancel_event,
     )
+
+
+def validate_scan_root(
+    root,
+    *,
+    attempts: int = DISCOVERY_ATTEMPTS,
+    initial_delay: float = DISCOVERY_INITIAL_DELAY_SECONDS,
+    max_delay: float = DISCOVERY_MAX_DELAY_SECONDS,
+    cancel_event=None,
+):
+    """Validate a scan root with the same retry policy as directory entries.
+
+    ``Path.exists()`` and ``Path.is_dir()`` each perform an unbounded,
+    non-retrying stat on network shares.  Callers should use this helper
+    before starting a walk so one reconnecting NAS does not look like a
+    missing directory.
+    """
+
+    path = Path(root)
+    try:
+        info = retry_fs_operation(
+            lambda: os.lstat(_text(path)),
+            attempts=attempts,
+            initial_delay=initial_delay,
+            max_delay=max_delay,
+            cancel_event=cancel_event,
+        )
+    except TimeoutError:
+        raise
+    except OSError as exc:
+        raise RuntimeError(f"目录不存在或暂时无法读取：{path}\n{exc}") from exc
+    if _is_reparse_info(info):
+        raise RuntimeError(f"目录不能是符号链接或 junction：{path}")
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(f"路径不是目录：{path}")
+    return path
+
+
+def iter_directory_entries_with_retry(
+    directory,
+    *,
+    attempts: int = DISCOVERY_ATTEMPTS,
+    initial_delay: float = DISCOVERY_INITIAL_DELAY_SECONDS,
+    max_delay: float = DISCOVERY_MAX_DELAY_SECONDS,
+    cancel_event=None,
+):
+    """Yield directory entries even when a scandir iterator briefly drops.
+
+    ``os.scandir`` can fail after several successful ``next()`` calls on an
+    SMB/NFS mount.  Reopen the directory, skip names already yielded, and
+    continue until the bounded retry budget is exhausted.  The caller keeps
+    all entries yielded before a final failure and can report that directory
+    error without aborting the whole scan.
+    """
+
+    seen: set[str] = set()
+    limit = max(1, int(attempts))
+    consecutive_failures = 0
+    while True:
+        if _cancelled(cancel_event):
+            raise TimeoutError("目录扫描已取消")
+        iterator = _open_scandir(
+            directory,
+            attempts=limit,
+            initial_delay=initial_delay,
+            max_delay=max_delay,
+            cancel_event=cancel_event,
+        )
+        reopen = False
+        try:
+            with iterator as entries:
+                entry_iterator = iter(entries)
+                while True:
+                    if _cancelled(cancel_event):
+                        raise TimeoutError("目录扫描已取消")
+                    try:
+                        entry = next(entry_iterator)
+                    except StopIteration:
+                        return
+                    except OSError as exc:
+                        if not is_transient_fs_error(exc) or consecutive_failures >= limit - 1:
+                            raise
+                        consecutive_failures += 1
+                        if not cancelable_sleep(
+                            min(max(0.0, float(max_delay)),
+                                max(0.0, float(initial_delay)) * (2 ** (consecutive_failures - 1))),
+                            cancel_event,
+                        ):
+                            raise TimeoutError("目录扫描已取消") from exc
+                        reopen = True
+                        break
+                    # Entry names are the only identity available without a
+                    # second stat. ``stable_path`` folds case on Windows but
+                    # preserves distinct names on case-sensitive POSIX shares.
+                    identity = stable_path(getattr(entry, "path", entry.name))
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    consecutive_failures = 0
+                    yield entry
+        finally:
+            # ``with`` closes a normal scandir iterator; this guard also
+            # handles custom iterators used by integrations/tests.
+            close = getattr(iterator, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except OSError:
+                    pass
+        if not reopen:
+            return
 
 
 def run_cancellable_process(
@@ -1124,71 +1302,69 @@ def iter_files(
             warnings.append(f"跳过符号链接或 junction：{directory}")
             continue
         try:
-            iterator = _open_scandir(
+            for entry in iter_directory_entries_with_retry(
                 directory,
                 attempts=discovery_attempts,
                 initial_delay=discovery_initial_delay,
                 max_delay=discovery_max_delay,
                 cancel_event=cancel_event,
-            )
-            with iterator as it:
-                for entry in it:
+            ):
+                if _cancelled(cancel_event):
+                    cancelled = True
+                    break
+                try:
+                    # The non-following stat is both the type check and
+                    # the discovery snapshot.  Avoid a separate ``is_symlink``
+                    # syscall so a transient SMB stat failure gets the same
+                    # bounded retry as every other entry and matching files
+                    # are inspected only once.
+                    info = retry_fs_operation(
+                        lambda entry=entry: entry.stat(follow_symlinks=False),
+                        attempts=discovery_attempts,
+                        initial_delay=discovery_initial_delay,
+                        max_delay=discovery_max_delay,
+                        cancel_event=cancel_event,
+                    )
+                    if _is_reparse_info(info):
+                        warnings.append(f"跳过符号链接或 junction：{entry.path}")
+                        continue
+                    if stat.S_ISDIR(info.st_mode):
+                        stack.append(entry.path)
+                        continue
+
+                    # Avoid constructing Path objects for files that will be
+                    # rejected by the extension filter. This spelling matches
+                    # pathlib.Path.suffix for names such as ``photo.`` and
+                    # ``.hidden`` (both have no suffix).
+                    ext = _entry_suffix(entry.name)
+                    if ext.lower() not in accepted:
+                        continue
+                    if stat.S_ISREG(info.st_mode) and info.st_size > 0:
+                        path = Path(entry.path)
+                        paths.append(path)
+                        mtime_ns = getattr(info, "st_mtime_ns", None)
+                        if mtime_ns is None:
+                            mtime_ns = int(info.st_mtime * 1_000_000_000)
+                        snapshots[stable_path(path)] = FileSnapshot(
+                            _text(path),
+                            int(info.st_size),
+                            int(mtime_ns),
+                        )
+                except TimeoutError as error:
                     if _cancelled(cancel_event):
                         cancelled = True
                         break
-                    try:
-                        # The non-following stat is both the type check and
-                        # the discovery snapshot.  Avoid a separate
-                        # ``is_symlink`` syscall so a transient SMB stat
-                        # failure gets the same bounded retry as every other
-                        # entry and matching files are inspected only once.
-                        info = retry_fs_operation(
-                            lambda entry=entry: entry.stat(follow_symlinks=False),
-                            attempts=discovery_attempts,
-                            initial_delay=discovery_initial_delay,
-                            max_delay=discovery_max_delay,
-                            cancel_event=cancel_event,
-                        )
-                        if _is_reparse_info(info):
-                            warnings.append(f"跳过符号链接或 junction：{entry.path}")
-                            continue
-                        if stat.S_ISDIR(info.st_mode):
-                            stack.append(entry.path)
-                            continue
-
-                        # Avoid constructing Path objects for files that will
-                        # be rejected by the extension filter. This spelling
-                        # matches pathlib.Path.suffix for names such as
-                        # ``photo.`` and ``.hidden`` (both have no suffix).
-                        ext = _entry_suffix(entry.name)
-                        if ext.lower() not in accepted:
-                            continue
-                        if stat.S_ISREG(info.st_mode) and info.st_size > 0:
-                            path = Path(entry.path)
-                            paths.append(path)
-                            mtime_ns = getattr(info, "st_mtime_ns", None)
-                            if mtime_ns is None:
-                                mtime_ns = int(info.st_mtime * 1_000_000_000)
-                            snapshots[stable_path(path)] = FileSnapshot(
-                                _text(path),
-                                int(info.st_size),
-                                int(mtime_ns),
-                            )
-                    except TimeoutError as error:
-                        if _cancelled(cancel_event):
-                            cancelled = True
-                            break
-                        errors.append(f"{entry.path}: {error}")
-                    except OSError as error:
-                        errors.append(f"{entry.path}: {error}")
-                if cancelled:
-                    break
+                    errors.append(f"{entry.path}: {error}")
+                except OSError as error:
+                    errors.append(f"{entry.path}: {error}")
+            if cancelled:
+                break
         except TimeoutError as error:
             if _cancelled(cancel_event):
                 cancelled = True
                 break
             errors.append(f"{directory}: {error}")
         except OSError as error:
-            errors.append(str(error))
+            errors.append(f"{directory}: {error}")
 
     return ScanResult(paths, errors, warnings, cancelled, snapshots)

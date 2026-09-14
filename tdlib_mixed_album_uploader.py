@@ -40,6 +40,8 @@ from path_utils import (
     raise_for_file_readiness,
     retry_fs_operation,
     stable_path,
+    iter_directory_entries_with_retry,
+    validate_scan_root,
     wait_for_file_ready,
 )
 import app_config as cfg
@@ -249,52 +251,61 @@ def scan_mixed_groups(cancel_event=None) -> list[dict]:
     global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_IGNORED_ROOT_MEDIA
     root = Path(cfg.MIXED_DIR)
     _validate_extensions()
-    if is_link_or_junction(root):
-        raise RuntimeError(f"混合上传目录不能是符号链接或 junction：{root}")
-    if not root.exists() or not root.is_dir():
-        raise RuntimeError(f"混合上传目录不存在或不是目录：{root}")
     LAST_SCAN_ERRORS = []
     LAST_SCAN_WARNINGS = []
     LAST_SCAN_SIZE_SKIPS = []
     LAST_SCAN_IGNORED_ROOT_MEDIA = []
+    try:
+        root = validate_scan_root(
+            root,
+            attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
+            initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+            max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+            cancel_event=cancel_event,
+        )
+    except TimeoutError:
+        LAST_SCAN_WARNINGS.append("目录扫描已取消")
+        return []
     groups = []
     directories = []
     root_files = []
     try:
         # Iterate the root directly so a large mixed directory can honour
-        # cancellation between entries instead of waiting for list(scandir).
-        with retry_fs_operation(
-            lambda: os.scandir(root),
+        # cancellation and recover when an SMB iterator drops mid-enumeration.
+        for entry in iter_directory_entries_with_retry(
+            root,
             attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
             initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
             max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
             cancel_event=cancel_event,
-        ) as entries:
-            for entry in entries:
-                if cancel_event is not None and cancel_event.is_set():
-                    LAST_SCAN_WARNINGS.append("目录扫描已取消")
-                    break
-                try:
+        ):
+            if cancel_event is not None and cancel_event.is_set():
+                LAST_SCAN_WARNINGS.append("目录扫描已取消")
+                break
+            try:
+                info = retry_fs_operation(
+                    lambda entry=entry: entry.stat(follow_symlinks=False),
+                    attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
+                    initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+                    max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+                    cancel_event=cancel_event,
+                )
+                if stat.S_ISDIR(info.st_mode):
                     if is_link_or_junction(entry):
                         LAST_SCAN_WARNINGS.append(f"跳过符号链接或 junction：{entry.path}")
                         continue
-                    info = retry_fs_operation(
-                        lambda entry=entry: entry.stat(follow_symlinks=False),
-                        attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
-                        initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
-                        max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
-                        cancel_event=cancel_event,
-                    )
-                    if stat.S_ISDIR(info.st_mode):
-                        directories.append(Path(entry.path))
-                    elif stat.S_ISREG(info.st_mode) and _kind_for(Path(entry.path)):
-                        root_files.append(Path(entry.path))
-                except OSError as exc:
-                    LAST_SCAN_ERRORS.append(f"{entry.path}: {exc}")
+                    directories.append(Path(entry.path))
+                elif stat.S_ISREG(info.st_mode) and _kind_for(Path(entry.path)):
+                    root_files.append(Path(entry.path))
+            except OSError as exc:
+                LAST_SCAN_ERRORS.append(f"{entry.path}: {exc}")
     except TimeoutError:
         LAST_SCAN_WARNINGS.append("目录扫描已取消")
     except OSError as exc:
-        raise RuntimeError(f"无法读取混合上传目录：{root}\n{exc}") from exc
+        # Keep groups discovered before an iterator failure.  A reconnecting
+        # network share must not discard the portion we already enumerated or
+        # abort the entire mixed scan.
+        LAST_SCAN_ERRORS.append(f"{root}: {exc}")
     directories = media_path_sort(directories, root, mode="name")
     for group_path in directories:
         items = _group_items(group_path, group_path.name, cancel_event=cancel_event)
@@ -319,12 +330,21 @@ def flatten_items(groups) -> list[dict]:
 class UploadState:
     VERSION = 1
 
-    def __init__(self):
+    def __init__(self, target=None):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        suffix = "tdlib-mixed-v1" if getattr(cfg, "TARGET_MODE", "forum_topic") == "forum_topic" else "tdlib-mixed-v1-channel"
-        identity = f"{stable_path(cfg.MIXED_DIR)}|{cfg.CHAT_ID}|{cfg.FORUM_TOPIC_ID}|{suffix}"
+        target = target if isinstance(target, dict) else {}
+        target_mode = str(target.get("target_mode", getattr(cfg, "TARGET_MODE", "forum_topic")))
+        chat_id = int(target.get("chat_id", getattr(cfg, "CHAT_ID", 0)) or 0)
+        forum_topic_id = int(target.get("forum_topic_id", getattr(cfg, "FORUM_TOPIC_ID", 0)) or 0)
+        channel_chat_id = int(target.get("channel_chat_id", getattr(cfg, "CHANNEL_CHAT_ID", 0)) or 0)
+        suffix = "tdlib-mixed-v1" if target_mode == "forum_topic" else "tdlib-mixed-v1-channel"
+        identity = f"{stable_path(cfg.MIXED_DIR)}|{chat_id}|{forum_topic_id}|{suffix}"
         digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
         self.path = STATE_DIR / f"mixed_upload_state_{digest}.json"
+        self._target_mode = target_mode
+        self._chat_id = chat_id
+        self._forum_topic_id = forum_topic_id
+        self._channel_chat_id = channel_chat_id
         self.lock = threading.Lock()
         if getattr(cfg, "MIXED_RESET_STATE", False) and self.path.exists():
             self.path.unlink()
@@ -334,10 +354,10 @@ class UploadState:
         return {
             "version": self.VERSION,
             "mixed_dir": stable_path(cfg.MIXED_DIR),
-            "chat_id": cfg.CHAT_ID,
-            "target_mode": getattr(cfg, "TARGET_MODE", "forum_topic"),
-            "channel_chat_id": getattr(cfg, "CHANNEL_CHAT_ID", 0),
-            "forum_topic_id": cfg.FORUM_TOPIC_ID,
+            "chat_id": self._chat_id,
+            "target_mode": self._target_mode,
+            "channel_chat_id": self._channel_chat_id,
+            "forum_topic_id": self._forum_topic_id,
             "completed": {},
         }
 
@@ -374,7 +394,11 @@ class UploadState:
         with self.lock:
             for index, item in enumerate(items):
                 path = item["path"]
-                snapshot = file_snapshot(path)
+                snapshot = None
+                if item.get("_journal_snapshot") and item.get("size") is not None and item.get("mtime_ns") is not None:
+                    snapshot = (int(item["size"]), int(item["mtime_ns"]))
+                if snapshot is None:
+                    snapshot = file_snapshot(path)
                 if snapshot is None:
                     # The source can disappear from a network share after a
                     # successful Telegram send.  The scan snapshot is the

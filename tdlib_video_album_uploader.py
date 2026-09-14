@@ -45,6 +45,7 @@ from path_utils import (
     raise_for_file_readiness,
     stable_path,
     retry_fs_operation,
+    validate_scan_root,
     wait_for_file_ready,
 )
 import app_config as cfg
@@ -264,9 +265,20 @@ def month_caption(month_key: str) -> str:
 
 def scan_videos(cancel_event=None) -> list[Path]:
     global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_SNAPSHOTS
-    root = cfg.VIDEO_DIR
-    if not root.exists() or not root.is_dir():
-        raise RuntimeError(f"视频目录不存在或不是目录：{root}")
+    try:
+        root = validate_scan_root(
+            cfg.VIDEO_DIR,
+            attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
+            initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+            max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+            cancel_event=cancel_event,
+        )
+    except TimeoutError:
+        LAST_SCAN_ERRORS = []
+        LAST_SCAN_WARNINGS = ["目录扫描已取消"]
+        LAST_SCAN_SIZE_SKIPS = []
+        LAST_SCAN_SNAPSHOTS = {}
+        return []
     scan_result = iter_files(
         root,
         cfg.VIDEO_EXTENSIONS,
@@ -1531,16 +1543,25 @@ def input_video(item, caption: str, cancel_event=None):
 class UploadState:
     VERSION = 1
 
-    def __init__(self):
+    def __init__(self, target=None):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
+        target = target if isinstance(target, dict) else {}
+        target_mode = str(target.get("target_mode", getattr(cfg, "TARGET_MODE", "forum_topic")))
+        chat_id = int(target.get("chat_id", getattr(cfg, "CHAT_ID", 0)) or 0)
+        forum_topic_id = int(target.get("forum_topic_id", getattr(cfg, "FORUM_TOPIC_ID", 0)) or 0)
+        channel_chat_id = int(target.get("channel_chat_id", getattr(cfg, "CHANNEL_CHAT_ID", 0)) or 0)
         identity_suffix = (
             "tdlib-video-v5"
-            if getattr(cfg, "TARGET_MODE", "forum_topic") == "forum_topic"
+            if target_mode == "forum_topic"
             else "tdlib-video-v5-channel"
         )
-        identity = f"{stable_path(cfg.VIDEO_DIR)}|{cfg.CHAT_ID}|{cfg.FORUM_TOPIC_ID}|{identity_suffix}"
+        identity = f"{stable_path(cfg.VIDEO_DIR)}|{chat_id}|{forum_topic_id}|{identity_suffix}"
         task_hash = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
         self.path = STATE_DIR / f"upload_state_{task_hash}.json"
+        self._target_mode = target_mode
+        self._chat_id = chat_id
+        self._forum_topic_id = forum_topic_id
+        self._channel_chat_id = channel_chat_id
         self.lock = threading.Lock()
         if cfg.VIDEO_RESET_STATE and self.path.exists():
             self.path.unlink()
@@ -1550,10 +1571,10 @@ class UploadState:
         return {
             "version": self.VERSION,
             "video_dir": stable_path(cfg.VIDEO_DIR),
-            "chat_id": cfg.CHAT_ID,
-            "target_mode": getattr(cfg, "TARGET_MODE", "forum_topic"),
-            "channel_chat_id": getattr(cfg, "CHANNEL_CHAT_ID", 0),
-            "forum_topic_id": cfg.FORUM_TOPIC_ID,
+            "chat_id": self._chat_id,
+            "target_mode": self._target_mode,
+            "channel_chat_id": self._channel_chat_id,
+            "forum_topic_id": self._forum_topic_id,
             "completed": {},
         }
 
@@ -1589,7 +1610,11 @@ class UploadState:
         with self.lock:
             for index, item in enumerate(items):
                 path = item["path"]
-                snapshot = _snapshot_for_path(path)
+                snapshot = None
+                if item.get("_journal_snapshot") and item.get("size") is not None and item.get("mtime_ns") is not None:
+                    snapshot = (int(item["size"]), int(item["mtime_ns"]))
+                if snapshot is None:
+                    snapshot = _snapshot_for_path(path)
                 if snapshot is None:
                     expected_size = item.get("scan_size")
                     expected_mtime_ns = item.get("scan_mtime_ns")
@@ -1604,11 +1629,11 @@ class UploadState:
                     "mtime_ns": mtime_ns,
                     "capture_time": (
                         item["capture_time"].isoformat()
-                        if item.get("capture_time") is not None
-                        else None
+                        if hasattr(item.get("capture_time"), "isoformat")
+                        else item.get("capture_time")
                     ),
-                    "month_key": item["month_key"],
-                    "date_tag": item["date_tag"],
+                    "month_key": item.get("month_key", ""),
+                    "date_tag": item.get("date_tag", ""),
                     "message_id": message_ids[index] if index < len(message_ids) else None,
                     "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 }

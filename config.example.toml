@@ -199,6 +199,7 @@ io_workers_network = 2
 [process]
 
 # ExifTool/FFmpeg 单次调用的最长时间（秒）。超时后会按现有重试/隔离策略处理。
+# 未确认上传日志会额外记录 Telegram 目标和源文件快照；可在 GUI 的“未确认上传”页人工处理。
 exiftool_timeout_seconds = 120
 ffmpeg_metadata_timeout_seconds = 30
 ffmpeg_info_timeout_seconds = 30

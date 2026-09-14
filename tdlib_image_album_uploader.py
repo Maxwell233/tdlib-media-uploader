@@ -32,6 +32,7 @@ from path_utils import (
     raise_for_file_readiness,
     run_cancellable_process,
     stable_path,
+    validate_scan_root,
     wait_for_file_ready,
 )
 import app_config as cfg
@@ -162,9 +163,20 @@ def file_signature(path: Path, snapshot=None) -> str:
 
 def scan_images(cancel_event=None) -> list[Path]:
     global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, IMAGE_SCAN_SNAPSHOTS
-    root = cfg.IMAGE_DIR
-    if not root.exists() or not root.is_dir():
-        raise RuntimeError(f"图片目录不存在或不是目录：{root}")
+    try:
+        root = validate_scan_root(
+            cfg.IMAGE_DIR,
+            attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
+            initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+            max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+            cancel_event=cancel_event,
+        )
+    except TimeoutError:
+        LAST_SCAN_ERRORS = []
+        LAST_SCAN_WARNINGS = ["目录扫描已取消"]
+        LAST_SCAN_SIZE_SKIPS = []
+        IMAGE_SCAN_SNAPSHOTS = {}
+        return []
     scan_result = iter_files(
         root,
         cfg.IMAGE_EXTENSIONS,
@@ -642,16 +654,25 @@ def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
 class UploadState:
     VERSION = 1
 
-    def __init__(self):
+    def __init__(self, target=None):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
+        target = target if isinstance(target, dict) else {}
+        target_mode = str(target.get("target_mode", getattr(cfg, "TARGET_MODE", "forum_topic")))
+        chat_id = int(target.get("chat_id", getattr(cfg, "CHAT_ID", 0)) or 0)
+        forum_topic_id = int(target.get("forum_topic_id", getattr(cfg, "FORUM_TOPIC_ID", 0)) or 0)
+        channel_chat_id = int(target.get("channel_chat_id", getattr(cfg, "CHANNEL_CHAT_ID", 0)) or 0)
         identity_suffix = (
             "tdlib-image-v5"
-            if getattr(cfg, "TARGET_MODE", "forum_topic") == "forum_topic"
+            if target_mode == "forum_topic"
             else "tdlib-image-v5-channel"
         )
-        identity = f"{stable_path(cfg.IMAGE_DIR)}|{cfg.CHAT_ID}|{cfg.FORUM_TOPIC_ID}|{identity_suffix}"
+        identity = f"{stable_path(cfg.IMAGE_DIR)}|{chat_id}|{forum_topic_id}|{identity_suffix}"
         task_hash = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
         self.path = STATE_DIR / f"image_upload_state_{task_hash}.json"
+        self._target_mode = target_mode
+        self._chat_id = chat_id
+        self._forum_topic_id = forum_topic_id
+        self._channel_chat_id = channel_chat_id
         self.lock = threading.Lock()
         if cfg.IMAGE_RESET_STATE and self.path.exists():
             self.path.unlink()
@@ -661,10 +682,10 @@ class UploadState:
         return {
             "version": self.VERSION,
             "image_dir": stable_path(cfg.IMAGE_DIR),
-            "chat_id": cfg.CHAT_ID,
-            "target_mode": getattr(cfg, "TARGET_MODE", "forum_topic"),
-            "channel_chat_id": getattr(cfg, "CHANNEL_CHAT_ID", 0),
-            "forum_topic_id": cfg.FORUM_TOPIC_ID,
+            "chat_id": self._chat_id,
+            "target_mode": self._target_mode,
+            "channel_chat_id": self._channel_chat_id,
+            "forum_topic_id": self._forum_topic_id,
             "completed": {},
         }
 
@@ -698,8 +719,18 @@ class UploadState:
 
     def mark_album_completed(self, paths: list[Path], message_ids: list[int]):
         with self.lock:
-            for index, path in enumerate(paths):
-                snapshot = _snapshot_for_path(path)
+            for index, raw_item in enumerate(paths):
+                item = raw_item if isinstance(raw_item, dict) else {"path": raw_item}
+                path = Path(item["path"])
+                snapshot = None
+                if item.get("_journal_snapshot") and item.get("size") is not None and item.get("mtime_ns") is not None:
+                    snapshot = (int(item["size"]), int(item["mtime_ns"]))
+                if snapshot is None:
+                    snapshot = _snapshot_for_path(path)
+                if snapshot is None and item.get("size") is not None and item.get("mtime_ns") is not None:
+                    snapshot = (int(item["size"]), int(item["mtime_ns"]))
+                if snapshot is None and item.get("scan_size") is not None and item.get("scan_mtime_ns") is not None:
+                    snapshot = (int(item["scan_size"]), int(item["scan_mtime_ns"]))
                 if snapshot is None:
                     raise RuntimeError(f"上传完成但无法记录图片断点：{path}")
                 size, mtime_ns = snapshot

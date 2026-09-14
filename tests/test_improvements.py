@@ -316,6 +316,186 @@ class ImprovementsTest(unittest.TestCase):
             client.reconcile_inflight("album-key", sent=False)
             self.assertIsNone(journal.get("mixed", "album-key"))
 
+    def test_manual_sent_reconciliation_writes_checkpoint_before_removing_journal(self):
+        import tdlib_common
+        import tdlib_image_album_uploader as image_core
+        from upload_journal import InflightJournal
+
+        target = {
+            "target_mode": "forum_topic",
+            "chat_id": -1001,
+            "forum_topic_id": 7,
+            "channel_chat_id": 0,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "images"
+            root.mkdir()
+            path = root / "photo.jpg"
+            path.write_bytes(b"image")
+            snapshot = path.stat()
+            journal = InflightJournal(Path(directory) / "journal")
+            journal.prepare(
+                "image",
+                "album-key",
+                [{"path": path, "scan_size": snapshot.st_size, "scan_mtime_ns": snapshot.st_mtime_ns}],
+                target=target,
+            )
+            journal.submitted("image", "album-key", [11], target=target)
+            journal.unknown("image", "album-key", "connection lost", target=target)
+            client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
+            client.inflight_journal = journal
+            with patch.object(image_core.cfg, "IMAGE_DIR", root), \
+                    patch.object(image_core, "STATE_DIR", Path(directory) / "state"):
+                path.write_bytes(b"changed source")
+                client.reconcile_inflight("album-key", sent=True, kind="image", target=target)
+                state = image_core.UploadState(target=target)
+                self.assertIn(
+                    image_core.file_signature(path, (snapshot.st_size, snapshot.st_mtime_ns)),
+                    state.data["completed"],
+                )
+            self.assertIsNone(journal.unresolved("image", "album-key", target=target))
+
+    def test_manual_sent_state_failure_keeps_journal(self):
+        import tdlib_common
+        import tdlib_image_album_uploader as image_core
+        from upload_journal import InflightJournal
+
+        target = {"target_mode": "forum_topic", "chat_id": -1001, "forum_topic_id": 7}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "images"
+            root.mkdir()
+            path = root / "photo.jpg"
+            path.write_bytes(b"image")
+            snapshot = path.stat()
+            journal = InflightJournal(Path(directory) / "journal")
+            journal.prepare("image", "album-key", [{"path": path, "size": snapshot.st_size, "mtime_ns": snapshot.st_mtime_ns}], target=target)
+            journal.unknown("image", "album-key", "timeout", target=target)
+            state_dir = Path(directory) / "state"
+            with patch.object(image_core.cfg, "IMAGE_DIR", root), patch.object(image_core, "STATE_DIR", state_dir):
+                # Create the state file before making its durable save fail.
+                image_core.UploadState(target=target)
+                client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
+                client.inflight_journal = journal
+                with patch.object(image_core.UploadState, "_save", side_effect=OSError("disk full")):
+                    with self.assertRaises(OSError):
+                        client.reconcile_inflight("album-key", sent=True, kind="image", target=target)
+            self.assertIsNotNone(journal.unresolved("image", "album-key", target=target))
+
+    def test_inflight_journal_is_scoped_to_target_and_legacy_records_are_conservative(self):
+        from upload_journal import InflightJournal
+
+        first = {"target_mode": "forum_topic", "chat_id": -1001, "forum_topic_id": 1}
+        second = {"target_mode": "forum_topic", "chat_id": -1001, "forum_topic_id": 2}
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "album", [{"path": "photo.jpg"}], target=first)
+            journal.unknown("image", "album", "timeout", target=first)
+            self.assertIsNotNone(journal.unresolved("image", "album", target=first))
+            self.assertIsNone(journal.unresolved("image", "album", target=second))
+            journal.prepare("image", "legacy", [{"path": "photo.jpg"}])
+            journal.unknown("image", "legacy", "timeout")
+            self.assertIsNotNone(journal.unresolved("image", "legacy", target=first))
+            self.assertIsNotNone(journal.unresolved("image", "legacy", target=second))
+
+    def test_validate_scan_root_retries_transient_stat(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = path_utils.os.lstat
+            calls = {"count": 0}
+
+            def flaky(value):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise OSError("share temporarily offline")
+                return original(value)
+
+            with patch.object(path_utils.os, "lstat", side_effect=flaky):
+                self.assertEqual(path_utils.validate_scan_root(root, initial_delay=0, max_delay=0), root)
+            self.assertEqual(calls["count"], 2)
+
+    def test_directory_iterator_recovers_after_mid_enumeration_error(self):
+        class Entry:
+            def __init__(self, name):
+                self.name = name
+                self.path = name
+
+        class Iterator:
+            def __init__(self, values):
+                self.values = iter(values)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                value = next(self.values)
+                if value == "ERROR":
+                    raise OSError("connection reset")
+                return Entry(value)
+
+        streams = iter((Iterator(["a", "ERROR"]), Iterator(["a", "b"])))
+        with patch.object(path_utils.os, "scandir", side_effect=lambda _path: next(streams)):
+            entries = list(path_utils.iter_directory_entries_with_retry("root", initial_delay=0, max_delay=0))
+        self.assertEqual([entry.name for entry in entries], ["a", "b"])
+
+    def test_stability_interval_honours_configured_value(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stable.bin"
+            path.write_bytes(b"stable")
+            with patch.object(path_utils, "cancelable_sleep", return_value=True) as sleep:
+                result = path_utils.check_file_readiness(path, stable_interval=1.2, stable_checks=2, probe=False)
+            self.assertTrue(result.ready)
+            self.assertEqual(sleep.call_args.args[0], 1.2)
+
+    def test_ordered_bounded_map_keeps_submitting_behind_slow_head(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        started = set()
+        lock = threading.Lock()
+
+        def worker(value):
+            with lock:
+                started.add(value)
+            if value == 0:
+                time.sleep(0.2)
+            else:
+                time.sleep(0.01)
+            return value
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            values = list(path_utils.ordered_bounded_map(executor, range(6), worker, 2))
+        self.assertEqual(values, list(range(6)))
+        self.assertTrue({2, 3}.issubset(started))
+
+    def test_filesystem_error_classification_distinguishes_permanent_failures(self):
+        import errno
+
+        self.assertFalse(path_utils.is_transient_fs_error(OSError(errno.EACCES, "denied")))
+        self.assertFalse(path_utils.is_transient_fs_error(OSError(errno.EINVAL, "bad argument")))
+        self.assertTrue(path_utils.is_transient_fs_error(OSError(errno.EAGAIN, "try again")))
+        self.assertTrue(path_utils.is_transient_fs_error(OSError("provider reset")))
+
+    def test_gui_inflight_page_loads_unresolved_records(self):
+        from upload_journal import InflightJournal
+
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory) / ".upload_inflight")
+            journal.prepare("image", "gui-album", [{"path": "photo.jpg"}])
+            journal.unknown("image", "gui-album", "timeout")
+            with patch.object(gui, "APP_DATA_DIR", Path(directory)):
+                # The page resolves its journal root through runtime_paths at
+                # import time; replace the class-level path explicitly for a
+                # deterministic, offline smoke test.
+                with patch("upload_journal.APP_DATA_DIR", Path(directory)):
+                    page = gui.InflightPage()
+                    self.assertEqual(page.table.rowCount(), 1)
+                    page.deleteLater()
+
     def test_natural_sort_handles_unicode_numeric_runs_and_folder_names(self):
         self.assertEqual(
             path_utils.natural_sort(["a（10）", "a（1）", "a（11）", "a（5）"]),

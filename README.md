@@ -119,7 +119,7 @@ Windows 便携包如果要更换安装位置，只移动上表中的个人数据
 
 视频、图片或混合媒体无法被 FFmpeg/Pillow 读取时，程序会在预检阶段跳过该文件，继续上传其他文件；暂时不可读的项目会标记为 deferred，网络恢复后重新扫描即可重试。预检生成的 Album 计划会保留完整成员，deferred 文件不会让后面的文件向前补位。上传前还会再次检查文件存在、可读且大小/修改时间没有变化。坏文件不会写入断点，跳过文件的完整路径和原因会显示在任务日志中，并保存到应用数据目录的 `logs/app.log`。TDLib 原生诊断写入同目录的 `logs/tdlib.log`，可用于排查上传失败。
 
-每个待发送 Album 在请求前会写入 `.upload_inflight/<hash>.json`。状态依次记录为 `PREPARED`、`SUBMITTED`、`CONFIRMED`，正常断点写入后才删除；超时、断线或取消会记录为 `UNKNOWN`，下一次不会自动重发可能已经提交的 Album。请先在 Telegram 中核对，再通过集成调用的 `reconcile_inflight(..., sent=True/False)` 标记已发送或允许重试。点击“清理所有缓存”会同时删除断点、暂存副本和运行日志，请先处理这些未知状态记录。
+每个待发送 Album 在请求前会写入 `.upload_inflight/<hash>.json`。状态依次记录为 `PREPARED`、`SUBMITTED`、`CONFIRMED`，正常断点写入后才删除；超时、断线或取消会记录为 `UNKNOWN`，下一次不会自动重发可能已经提交的 Album。日志会保存 Album 文件的路径、大小、修改时间和 Telegram 目标，因此切换到其他 Topic 或频道不会互相阻塞。请打开侧栏的“未确认上传”，先在 Telegram 中核对对应目标，再选择“我已确认 Telegram 中存在”或“我已确认 Telegram 中不存在”；选择“已存在”时程序会先写入对应上传断点，保存成功后才删除日志，保存失败则继续保留记录。集成调用仍可使用 `reconcile_inflight(..., sent=True/False)`。点击“清理所有缓存”会同时删除断点、暂存副本和运行日志，请先处理这些未知状态记录。
 
 如果源文件位于 SMB/NAS，可在“设置与诊断”中选择本地暂存模式，或在配置中设置 `[staging] mode`：`off` 直接读取源文件，`network` 只暂存网络盘，`always` 暂存所有文件。旧版 `enabled = true/false` 仍可使用，未填写 `mode` 时会映射为 `always/off`。程序会在发送前把已验证的文件复制到本地暂存目录，再交给 TDLib 读取；断点、标题和文件名仍以原始路径为准。`cleanup_on_start` 控制启动时清理过期文件，`cleanup_days` 控制保留时间，`cleanup_after_success` 控制 Album 已确认且断点写入后是否立即删除对应副本；失败、取消或发送状态未知时会保留副本供诊断和重试。暂存目录可以从缓存列表单独清理。
 
