@@ -88,12 +88,16 @@ extensions = [".mp4", ".mov", ".m4v"]
 # 日期优先级：EXIF 信息 →（可选）媒体创建日期 → 文件修改日期。
 # ExifTool 仍使用一次批量扫描；缺少 EXIF 的视频才会用 FFmpeg 读取媒体日期。
 # 媒体日期最多同时读取 4 个文件，每个文件只启动一次 FFmpeg，并显示扫描进度。
-# 如果扫描速度优先，可关闭 read_media_creation_date；关闭后仍会读取 EXIF。
+# 如果只需要按文件名上传，可关闭 read_dates；关闭后跳过所有日期读取，
+# 自动按文件名排序并按固定数量分组。read_media_creation_date 仅在 read_dates 开启时生效。
 #
 # "error"：
 # - 找不到可用的 EXIF 或媒体创建日期的视频会停止上传
 # - 未安装 ExifTool 且关闭媒体日期回退时，无法读取 EXIF 的视频会停止上传
 missing_date_policy = "mtime"
+
+# 是否读取视频日期信息。关闭后只按文件名扫描，不调用 ExifTool、FFmpeg 或文件修改时间。
+read_dates = true
 
 # 是否读取 MediaCreateDate、TrackCreateDate、QuickTime CreationDate 等媒体日期。
 # true 保留旧版本的 QuickTime 日期读取行为；false 可进一步缩短扫描时间。

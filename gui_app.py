@@ -214,7 +214,11 @@ def _basic_paths(kind: str) -> list[Path]:
     paths, _errors = iter_files(root, extensions)
     if kind == "image" and _cfg("IMAGE_SORT_MODE", "mtime") == "mtime":
         paths.sort(key=lambda item: (file_mtime(item), item.name.lower()))
-    elif kind == "video" and _cfg("VIDEO_SORT_MODE", "mtime") == "mtime":
+    elif (
+        kind == "video"
+        and _cfg("VIDEO_READ_DATES", True)
+        and _cfg("VIDEO_SORT_MODE", "mtime") == "mtime"
+    ):
         paths.sort(key=lambda item: (file_mtime(item), str(item).lower()))
     else:
         paths.sort(key=lambda item: (item.name.casefold(), str(item).casefold()))
@@ -468,9 +472,16 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
             scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
             metadata = {}
             exiftool = Path(_cfg("EXIFTOOL_PATH", ""))
+            read_dates = bool(_cfg("VIDEO_READ_DATES", True))
             if progress_callback is not None:
-                progress_callback({"phase": "exif", "completed": 0, "total": len(paths)})
-            if exiftool.exists():
+                progress_callback({
+                    "phase": "exif" if read_dates else "date_disabled",
+                    "completed": 0,
+                    "total": len(paths),
+                })
+            if not read_dates:
+                warning = "已关闭日期读取，将按文件名扫描并按固定数量分组。"
+            elif exiftool.exists():
                 metadata = core.read_exif_metadata()
             elif _cfg("VIDEO_READ_MEDIA_CREATION_DATE", True):
                 warning = (
@@ -494,17 +505,30 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
             paths, scan_size_skips = _apply_size_limits(_basic_paths(kind), kind)
             missing = []
             items = []
-            for path in paths:
-                capture_time = _dt.datetime.fromtimestamp(file_mtime(path))
-                items.append(
+            if not _cfg("VIDEO_READ_DATES", True):
+                items = [
                     {
                         "path": path,
-                        "capture_time": capture_time,
-                        "month_key": capture_time.strftime("%Y-%m"),
-                        "date_tag": "FileSystem:ModifyTime",
-                        "fallback": True,
+                        "capture_time": None,
+                        "month_key": "__all_videos__",
+                        "date_tag": "未读取日期",
+                        "fallback": False,
                     }
-                )
+                    for path in paths
+                ]
+                warning = "已关闭日期读取，将按文件名扫描并按固定数量分组。"
+            else:
+                for path in paths:
+                    capture_time = _dt.datetime.fromtimestamp(file_mtime(path))
+                    items.append(
+                        {
+                            "path": path,
+                            "capture_time": capture_time,
+                            "month_key": capture_time.strftime("%Y-%m"),
+                            "date_tag": "FileSystem:ModifyTime",
+                            "fallback": True,
+                        }
+                    )
     else:
         if core is not None:
             paths = core.scan_images()
@@ -538,6 +562,8 @@ def _scan_result(kind: str, progress_callback=None) -> dict:
                 )
             ).lower() == "fixed"
         )
+        if not _cfg("VIDEO_READ_DATES", True):
+            force_ten = True
         include_group_title = bool(_cfg("VIDEO_CAPTION_INCLUDE_GROUP_TITLE", True))
         forced_key = getattr(core, "FORCED_GROUP_KEY", "__all_videos__")
         if force_ten:
@@ -1677,6 +1703,7 @@ class TargetDialog(QDialog):
             "超级群组和频道的 Chat ID 通常以 -100 开头；频道不使用 Forum Topic。"
             + (
                 "视频的分组方式、每组数量、组标题、文件名和序号都集中在“视频分组与标题”中。"
+                "关闭“读取视频日期信息”后会自动按文件名和固定分组处理。"
                 if self.kind == "video"
                 else "图片的排序、分组数量、标题和文件名选项都集中在图片设置中。"
             )
@@ -1700,6 +1727,14 @@ class TargetDialog(QDialog):
         if self.kind == "video":
             date_box = QGroupBox("日期读取")
             date_form = QFormLayout(date_box)
+            self.video_read_dates = QCheckBox("读取视频日期信息")
+            self.video_read_dates.setChecked(bool(_cfg("VIDEO_READ_DATES", True)))
+            self.video_read_dates.setToolTip(
+                "关闭后跳过 EXIF、媒体创建日期和文件修改时间读取；"
+                "视频只按文件名扫描，并按固定数量分组。"
+            )
+            date_form.addRow("日期读取", self.video_read_dates)
+
             self.video_missing_date = QComboBox()
             self.video_missing_date.addItem("使用文件修改时间", "mtime")
             self.video_missing_date.addItem("停止并提示缺失日期", "error")
@@ -1779,6 +1814,8 @@ class TargetDialog(QDialog):
             process_form.addRow("缩略图", self.thumbnail)
             self.media_layout.addWidget(process_box)
             self.video_filename_numbers.setEnabled(self.video_filenames.isChecked())
+            self.video_read_dates.toggled.connect(self._update_video_date_fields)
+            self._update_video_date_fields()
         else:
             image_box = QGroupBox("图片分组与标题")
             image_form = QFormLayout(image_box)
@@ -1841,6 +1878,22 @@ class TargetDialog(QDialog):
             if label is not None:
                 label.setVisible(visible)
 
+    def _update_video_date_fields(self):
+        if self.kind != "video" or not hasattr(self, "video_read_dates"):
+            return
+        enabled = self.video_read_dates.isChecked()
+        self.video_missing_date.setEnabled(enabled)
+        self.video_media_creation.setEnabled(enabled)
+        self.video_sort.setEnabled(enabled)
+        self.video_group_mode.setEnabled(enabled)
+        if not enabled:
+            name_index = self.video_sort.findData("name")
+            fixed_index = self.video_group_mode.findData("fixed")
+            if name_index >= 0:
+                self.video_sort.setCurrentIndex(name_index)
+            if fixed_index >= 0:
+                self.video_group_mode.setCurrentIndex(fixed_index)
+
     def _save(self):
         try:
             group_id = int(self.chat_id.text().strip() or "0")
@@ -1868,13 +1921,19 @@ class TargetDialog(QDialog):
             (f"telegram.{self.kind}", "forum_topic_id"): topic_id,
         }
         if self.kind == "video":
+            read_dates = self.video_read_dates.isChecked()
             values.update({
                 ("video", "missing_date_policy"): self.video_missing_date.currentData(),
                 ("video", "read_media_creation_date"): self.video_media_creation.isChecked(),
-                ("video", "sort_mode"): self.video_sort.currentData(),
+                ("video", "read_dates"): read_dates,
+                ("video", "sort_mode"): self.video_sort.currentData() if read_dates else "name",
                 ("video", "album_size"): self.video_album.value(),
-                ("video", "group_mode"): self.video_group_mode.currentData(),
-                ("video", "force_ten_per_album"): self.video_group_mode.currentData() == "fixed",
+                ("video", "group_mode"): self.video_group_mode.currentData() if read_dates else "fixed",
+                ("video", "force_ten_per_album"): (
+                    self.video_group_mode.currentData() == "fixed"
+                    if read_dates
+                    else True
+                ),
                 ("video", "caption_include_group_title"): self.video_group_title.isChecked(),
                 ("video", "album_caption_separator"): self.video_separator.text(),
                 ("video", "caption_include_filenames"): self.video_filenames.isChecked(),
@@ -2220,6 +2279,8 @@ class MainWindow(QMainWindow):
             message = f"正在读取 EXIF 日期… {completed}/{total}"
         elif phase == "media_date":
             message = f"正在读取媒体创建日期… {completed}/{total}"
+        elif phase == "date_disabled":
+            message = "日期读取已关闭，按文件名处理…"
         else:
             message = "正在扫描…"
         page.status_label.setText(message)

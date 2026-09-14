@@ -247,6 +247,15 @@ if VIDEO_SORT_MODE not in {"mtime", "name"}:
         '[video].sort_mode 只能是 "mtime" 或 "name"。'
     )
 
+# 关闭后完全跳过 EXIF、媒体创建日期和文件修改时间读取。为了让“仅按
+# 文件名处理”保持确定性，实际排序和分组会固定为文件名/固定分组。
+VIDEO_READ_DATES = bool(
+    video.get(
+        "read_dates",
+        True,
+    )
+)
+
 VIDEO_MISSING_DATE_POLICY = str(
     video.get(
         "missing_date_policy",
@@ -265,7 +274,8 @@ if VIDEO_MISSING_DATE_POLICY not in {
 
 # 默认开启媒体创建日期以保持旧版本读取 QuickTime 日期的行为。扫描先由
 # ExifTool 一次批量读取；缺少可用 EXIF 的视频才会使用 FFmpeg 回退。关闭后
-# 仍优先使用 EXIF 日期，但跳过媒体日期回退，扫描更快。
+# 仍优先使用 EXIF 日期，但跳过媒体日期回退，扫描更快。read_dates 关闭时
+# 所有日期读取都会跳过。
 VIDEO_READ_MEDIA_CREATION_DATE = bool(
     video.get(
         "read_media_creation_date",
@@ -311,6 +321,10 @@ if VIDEO_GROUP_MODE not in {"date", "fixed"}:
     raise RuntimeError(
         '[video].group_mode 只能是 "date" 或 "fixed"。'
     )
+
+if not VIDEO_READ_DATES:
+    VIDEO_SORT_MODE = "name"
+    VIDEO_GROUP_MODE = "fixed"
 
 # Keep the old constant available to extensions and older integrations.
 VIDEO_FORCE_TEN_PER_ALBUM = VIDEO_GROUP_MODE == "fixed"

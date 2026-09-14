@@ -150,7 +150,15 @@ FORCED_GROUP_KEY = "__all_videos__"
 FORCED_GROUP_LABEL = "全部视频（按顺序分组）"
 
 
+def video_dates_enabled() -> bool:
+    """Return whether date metadata should be read during a video scan."""
+
+    return bool(getattr(cfg, "VIDEO_READ_DATES", True))
+
+
 def force_ten_per_album() -> bool:
+    if not video_dates_enabled():
+        return True
     group_mode = getattr(cfg, "VIDEO_GROUP_MODE", None)
     legacy_enabled = bool(getattr(cfg, "VIDEO_FORCE_TEN_PER_ALBUM", False))
     if group_mode is not None:
@@ -208,7 +216,7 @@ def scan_videos() -> list[Path]:
             continue
         accepted.append(path)
     videos = accepted
-    if getattr(cfg, "VIDEO_SORT_MODE", "mtime") == "name":
+    if not video_dates_enabled() or getattr(cfg, "VIDEO_SORT_MODE", "mtime") == "name":
         videos.sort(key=lambda p: (p.name.casefold(), relative_name(p).casefold()))
     else:
         videos.sort(key=lambda p: (file_mtime(p), relative_name(p).casefold()))
@@ -239,6 +247,8 @@ def parse_exif_datetime(value):
 
 
 def read_exif_metadata() -> dict[str, dict]:
+    if not video_dates_enabled():
+        return {}
     if not cfg.EXIFTOOL_PATH.exists():
         raise RuntimeError(
             f"找不到 ExifTool：{cfg.EXIFTOOL_PATH}\n"
@@ -383,6 +393,8 @@ def _media_creation_metadata(path_text: str, size: int, mtime_ns: int):
 
 
 def read_media_creation_time(path: Path):
+    if not video_dates_enabled():
+        return None
     try:
         info = path.stat()
         return _media_creation_metadata(
@@ -479,7 +491,8 @@ def _media_selection(media):
 
 
 def _fallback_capture_time(path: Path):
-
+    if not video_dates_enabled():
+        return None
     if cfg.VIDEO_MISSING_DATE_POLICY == "mtime":
         return {
             "datetime": datetime.fromtimestamp(path.stat().st_mtime),
@@ -496,6 +509,8 @@ def choose_capture_time(
     probe_media: bool = True,
     allow_fallback: bool = True,
 ):
+    if not video_dates_enabled():
+        return None
     selected = _choose_embedded_capture_time(row)
     if selected is not None:
         return selected
@@ -517,7 +532,11 @@ def _emit_scan_progress(progress_callback, payload: dict):
 
 
 def _probe_media_dates(paths, progress_callback=None):
-    if not paths or not getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True):
+    if (
+        not paths
+        or not video_dates_enabled()
+        or not getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True)
+    ):
         return {}
 
     total = len(paths)
@@ -568,6 +587,21 @@ def _probe_media_dates(paths, progress_callback=None):
 def build_items(videos, metadata_index, progress_callback=None):
     items, missing = [], []
     metadata_index = metadata_index or {}
+    if not video_dates_enabled():
+        _emit_scan_progress(
+            progress_callback,
+            {"phase": "date_disabled", "completed": len(videos), "total": len(videos)},
+        )
+        return [
+            {
+                "path": path,
+                "capture_time": None,
+                "month_key": FORCED_GROUP_KEY,
+                "date_tag": "未读取日期",
+                "fallback": False,
+            }
+            for path in videos
+        ], []
     embedded = {}
     pending_media = []
     unavailable = set()
@@ -988,7 +1022,11 @@ class UploadState:
                     "relative_path": relative_name(path),
                     "size": stat.st_size,
                     "mtime_ns": stat.st_mtime_ns,
-                    "capture_time": item["capture_time"].isoformat(),
+                    "capture_time": (
+                        item["capture_time"].isoformat()
+                        if item.get("capture_time") is not None
+                        else None
+                    ),
                     "month_key": item["month_key"],
                     "date_tag": item["date_tag"],
                     "message_id": message_ids[index] if index < len(message_ids) else None,
@@ -1213,8 +1251,14 @@ def print_plan(items, state):
             path = item["path"]
             status = "已完成" if state.is_completed(path) else "待上传"
             fallback = " [mtime兜底]" if item["fallback"] else ""
+            capture_time = item.get("capture_time")
+            capture_text = (
+                capture_time.strftime("%Y-%m-%d %H:%M:%S")
+                if capture_time is not None
+                else "未读取日期"
+            )
             print(
-                f"  {index:>3}. [{status}] {item['capture_time'].strftime('%Y-%m-%d %H:%M:%S')}  "
+                f"  {index:>3}. [{status}] {capture_text}  "
                 f"{format_size(path.stat().st_size):>10}  {relative_name(path)}  <{item['date_tag']}>{fallback}"
             )
 
@@ -1244,7 +1288,10 @@ def main():
         UI.log("没有找到视频文件。")
         return
 
-    if cfg.EXIFTOOL_PATH.exists():
+    if not video_dates_enabled():
+        UI.log("已关闭日期读取，将按文件名扫描并按固定数量分组；不会调用 ExifTool、FFmpeg 或文件修改时间。")
+        metadata_index = {}
+    elif cfg.EXIFTOOL_PATH.exists():
         UI.log(
             "正在使用 ExifTool 批量读取 EXIF"
             + ("；缺少 EXIF 的视频再读取媒体创建日期..." if getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True) else "...")
@@ -1390,8 +1437,14 @@ def main():
                 )
                 for item in ready_items:
                     path = item["path"]
+                    capture_time = item.get("capture_time")
+                    capture_text = (
+                        capture_time.strftime("%Y-%m-%d %H:%M:%S")
+                        if capture_time is not None
+                        else "未读取日期"
+                    )
                     UI.log(
-                        f"  {item['capture_time'].strftime('%Y-%m-%d %H:%M:%S')}  "
+                        f"  {capture_text}  "
                         f"{format_size(path.stat().st_size):>10}  {relative_name(path)}"
                     )
                 try:

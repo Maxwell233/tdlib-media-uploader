@@ -267,6 +267,43 @@ class ImprovementsTest(unittest.TestCase):
                 self.assertEqual(fallback["tag"], "FileSystem:ModifyTime")
                 self.assertEqual(fallback["datetime"].timestamp(), path.stat().st_mtime)
 
+    def test_disabled_video_dates_uses_filename_only(self):
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "b.mp4"
+            second = root / "a.mp4"
+            first.write_bytes(b"video")
+            second.write_bytes(b"video")
+            os.utime(first, (200, 200))
+            os.utime(second, (100, 100))
+            with patch.object(core.cfg, "VIDEO_DIR", root), \
+                    patch.object(core.cfg, "VIDEO_EXTENSIONS", {".mp4"}), \
+                    patch.object(core.cfg, "VIDEO_MAX_BYTES", 10_000), \
+                    patch.object(core.cfg, "VIDEO_READ_DATES", False), \
+                    patch.object(core.cfg, "VIDEO_SORT_MODE", "mtime"), \
+                    patch.object(core.cfg, "VIDEO_GROUP_MODE", "date"), \
+                    patch.object(core, "read_media_creation_time", side_effect=AssertionError("不应读取媒体日期")):
+                paths = core.scan_videos()
+                items, missing = core.build_items(paths, {})
+
+            self.assertEqual([path.name for path in paths], ["a.mp4", "b.mp4"])
+            self.assertEqual(missing, [])
+            self.assertEqual([item["capture_time"] for item in items], [None, None])
+            with patch.object(core.cfg, "VIDEO_READ_DATES", False), \
+                    patch.object(core.cfg, "VIDEO_GROUP_MODE", "date"), \
+                    patch.object(core, "STATE_DIR", root / "state"), \
+                    patch.object(core.cfg, "VIDEO_RESET_STATE", False):
+                self.assertTrue(core.force_ten_per_album())
+                self.assertEqual({item["month_key"] for item in items}, {core.FORCED_GROUP_KEY})
+                plans = core.build_album_plans(items)
+                self.assertEqual([len(plan["items"]) for plan in plans], [2])
+                state = core.UploadState()
+                state.mark_album_completed(items, [1, 2])
+                saved = json.loads(state.path.read_text(encoding="utf-8"))
+            self.assertTrue(all(record["capture_time"] is None for record in saved["completed"].values()))
+
     def test_exiftool_date_query_keeps_full_time_batch(self):
         import subprocess
         import tdlib_video_album_uploader as core

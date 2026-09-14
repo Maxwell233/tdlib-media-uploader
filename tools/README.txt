@@ -36,6 +36,7 @@ Windows: exiftool_path = 'tools/exiftool.exe'
 macOS:  exiftool_path = 'tools/exiftool'
 
 日期规则：
+- read_dates = false 时跳过所有日期读取，自动按文件名排序并按固定数量分组，只使用文件名和自定义标题。
 - 优先读取 EXIF；启用 read_media_creation_date 后，再读取媒体/QuickTime 创建日期；最后按配置使用 mtime 兜底。
 - ExifTool 一次批量读取日期；已有日期的文件不会启动 FFmpeg。
 - 缺少 EXIF 的视频最多同时由 4 个 FFmpeg 任务读取媒体创建日期，每个文件只启动一次。
