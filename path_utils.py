@@ -46,7 +46,7 @@ def display_path(path) -> str:
 def file_mtime(path, fallback: float = 0.0) -> float:
     """Read a file mtime without turning a transient share error into a crash."""
     try:
-        return float(Path(path).stat().st_mtime)
+        return float(os.stat(path).st_mtime)
     except OSError:
         return fallback
 
@@ -67,34 +67,46 @@ def relative_name(path, root) -> str:
     return relative.replace("\\", "/")
 
 
+def _entry_suffix(name: str) -> str:
+    """Return the pathlib-compatible suffix for a directory entry name."""
+    dot = name.rfind(".")
+    return name[dot:] if 0 < dot < len(name) - 1 else ""
+
+
 def iter_files(root, extensions):
     """Walk a local or UNC tree, skipping entries unavailable to the share."""
     accepted = {str(ext).lower() for ext in extensions}
     paths = []
     errors = []
 
-    def scan(directory):
+    # Keep the traversal iterative. A recursive scanner can hit Python's
+    # recursion limit on exported camera/archive trees with many nested
+    # folders, while os.walk handles those trees without growing the call
+    # stack. ``follow_symlinks=False`` retains os.walk's default behavior.
+    stack = [_text(root)]
+    while stack:
+        directory = stack.pop()
         try:
             with os.scandir(directory) as it:
                 for entry in it:
                     try:
                         if entry.is_dir(follow_symlinks=False):
-                            scan(entry.path)
-                        else:
-                            # ⚡ Bolt: Use os.path.splitext on entry.name instead of instantiating
-                            # a pathlib.Path object just to check the suffix. This avoids expensive
-                            # Path creation for skipped files, improving scan speed by ~40%.
-                            dot = entry.name.rfind(".")
-                            ext = entry.name[dot:] if 0 < dot < len(entry.name) - 1 else ""
-                            if ext.lower() not in accepted:
-                                continue
-                            info = entry.stat()
-                            if stat.S_ISREG(info.st_mode) and info.st_size > 0:
-                                paths.append(Path(entry.path))
+                            stack.append(entry.path)
+                            continue
+
+                        # Avoid constructing Path objects for files that will
+                        # be rejected by the extension filter. This spelling
+                        # matches pathlib.Path.suffix for names such as
+                        # ``photo.`` and ``.hidden`` (both have no suffix).
+                        ext = _entry_suffix(entry.name)
+                        if ext.lower() not in accepted:
+                            continue
+                        info = entry.stat()
+                        if stat.S_ISREG(info.st_mode) and info.st_size > 0:
+                            paths.append(Path(entry.path))
                     except OSError as error:
                         errors.append(f"{entry.path}: {error}")
         except OSError as error:
             errors.append(str(error))
 
-    scan(_text(root))
     return paths, errors

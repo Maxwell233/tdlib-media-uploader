@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import album_metadata as metadata
@@ -119,6 +120,21 @@ class ImprovementsTest(unittest.TestCase):
             self.assertEqual([p.name for p in files], ["a.jpg"])
             self.assertFalse(errors)
             self.assertEqual(len(calls), 0)
+
+    def test_file_mtime_uses_os_stat_and_keeps_fallback(self):
+        result = SimpleNamespace(st_mtime=123.5)
+        with patch.object(path_utils.os, "stat", return_value=result) as stat:
+            self.assertEqual(path_utils.file_mtime("clip.mp4"), 123.5)
+            stat.assert_called_once_with("clip.mp4")
+
+        with patch.object(path_utils.os, "stat", side_effect=OSError("share offline")):
+            self.assertEqual(path_utils.file_mtime("clip.mp4", fallback=7.25), 7.25)
+
+    def test_extension_filter_preserves_path_suffix_edge_cases(self):
+        self.assertEqual(path_utils._entry_suffix("photo."), "")
+        self.assertEqual(path_utils._entry_suffix("photo.."), "")
+        self.assertEqual(path_utils._entry_suffix(".hidden"), "")
+        self.assertEqual(path_utils._entry_suffix("photo.jpg"), ".jpg")
 
     def test_media_scan_applies_telegram_size_limits(self):
         import tdlib_image_album_uploader as image_core
