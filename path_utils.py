@@ -84,7 +84,8 @@ def iter_files(root, extensions):
                             # ⚡ Bolt: Use os.path.splitext on entry.name instead of instantiating
                             # a pathlib.Path object just to check the suffix. This avoids expensive
                             # Path creation for skipped files, improving scan speed by ~40%.
-                            _, ext = os.path.splitext(entry.name)
+                            dot = entry.name.rfind(".")
+                            ext = entry.name[dot:] if 0 < dot < len(entry.name) - 1 else ""
                             if ext.lower() not in accepted:
                                 continue
                             info = entry.stat()
