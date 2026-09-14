@@ -14,7 +14,7 @@
 
 - 保留 `foo.`、`foo..` 和 `.hidden` 等文件名与旧版 `Path.suffix` 一致的扩展名行为。
 - 增加 mtime 成功/回退路径及扩展名边界的离线回归测试。
-- ExifTool 批量读取显式使用 UTF-8 文件名编码，修复 Windows 中文/特殊字符目录导致的日期扫描失败。
+- ExifTool 批量读取通过 UTF-8 参数流传递扫描目录，并启用 Unicode 文件名处理，修复 Windows 中文/特殊字符目录导致的日期扫描失败。
 - 发布版本统一更新为 1.8.11，Windows/macOS GitHub Actions 继续使用同一套源码构建。
 
 ## 1.8.10

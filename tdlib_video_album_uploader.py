@@ -254,9 +254,16 @@ def read_exif_metadata() -> dict[str, dict]:
     ]
     for ext in sorted(cfg.VIDEO_EXTENSIONS):
         command += ["-ext", ext.lstrip(".")]
-    command.append(str(cfg.VIDEO_DIR))
+    # Windows may recode command-line arguments through the active code page
+    # before ExifTool sees them.  Passing the directory through a UTF-8
+    # argument stream keeps non-ASCII paths intact while ``-charset`` enables
+    # ExifTool's Unicode filename handling.  The final newline closes stdin
+    # after the single directory argument, so the batch query remains one
+    # ExifTool process.
+    command += ["-@", "-"]
     result = subprocess.run(
         command,
+        input=f"{cfg.VIDEO_DIR}\n",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

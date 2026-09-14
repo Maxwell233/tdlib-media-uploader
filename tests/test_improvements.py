@@ -286,6 +286,9 @@ class ImprovementsTest(unittest.TestCase):
                 command = run.call_args.args[0]
                 self.assertIn("-charset", command)
                 self.assertIn("FileName=UTF8", command)
+                self.assertEqual(command[-2:], ["-@", "-"])
+                self.assertEqual(run.call_args.kwargs["input"], f"{root}\n")
+                self.assertNotIn(str(root), command)
                 self.assertIn("-time:all", command)
                 self.assertNotIn("-fast", command)
 
