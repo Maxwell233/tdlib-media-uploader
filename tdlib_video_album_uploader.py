@@ -245,7 +245,9 @@ def read_exif_metadata() -> dict[str, dict]:
             "请把对应平台的 ExifTool 可执行文件放入 tools 目录，或在设置中指定路径。"
         )
     command = [
-        str(cfg.EXIFTOOL_PATH), "-j", "-r", "-a", "-G1", "-s",
+        str(cfg.EXIFTOOL_PATH),
+        "-charset", "FileName=UTF8",
+        "-j", "-r", "-a", "-G1", "-s",
         "-api", "LargeFileSupport=1",
         "-d", "%Y-%m-%d %H:%M:%S%z",
         "-time:all",

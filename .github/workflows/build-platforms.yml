@@ -201,21 +201,25 @@ jobs:
             shasum -a 256 "$archive" >> release-assets/SHA256SUMS
           done
           version="$(tr -d '[:space:]' < VERSION)"
-          cat > release-notes.md <<'EOF'
-          ## V__VERSION__
+          changelog_notes="$(awk -v version="$version" '
+            $0 == "## " version { found=1; print; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md)"
+          if [[ -z "${changelog_notes//[[:space:]]/}" ]]; then
+            echo "CHANGELOG.md 中没有找到 ${version} 的更新章节" >&2
+            exit 1
+          fi
+          {
+            printf '%s\n\n' "$changelog_notes"
+            cat <<'EOF'
+          ### 发布包
 
-          此版本由同一份远程源码同时构建两个平台：Windows x64 和 macOS Apple Silicon arm64；两者使用同一套 GUI、上传核心和功能配置。
-
-          - Windows：解压后运行 `TDLib Media Uploader.exe`。
-          - macOS：打开 DMG，把 `TDLib Media Uploader.app` 拖到其中的 `Applications` 文件夹；首次打开若遇到系统安全提示，请确认下载来源和 SHA-256 后右键点按“打开”。
-          - 视频大于 4 GiB 会在扫描阶段跳过；图片大于 10 MiB 默认在扫描阶段跳过。启用图片压缩选项后，超限图片只会在确认上传并实际处理该图片时使用已有 FFmpeg 生成临时副本，原图不会被修改。
-          - 发布包包含许可、署名、第三方清单以及 macOS FFmpeg 构建信息。
-          - 项目原创代码、文档和界面资源采用 GNU GPL v3.0 only（GPL-3.0-only）；第三方组件仍遵循各自上游许可证。
-          - 使用 `SHA256SUMS` 校验下载文件完整性。
-
-          风险提示：当前发布包未配置 Apple Developer 签名/公证，因此 macOS Gatekeeper 可能提示无法验证开发者；未签名不等于安全认证。请只从本仓库 Release 下载，先核对 SHA-256，并在使用前阅读源码和许可文件。程序会保存 Telegram 登录数据、API 凭据相关配置和上传断点到本机，不会把这些个人文件放入发布包；请勿分享 `config.toml`、登录数据库或 API Hash。上传行为、代理和目标权限由用户自行确认，并应遵守 Telegram 条款及目标群组规则。
+          - Windows：下载 x64 ZIP，解压后运行 `TDLib Media Uploader.exe`。
+          - macOS：下载 Apple Silicon arm64 DMG，把 `TDLib Media Uploader.app` 拖到其中的 `Applications` 文件夹。
+          - 使用 `SHA256SUMS` 校验下载文件完整性；macOS 包未配置 Apple Developer 签名和公证。
           EOF
-          sed -i "s/__VERSION__/${version}/g" release-notes.md
+          } > release-notes.md
 
       - name: Publish combined GitHub Release
         shell: bash

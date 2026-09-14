@@ -284,6 +284,8 @@ class ImprovementsTest(unittest.TestCase):
                     patch.object(core.subprocess, "run", return_value=completed) as run:
                 core.read_exif_metadata()
                 command = run.call_args.args[0]
+                self.assertIn("-charset", command)
+                self.assertIn("FileName=UTF8", command)
                 self.assertIn("-time:all", command)
                 self.assertNotIn("-fast", command)
 
