@@ -87,6 +87,34 @@ Telegram 限制在扫描阶段生效：大于 4 GiB 的视频会直接跳过；�
 
 历史记录保留最近 100 次任务。Telegram 登录数据位于 `tdlib_data` 和 `tdlib_files`；标题修改存放在 `.video_album_captions.json`、`.image_album_captions.json` 和 `.mixed_album_captions.json`，独立于上传断点。macOS 发布版会将这些可写数据放到上面的 Application Support 目录，避免写入只读的 `.app` 包。
 
+### 从旧版本迁移本地数据
+
+升级时先退出旧版和新版程序，并确认任务中心没有正在运行的上传。程序版本本身不携带个人数据；只要把旧版的应用数据目录移到新版使用的同一位置，就可以保留登录状态、任务历史和上传断点。建议先复制一份旧目录作为备份，确认新版能正常登录和读取断点后再删除旧目录。
+
+应用数据目录按运行方式确定：
+
+| 运行方式 | 应用数据目录 |
+| --- | --- |
+| Windows x64 便携 ZIP | ZIP 解压后的 `TDLib Media Uploader` 文件夹中的资源目录；当前 one-folder 包通常是 `_internal`（以“设置与诊断”显示的配置文件路径为准） |
+| Windows 源码运行 | 仓库目录，即与 `config.toml` 同一目录 |
+| macOS arm64 发布版 | `~/Library/Application Support/TDLib Media Uploader/` |
+| macOS 源码运行 | 仓库目录，即与 `config.toml` 同一目录 |
+
+将旧目录中的下列内容复制到新版的**应用数据目录根部**，不要再套一层同名文件夹：
+
+| 文件或文件夹 | 保存内容 |
+| --- | --- |
+| `tdlib_data/`、`tdlib_files/` | Telegram 登录会话、TDLib 数据库和已下载文件；必须一起迁移 |
+| `.gui_history.json` | “任务中心”和历史记录中的最近 100 次任务 |
+| `.video_state/`、`.image_state/`、`.mixed_state/` | 视频、图片、混合上传断点 |
+| `.state/` | 更早版本使用的视频断点；当前版本仍会识别它 |
+| `config.toml` | API、代理、上传目标、媒体目录和各项选项；复制后请检查目录和目标是否正确 |
+| `.video_album_captions.json`、`.image_album_captions.json`、`.mixed_album_captions.json` | 已编辑的媒体组标题（可选） |
+
+Windows 便携包如果要更换安装位置，只移动上表中的个人数据文件和文件夹，保留新版包自带的 EXE、`_internal` 依赖、`tools` 和资源文件。若旧版和新版使用的是同一个 Windows 目录，或 macOS 仍使用上面的 Application Support 目录，则无需移动数据，直接替换程序文件并保留该目录即可。文件名以点号开头的状态文件属于正常数据，复制时不要遗漏。
+
+迁移后启动新版，先在“设置与诊断”确认配置文件路径，再检查账号、任务历史和各上传页面的已完成组。媒体目录的路径、文件大小或修改时间改变后，程序会将文件视为新文件；如果同时移动了媒体目录，请在 `config.toml` 更新路径并重新扫描，旧断点不一定能够继续匹配。不要把包含登录数据、API Hash、代理密码或断点的目录发给他人。
+
 视频、图片或混合媒体无法被 FFmpeg/Pillow 读取时，程序会在预检阶段跳过该文件，继续上传其他文件；暂时不可读的项目会标记为 deferred，网络恢复后重新扫描即可重试。坏文件不会写入断点，跳过文件的完整路径和原因会显示在任务日志中，并保存到应用数据目录的 `logs/app.log`。TDLib 原生诊断写入同目录的 `logs/tdlib.log`，可用于排查上传失败。点击“清理所有缓存”会同时删除这两个日志文件。
 
 ## 配置与代理
