@@ -599,6 +599,18 @@ class ImprovementsTest(unittest.TestCase):
             warning.assert_called_once()
             save.assert_not_called()
 
+    def test_filename_number_checkbox_can_be_disabled(self):
+        for kind, attribute in (
+            ("video", "video_filename_numbers"),
+            ("mixed", "mixed_filename_numbers"),
+        ):
+            dialog = gui.TargetDialog(kind)
+            checkbox = getattr(dialog, attribute)
+            self.assertTrue(checkbox.isEnabled())
+            checkbox.setChecked(False)
+            self.assertFalse(checkbox.isChecked())
+            dialog.deleteLater()
+
     def test_video_scan_builds_all_months_once(self):
         import tdlib_video_album_uploader as core
         import datetime

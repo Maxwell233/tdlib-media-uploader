@@ -1956,8 +1956,10 @@ class TargetDialog(QDialog):
 
             self.video_filename_numbers = QCheckBox("文件名带序号（1、2、3…）")
             self.video_filename_numbers.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS", True)))
-            self.video_filename_numbers.setToolTip("关闭后只显示文件名，每行一个，不添加序号。")
-            self.video_filenames.toggled.connect(self.video_filename_numbers.setEnabled)
+            self.video_filename_numbers.setToolTip(
+                "关闭后只显示文件名，每行一个，不添加序号；"
+                "即使暂时关闭文件名列表，也可以先保存这个格式选项。"
+            )
             group_form.addRow("文件名格式", self.video_filename_numbers)
 
             self.video_separator = QLineEdit(str(_cfg("VIDEO_ALBUM_CAPTION_SEPARATOR", " · ")))
@@ -1971,7 +1973,6 @@ class TargetDialog(QDialog):
             self.thumbnail.setChecked(bool(_cfg("VIDEO_GENERATE_THUMBNAIL", True)))
             process_form.addRow("缩略图", self.thumbnail)
             self.media_layout.addWidget(process_box)
-            self.video_filename_numbers.setEnabled(self.video_filenames.isChecked())
             self.video_read_dates.toggled.connect(self._update_video_date_fields)
             self._update_video_date_fields()
         elif self.kind == "image":
@@ -2029,8 +2030,10 @@ class TargetDialog(QDialog):
             mixed_form.addRow("文件名列表", self.mixed_filenames)
             self.mixed_filename_numbers = QCheckBox("文件名带序号（1、2、3…）")
             self.mixed_filename_numbers.setChecked(bool(_cfg("MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS", True)))
-            self.mixed_filename_numbers.setEnabled(self.mixed_filenames.isChecked())
-            self.mixed_filenames.toggled.connect(self.mixed_filename_numbers.setEnabled)
+            self.mixed_filename_numbers.setToolTip(
+                "关闭后只显示文件名，每行一个，不添加序号；"
+                "即使暂时关闭文件名列表，也可以先保存这个格式选项。"
+            )
             mixed_form.addRow("文件名格式", self.mixed_filename_numbers)
             self.mixed_separator = QLineEdit(str(_cfg("MIXED_ALBUM_CAPTION_SEPARATOR", " · ")))
             mixed_form.addRow("标题分隔符", self.mixed_separator)
