@@ -48,7 +48,7 @@ macOS 首次打开若出现“无法验证开发者”等提示，请先确认�
 
 每组仅第一条消息显示统一标题。最后不足一组也会发送；只有一个文件时发送单条消息。
 
-Telegram 限制在扫描阶段生效：普通账号视频单文件最多 2 GiB，Premium 账号最多 4 GiB；超过 2 GiB 的视频会在登录后、发送前按账号状态跳过并明确提示，超过 4 GiB 的视频直接跳过。大于 10 MiB 的图片默认跳过。图片配置中可开启“超限图片使用 FFmpeg 压缩”：扫描和预检只提示，确认上传并实际处理该图片时才生成不超过约 9.5 MiB 的临时 JPEG；原文件不会被修改。
+Telegram 限制在扫描阶段生效：普通账号视频单文件上限约 2 GB，Premium 账号上限约 4 GB；超过约 2 GB 的视频会在登录后、发送前按账号状态跳过并明确提示，超过约 4 GB 的视频直接跳过。程序按 Telegram 的精确字节边界检查（普通账号 2,097,152,000 字节，Premium 账号 4,194,304,000 字节）。大于 10 MiB 的图片默认跳过。图片配置中可开启“超限图片使用 FFmpeg 压缩”：扫描和预检只提示，确认上传并实际处理该图片时才生成不超过约 9.5 MiB 的临时 JPEG；原文件不会被修改。
 
 视频选择“按扫描顺序固定分组”后会忽略月份，按照设置的 1–10 个连续分组。组标题、文件名列表和文件名序号可以分别开关，仍可逐组编辑标题。
 
@@ -165,6 +165,8 @@ cd tdlib-media-uploader
 python -m unittest discover -s tests -v
 ```
 
+便携包支持 `--self-test` 离线检查。全新包即使还没有 `data/config.toml` 也可以直接运行；检查只验证资源、可写数据目录、TDLib 路径和可选 FFmpeg，不会连接 Telegram 或修改正式配置。
+
 如 `.venv` 损坏，可删除项目中的 `.venv` 后重新运行对应平台安装脚本。
 
 ## 构建 Windows 和 macOS 包
@@ -185,7 +187,7 @@ Windows 和 macOS 构建使用各自平台的原生 runner，并行执行离线�
 
 输出为 Windows 的 `dist/TDLib Media Uploader/TDLib Media Uploader.exe` 及 Windows x64 ZIP，和 macOS 的 `dist/TDLib Media Uploader.app` 及带版本号的 macOS arm64 DMG。DMG 根目录包含应用和指向系统 `/Applications` 的 `Applications` 文件夹别名，便于拖放安装。Windows 构建同时校验 EXE 嵌入图标、Qt 图标资源和稳定的 AppUserModelID，避免打包后任务栏图标缺失或归组异常。构建包不包含个人配置、断点、封面缓存、媒体文件或登录数据；macOS 包另附 FFmpeg 构建信息。
 
-核心文件：`gui_app.py`（界面）、`app_config.py`（配置）、`tdlib_video_app.py`（视频流程）、`tdlib_video_album_uploader.py`、`tdlib_image_album_uploader.py`、`tdlib_mixed_album_uploader.py`（媒体上传）、`tdlib_common.py`（TDLib）、`album_metadata.py`（标题）、`path_utils.py`（路径和扫描）。
+核心文件：`gui_app.py`（正式界面入口）、`app_config.py`（配置）、`tdlib_video_app.py`、`tdlib_video_album_uploader.py`、`tdlib_image_album_uploader.py`、`tdlib_mixed_album_uploader.py`（由界面调用的媒体上传流程）、`tdlib_common.py`（TDLib）、`album_metadata.py`（标题）、`path_utils.py`（路径和扫描）。上传流程入口也会复用 `data/app.lock`；通常不需要单独启动这些内部模块。
 
 版本使用“主版本.功能版本.修订版本”：日常优化增加最后一位，较大功能更新增加中间一位。更新时同步 `VERSION`、`app_config.py` 和界面版本信息。此次修改见 [CHANGELOG.md](CHANGELOG.md)。
 

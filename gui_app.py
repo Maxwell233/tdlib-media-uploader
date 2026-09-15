@@ -95,6 +95,10 @@ PROJECT_DIR = RESOURCE_DIR
 APP_VERSION = read_version()
 MEDIA_KINDS = ("video", "image", "mixed")
 KIND_LABELS = {"video": "视频", "image": "图片", "mixed": "混合"}
+# The editor is normally used before a Telegram session is opened, so its
+# local validation is a soft ceiling.  Each uploader revalidates against
+# TDLib's ``message_caption_length_max`` immediately before sending.
+CAPTION_EDITOR_SOFT_LIMIT = 4096
 KIND_PATH_KEYS = {"video": "VIDEO_DIR", "image": "IMAGE_DIR", "mixed": "MIXED_DIR"}
 KIND_PATH_CONFIG_KEYS = {"video": "video_dir", "image": "image_dir", "mixed": "mixed_dir"}
 # The dependency-free preview path still keeps the scanner's one-stat
@@ -175,6 +179,11 @@ _prepare_qt_plugins()
 
 
 def _ensure_config_file() -> bool:
+    # The packaged health check must work on a clean install without writing
+    # a user config.  ``app_config`` loads the bundled template in memory for
+    # this command-line mode.
+    if "--self-test" in sys.argv[1:]:
+        return False
     if CONFIG_PATH.exists() or not TEMPLATE_CONFIG_PATH.exists():
         return False
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -336,10 +345,20 @@ def _apply_size_limits(paths: list[Path], kind: str) -> tuple[list[Path], list[d
         else:
             media_kind = kind
         limit_key = "VIDEO_MAX_BYTES" if media_kind == "video" else "IMAGE_MAX_BYTES"
-        default_limit = 4 * 1024 ** 3 if media_kind == "video" else 10 * 1024 ** 2
+        default_limit = int(
+            _cfg("VIDEO_MAX_BYTES", 4_194_304_000)
+            if media_kind == "video"
+            else _cfg("IMAGE_MAX_BYTES", 10 * 1024 ** 2)
+        )
         limit = int(_cfg(limit_key, default_limit))
         compress_images = media_kind == "image" and bool(_cfg("IMAGE_COMPRESS_OVERSIZE", False))
         media_label = "视频" if media_kind == "video" else "Photo"
+        if media_kind == "video":
+            premium_limit = int(_cfg("VIDEO_PREMIUM_MAX_BYTES", 8000 * 524_288))
+            standard_limit = int(_cfg("VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288))
+            limit_label = "约 4 GB" if limit == premium_limit else "约 2 GB" if limit == standard_limit else _fmt_size(limit)
+        else:
+            limit_label = _fmt_size(limit)
         snapshot = BASIC_SCAN_SNAPSHOTS.get(stable_path(path))
         size = int(snapshot[0]) if snapshot is not None else _path_size(str(path))
         if size > limit:
@@ -353,7 +372,7 @@ def _apply_size_limits(paths: list[Path], kind: str) -> tuple[list[Path], list[d
                 "action": action,
                 "reason": (
                     f"文件大小 {_fmt_size(size)} 超过 Telegram "
-                    f"{media_label} 上限 {_fmt_size(limit)}"
+                    f"{media_label} 上限 {limit_label}"
                 ),
             })
             if action == "skip":
@@ -1107,7 +1126,7 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
         notices = []
         if scan_rejected:
             limit_label = {
-                "video": "视频 4 GiB",
+                "video": "视频约 4 GB",
                 "image": "Photo 10 MiB",
                 "mixed": "图片/视频",
             }.get(kind, _kind_label(kind))
@@ -1375,18 +1394,22 @@ class UploadWorker(QThread):
 
                 core.STATE_DIR = VIDEO_STATE_DIR
                 core.UI = self.ui
+                core._INSTANCE_LOCK_HELD = True
                 entry.UI = self.ui
+                entry._INSTANCE_LOCK_HELD = True
                 entry.main()
             elif self.kind == "image":
                 import tdlib_image_album_uploader as core
 
                 core.UI = self.ui
+                core._INSTANCE_LOCK_HELD = True
                 core.main()
             elif self.kind == "mixed":
                 import tdlib_mixed_album_uploader as core
 
                 core.STATE_DIR = MIXED_STATE_DIR
                 core.UI = self.ui
+                core._INSTANCE_LOCK_HELD = True
                 core.main()
             else:
                 raise ValueError(f"未知媒体类型：{self.kind}")
@@ -1686,6 +1709,7 @@ class UploadPage(QWidget):
                         else "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
                         True,
                     )),
+                    max_chars=CAPTION_EDITOR_SOFT_LIMIT,
                 )
                 album_row = QTreeWidgetItem([
                     "待上传" if pending_count else "已完成",
@@ -1788,9 +1812,14 @@ class UploadPage(QWidget):
         custom_edit.setPlaceholderText("可输入多行；留空表示不追加")
         preview = QPlainTextEdit()
         preview.setReadOnly(True)
-        caption_limit = 1024
+        caption_limit = int(getattr(self, "CAPTION_EDITOR_SOFT_LIMIT", CAPTION_EDITOR_SOFT_LIMIT))
         caption_count = QLabel()
         caption_count.setObjectName("mutedLabel")
+        caption_hint = QLabel(
+            f"编辑器使用 {caption_limit} 字符软上限；连接 Telegram 后会按当前账号的最终限制再次确认。"
+        )
+        caption_hint.setObjectName("mutedLabel")
+        caption_hint.setWordWrap(True)
         include_base = (
             self.kind == "video"
             or self.kind == "mixed" and _cfg("MIXED_CAPTION_INCLUDE_GROUP_TITLE", True)
@@ -1833,6 +1862,7 @@ class UploadPage(QWidget):
         form.addRow("基础标题" if self.kind in {"video", "mixed"} else "媒体组编号", base_edit)
         form.addRow("追加文字", custom_edit)
         form.addRow("字符数", caption_count)
+        form.addRow("发送限制", caption_hint)
         form.addRow("标题预览", preview)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)

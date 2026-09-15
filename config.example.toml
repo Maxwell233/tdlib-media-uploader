@@ -90,6 +90,8 @@ exiftool_path = 'tools/exiftool'
 [video]
 
 # 视频上传页“编辑目标与配置”窗口可直接修改本段媒体选项。
+# Telegram 视频单文件上限约为普通账号 2 GB、Premium 4 GB；程序按
+# 4000/8000 个 512 KiB 分片计算精确字节边界，扫描和发送前都会检查。
 
 extensions = [".mp4", ".mov", ".m4v"]
 

@@ -10,6 +10,44 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _canonical_path(value) -> str:
+    """Compare runtime paths across platform aliases used by CI.
+
+    macOS can expose the same temporary directory as ``/var`` or
+    ``/private/var``.  Windows can return an 8.3 short parent (for example
+    ``RUNNER~1``) when ``Path.resolve`` is called on a synthetic executable.
+    Normalize those aliases in the test without weakening runtime path
+    resolution.
+    """
+
+    text = os.path.realpath(os.path.abspath(os.fspath(value)))
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            get_long_path = ctypes.windll.kernel32.GetLongPathNameW
+            get_long_path.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+            get_long_path.restype = ctypes.c_uint32
+
+            def expand(candidate: str) -> str | None:
+                buffer = ctypes.create_unicode_buffer(32768)
+                length = int(get_long_path(candidate, buffer, len(buffer)))
+                if 0 < length < len(buffer):
+                    return buffer.value
+                return None
+
+            expanded = expand(text)
+            if expanded:
+                text = expanded
+            else:
+                parent = expand(os.path.dirname(text))
+                if parent:
+                    text = os.path.join(parent, os.path.basename(text))
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+    return os.path.normcase(os.path.normpath(text))
+
+
 def _probe_runtime_paths(*, platform: str, frozen: bool, executable: Path, meipass: Path, home: Path | None = None):
     script = """
 import json
@@ -55,9 +93,9 @@ class DataLayoutTest(unittest.TestCase):
             meipass=PROJECT_ROOT,
         )
         data = PROJECT_ROOT / "data"
-        self.assertEqual(Path(result["data"]), data)
-        self.assertEqual(Path(result["database"]), data / "telegram" / "database")
-        self.assertEqual(Path(result["files"]), data / "telegram" / "files")
+        self.assertEqual(_canonical_path(result["data"]), _canonical_path(data))
+        self.assertEqual(_canonical_path(result["database"]), _canonical_path(data / "telegram" / "database"))
+        self.assertEqual(_canonical_path(result["files"]), _canonical_path(data / "telegram" / "files"))
 
     def test_frozen_windows_uses_executable_data_directory(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -69,10 +107,10 @@ class DataLayoutTest(unittest.TestCase):
                 meipass=root / "_internal",
             )
             data = root / "data"
-            self.assertEqual(Path(result["data"]), data)
-            self.assertEqual(Path(result["database"]), data / "telegram" / "database")
-            self.assertEqual(Path(result["files"]), data / "telegram" / "files")
-            self.assertNotEqual(Path(result["database"]), root / "_internal" / "tdlib_data")
+            self.assertEqual(_canonical_path(result["data"]), _canonical_path(data))
+            self.assertEqual(_canonical_path(result["database"]), _canonical_path(data / "telegram" / "database"))
+            self.assertEqual(_canonical_path(result["files"]), _canonical_path(data / "telegram" / "files"))
+            self.assertNotEqual(_canonical_path(result["database"]), _canonical_path(root / "_internal" / "tdlib_data"))
 
     def test_frozen_macos_uses_application_support_data_directory(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -85,9 +123,9 @@ class DataLayoutTest(unittest.TestCase):
                 home=home,
             )
             data = home / "Library" / "Application Support" / "TDLib Media Uploader" / "data"
-            self.assertEqual(Path(result["data"]), data)
-            self.assertEqual(Path(result["database"]), data / "telegram" / "database")
-            self.assertEqual(Path(result["files"]), data / "telegram" / "files")
+            self.assertEqual(_canonical_path(result["data"]), _canonical_path(data))
+            self.assertEqual(_canonical_path(result["database"]), _canonical_path(data / "telegram" / "database"))
+            self.assertEqual(_canonical_path(result["files"]), _canonical_path(data / "telegram" / "files"))
 
     def test_self_test_reports_tdlib_paths_under_data_dir(self):
         from self_test import run_self_test
@@ -104,12 +142,12 @@ class DataLayoutTest(unittest.TestCase):
         payload = build_tdlib_parameters("test")
         data = Path(__file__).resolve().parents[1] / "data"
         self.assertEqual(
-            Path(payload["database_directory"]),
-            (data / "telegram" / "database").resolve(),
+            _canonical_path(payload["database_directory"]),
+            _canonical_path(data / "telegram" / "database"),
         )
         self.assertEqual(
-            Path(payload["files_directory"]),
-            (data / "telegram" / "files").resolve(),
+            _canonical_path(payload["files_directory"]),
+            _canonical_path(data / "telegram" / "files"),
         )
 
 

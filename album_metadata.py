@@ -58,7 +58,7 @@ def _item_signature(item, *, root=None, snapshot_provider=None) -> str:
         size = item.get("scan_size", item.get("size"))
         mtime_ns = item.get("scan_mtime_ns", item.get("mtime_ns"))
         if size is not None and mtime_ns is not None:
-            identity_root = item.get("source_root") or root or item.get("group_path") or path.parent
+            identity_root = root or item.get("source_root") or item.get("group_path") or path.parent
             return media_file_identity(path, root=identity_root, size=size, mtime_ns=mtime_ns)
     if snapshot_provider is not None:
         snapshot = snapshot_provider(path)
@@ -74,14 +74,32 @@ def _item_signature(item, *, root=None, snapshot_provider=None) -> str:
 
 
 def album_key(kind: str, group_label: str, items, *, root=None, snapshot_provider=None) -> str:
-    """Return a stable key for a complete (not pending-only) Album plan."""
+    """Return a stable key for a complete (not pending-only) Album plan.
+
+    The source root is part of the identity.  Two identical relative Album
+    layouts under different configured roots must not share captions,
+    in-flight journals or completion records.
+    """
+    values = list(items)
+    source_root = root
+    if source_root is None:
+        for item in values:
+            if isinstance(item, dict) and item.get("source_root"):
+                source_root = item["source_root"]
+                break
+    if source_root is None:
+        # Keep direct callers usable while still giving their Album a stable
+        # scope. Normal scanner paths always pass the configured source root.
+        source_root = Path(_item_path(values[0])).parent if values else Path(".")
+    source_scope = stable_path(source_root)
     raw = "\n".join(
         [
             kind,
+            source_scope,
             str(group_label),
             *(
-                _item_signature(item, root=root, snapshot_provider=snapshot_provider)
-                for item in items
+                _item_signature(item, root=source_root, snapshot_provider=snapshot_provider)
+                for item in values
             ),
         ]
     )

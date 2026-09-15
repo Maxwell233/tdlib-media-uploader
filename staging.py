@@ -38,35 +38,83 @@ _TEMP_ARTIFACT_RE = re.compile(r"^[0-9a-f]{64}(?:\.[A-Za-z0-9._+-]+)?\.tmp$")
 _SHARD_RE = re.compile(r"^[0-9a-f]{2}$")
 
 
-def ensure_managed_staging_dir(staging_dir: Path) -> Path:
+def _linked_component(path: Path) -> bool:
+    """Return whether the supplied staging component is a link/reparse point.
+
+    If the component does not exist yet, inspect the nearest existing parent
+    as well.  That closes the gap where a configured parent is replaced by a
+    symlink immediately before ``mkdir``.  We stop at the first existing
+    ancestor rather than walking the whole filesystem path, so normal macOS
+    aliases such as ``/var`` and ``/tmp`` are not rejected merely because the
+    operating system exposes them through a system symlink.  Callers check
+    every managed component independently: base/root, shard, artifact and
+    temporary file.
+    """
+
+    current = Path(os.path.abspath(os.fspath(path)))
+    while True:
+        try:
+            os.lstat(current)
+        except FileNotFoundError:
+            parent = current.parent
+            if parent == current:
+                return False
+            current = parent
+            continue
+        except OSError:
+            return True
+        return is_link_or_junction(current)
+
+
+def _assert_safe_component(path: Path, label: str) -> None:
+    if _linked_component(path):
+        message = f"{label} 不能包含符号链接或 junction：{path}"
+        _log_staging_warning(message)
+        raise RuntimeError(message)
+
+
+def _log_staging_warning(message: str) -> None:
+    """Record a link/reparse refusal without making logging a dependency."""
+
+    try:
+        from app_logging import write_app_log
+
+        write_app_log("WARNING", message, source="staging")
+    except Exception:
+        # Staging must fail closed even when the log directory is unavailable.
+        pass
+
+
+def ensure_managed_staging_dir(staging_dir: Path, *, base_dir: Path | None = None) -> Path:
     """Create/validate the private staging root used by this application."""
 
     root = Path(staging_dir)
-    if root.exists() and is_link_or_junction(root):
-        raise RuntimeError(f"暂存目录不能是符号链接或 junction：{root}")
+    if base_dir is not None:
+        _assert_safe_component(Path(base_dir), "暂存目录基准")
+    _assert_safe_component(root, "暂存目录")
     root.mkdir(parents=True, exist_ok=True)
-    if is_link_or_junction(root):
-        raise RuntimeError(f"暂存目录不能是符号链接或 junction：{root}")
+    _assert_safe_component(root, "暂存目录")
     marker = root / MARKER_NAME
-    if marker.exists():
+    if os.path.lexists(marker):
+        _assert_safe_component(marker, "暂存目录标记")
         try:
-            if is_link_or_junction(marker):
-                raise RuntimeError(f"暂存目录标记不能是符号链接或 junction：{marker}")
             value = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError) as exc:
+        except (OSError, ValueError, TypeError, OverflowError) as exc:
             raise RuntimeError(f"暂存目录标记无效：{marker}") from exc
         if not isinstance(value, dict) or value.get("application") != MARKER_APP or int(value.get("schema", 0)) != MARKER_SCHEMA:
             raise RuntimeError(f"暂存目录不是本程序管理的目录：{root}")
         return root
     payload = {"application": MARKER_APP, "schema": MARKER_SCHEMA, "created_at": time.time()}
     temporary = marker.with_suffix(marker.suffix + ".tmp")
+    _assert_safe_component(temporary, "暂存目录标记")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, marker)
+    _assert_safe_component(marker, "暂存目录标记")
     return root
 
 
 def _is_managed_staging_dir(root: Path) -> bool:
-    if is_link_or_junction(root):
+    if _linked_component(Path(root)):
         return False
     marker = Path(root) / MARKER_NAME
     try:
@@ -78,7 +126,7 @@ def _is_managed_staging_dir(root: Path) -> bool:
             and value.get("application") == MARKER_APP
             and int(value.get("schema", 0)) == MARKER_SCHEMA
         )
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, OverflowError):
         return False
 
 
@@ -97,7 +145,7 @@ def _safe_child(root: Path, candidate: Path) -> bool:
     # this keeps remove_staged_file safe even when handed an untrusted path.
     if not _SHARD_RE.fullmatch(parent) or name == MARKER_NAME:
         return False
-    if is_link_or_junction(root / parent) or is_link_or_junction(candidate):
+    if _linked_component(root) or _linked_component(root / parent) or _linked_component(candidate):
         return False
     return bool(_ARTIFACT_RE.fullmatch(name))
 
@@ -135,17 +183,22 @@ def stage_file(
     snapshot=None,
     *,
     staging_dir: Path,
+    staging_base_dir: Path | None = None,
     cancel_event=None,
     buffer_size: int = 1024 * 1024,
 ) -> Path:
     """Copy a source file atomically into the local staging cache."""
 
     source = Path(path)
-    root = ensure_managed_staging_dir(Path(staging_dir))
+    root = ensure_managed_staging_dir(
+        Path(staging_dir),
+        base_dir=staging_base_dir,
+    )
     source_snapshot = snapshot_file(source) if snapshot is None else snapshot
     if source_snapshot is None:
         raise OSError(f"文件暂时不可读取或已被删除：{source}")
     target = _stage_target(source, source_snapshot, root)
+    _assert_safe_component(target, "暂存文件")
     if target.is_file():
         try:
             if target.stat().st_size == _snapshot_values(source_snapshot)[0]:
@@ -154,11 +207,19 @@ def stage_file(
         except OSError:
             pass
 
+    _assert_safe_component(target.parent, "暂存分片目录")
     target.parent.mkdir(parents=True, exist_ok=True)
+    _assert_safe_component(target.parent, "暂存分片目录")
     temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.unlink(missing_ok=True)
+    _assert_safe_component(temporary, "暂存临时文件")
     try:
-        with source.open("rb") as input_file, temporary.open("wb") as output_file:
+        temporary.unlink(missing_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"无法准备暂存临时文件：{temporary}") from exc
+    try:
+        # ``xb`` prevents a concurrent replacement from turning the temporary
+        # path into an attacker-controlled link between unlink and open.
+        with source.open("rb") as input_file, temporary.open("xb") as output_file:
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     raise TimeoutError("本地暂存已取消")
@@ -179,6 +240,7 @@ def stage_file(
         current = snapshot_file(source)
         if current is None or current.as_tuple() != _snapshot_values(source_snapshot):
             raise OSError(f"文件在暂存期间发生变化：{source}")
+        _assert_safe_component(target, "暂存文件")
         os.replace(temporary, target)
         probe_readable(target, probe_bytes=min(buffer_size, 64 * 1024))
         return target
@@ -189,6 +251,7 @@ def stage_file(
 def cleanup_staging(
     staging_dir: Path,
     *,
+    staging_base_dir: Path | None = None,
     max_age_seconds: float | None = None,
     remove_empty: bool = False,
 ) -> None:
@@ -202,6 +265,14 @@ def cleanup_staging(
     """
 
     root = Path(staging_dir)
+    if staging_base_dir is not None:
+        base = Path(staging_base_dir)
+        if os.path.lexists(base) and _linked_component(base):
+            _log_staging_warning(f"拒绝使用包含符号链接或 junction 的暂存目录基准：{base}")
+            return
+    if os.path.lexists(root) and _linked_component(root):
+        _log_staging_warning(f"拒绝使用包含符号链接或 junction 的暂存目录：{root}")
+        return
     if not root.exists() or not _is_managed_staging_dir(root):
         return
     # Only inspect the two-level artifact layout created by stage_file. Never
@@ -214,12 +285,17 @@ def cleanup_staging(
         try:
             if (
                 directory.name == MARKER_NAME
-                or is_link_or_junction(directory)
                 or not directory.is_dir()
             ):
                 continue
+            if _linked_component(directory):
+                _log_staging_warning(f"跳过链接暂存分片目录：{directory}")
+                continue
             for item in directory.iterdir():
-                if is_link_or_junction(item) or not item.is_file():
+                if _linked_component(item):
+                    _log_staging_warning(f"跳过链接暂存文件：{item}")
+                    continue
+                if not item.is_file():
                     continue
                 if not (
                     _TEMP_ARTIFACT_RE.fullmatch(item.name)

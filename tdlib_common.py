@@ -833,6 +833,34 @@ class TDJsonClient:
             return "mixed"
         return "unknown"
 
+    def _validate_caption_length(self, contents) -> None:
+        """Reject an over-limit user caption before preparing a journal.
+
+        Uploaders normally build captions with the same limit, but keeping
+        this guard in the shared sender protects direct integrations and
+        ensures a user-authored caption can never be silently truncated or
+        turn into an UNKNOWN send attempt.
+        """
+
+        raw_limit = getattr(self, "caption_length_limit", None)
+        try:
+            limit = int(raw_limit) if raw_limit is not None else 0
+        except (TypeError, ValueError):
+            limit = 0
+        if limit <= 0:
+            return
+        for content in contents or []:
+            caption = (content or {}).get("caption")
+            if not isinstance(caption, dict):
+                continue
+            text = caption.get("text", "")
+            if text is None:
+                continue
+            if len(str(text)) > limit:
+                raise ValueError(
+                    f"标题超过 Telegram Caption 限制（{len(str(text))}/{limit} 字符）"
+                )
+
     @staticmethod
     def _target_identity() -> dict:
         """Capture the effective Telegram destination for journal scoping."""
@@ -1013,6 +1041,8 @@ class TDJsonClient:
                 if callable(warning):
                     warning(message)
                 raise UploadUnknownError(message)
+        self._validate_caption_length(contents)
+        if journal_active:
             journal.prepare(
                 selected_kind,
                 album_key,

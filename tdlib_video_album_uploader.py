@@ -54,6 +54,7 @@ import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR, VIDEO_STATE_DIR, THUMBNAIL_CACHE_DIR
 from staging import cleanup_staging, remove_staged_file, should_stage, stage_file
+from instance_lock import run_with_instance_lock
 
 PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = VIDEO_STATE_DIR
@@ -178,6 +179,17 @@ def format_size(value: float) -> str:
     return f"{value:.2f} TiB"
 
 
+def video_limit_text(limit: int) -> str:
+    """Use product-facing GB labels for Telegram's protocol limits."""
+
+    value = int(limit)
+    if value == int(getattr(cfg, "VIDEO_PREMIUM_MAX_BYTES", 8000 * 524_288)):
+        return "约 4 GB"
+    if value == int(getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)):
+        return "约 2 GB"
+    return format_size(value)
+
+
 def relative_name(path: Path) -> str:
     return stable_relative_name(path, cfg.VIDEO_DIR)
 
@@ -219,6 +231,7 @@ def cleanup_staging_cache(*, startup: bool = False) -> None:
     # files left by an older configuration.
     cleanup_staging(
         cfg.STAGING_DIR,
+        staging_base_dir=getattr(cfg, "STAGING_BASE_DIR", cfg.STAGING_DIR),
         max_age_seconds=float(getattr(cfg, "STAGING_CLEANUP_DAYS", 7)) * 86400,
     )
 
@@ -317,16 +330,16 @@ def scan_videos(cancel_event=None) -> list[Path]:
                 "category": "size",
                 "reason": (
                     f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
-                    f"{format_size(cfg.VIDEO_MAX_BYTES)}"
+                    f"{video_limit_text(cfg.VIDEO_MAX_BYTES)}"
                 ),
             })
             continue
-        if size > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 2 * 1024 ** 3):
+        if size > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288):
             LAST_SCAN_PREMIUM_REQUIRED.append({
                 "path": path,
                 "size": size,
                 "category": "premium",
-                "reason": "视频超过 2 GiB，需要 Telegram Premium 才能上传",
+                "reason": "视频超过约 2 GB，需要 Telegram Premium 才能上传",
             })
         LAST_SCAN_SNAPSHOTS[normalize_path(path)] = (int(size), int(mtime_ns))
         accepted.append(path)
@@ -1009,7 +1022,7 @@ def build_items(videos, metadata_index, progress_callback=None, cancel_event=Non
                 "fallback": False,
                 "requires_premium": (
                     int((LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or (0, 0))[0])
-                    > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 2 * 1024 ** 3)
+                    > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)
                 ),
             }
             snapshot = LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or file_snapshot(path)
@@ -1084,7 +1097,7 @@ def build_items(videos, metadata_index, progress_callback=None, cancel_event=Non
             "fallback": selected["fallback"],
             "requires_premium": (
                 int((LAST_SCAN_SNAPSHOTS.get(key) or (0, 0))[0])
-                > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 2 * 1024 ** 3)
+                > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)
             ),
         }
         snapshot = LAST_SCAN_SNAPSHOTS.get(key) or file_snapshot(path)
@@ -1377,7 +1390,7 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
             if size > cfg.VIDEO_MAX_BYTES:
                 raise RuntimeError(
                     f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
-                    f"{format_size(cfg.VIDEO_MAX_BYTES)}"
+                    f"{video_limit_text(cfg.VIDEO_MAX_BYTES)}"
                 )
             # Preserve the historical one-argument call for integrations and
             # tests that provide a lightweight preparation hook.  The worker
@@ -1433,7 +1446,7 @@ def report_scan_size_skips(skipped, ui=None) -> None:
         return
     target = ui or UI
     target.warning(
-        f"扫描时跳过 {len(skipped)} 个超过 Telegram 4 GiB 上限的视频；"
+        f"扫描时跳过 {len(skipped)} 个超过约 4 GB 上限的视频；"
         "这些文件未加入上传计划。"
     )
     for record in skipped:
@@ -1457,7 +1470,7 @@ def report_skipped_videos(skipped, ui=None, *, final=False) -> None:
     if unreadable_count:
         parts.append(f"{unreadable_count} 个无法读取的视频")
     if size_count:
-        parts.append(f"{size_count} 个超过 4 GiB 上限的视频")
+        parts.append(f"{size_count} 个超过约 4 GB 上限的视频")
     if premium_count:
         parts.append(f"{premium_count} 个需要 Telegram Premium 的视频")
     if deferred_count:
@@ -1525,6 +1538,7 @@ def input_video(item, caption: str, cancel_event=None):
             path,
             readiness.snapshot,
             staging_dir=cfg.STAGING_DIR,
+            staging_base_dir=getattr(cfg, "STAGING_BASE_DIR", cfg.STAGING_DIR),
             cancel_event=cancel_event,
         )
         STAGED_UPLOAD_PATHS[stable_path(path)] = source_path
@@ -1831,7 +1845,7 @@ def validate_config():
         raise RuntimeError("请先在 config.toml 中填写 CHAT_ID / FORUM_TOPIC_ID。")
 
 
-def main():
+def _main_impl():
     activate = getattr(cfg, "activate_target", None)
     if callable(activate):
         activate("video")
@@ -1975,7 +1989,7 @@ def main():
             ]
             if premium_items:
                 UI.warning(
-                    f"已跳过 {len(premium_items)} 个超过 2 GiB 的视频：Telegram Premium 才允许上传。"
+                    f"已跳过 {len(premium_items)} 个超过约 2 GB 的视频：Telegram Premium 才允许上传。"
                 )
                 for item in premium_items:
                     preflight_skipped_paths.add(stable_path(item["path"]))
@@ -1983,7 +1997,7 @@ def main():
                         "path": item["path"],
                         "item": item,
                         "category": "premium",
-                        "reason": "视频超过 2 GiB，需要 Telegram Premium 才能上传",
+                        "reason": "视频超过约 2 GB，需要 Telegram Premium 才能上传",
                     })
                 progress.skip_items(premium_items)
         client.set_fast_options()
@@ -2096,3 +2110,12 @@ def main():
         client.remove_update_callback(progress.handle_update)
         client.close()
         cleanup_staging_cache()
+
+
+def main():
+    """Run the video uploader under the shared single-instance lock."""
+
+    return run_with_instance_lock(
+        _main_impl,
+        lock_held=bool(globals().get("_INSTANCE_LOCK_HELD", False)),
+    )

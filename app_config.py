@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import tomllib
 import os
+import sys
 from pathlib import Path
 
 from runtime_paths import (
@@ -23,11 +24,13 @@ PROJECT_DIR = RESOURCE_DIR
 # Telegram's current upload limits used by this application.  Keep these
 # checks local so an oversized file is reported during scanning instead of
 # failing later inside TDLib.
-# Telegram allows ordinary accounts up to 2 GiB and Premium accounts up to
-# 4 GiB.  Scanners keep the broader ceiling so Premium-required files remain
-# visible and can be reported before sending.
-VIDEO_STANDARD_MAX_BYTES = 2 * 1024 ** 3
-VIDEO_PREMIUM_MAX_BYTES = 4 * 1024 ** 3
+# Telegram calculates the upload ceiling from the maximum upload part size
+# and the account's allowed part count.  Keep the exact byte values here so
+# scan-time checks match the server boundary (the UI presents these as about
+# 2 GB and about 4 GB for readability).
+TELEGRAM_UPLOAD_PART_SIZE_MAX = 524_288
+VIDEO_STANDARD_MAX_BYTES = 4000 * TELEGRAM_UPLOAD_PART_SIZE_MAX
+VIDEO_PREMIUM_MAX_BYTES = 8000 * TELEGRAM_UPLOAD_PART_SIZE_MAX
 VIDEO_MAX_BYTES = VIDEO_PREMIUM_MAX_BYTES
 IMAGE_MAX_BYTES = 10 * 1024 ** 2
 IMAGE_COMPRESSION_TARGET_BYTES = int(9.5 * 1024 ** 2)
@@ -36,7 +39,7 @@ IMAGE_COMPRESSION_TARGET_BYTES = int(9.5 * 1024 ** 2)
 def video_size_status(size: int, *, is_premium: bool | None = None) -> str:
     """Classify a video without changing the complete Album plan.
 
-    ``requires_premium`` is intentionally returned for 2–4 GiB files while
+    ``requires_premium`` is intentionally returned for about 2–4 GB files while
     the scanner still includes them.  The upload worker filters them only
     after TDLib reports the account status.
     """
@@ -50,12 +53,25 @@ def video_size_status(size: int, *, is_premium: bool | None = None) -> str:
 
 
 def _load():
+    # The packaged health check must be independent of any user configuration
+    # (including a partially written or invalid one).  Read the immutable
+    # bundled template in memory and never create or modify ``data/config``.
+    if "--self-test" in sys.argv[1:]:
+        template = RESOURCE_DIR / "config.example.toml"
+        if template.exists():
+            try:
+                with template.open("rb") as file:
+                    return tomllib.load(file)
+            except (OSError, tomllib.TOMLDecodeError) as error:
+                raise RuntimeError(f"配置模板读取失败：{template}\n{error}") from error
     if not CONFIG_PATH.exists():
         # A fresh V1.9 installation starts with a writable data directory.
+        # Normal startup copies the bundled template into the writable data
+        # directory on first launch.
+        template = RESOURCE_DIR / "config.example.toml"
         # Never look for or import a config from the old application root.
         try:
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            template = RESOURCE_DIR / "config.example.toml"
             if template.exists():
                 import shutil
                 shutil.copyfile(template, CONFIG_PATH)

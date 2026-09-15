@@ -12,6 +12,7 @@ from collections import Counter
 import app_config as cfg
 import tdlib_video_album_uploader as core
 from album_metadata import with_filename_description
+from instance_lock import run_with_instance_lock
 
 
 UI = core.UI
@@ -255,7 +256,7 @@ def show_upload_summary(
     )
 
 
-def main():
+def _main_impl():
     activate = getattr(cfg, "activate_target", None)
     if callable(activate):
         activate("video")
@@ -421,6 +422,22 @@ def main():
 
     try:
         client.login()
+        client.refresh_account_limits()
+        caption_limit = int(getattr(client, "caption_length_limit", None) or 1024)
+        if client.is_premium is not True:
+            premium_items = [item for item in pending_items if item.get("requires_premium")]
+            if premium_items:
+                UI.warning(
+                    f"已跳过 {len(premium_items)} 个超过约 2 GB 的视频：Telegram Premium 才允许上传。"
+                )
+                for item in premium_items:
+                    preflight_skipped_paths.add(core.stable_path(item["path"]))
+                    skipped_items.append({
+                        "path": item["path"],
+                        "item": item,
+                        "category": "premium",
+                        "reason": "视频超过约 2 GB，需要 Telegram Premium 才能上传",
+                    })
         client.set_fast_options()
         client.validate_target()
 
@@ -459,6 +476,7 @@ def main():
                     album_items,
                     getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False),
                     core.include_filename_numbers(),
+                    max_chars=caption_limit,
                 )
 
                 if cancel_event is None:
@@ -493,6 +511,7 @@ def main():
                         ready_items,
                         True,
                         core.include_filename_numbers(),
+                        max_chars=caption_limit,
                     )
                     if contents:
                         contents[0]["caption"] = core.formatted_text(label)
@@ -584,3 +603,12 @@ def main():
 
         client.close()
         core.cleanup_staging_cache()
+
+
+def main():
+    """Run the video uploader under the shared single-instance lock."""
+
+    return run_with_instance_lock(
+        _main_impl,
+        lock_held=bool(globals().get("_INSTANCE_LOCK_HELD", False)),
+    )

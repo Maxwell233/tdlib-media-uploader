@@ -50,6 +50,7 @@ import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR, MIXED_STATE_DIR
 from staging import cleanup_staging, remove_staged_file, should_stage, stage_file
+from instance_lock import run_with_instance_lock
 
 import tdlib_image_album_uploader as image_core
 import tdlib_video_album_uploader as video_core
@@ -136,6 +137,7 @@ def cleanup_staging_cache(*, startup: bool = False) -> None:
     # disabling staging should not leave its old cache behind indefinitely.
     cleanup_staging(
         cfg.STAGING_DIR,
+        staging_base_dir=getattr(cfg, "STAGING_BASE_DIR", cfg.STAGING_DIR),
         max_age_seconds=float(getattr(cfg, "STAGING_CLEANUP_DAYS", 7)) * 86400,
     )
 
@@ -188,6 +190,11 @@ def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
     limit = cfg.VIDEO_MAX_BYTES if media_kind == "video" else cfg.IMAGE_MAX_BYTES
     if size > limit:
         compress = media_kind == "image" and cfg.IMAGE_COMPRESS_OVERSIZE
+        limit_label = (
+            video_core.video_limit_text(limit)
+            if media_kind == "video"
+            else format_size(limit)
+        )
         LAST_SCAN_SIZE_SKIPS.append({
             "path": path,
             "size": size,
@@ -197,8 +204,7 @@ def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
             "media_kind": media_kind,
             "reason": (
                 f"文件大小 {format_size(size)} 超过 Telegram "
-                f"{'视频 4 GiB' if media_kind == 'video' else 'Photo 10 MiB'} 上限 "
-                f"{format_size(limit)}"
+                f"{'视频' if media_kind == 'video' else 'Photo'} 上限 {limit_label}"
             ),
         })
         if not compress:
@@ -211,7 +217,7 @@ def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
         "scan_mtime_ns": mtime_ns,
         "requires_premium": (
             media_kind == "video"
-            and size > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 2 * 1024 ** 3)
+            and size > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)
         ),
     }
 
@@ -518,6 +524,7 @@ def _mixed_input_video(item, caption, cancel_event=None):
             path,
             readiness.snapshot,
             staging_dir=cfg.STAGING_DIR,
+            staging_base_dir=getattr(cfg, "STAGING_BASE_DIR", cfg.STAGING_DIR),
             cancel_event=cancel_event,
         )
         # Mixed video input is built here rather than through the standalone
@@ -774,7 +781,7 @@ def _validate_config():
         raise RuntimeError("请先在 config.toml 中填写 CHAT_ID / FORUM_TOPIC_ID。")
 
 
-def main():
+def _main_impl():
     activate = getattr(cfg, "activate_target", None)
     if callable(activate):
         activate("mixed")
@@ -858,7 +865,7 @@ def main():
             premium_items = [item for item in pending if item.get("requires_premium")]
             if premium_items:
                 UI.warning(
-                    f"已跳过 {len(premium_items)} 个超过 2 GiB 的视频：Telegram Premium 才允许上传。"
+                    f"已跳过 {len(premium_items)} 个超过约 2 GB 的视频：Telegram Premium 才允许上传。"
                 )
                 for item in premium_items:
                     preflight_skipped_paths.add(stable_path(item["path"]))
@@ -866,7 +873,7 @@ def main():
                         "path": item["path"],
                         "item": item,
                         "category": "premium",
-                        "reason": "视频超过 2 GiB，需要 Telegram Premium 才能上传",
+                        "reason": "视频超过约 2 GB，需要 Telegram Premium 才能上传",
                     })
                 progress.skip_items(premium_items)
         client.set_fast_options()
@@ -947,3 +954,12 @@ def main():
         client.close()
         cleanup_staging_cache()
         image_core.cleanup_compressed_images()
+
+
+def main():
+    """Run the mixed uploader under the shared single-instance lock."""
+
+    return run_with_instance_lock(
+        _main_impl,
+        lock_held=bool(globals().get("_INSTANCE_LOCK_HELD", False)),
+    )
