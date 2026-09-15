@@ -1,0 +1,49 @@
+name: V2 Refactor Fast Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - refactor/v2-gui-only
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    name: Offline tests and architecture gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Qt runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libegl1 libgl1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      - name: Install locked runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir --upgrade --force-reinstall \
+            --no-binary imageio-ffmpeg -r requirements-lock.txt
+          python -m pip check
+
+      - name: Run offline regression and architecture tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile source tree
+        run: python -m compileall -q .
