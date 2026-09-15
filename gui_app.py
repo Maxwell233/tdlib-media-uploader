@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 42925)
-Total output lines: 3893
-
 # -*- coding: utf-8 -*-
 """PySide6 desktop interface for TDLib Media Uploader.
 
@@ -1594,7 +1591,1086 @@ class HomePage(QWidget):
 
 
 class UploadPage(QWidget):
-    start_requested = Signa…12925 tokens truncated…分，每组 1~10 个媒体。")
+    start_requested = Signal(str)
+    path_selected = Signal(str, str)
+    scan_requested = Signal(str)
+    scan_cancel_requested = Signal(str)
+    edit_target_requested = Signal(str)
+
+    def __init__(self, kind: str):
+        super().__init__()
+        self.kind = _require_kind(kind)
+        self.result = None
+        self._running = False
+        self._scanning = False
+        accent = _kind_label(kind)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+        title = QLabel(f"{accent}上传")
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+
+        source_box = QGroupBox("1 · 来源目录")
+        source_layout = QHBoxLayout(source_box)
+        self.source_edit = QLineEdit()
+        self.source_edit.setPlaceholderText("输入或粘贴目录，按 Enter 保存；也可点击选择目录")
+        self.source_edit.editingFinished.connect(self._commit_source)
+        browse = QPushButton("选择目录")
+        browse.clicked.connect(self._browse)
+        source_layout.addWidget(self.source_edit, 1)
+        source_layout.addWidget(browse)
+        layout.addWidget(source_box)
+
+        preview_box = QGroupBox("2 · 文件与媒体组预览")
+        preview_layout = QVBoxLayout(preview_box)
+        filters = QHBoxLayout()
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("搜索文件名、路径或标题（仅筛选显示）")
+        self.search_edit.setClearButtonEnabled(True)
+        self.pending_only = QCheckBox("只看待上传")
+        self.edit_caption_button = QPushButton("编辑标题")
+        self.edit_caption_button.setEnabled(False)
+        self.edit_caption_button.clicked.connect(lambda: self._edit_album(self.tree.currentItem()))
+        filters.addWidget(self.search_edit, 1)
+        filters.addWidget(self.pending_only)
+        filters.addWidget(self.edit_caption_button)
+        preview_layout.addLayout(filters)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["状态", "日期 / 分组", "大小", "文件"])
+        self.tree.header().setStretchLastSection(True)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setAlternatingRowColors(True)
+        # Keep the preview useful on a normal window while allowing the page
+        # scroll area to reveal the target/actions on short windows.
+        self.tree.setMinimumHeight(220)
+        self.tree.itemDoubleClicked.connect(self._edit_album)
+        self.tree.itemSelectionChanged.connect(self._update_edit_button)
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(180)
+        self.search_timer.timeout.connect(self._filter_preview)
+        self.search_edit.textChanged.connect(lambda: self.search_timer.start())
+        self.pending_only.toggled.connect(self._filter_preview)
+        preview_layout.addWidget(self.tree)
+        self.summary_label = QLabel("尚未扫描")
+        self.summary_label.setObjectName("mutedLabel")
+        preview_layout.addWidget(self.summary_label)
+        layout.addWidget(preview_box, 1)
+
+        target_box = QGroupBox(f"3 · Telegram 目标（{accent}上传）")
+        target_layout = QGridLayout(target_box)
+        target_layout.addWidget(QLabel(f"{accent}目标"), 0, 0)
+        target_layout.addWidget(QLabel("Forum Topic"), 1, 0)
+        self.chat_label = QLabel("未配置")
+        self.topic_label = QLabel("未配置")
+        self.chat_label.setObjectName("valueLabel")
+        self.topic_label.setObjectName("valueLabel")
+        target_layout.addWidget(self.chat_label, 0, 1)
+        target_layout.addWidget(self.topic_label, 1, 1)
+        edit_target = QPushButton(f"编辑{accent}目标与配置")
+        edit_target.setObjectName("secondaryButton")
+        edit_target.clicked.connect(lambda: self.edit_target_requested.emit(self.kind))
+        target_layout.addWidget(edit_target, 0, 2, 2, 1)
+        layout.addWidget(target_box)
+
+        bottom = QHBoxLayout()
+        self.status_label = QLabel("准备扫描")
+        self.status_label.setObjectName("mutedLabel")
+        self.scan_button = QPushButton("扫描目录")
+        self.scan_button.setObjectName("secondaryButton")
+        self.scan_button.clicked.connect(self._scan_button_clicked)
+        self.start_button = QPushButton("开始上传")
+        self.start_button.setObjectName("primaryButton")
+        self.start_button.setEnabled(False)
+        self.start_button.clicked.connect(lambda: self.start_requested.emit(self.kind))
+        bottom.addWidget(self.status_label)
+        bottom.addStretch(1)
+        bottom.addWidget(self.scan_button)
+        bottom.addWidget(self.start_button)
+        layout.addLayout(bottom)
+        self.refresh_config()
+
+    def refresh_config(self):
+        path_name = KIND_PATH_KEYS[self.kind]
+        self.source_edit.setText(_path_text(_cfg(path_name, "")))
+        target = _target_for(self.kind)
+        mode = str(target.get("target_mode", "forum_topic"))
+        target_name = "频道" if mode == "channel" else "超级群组"
+        self.chat_label.setText(f"{target_name} · {str(target.get('chat_id', '未配置'))}")
+        self.topic_label.setText(
+            "不适用（频道不使用 Topic）"
+            if mode == "channel"
+            else str(target.get("forum_topic_id", "未配置"))
+        )
+
+    def _browse(self):
+        path = QFileDialog.getExistingDirectory(self, "选择目录", self.source_edit.text() or str(PROJECT_DIR))
+        if path:
+            self.source_edit.setText(path)
+            self.path_selected.emit(self.kind, path)
+
+    def _commit_source(self):
+        path = self.source_edit.text().strip()
+        saved = str(_cfg(KIND_PATH_KEYS[self.kind], ""))
+        if path != saved:
+            self.path_selected.emit(self.kind, path)
+
+    def _scan_button_clicked(self):
+        if self._scanning:
+            self.scan_cancel_requested.emit(self.kind)
+        else:
+            self.scan_requested.emit(self.kind)
+
+    def set_scanning(self, active: bool):
+        self._scanning = active
+        self.scan_button.setText("停止扫描" if active else "扫描目录")
+        # Keep the control available while scanning so a network traversal can
+        # be cancelled without waiting for the current directory to finish.
+        self.scan_button.setEnabled(not self._running)
+        if active:
+            self.clear_scan_result()
+            self.status_label.setText("正在扫描…")
+        self._update_edit_button()
+
+    def set_result(self, result: dict):
+        self.result = result
+        self.tree.clear()
+        completed_paths = set(result.get("completed_paths", []))
+        for group in result["groups"]:
+            label = (
+                f"{group['label']} · {len(group['items'])} 个 · "
+                f"已完成 {group['completed']} · 待上传 {group['pending']} · "
+                f"{group['albums']} 组待上传"
+            )
+            top = QTreeWidgetItem(["分组", group["label"], "", label])
+            if self.kind in {"video", "mixed"}:
+                self.tree.addTopLevelItem(top)
+                top.setExpanded(True)
+            plans = group.get("album_plans") or [{
+                "key": "",
+                "number": 1,
+                "items": group["items"],
+                "pending_items": [item for item in group["items"] if stable_path(item["path"] if isinstance(item, dict) else item) not in completed_paths],
+                "caption": {"text": group.get("caption", ""), "base_label": group.get("caption", ""), "custom_text": ""},
+            }]
+            for plan in plans:
+                album_items = plan.get("items", [])
+                pending_count = len(plan.get("pending_items", []))
+                completed_count = len(album_items) - pending_count
+                caption_text = with_filename_description(
+                    plan.get("caption", {}).get("text", ""),
+                    album_items,
+                    bool(_cfg(
+                        "VIDEO_CAPTION_INCLUDE_FILENAMES"
+                        if self.kind == "video"
+                        else "MIXED_CAPTION_INCLUDE_FILENAMES"
+                        if self.kind == "mixed"
+                        else "IMAGE_CAPTION_INCLUDE_FILENAMES",
+                        False,
+                    )),
+                    bool(_cfg(
+                        "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS"
+                        if self.kind == "video"
+                        else "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS"
+                        if self.kind == "mixed"
+                        else "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
+                        True,
+                    )),
+                    max_chars=CAPTION_EDITOR_SOFT_LIMIT,
+                )
+                album_row = QTreeWidgetItem([
+                    "待上传" if pending_count else "已完成",
+                    self._album_title(plan),
+                    _fmt_size(sum(_item_size(item) for item in album_items)),
+                    f"{len(album_items)} 个文件 · 已完成 {completed_count} · 待上传 {pending_count}",
+                ])
+                album_row.setData(0, Qt.ItemDataRole.UserRole, plan)
+                album_row.setToolTip(1, caption_text or "无标题")
+                if self.kind == "image":
+                    self.tree.addTopLevelItem(album_row)
+                else:
+                    top.addChild(album_row)
+                for item in album_items:
+                    path = item["path"] if isinstance(item, dict) else item
+                    completed = stable_path(path) in completed_paths
+                    date_value = item.get("capture_time") if isinstance(item, dict) else None
+                    if self.kind == "mixed" and isinstance(item, dict):
+                        date_value = "图片" if item.get("media_kind") == "image" else "视频"
+                    row = QTreeWidgetItem([
+                        "待上传" if not completed else "已完成",
+                        _fmt_date(date_value),
+                        _fmt_size(_item_size(item)),
+                        str(path),
+                    ])
+                    album_row.addChild(row)
+                    row.setToolTip(3, str(path))
+                    if isinstance(item, dict):
+                        source = item.get("date_tag") or "未知"
+                        row.setToolTip(
+                            1,
+                            f"{_fmt_date(date_value)}\n日期来源：{source}",
+                        )
+        for column, width in enumerate((140, 250, 100)):
+            self.tree.setColumnWidth(column, width)
+        self._filter_preview()
+        self.summary_label.setText(
+            f"共 {result['total_files']} 个 · {_fmt_size(result['total_bytes'])} · "
+            f"已完成 {result['completed_files']} · 待上传 {result['pending_files']} · "
+            f"{result['album_count']} 组待上传"
+        )
+        if result.get("missing"):
+            self.summary_label.setText(self.summary_label.text() + f" · 缺失日期 {len(result['missing'])}")
+        if result.get("scan_skipped_files"):
+            self.summary_label.setText(
+                self.summary_label.text()
+                + f" · 扫描跳过超限 {result['scan_skipped_files']} 个"
+            )
+        if result.get("scan_compress_files"):
+            self.summary_label.setText(
+                self.summary_label.text()
+                + f" · 上传时压缩 {result['scan_compress_files']} 个"
+            )
+        if result.get("warning"):
+            self.status_label.setText(result["warning"])
+        elif result["total_files"] == 0:
+            self.status_label.setText("目录中没有支持的媒体文件，请检查目录或文件格式")
+        elif result["pending_files"] == 0:
+            self.status_label.setText("全部项目已在断点记录中")
+        elif not result["core_available"]:
+            self.status_label.setText("预览可用；安装完整依赖后才能上传")
+        else:
+            self.status_label.setText("扫描完成，可开始上传")
+        self.start_button.setEnabled(
+            bool(
+                result["pending_files"]
+                and result["core_available"]
+                and not result.get("cancelled")
+                and not self._running
+            )
+        )
+
+    def set_cancelled(self, result: dict | None = None):
+        """Show cancellation explicitly and keep it out of normal counts."""
+
+        self.result = result
+        self.tree.clear()
+        self.summary_label.setText("扫描已取消；请重新扫描以获取完整列表")
+        self.status_label.setText("扫描已取消")
+        self.start_button.setEnabled(False)
+        self._update_edit_button()
+
+    def _edit_album(self, item, _column=0):
+        if item is None or self._running or self._scanning:
+            return
+        plan = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(plan, dict) and item.parent() is not None:
+            item = item.parent()
+            plan = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(plan, dict) or not plan.get("key"):
+            return
+        current = plan.get("caption") or {}
+        base_label = str(current.get("base_label", ""))
+        custom_text = str(current.get("custom_text", ""))
+        separator = str(_cfg(
+            "VIDEO_ALBUM_CAPTION_SEPARATOR"
+            if self.kind == "video"
+            else "MIXED_ALBUM_CAPTION_SEPARATOR"
+            if self.kind == "mixed"
+            else "IMAGE_ALBUM_CAPTION_SEPARATOR",
+            " · ",
+        ))
+        dialog = QDialog(self)
+        dialog.setWindowTitle("编辑媒体组标题")
+        dialog.resize(560, 350)
+        form = QFormLayout(dialog)
+        base_edit = QLineEdit(base_label)
+        base_edit.setReadOnly(self.kind == "image")
+        custom_edit = QPlainTextEdit(custom_text)
+        custom_edit.setPlaceholderText("可输入多行；留空表示不追加")
+        preview = QPlainTextEdit()
+        preview.setReadOnly(True)
+        caption_limit = int(getattr(self, "CAPTION_EDITOR_SOFT_LIMIT", CAPTION_EDITOR_SOFT_LIMIT))
+        caption_count = QLabel()
+        caption_count.setObjectName("mutedLabel")
+        caption_hint = QLabel(
+            f"编辑器使用 {caption_limit} 字符软上限；连接 Telegram 后会按当前账号的最终限制再次确认。"
+        )
+        caption_hint.setObjectName("mutedLabel")
+        caption_hint.setWordWrap(True)
+        include_base = (
+            self.kind == "video"
+            or self.kind == "mixed" and _cfg("MIXED_CAPTION_INCLUDE_GROUP_TITLE", True)
+            or self.kind == "image" and _cfg("IMAGE_ALBUM_NUMBERING", True)
+        )
+        def update_preview():
+            caption = compose_caption(base_edit.text() if include_base else "", custom_edit.toPlainText(), separator)
+            try:
+                rendered = with_filename_description(
+                    caption,
+                    plan.get("items", []),
+                    bool(_cfg(
+                        "VIDEO_CAPTION_INCLUDE_FILENAMES"
+                        if self.kind == "video"
+                        else "MIXED_CAPTION_INCLUDE_FILENAMES"
+                        if self.kind == "mixed"
+                        else "IMAGE_CAPTION_INCLUDE_FILENAMES",
+                        False,
+                    )),
+                    bool(_cfg(
+                        "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS"
+                        if self.kind == "video"
+                        else "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS"
+                        if self.kind == "mixed"
+                        else "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
+                        True,
+                    )),
+                    max_chars=caption_limit,
+                )
+                preview.setPlainText(rendered)
+                caption_count.setText(f"用户标题 {len(caption)}/{caption_limit} · 发送预览 {len(rendered)}/{caption_limit}")
+                caption_count.setStyleSheet("color: #91a2b5")
+            except CaptionLimitError as exc:
+                preview.setPlainText(str(exc))
+                caption_count.setText(f"用户标题 {len(caption)}/{caption_limit}，超过限制")
+                caption_count.setStyleSheet("color: #ff7b72")
+        base_edit.textChanged.connect(update_preview)
+        custom_edit.textChanged.connect(update_preview)
+        update_preview()
+        form.addRow("基础标题" if self.kind in {"video", "mixed"} else "媒体组编号", base_edit)
+        form.addRow("追加文字", custom_edit)
+        form.addRow("字符数", caption_count)
+        form.addRow("发送限制", caption_hint)
+        form.addRow("标题预览", preview)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        base_label = base_edit.text().strip()
+        custom_text = custom_edit.toPlainText().strip()
+        try:
+            validate_caption(
+                compose_caption(base_label if include_base else "", custom_text, separator),
+                caption_limit,
+            )
+        except CaptionLimitError as exc:
+            QMessageBox.warning(self, "标题过长", str(exc))
+            return
+        store = CaptionStore(self.kind)
+        if self.kind in {"video", "mixed"} and _cfg(
+            "VIDEO_CAPTION_INCLUDE_GROUP_TITLE" if self.kind == "video" else "MIXED_CAPTION_INCLUDE_GROUP_TITLE",
+            True,
+        ) and not base_label:
+            QMessageBox.warning(self, "未保存", "请填写基础标题。")
+            return
+        try:
+            store.set(plan["key"], base_label=base_label, custom_text=custom_text)
+        except OSError as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
+        plan["caption"] = {
+            "base_label": base_label,
+            "custom_text": custom_text,
+            "text": compose_caption(
+                base_label if include_base else "",
+                custom_text,
+                separator,
+            ),
+        }
+        item.setText(1, self._album_title(plan))
+        item.setToolTip(1, preview.toPlainText())
+        self._filter_preview()
+        self.status_label.setText("标题已保存")
+
+    def _album_title(self, plan):
+        text = " ".join(plan.get("caption", {}).get("text", "").split())
+        label = f"媒体组 {plan.get('number', 1)}"
+        return label if text in {"", str(plan.get("number", 1)), f"Album {plan.get('number', 1)}"} else f"{label} · {text[:100]}"
+
+    def _update_edit_button(self):
+        item = self.tree.currentItem()
+        if item is not None and not isinstance(item.data(0, Qt.ItemDataRole.UserRole), dict):
+            item = item.parent()
+        self.edit_caption_button.setEnabled(bool(item is not None and isinstance(item.data(0, Qt.ItemDataRole.UserRole), dict) and not self._running and not self._scanning))
+
+    def _filter_preview(self):
+        query = self.search_edit.text().strip().casefold()
+        def visit(row, inherited=False):
+            matches = inherited or not query or query in " ".join(row.text(c) for c in range(4)).casefold() or query in row.toolTip(1).casefold()
+            visible = False
+            for index in range(row.childCount()):
+                visible = visit(row.child(index), matches) or visible
+            if not row.childCount():
+                visible = matches and (not self.pending_only.isChecked() or row.text(0) != "已完成")
+            row.setHidden(not visible)
+            if query and visible:
+                row.setExpanded(True)
+            return visible
+        for index in range(self.tree.topLevelItemCount()):
+            visit(self.tree.topLevelItem(index))
+
+    def clear_scan_result(self):
+        self.result = None
+        self.tree.clear()
+        self.summary_label.setText("请扫描目录，生成最新上传预览")
+        self.status_label.setText("等待重新扫描")
+        self.start_button.setEnabled(False)
+
+    def set_running(self, active: bool):
+        self._running = active
+        self._update_edit_button()
+        self.scan_button.setEnabled(not active)
+        self.start_button.setEnabled(not active and bool(self.result and self.result.get("pending_files") and self.result.get("core_available")))
+        if active:
+            self.status_label.setText("任务运行中，请在任务中心查看进度")
+
+
+class TaskPage(QWidget):
+    stop_requested = Signal()
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+        title_row = QHBoxLayout()
+        self.title = QLabel("任务中心")
+        self.title.setObjectName("pageTitle")
+        self.task_status = QLabel("无正在运行的任务")
+        self.task_status.setObjectName("mutedLabel")
+        title_row.addWidget(self.title)
+        title_row.addStretch(1)
+        title_row.addWidget(self.task_status)
+        layout.addLayout(title_row)
+
+        progress_box = QGroupBox("当前 Album")
+        progress_layout = QVBoxLayout(progress_box)
+        self.album_label = QLabel("尚未开始")
+        self.album_label.setObjectName("valueLabel")
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1000)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(True)
+        self.metrics = QLabel("速度 — · Mbps — · ETA --:-- · 文件 0/0 · 已传 0 B")
+        self.metrics.setObjectName("mutedLabel")
+        progress_layout.addWidget(self.album_label)
+        progress_layout.addWidget(self.progress)
+        progress_layout.addWidget(self.metrics)
+        layout.addWidget(progress_box)
+
+        split = QHBoxLayout()
+        album_box = QGroupBox("Album 文件")
+        album_layout = QVBoxLayout(album_box)
+        self.album_files = QListWidget()
+        album_layout.addWidget(self.album_files)
+        log_box = QGroupBox("运行日志")
+        log_layout = QVBoxLayout(log_box)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(2000)
+        log_layout.addWidget(self.log)
+        split.addWidget(album_box, 1)
+        split.addWidget(log_box, 2)
+        layout.addLayout(split, 1)
+
+        bottom = QHBoxLayout()
+        self.stop_button = QPushButton("安全停止")
+        self.stop_button.setObjectName("dangerButton")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self.stop_requested)
+        bottom.addStretch(1)
+        bottom.addWidget(self.stop_button)
+        layout.addLayout(bottom)
+
+    def start_session(self, kind: str, result: dict):
+        self.title.setText(f"任务中心 · {_kind_label(kind)}")
+        self.task_status.setText("正在启动…")
+        self.stop_button.setEnabled(True)
+        self.progress.setValue(0)
+        self.metrics.setText(
+            f"待上传 {result['pending_files']} 个 · {_fmt_size(result['pending_bytes'])} · "
+            f"{result['album_count']} 个 Album"
+        )
+        self.album_files.clear()
+        self.log.clear()
+
+    @Slot(str, str)
+    def add_message(self, level: str, text: str):
+        prefix = {"success": "✓", "warning": "!", "error": "✗", "info": "ℹ"}.get(level, "·")
+        self.log.appendPlainText(f"{prefix} {text}")
+        self.task_status.setText(text.splitlines()[0][:100] if text else "运行中")
+
+    @Slot(object)
+    def show_album(self, payload: dict):
+        self.album_label.setText(f"{payload.get('title', '')} · {payload.get('subtitle', '')}")
+        self.album_files.clear()
+        for row in payload.get("rows", []):
+            self.album_files.addItem(str(row))
+
+    @Slot(object)
+    def show_progress(self, payload: dict):
+        ratio = max(0.0, min(float(payload.get("ratio", 0)), 1.0))
+        self.progress.setValue(round(ratio * 1000))
+        speed = float(payload.get("speed", 0) or 0)
+        mbps = speed * 8 / 1_000_000
+        self.metrics.setText(
+            f"速度 {_fmt_size(speed)}/s · {mbps:,.1f} Mbps · "
+            f"ETA {_fmt_eta(payload.get('eta'))} · "
+            f"Album {payload.get('album_number', 0)}/{payload.get('album_total', 0)} · "
+            f"文件 {payload.get('done_files', 0)}/{payload.get('total_files', 0)} · "
+            f"已传 {_fmt_size(payload.get('done_bytes', 0))} / {_fmt_size(payload.get('total_bytes', 0))}"
+        )
+
+    def finish_session(self, success: bool, message: str):
+        self.stop_button.setEnabled(False)
+        self.task_status.setText("已完成" if success else message)
+        self.log.appendPlainText(("✓ " if success else "! ") + message)
+
+
+class InflightPage(QWidget):
+    """Review send attempts whose Telegram result was not confirmed."""
+
+    reconciliation_requested = Signal(object, bool)
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+        title_row = QHBoxLayout()
+        title = QLabel("未确认上传")
+        title.setObjectName("pageTitle")
+        self.hint = QLabel("这些记录可能已经发送到 Telegram，请先核对目标中的 Album。")
+        self.hint.setObjectName("mutedLabel")
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        title_row.addWidget(self.hint)
+        layout.addLayout(title_row)
+
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(
+            ["媒体类型", "Album 标识", "状态", "创建时间", "最后更新", "目标", "文件数", "错误原因"]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table, 1)
+
+        buttons = QHBoxLayout()
+        refresh = QPushButton("刷新")
+        refresh.clicked.connect(self.reload_records)
+        self.sent_button = QPushButton("我已确认 Telegram 中存在")
+        self.sent_button.setObjectName("primaryButton")
+        self.sent_button.clicked.connect(lambda: self._emit_choice(True))
+        self.not_sent_button = QPushButton("我已确认 Telegram 中不存在")
+        self.not_sent_button.setObjectName("dangerButton")
+        self.not_sent_button.clicked.connect(lambda: self._emit_choice(False))
+        buttons.addWidget(refresh)
+        buttons.addStretch(1)
+        buttons.addWidget(self.sent_button)
+        buttons.addWidget(self.not_sent_button)
+        layout.addLayout(buttons)
+        self.reload_records()
+
+    def _emit_choice(self, sent: bool):
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "请选择记录", "请先选择一条未确认上传记录。")
+            return
+        item = self.table.item(row, 0)
+        record = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if not isinstance(record, dict):
+            return
+        action = "标记为已发送" if sent else "允许下次重新发送"
+        from upload_journal import _record_target
+
+        target = _record_target(record)
+        has_target = bool(target)
+        message = (
+            f"将{action}：\n{record.get('album_key', '')}\n\n"
+            "请确认你已经核对 Telegram 中的目标和 Album。"
+        )
+        if sent and not has_target:
+            message += (
+                "\n\n这是一条旧版未记录 Telegram 目标的上传记录。"
+                "\n程序无法确认它当时发送到哪个群组/Topic/频道。"
+                "\n\n只有在你确认“当前配置的 Telegram 目标”就是当时发送该 Album 的目标时，"
+                "才能选择“已发送”。"
+                "\n\n如果目标不一致，请不要确认已发送。"
+            )
+        answer = QMessageBox.warning(
+            self,
+            "确认人工处理",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.reconciliation_requested.emit(record, sent)
+
+    def reload_records(self):
+        try:
+            from upload_journal import InflightJournal, UNRESOLVED, _record_target
+
+            records = [
+                record for record in InflightJournal().list_unresolved()
+                if str(record.get("status", "")).upper() in UNRESOLVED
+            ]
+        except Exception as exc:
+            self.table.setRowCount(0)
+            self.hint.setText(f"读取未确认记录失败：{exc}")
+            return
+        self.table.setRowCount(len(records))
+        for row, record in enumerate(records):
+            target = _record_target(record)
+            has_target = bool(target)
+            target_id = ""
+            if has_target:
+                target_mode = str(target.get("target_mode", ""))
+                target_id = target.get("chat_id", "")
+                if target_mode != "channel" and target.get("forum_topic_id"):
+                    target_id = f"{target_id} / Topic {target.get('forum_topic_id')}"
+            values = [
+                _kind_label(record.get("kind", "unknown")),
+                record.get("album_key", ""),
+                record.get("status", ""),
+                record.get("created_at", ""),
+                record.get("updated_at", ""),
+                target_id or "⚠ 旧版记录：目标未知",
+                len(record.get("items", []) or []),
+                record.get("error", ""),
+            ]
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(str(value))
+                if column == 0:
+                    cell.setData(Qt.ItemDataRole.UserRole, record)
+                self.table.setItem(row, column, cell)
+        self.table.resizeColumnsToContents()
+        self.hint.setText(
+            f"当前有 {len(records)} 条未确认记录。处理“已发送”前必须先核对 Telegram。"
+            if records else "没有未确认上传记录。"
+        )
+
+
+class HistoryPage(QWidget):
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 24)
+        title = QLabel("历史记录")
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["时间", "类型", "来源", "文件", "数据量", "结果", "说明"])
+        self.table.setAlternatingRowColors(True)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+    def reload_records(self):
+        records = list(reversed(_load_history()))
+        self.table.setRowCount(len(records))
+        for row, record in enumerate(records):
+            values = [
+                record.get("finished_at", record.get("started_at", "")),
+                _kind_label(record.get("kind", "image")),
+                record.get("source_dir", ""),
+                str(record.get("total_files", 0)),
+                _fmt_size(record.get("total_bytes", 0)),
+                "成功" if record.get("success") else "停止/失败",
+                record.get("message", ""),
+            ]
+            for column, value in enumerate(values):
+                self.table.setItem(row, column, QTableWidgetItem(str(value)))
+        self.table.resizeColumnsToContents()
+
+
+class SettingsPage(QWidget):
+    open_editor = Signal()
+    open_scan_tools = Signal()
+    clear_all_requested = Signal()
+    clear_thumb_requested = Signal()
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+        title = QLabel("设置与诊断")
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+
+        self.config_status = QLabel()
+        self.config_status.setWordWrap(True)
+        layout.addWidget(self.config_status)
+
+        env_box = QGroupBox("运行环境")
+        env_layout = QFormLayout(env_box)
+        self.env_labels = {}
+        for name in ("PySide6", "tdjson", "Pillow", "imageio-ffmpeg", "ExifTool"):
+            label = QLabel("检测中")
+            self.env_labels[name] = label
+            env_layout.addRow(name, label)
+        self.env_labels["代理"] = QLabel("检测中")
+        env_layout.addRow("代理", self.env_labels["代理"])
+        layout.addWidget(env_box)
+
+        config_box = QGroupBox("配置入口")
+        config_layout = QHBoxLayout(config_box)
+        edit = QPushButton("编辑配置")
+        edit.setObjectName("primaryButton")
+        edit.clicked.connect(self.open_editor)
+        config_layout.addWidget(edit)
+        scan_tools = QPushButton("扫描与外部工具")
+        scan_tools.setObjectName("secondaryButton")
+        scan_tools.clicked.connect(self.open_scan_tools)
+        config_layout.addWidget(scan_tools)
+        config_hint = QLabel(
+            "GUI 会保留现有 config.toml 注释；账号、目录、暂存和代理在编辑配置中设置，"
+            "扫描稳定性、ExifTool、FFmpeg 超时和批次在扫描与外部工具中设置。"
+        )
+        config_hint.setObjectName("mutedLabel")
+        config_hint.setWordWrap(True)
+        config_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        config_layout.addWidget(config_hint, 1)
+        config_layout.addStretch(1)
+        layout.addWidget(config_box)
+
+        data_box = QGroupBox("用户数据目录")
+        data_layout = QVBoxLayout(data_box)
+        data_hint = QLabel(
+            f"DATA_DIR：{DATA_DIR}\n"
+            f"TDLib 登录数据库：{RUNTIME_TDLIB_DATABASE_DIR}\n"
+            f"TDLib 文件缓存：{RUNTIME_TDLIB_FILES_DIR}"
+        )
+        data_hint.setObjectName("mutedLabel")
+        data_hint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        data_hint.setWordWrap(True)
+        data_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        data_layout.addWidget(data_hint)
+
+        log_box = QGroupBox("运行日志")
+        log_layout = QVBoxLayout(log_box)
+        log_hint = QLabel(
+            f"应用日志：{APP_LOG_PATH}\n"
+            f"TDLib 原生日志：{TDLIB_LOG_PATH}\n"
+            "日志会跨应用重启保留；点击“清理所有缓存”时一并删除。"
+        )
+        log_hint.setObjectName("mutedLabel")
+        log_hint.setWordWrap(True)
+        log_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        log_layout.addWidget(log_hint)
+
+        # These two diagnostic cards describe the same persistent data area.
+        # Keep them side by side to reduce the page's vertical footprint; the
+        # settings page itself is scrollable so narrow windows can still wrap
+        # long Windows/macOS paths without compressing the cards.
+        data_log_row = QWidget()
+        data_log_layout = QHBoxLayout(data_log_row)
+        data_log_layout.setContentsMargins(0, 0, 0, 0)
+        data_log_layout.setSpacing(14)
+        data_log_layout.addWidget(data_box, 1)
+        data_log_layout.addWidget(log_box, 1)
+        layout.addWidget(data_log_row)
+
+        license_box = QGroupBox("许可与署名")
+        license_layout = QVBoxLayout(license_box)
+        license_hint = QLabel(
+            "原创内容采用 GNU GPL v3.0 only（GPL-3.0-only）；TDLib、Qt/PySide6、"
+            "Pillow、FFmpeg、PyInstaller 和 Python 仍按各自上游许可证使用。"
+            "完整许可清单随程序放在 THIRD_PARTY_LICENSES.md。"
+        )
+        license_hint.setObjectName("mutedLabel")
+        license_hint.setWordWrap(True)
+        license_layout.addWidget(license_hint)
+        layout.addWidget(license_box)
+
+        cache_box = QGroupBox("缓存管理")
+        cache_layout = QVBoxLayout(cache_box)
+        self.cache_status = QLabel()
+        self.cache_status.setObjectName("mutedLabel")
+        self.cache_status.setWordWrap(True)
+        cache_layout.addWidget(self.cache_status)
+        cache_hint = QLabel(
+            "清理所有会清空视频/图片/混合上传状态、标题、视频封面、历史记录、"
+            "未确认上传记录、暂存副本和运行日志；不会删除 config.toml 或 Telegram 登录数据库。"
+        )
+        cache_hint.setObjectName("mutedLabel")
+        cache_hint.setWordWrap(True)
+        cache_layout.addWidget(cache_hint)
+        cache_buttons = QHBoxLayout()
+        clear_thumb = QPushButton("仅清理视频封面")
+        clear_thumb.setObjectName("secondaryButton")
+        clear_thumb.clicked.connect(lambda: self.clear_thumb_requested.emit())
+        clear_all = QPushButton("清理所有缓存")
+        clear_all.setObjectName("dangerButton")
+        clear_all.clicked.connect(lambda: self.clear_all_requested.emit())
+        cache_buttons.addWidget(clear_thumb)
+        cache_buttons.addWidget(clear_all)
+        cache_buttons.addStretch(1)
+        cache_layout.addLayout(cache_buttons)
+        layout.addWidget(cache_box)
+        layout.addStretch(1)
+        self.refresh()
+
+    def refresh(self):
+        if _CONFIG_ERROR:
+            self.config_status.setText(f"配置不可用：{_CONFIG_ERROR}")
+            self.config_status.setStyleSheet("color: #ff7b72")
+        elif _cfg("API_ID", 12345678) == 12345678 or _cfg("API_HASH", "YOUR_API_HASH") == "YOUR_API_HASH":
+            self.config_status.setText("配置文件已找到，但 Telegram API 信息仍是示例值，请先编辑配置。")
+            self.config_status.setStyleSheet("color: #f2cc60")
+        else:
+            self.config_status.setText(f"配置文件：{CONFIG_PATH}")
+            self.config_status.setStyleSheet("color: #7ee787")
+
+        exiftool_path = _cfg("EXIFTOOL_PATH", None)
+        checks = {
+            "PySide6": True,
+            "tdjson": bool(importlib.util.find_spec("tdjson")),
+            "Pillow": bool(importlib.util.find_spec("PIL")),
+            "imageio-ffmpeg": bool(importlib.util.find_spec("imageio_ffmpeg")),
+            "ExifTool": bool(cfg is not None and exiftool_path and Path(exiftool_path).exists()),
+        }
+        for name, available in checks.items():
+            label = self.env_labels[name]
+            label.setText("可用" if available else "未找到 / 可选")
+            label.setStyleSheet(f"color: {'#7ee787' if available else '#f2cc60'}")
+        proxy_label = self.env_labels["代理"]
+        if _cfg("PROXY_ENABLED", False):
+            proxy_type = {
+                "socks5": "SOCKS5",
+                "http": "HTTP",
+                "mtproto": "MTProto",
+            }.get(str(_cfg("PROXY_TYPE", "socks5")).lower(), "代理")
+            proxy_label.setText(
+                f"已启用 · {proxy_type} "
+                f"{_cfg('PROXY_SERVER', '')}:{_cfg('PROXY_PORT', '')}"
+            )
+            proxy_label.setStyleSheet("color: #7ee787")
+        else:
+            proxy_label.setText("未启用 · 直连")
+            proxy_label.setStyleSheet("color: #91a2b5")
+        self.cache_status.setText(_cache_status_text())
+
+
+class TargetDialog(QDialog):
+    """Edit the Telegram target used by the selected media uploader."""
+
+    def __init__(self, kind="video", parent=None):
+        # Keep the old TargetDialog(parent) call shape usable for extensions.
+        if not isinstance(kind, str):
+            parent = kind if parent is None else parent
+            kind = "video"
+        kind = _require_kind(kind)
+        super().__init__(parent)
+        self.kind = kind
+        accent = _kind_label(self.kind)
+        self.setWindowTitle(f"编辑{accent}上传目标与配置 · V{APP_VERSION}")
+        self.setMinimumWidth(700)
+        self.resize(760, 640 if self.kind == "video" else 560)
+        layout = QVBoxLayout(self)
+        target_box = QGroupBox("上传目标")
+        form = QFormLayout(target_box)
+        self.form = form
+        self.target_mode = QComboBox()
+        self.target_mode.addItem("超级群组 Forum Topic", "forum_topic")
+        self.target_mode.addItem("Channel 频道", "channel")
+        form.addRow("目标类型", self.target_mode)
+        self.chat_id = QLineEdit()
+        self.channel_chat_id = QLineEdit()
+        self.topic_id = QLineEdit()
+        form.addRow("群组 Chat ID", self.chat_id)
+        form.addRow("频道 Chat ID", self.channel_chat_id)
+        form.addRow("Forum Topic ID", self.topic_id)
+        layout.addWidget(target_box)
+
+        self.media_box = QGroupBox(f"{accent}设置")
+        self.media_layout = QVBoxLayout(self.media_box)
+        self._build_media_fields()
+        layout.addWidget(self.media_box)
+
+        hint = QLabel(
+            "超级群组和频道的 Chat ID 通常以 -100 开头；频道不使用 Forum Topic。"
+            + (
+                "视频的分组方式、每组数量、组标题、文件名和序号都集中在“视频分组与标题”中。"
+                "关闭“读取视频日期信息”后会自动按文件名和固定分组处理。"
+                if self.kind == "video"
+                else "混合上传按一级子文件夹分组，图片和视频按同一顺序组成 Album；"
+                "组标题、文件名和序号选项集中在混合设置中。"
+                if self.kind == "mixed"
+                else "图片的排序、分组数量、标题和文件名选项都集中在图片设置中。"
+            )
+        )
+        hint.setObjectName("mutedLabel")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.target_mode.currentIndexChanged.connect(self._update_fields)
+        self._load_target()
+        self._update_fields()
+
+    def _build_media_fields(self):
+        if self.kind == "video":
+            date_box = QGroupBox("日期读取")
+            date_form = QFormLayout(date_box)
+            self.video_read_dates = QCheckBox("读取视频日期信息")
+            self.video_read_dates.setChecked(bool(_cfg("VIDEO_READ_DATES", True)))
+            self.video_read_dates.setToolTip(
+                "关闭后跳过 EXIF、媒体创建日期和文件修改时间读取；"
+                "视频只按文件名扫描，并按固定数量分组。"
+            )
+            date_form.addRow("日期读取", self.video_read_dates)
+
+            self.video_missing_date = QComboBox()
+            self.video_missing_date.addItem("使用文件修改时间", "mtime")
+            self.video_missing_date.addItem("停止并提示缺失日期", "error")
+            self.video_missing_date.setCurrentIndex(max(0, self.video_missing_date.findData(_cfg("VIDEO_MISSING_DATE_POLICY", "mtime"))))
+            date_form.addRow("缺失日期", self.video_missing_date)
+
+            self.video_media_creation = QCheckBox("读取媒体创建日期")
+            self.video_media_creation.setChecked(
+                bool(_cfg("VIDEO_READ_MEDIA_CREATION_DATE", True))
+            )
+            self.video_media_creation.setToolTip(
+                "EXIF 日期始终优先；开启后在 EXIF 缺失时读取 MediaCreateDate、"
+                "TrackCreateDate 等容器日期，最后仍使用文件修改时间。"
+                "缺少 EXIF 的视频最多同时读取 4 个，每个文件只启动一次 FFmpeg；"
+                "扫描进度会显示在页面和状态栏。"
+            )
+            date_form.addRow("媒体日期", self.video_media_creation)
+            self.media_layout.addWidget(date_box)
+
+            group_box = QGroupBox("视频分组与标题")
+            group_form = QFormLayout(group_box)
+            self.video_sort = QComboBox()
+            self.video_sort.addItem("按修改时间", "mtime")
+            self.video_sort.addItem("按文件夹和文件名（自然数字，从小到大）", "name")
+            sort_index = self.video_sort.findData(_cfg("VIDEO_SORT_MODE", "mtime"))
+            self.video_sort.setCurrentIndex(sort_index if sort_index >= 0 else 0)
+            self.video_sort.setToolTip(
+                "按修改时间和按文件名只能选择一种；固定分组会按这里的顺序取视频。"
+            )
+            group_form.addRow("扫描排序", self.video_sort)
+
+            self.video_group_mode = QComboBox()
+            self.video_group_mode.addItem("按日期分组", "date")
+            self.video_group_mode.addItem("按扫描顺序固定分组", "fixed")
+            group_mode = _cfg(
+                "VIDEO_GROUP_MODE",
+                "fixed" if _cfg("VIDEO_FORCE_TEN_PER_ALBUM", False) else "date",
+            )
+            mode_index = self.video_group_mode.findData(str(group_mode).lower())
+            self.video_group_mode.setCurrentIndex(mode_index if mode_index >= 0 else 0)
+            self.video_group_mode.setToolTip(
+                "按日期分组会按月份整理；固定分组会忽略日期，按扫描顺序连续分组。"
+            )
+            group_form.addRow("分组方式", self.video_group_mode)
+
+            self.video_album = QSpinBox()
+            self.video_album.setRange(1, 10)
+            self.video_album.setValue(int(_cfg("VIDEO_ALBUM_SIZE", 10)))
+            self.video_album.setToolTip("按日期模式表示每个月最多多少个；固定模式表示每组多少个。")
+            group_form.addRow("每组视频数", self.video_album)
+
+            self.video_group_title = QCheckBox("带组标题（如 Album 1、25-06）")
+            self.video_group_title.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_GROUP_TITLE", True)))
+            self.video_group_title.setToolTip("关闭后仍可保留自定义追加文字，但不显示默认的 Album 或月份标题。")
+            group_form.addRow("组标题", self.video_group_title)
+
+            self.video_filenames = QCheckBox("带文件名")
+            self.video_filenames.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAMES", False)))
+            self.video_filenames.setToolTip("在组标题或追加文字下方列出当前组的视频文件名。")
+            group_form.addRow("文件名列表", self.video_filenames)
+
+            self.video_filename_numbers = QCheckBox("文件名带序号（1、2、3…）")
+            self.video_filename_numbers.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS", True)))
+            self.video_filename_numbers.setToolTip(
+                "关闭后只显示文件名，每行一个，不添加序号；"
+                "即使暂时关闭文件名列表，也可以先保存这个格式选项。"
+            )
+            group_form.addRow("文件名格式", self.video_filename_numbers)
+
+            self.video_separator = QLineEdit(str(_cfg("VIDEO_ALBUM_CAPTION_SEPARATOR", " · ")))
+            self.video_separator.setToolTip("组标题与自定义追加文字之间使用的分隔符。")
+            group_form.addRow("标题分隔符", self.video_separator)
+            self.media_layout.addWidget(group_box)
+
+            process_box = QGroupBox("上传前处理")
+            process_form = QFormLayout(process_box)
+            self.thumbnail = QCheckBox("生成视频缩略图")
+            self.thumbnail.setChecked(bool(_cfg("VIDEO_GENERATE_THUMBNAIL", True)))
+            process_form.addRow("缩略图", self.thumbnail)
+            self.media_layout.addWidget(process_box)
+            self.video_read_dates.toggled.connect(self._update_video_date_fields)
+            self._update_video_date_fields()
+        elif self.kind == "image":
+            image_box = QGroupBox("图片分组与标题")
+            image_form = QFormLayout(image_box)
+            self.image_sort = QComboBox()
+            self.image_sort.addItem("文件修改时间", "mtime")
+            self.image_sort.addItem("文件夹和文件名（自然数字，从小到大）", "name")
+            configured_image_sort = str(_cfg("IMAGE_SORT_MODE", "mtime")).strip().lower()
+            if configured_image_sort == "path":
+                configured_image_sort = "name"
+            self.image_sort.setCurrentIndex(max(0, self.image_sort.findData(configured_image_sort)))
+            image_form.addRow("排序方式", self.image_sort)
+
+            self.image_album = QSpinBox()
+            self.image_album.setRange(1, 10)
+            self.image_album.setValue(int(_cfg("IMAGE_ALBUM_SIZE", 10)))
+            image_form.addRow("每组图片数", self.image_album)
+
+            self.image_numbering = QCheckBox("图片 Album 默认添加编号")
+            self.image_numbering.setChecked(bool(_cfg("IMAGE_ALBUM_NUMBERING", True)))
+            image_form.addRow("组标题", self.image_numbering)
+
+            self.image_separator = QLineEdit(str(_cfg("IMAGE_ALBUM_CAPTION_SEPARATOR", " · ")))
+            image_form.addRow("标题分隔符", self.image_separator)
+
+            self.image_filenames = QCheckBox("图片标题附加“序号. 文件名”清单")
+            self.image_filenames.setChecked(bool(_cfg("IMAGE_CAPTION_INCLUDE_FILENAMES", False)))
+            image_form.addRow("文件名列表", self.image_filenames)
+            self.media_layout.addWidget(image_box)
+
+            process_box = QGroupBox("上传前处理")
+            process_form = QFormLayout(process_box)
+            self.image_compress = QCheckBox(
+                "图片超过 10 MiB 时，在上传时使用 FFmpeg 压缩临时副本"
+            )
+            self.image_compress.setChecked(bool(_cfg("IMAGE_COMPRESS_OVERSIZE", False)))
+            self.image_compress.setToolTip(
+                "扫描和预检只提示，不提前压缩；确认上传后才为超限图片生成临时 JPEG。"
+                "原文件不会被修改，压缩失败的图片会记录日志并跳过。"
+            )
+            process_form.addRow("超限处理", self.image_compress)
+            self.media_layout.addWidget(process_box)
+        else:
+            mixed_box = QGroupBox("混合分组与标题")
+            mixed_form = QFormLayout(mixed_box)
+            self.mixed_sort = QComboBox()
+            self.mixed_sort.addItem("文件夹和文件名（自然数字，从小到大）", "name")
+            self.mixed_sort.addItem("文件修改时间（从旧到新）", "mtime")
+            self.mixed_sort.setCurrentIndex(
+                max(0, self.mixed_sort.findData(_cfg("MIXED_SORT_MODE", "name")))
+            )
+            mixed_form.addRow("排序方式", self.mixed_sort)
+            self.mixed_album = QSpinBox()
+            self.mixed_album.setRange(1, 10)
+            self.mixed_album.setValue(int(_cfg("MIXED_ALBUM_SIZE", 10)))
+            self.mixed_album.setToolTip("每个一级子文件夹按扫描顺序拆分，每组 1~10 个媒体。")
             mixed_form.addRow("每组媒体数", self.mixed_album)
             self.mixed_group_title = QCheckBox("带文件夹组标题")
             self.mixed_group_title.setChecked(bool(_cfg("MIXED_CAPTION_INCLUDE_GROUP_TITLE", True)))
