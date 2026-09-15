@@ -22,6 +22,36 @@ def _imported_names(path: Path) -> set[str]:
 
 
 class ArchitectureContractTest(unittest.TestCase):
+    def test_phase2_package_layout_has_application_and_service_boundaries(self):
+        expected = {
+            "app.py",
+            "config/__init__.py",
+            "config/model.py",
+            "config/loader.py",
+            "config/paths.py",
+            "gui/__init__.py",
+            "media/__init__.py",
+            "upload/__init__.py",
+        }
+        for relative_path in expected:
+            self.assertTrue(
+                (PACKAGE_ROOT / relative_path).is_file(),
+                f"missing Phase 2 package boundary: {relative_path}",
+            )
+
+        app_source = (PACKAGE_ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn("from gui_app import main, run_self_test", app_source)
+        self.assertIn('if "--self-test" in sys.argv[1:]', (PROJECT_ROOT / "gui_app.py").read_text(encoding="utf-8"))
+
+        default_config = PROJECT_ROOT / "resources" / "default_config.toml"
+        legacy_template = PROJECT_ROOT / "config.example.toml"
+        self.assertTrue(default_config.is_file(), "missing immutable default config resource")
+        self.assertEqual(
+            default_config.read_bytes(),
+            legacy_template.read_bytes(),
+            "package resource and documented config template have drifted",
+        )
+
     def test_first_wave_modules_use_the_declared_package_layout(self):
         expected = {
             "core/sorting.py",

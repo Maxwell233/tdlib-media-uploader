@@ -25,7 +25,7 @@ class Phase1CliRemovalTest(unittest.TestCase):
         self.assertIn('"--self-test"', gui_source)
         self.assertIn("run_self_test", gui_source)
         spec = (REPO_ROOT / "tdlib_media_uploader.spec").read_text(encoding="utf-8")
-        self.assertIn('[str(PROJECT_DIR / "gui_app.py")]', spec)
+        self.assertIn('[str(SOURCE_DIR / PACKAGE_NAME / "app.py")]', spec)
 
     def test_source_run_documentation_uses_direct_gui_commands(self):
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
@@ -40,8 +40,9 @@ class Phase1CliRemovalTest(unittest.TestCase):
             "run.sh",
         ):
             self.assertNotIn(legacy_name, readme)
-        self.assertIn(".venv\\Scripts\\python.exe .\\gui_app.py", readme)
-        self.assertIn(".venv/bin/python gui_app.py", readme)
+        self.assertIn('$env:PYTHONPATH = "src"', readme)
+        self.assertIn(".venv\\Scripts\\python.exe -m tdlib_media_uploader.app", readme)
+        self.assertIn("PYTHONPATH=src .venv/bin/python -m tdlib_media_uploader.app", readme)
 
 
 if __name__ == "__main__":

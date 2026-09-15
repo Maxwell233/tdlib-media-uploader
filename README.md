@@ -121,7 +121,7 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 
 ## 配置与代理
 
-配置保存在统一数据目录的 `data/config.toml`，首次运行从 `config.example.toml` 创建。日常通过界面编辑；完整键名、默认值和说明见 [配置模板](config.example.toml)。保存无效配置时恢复原文件。
+配置保存在统一数据目录的 `data/config.toml`，首次运行从包内的 `resources/default_config.toml` 创建；源码仓库中的 [config.example.toml](config.example.toml) 继续作为可读配置模板。日常通过界面编辑；保存无效配置时恢复原文件。
 
 - API、媒体目录、暂存和代理：在“设置与诊断 → 编辑配置”编辑。
 - 扫描稳定性、ExifTool 路径、FFmpeg/ExifTool 超时、批次大小和重试：在“设置与诊断 → 扫描与外部工具”编辑。
@@ -144,10 +144,11 @@ cd tdlib-media-uploader
 py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install --no-cache-dir --upgrade --force-reinstall --no-binary imageio-ffmpeg -r requirements-lock.txt
-.\.venv\Scripts\python.exe .\gui_app.py
+$env:PYTHONPATH = "src"
+.\.venv\Scripts\python.exe -m tdlib_media_uploader.app
 ```
 
-源码运行不再依赖单独的安装或启动脚本；上述命令会创建 `.venv`、安装固定版本依赖，并直接启动 GUI。首次启动会在统一数据目录中创建配置模板。
+源码运行不再依赖单独的安装或启动脚本；上述命令会创建 `.venv`、安装固定版本依赖，并通过 V2 package 入口启动 GUI。首次启动会在统一数据目录中创建配置模板。
 
 依赖由 `requirements-lock.txt` 和 `requirements-build-lock.txt` 固定版本，其中包含 `tdjson==1.8.64.post1`、Pillow、imageio-ffmpeg、PySide6 和 PyInstaller。固定 TDLib 版本是为了兼容现有上传实现，请勿随意升级。源码和便携包都使用图形界面。
 
@@ -159,7 +160,7 @@ cd tdlib-media-uploader
 python3.13 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install --no-cache-dir --upgrade --force-reinstall --no-binary imageio-ffmpeg -r requirements-lock.txt
-.venv/bin/python gui_app.py
+PYTHONPATH=src .venv/bin/python -m tdlib_media_uploader.app
 ```
 
 源码运行的视频封面需要自行准备 LGPL FFmpeg；发布包已在构建阶段准备并检查。
@@ -192,7 +193,7 @@ Windows 和 macOS 构建使用各自平台的原生 runner，并行执行离线�
 
 输出为 Windows 的 `dist/TDLib Media Uploader/TDLib Media Uploader.exe` 及 Windows x64 ZIP，和 macOS 的 `dist/TDLib Media Uploader.app` 及带版本号的 macOS arm64 DMG。DMG 根目录包含应用和指向系统 `/Applications` 的 `Applications` 文件夹别名，便于拖放安装。Windows 构建同时校验 EXE 嵌入图标、Qt 图标资源和稳定的 AppUserModelID，避免打包后任务栏图标缺失或归组异常。构建包不包含个人配置、断点、封面缓存、媒体文件或登录数据；macOS 包另附 FFmpeg 构建信息。
 
-核心文件：`gui_app.py`（正式界面入口）、`app_config.py`（配置）、`tdlib_video_app.py`、`tdlib_video_album_uploader.py`、`tdlib_image_album_uploader.py`、`tdlib_mixed_album_uploader.py`（由界面调用的媒体上传流程）、`tdlib_common.py`（TDLib）、`album_metadata.py`（标题）、`path_utils.py`（路径和扫描）。上传流程入口也会复用 `data/app.lock`；通常不需要单独启动这些内部模块。
+核心文件：`src/tdlib_media_uploader/app.py`（V2 package 入口）、`gui_app.py`（迁移期间的 GUI 实现）、`app_config.py`（配置兼容层）、`tdlib_video_app.py`、`tdlib_video_album_uploader.py`、`tdlib_image_album_uploader.py`、`tdlib_mixed_album_uploader.py`（由界面调用的媒体上传流程）、`tdlib_common.py`（TDLib）。上传流程入口也会复用 `data/app.lock`；通常不需要单独启动这些内部模块。
 
 版本使用“主版本.功能版本.修订版本”：日常优化增加最后一位，较大功能更新增加中间一位。版本号唯一存放在根目录 `VERSION`，程序、界面和构建脚本会从该文件读取。此次修改见 [CHANGELOG.md](CHANGELOG.md)。
 

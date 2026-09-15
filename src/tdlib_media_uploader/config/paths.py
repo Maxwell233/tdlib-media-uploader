@@ -1,0 +1,71 @@
+"""V2 package facade for the application's resource and data paths.
+
+The legacy root ``runtime_paths`` module remains the single implementation
+while the package migration is incremental.  Re-exporting its values keeps
+old callers and the future ``tdlib_media_uploader.config.paths`` import path
+on one source/frozen resource contract, including ``TEMPLATE_CONFIG_PATH``.
+"""
+
+from runtime_paths import (
+    APP_DATA_DIR,
+    APP_ROOT,
+    ASSETS_DIR,
+    CACHE_DIR,
+    CAPTIONS_DIR,
+    CONFIG_PATH,
+    DATA_BASE_DIR,
+    DATA_DIR,
+    FFMPEG_DIR,
+    HISTORY_PATH,
+    IMAGE_COMPRESSION_CACHE_DIR,
+    IMAGE_STATE_DIR,
+    IS_FROZEN,
+    LOG_DIR,
+    MIXED_STATE_DIR,
+    RESOURCE_DIR,
+    STATE_DIR,
+    STAGING_CACHE_DIR,
+    TDLIB_DATABASE_DIR,
+    TDLIB_FILES_DIR,
+    TELEGRAM_DIR,
+    TEMPLATE_CONFIG_PATH,
+    THUMBNAIL_CACHE_DIR,
+    TOOLS_DIR,
+    UPLOAD_INFLIGHT_DIR,
+    VERSION_PATH,
+    VIDEO_STATE_DIR,
+    ensure_data_dirs,
+    read_version,
+)
+
+__all__ = [
+    "IS_FROZEN",
+    "RESOURCE_DIR",
+    "APP_ROOT",
+    "DATA_BASE_DIR",
+    "DATA_DIR",
+    "APP_DATA_DIR",
+    "CONFIG_PATH",
+    "TEMPLATE_CONFIG_PATH",
+    "VERSION_PATH",
+    "ASSETS_DIR",
+    "TOOLS_DIR",
+    "FFMPEG_DIR",
+    "STATE_DIR",
+    "VIDEO_STATE_DIR",
+    "IMAGE_STATE_DIR",
+    "MIXED_STATE_DIR",
+    "TELEGRAM_DIR",
+    "TDLIB_DATABASE_DIR",
+    "TDLIB_FILES_DIR",
+    "CAPTIONS_DIR",
+    "UPLOAD_INFLIGHT_DIR",
+    "CACHE_DIR",
+    "THUMBNAIL_CACHE_DIR",
+    "IMAGE_COMPRESSION_CACHE_DIR",
+    "STAGING_CACHE_DIR",
+    "LOG_DIR",
+    "HISTORY_PATH",
+    "read_version",
+    "ensure_data_dirs",
+]

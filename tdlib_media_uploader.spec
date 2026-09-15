@@ -8,10 +8,18 @@ from pathlib import Path
 
 from PyInstaller.building.api import COLLECT, EXE
 from PyInstaller.building.osx import BUNDLE
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 PROJECT_DIR = Path(SPEC).resolve().parent
+SOURCE_DIR = PROJECT_DIR / "src"
+PACKAGE_NAME = "tdlib_media_uploader"
+
+# The current GUI entrypoint still lives at the repository root, while the V2
+# package is migrated incrementally below ``src``.  Make both import roots
+# explicit so a spec build and a source run resolve the same modules.
+if SOURCE_DIR.is_dir() and str(SOURCE_DIR) not in sys.path:
+    sys.path.insert(0, str(SOURCE_DIR))
 
 
 def collect_package(name: str):
@@ -44,9 +52,9 @@ def is_embedded_ffmpeg(item) -> bool:
     return False
 
 
-datas = []
-for source, destination in [
+RESOURCE_DATA = (
     (PROJECT_DIR / "config.example.toml", "."),
+    (PROJECT_DIR / "resources" / "default_config.toml", "resources"),
     (PROJECT_DIR / "VERSION", "."),
     (PROJECT_DIR / "LICENSE", "."),
     (PROJECT_DIR / "ATTRIBUTION", "."),
@@ -54,7 +62,10 @@ for source, destination in [
     (PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico", "assets"),
     (PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.png", "assets"),
     (PROJECT_DIR / "tools" / "README.txt", "tools"),
-]:
+)
+
+datas = []
+for source, destination in RESOURCE_DATA:
     if source.is_file():
         datas.append((str(source), destination))
 binaries = []
@@ -70,6 +81,33 @@ if packaged_ffmpeg_license.is_file():
 ffmpeg_build_info = PROJECT_DIR / "tools" / "ffmpeg" / "BUILD_INFO.txt"
 if ffmpeg_build_info.is_file():
     datas.append((str(ffmpeg_build_info), "tools/ffmpeg"))
+
+# Keep the package's current public modules explicit for deterministic builds.
+# ``collect_submodules`` below also covers packages added during the staged V2
+# migration without requiring another spec change for every new module.
+PACKAGE_HIDDENIMPORTS = [
+    "tdlib_media_uploader",
+    "tdlib_media_uploader.app",
+    "tdlib_media_uploader.contracts",
+    "tdlib_media_uploader.core",
+    "tdlib_media_uploader.core.models",
+    "tdlib_media_uploader.core.sorting",
+    "tdlib_media_uploader.core.filesystem",
+    "tdlib_media_uploader.core.readiness",
+    "tdlib_media_uploader.core.concurrency",
+    "tdlib_media_uploader.config",
+    "tdlib_media_uploader.config.model",
+    "tdlib_media_uploader.config.loader",
+    "tdlib_media_uploader.config.paths",
+    "tdlib_media_uploader.processes",
+    "tdlib_media_uploader.processes.runner",
+    "tdlib_media_uploader.telegram",
+    "tdlib_media_uploader.telegram.client",
+    "tdlib_media_uploader.telegram.auth",
+    "tdlib_media_uploader.telegram.target",
+    "tdlib_media_uploader.telegram.limits",
+    "tdlib_media_uploader.telegram.send_result",
+]
 
 hiddenimports = [
     "app_config",
@@ -90,6 +128,13 @@ hiddenimports = [
     "PIL",
     "imageio_ffmpeg",
 ]
+hiddenimports.extend(PACKAGE_HIDDENIMPORTS)
+try:
+    hiddenimports.extend(collect_submodules(PACKAGE_NAME))
+except Exception:
+    # The explicit package list above keeps the current build usable if a
+    # future optional package cannot be enumerated by PyInstaller's hook.
+    pass
 
 for package_name in ("tdjson", "imageio_ffmpeg"):
     package_datas, package_binaries, package_hiddenimports = collect_package(package_name)
@@ -99,8 +144,8 @@ for package_name in ("tdjson", "imageio_ffmpeg"):
 
 
 a = Analysis(
-    [str(PROJECT_DIR / "gui_app.py")],
-    pathex=[str(PROJECT_DIR)],
+    [str(SOURCE_DIR / PACKAGE_NAME / "app.py")],
+    pathex=[str(PROJECT_DIR), str(SOURCE_DIR)],
     binaries=binaries,
     datas=datas,
     hiddenimports=sorted(set(hiddenimports)),
