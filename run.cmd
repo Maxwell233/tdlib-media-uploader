@@ -2,7 +2,8 @@
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-title TDLib Media Uploader V1.9.0
+set /p "appversion="<"%~dp0VERSION"
+title TDLib Media Uploader V%appversion%
 
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1"
 set "exitcode=%errorlevel%"

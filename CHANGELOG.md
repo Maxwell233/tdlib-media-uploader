@@ -1,5 +1,36 @@
 # 更新记录
 
+## 1.9.1
+
+### 数据与状态可靠性
+
+- 用户数据统一收敛到 `data/`；Telegram 登录数据库和文件统一进入 `data/telegram/database` 与 `data/telegram/files`。
+- video、image、mixed 共用媒体 identity 和 UploadState；Album identity 使用扫描 snapshot 并包含 source-root scope。
+- Telegram target identity 统一 canonicalize；UNKNOWN journal 会阻止不确定发送结果自动重复上传。
+
+### 网络盘和扫描
+
+- SMB/NAS 扫描支持有界 retry、`scandir` 枚举中断恢复和多次 readiness 稳定快照检查。
+- symlink/junction 不跟随；staging 使用带 marker 的受管目录，cleanup 不会删除非程序文件，并对 symlink、junction 和其他 reparse point fail closed。
+
+### Telegram 上传
+
+- Album 部分成功、失败、取消或超时进入 UNKNOWN，不自动整组重发。
+- 普通账号视频精确限制为 `4000 × 524288 bytes`，Premium 精确限制为 `8000 × 524288 bytes`。
+- Caption 长度按 TDLib 当前 `message_caption_length_max` 检查；single-instance 防止多个进程同时访问 TDLib、state 和 journal。
+
+### 排序与 Album
+
+- video、image、mixed 共用自然数字排序；数字按整数升序，多级路径逐 component 比较。
+- mtime 模式按修改时间从旧到新，mtime 相同时使用同一自然路径排序作为稳定 tie-breaker。
+- 视频日期只用于月份分组，不覆盖组内排序；完整 Album plan 在 preflight 前固定，deferred 文件不会导致后续文件补位或重新分组。
+
+### 构建与验证
+
+- Windows x64 与 macOS arm64 均通过 offline regression、PyInstaller 构建、打包 `--self-test`、包验证和制品上传。
+- Windows 自检配置 UTF-8 输出并安全处理不可表示字符；macOS DMG 针对偶发的 `hdiutil Resource busy` 增加有界重试。
+- `VERSION` 作为唯一版本来源，构建包文件名、DMG 卷标和发布标题均从该文件读取。
+
 ## 1.9.0
 
 ### 本次可靠性与排序修复

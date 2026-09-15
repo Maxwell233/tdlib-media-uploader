@@ -123,7 +123,11 @@ function Ensure-LgplFfmpeg {
 
 try {
     $python = Resolve-PythonCommand -RequestedPath $PythonPath
-    Write-Host "TDLib Media Uploader V1.9.0 · Windows EXE 构建" -ForegroundColor Cyan
+    $version = (Get-Content -Raw -LiteralPath ".\VERSION").Trim()
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        throw "VERSION 文件为空，无法确定构建版本。"
+    }
+    Write-Host "TDLib Media Uploader V$version · Windows EXE 构建" -ForegroundColor Cyan
     Write-Host "使用 Python：$python" -ForegroundColor DarkGray
 
     $iconPath = Join-Path $PSScriptRoot "assets\tdlib_media_uploader_icon.ico"
@@ -170,7 +174,6 @@ try {
         ".\tdlib_media_uploader.spec"
     )
 
-    $version = (Get-Content -Raw -LiteralPath ".\VERSION").Trim()
     $exePath = Join-Path $distDir "TDLib Media Uploader.exe"
     if (-not (Test-Path -LiteralPath $exePath)) {
         throw "构建完成但没有找到 EXE：$exePath"

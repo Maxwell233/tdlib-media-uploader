@@ -1,6 +1,6 @@
 # TDLib Media Uploader
 
-**V1.9.0 · Windows x64 + macOS arm64 桌面应用**
+**V1.9.1 · Windows x64 + macOS arm64 桌面应用**
 
 把本地或网络目录中的视频、图片批量上传到 Telegram 群组话题或频道。Windows x64 与 macOS Apple Silicon arm64 使用同一套 GUI、上传核心和功能配置；支持上传预览、标题编辑、断点恢复和独立代理，上传时无需打开 Telegram Desktop。
 
@@ -78,7 +78,7 @@ Telegram 限制在扫描阶段生效：普通账号视频单文件上限约 2 GB
 
 “安全停止”会取消当前上传，并保留已写入的断点。只有整组消息确认发送成功后才记录完成状态。重新扫描时，已完成的组自动跳过；尚未完整完成的组会重新处理，其中已发送的部分可能重复。
 
-文件路径、大小或修改时间变化后，会被视为新文件。V1.9 将状态、标题、登录数据库、缓存、历史和日志统一保存到 `data/`，三种模式分别使用 `data/state/video`、`data/state/image`、`data/state/mixed`。
+文件路径、大小或修改时间变化后，会被视为新文件。V1.9.1 将状态、标题、登录数据库、缓存、历史和日志统一保存到 `data/`，三种模式分别使用 `data/state/video`、`data/state/image`、`data/state/mixed`。
 
 “设置与诊断”提供两类清理：
 
@@ -87,13 +87,13 @@ Telegram 限制在扫描阶段生效：普通账号视频单文件上限约 2 GB
 
 也可在相应媒体配置中临时设置 `reset_state = true`；运行一次后务必改回 `false`。
 
-历史记录保留最近 100 次任务。所有用户数据都位于 `data/`：`telegram/database` 和 `telegram/files` 保存 TDLib 登录数据库及文件缓存，`captions` 保存标题，`state` 保存断点，`upload_inflight` 保存未确认记录，`cache` 保存封面、压缩和暂存副本，`logs` 保存日志，`history.json` 保存任务历史。V1.9 按全量更新处理，不读取 V1.8.x 或旧开发版的散落状态文件。
+历史记录保留最近 100 次任务。所有用户数据都位于 `data/`：`telegram/database` 和 `telegram/files` 保存 TDLib 登录数据库及文件缓存，`captions` 保存标题，`state` 保存断点，`upload_inflight` 保存未确认记录，`cache` 保存封面、压缩和暂存副本，`logs` 保存日志，`history.json` 保存任务历史。V1.9.1 按全量更新处理，不读取 V1.8.x 或旧开发版的散落状态文件。
 
 ### 迁移与备份 data
 
 升级或更换电脑时，先**完全退出** TDLib Media Uploader，再直接复制整个 `data/` 目录即可保留 V1.9 的登录数据、任务历史、标题、断点和未确认记录。不要在上传、登录或 TDLib 数据库仍在写入时复制；`data/telegram/database` 是登录状态的关键数据，不建议只复制其中部分文件。Windows 便携版使用程序目录下的 `data/`；源码运行使用仓库下的 `data/`；macOS 发布版使用 `~/Library/Application Support/TDLib Media Uploader/data/`。安装或解压新版本后，把完整的 `data/` 放到对应位置即可。复制时不要套多一层 `data/data`，并先保留一份备份。最简单可靠的迁移方式是整体复制 `data/`，不需要分别寻找配置、登录数据库、断点、标题、历史或日志文件。V1.9 不承诺读取 V1.8.x 或旧开发版的状态格式。
 
-V1.9 的目录职责固定如下；程序资源和 PyInstaller `_internal` 目录只读，不会用作登录或其他用户数据目录：
+V1.9.1 的目录职责固定如下；程序资源和 PyInstaller `_internal` 目录只读，不会用作登录或其他用户数据目录：
 
 ```text
 data/
@@ -189,13 +189,13 @@ Windows 和 macOS 构建使用各自平台的原生 runner，并行执行离线�
 
 核心文件：`gui_app.py`（正式界面入口）、`app_config.py`（配置）、`tdlib_video_app.py`、`tdlib_video_album_uploader.py`、`tdlib_image_album_uploader.py`、`tdlib_mixed_album_uploader.py`（由界面调用的媒体上传流程）、`tdlib_common.py`（TDLib）、`album_metadata.py`（标题）、`path_utils.py`（路径和扫描）。上传流程入口也会复用 `data/app.lock`；通常不需要单独启动这些内部模块。
 
-版本使用“主版本.功能版本.修订版本”：日常优化增加最后一位，较大功能更新增加中间一位。更新时同步 `VERSION`、`app_config.py` 和界面版本信息。此次修改见 [CHANGELOG.md](CHANGELOG.md)。
+版本使用“主版本.功能版本.修订版本”：日常优化增加最后一位，较大功能更新增加中间一位。版本号唯一存放在根目录 `VERSION`，程序、界面和构建脚本会从该文件读取。此次修改见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 信任与风险
 
 建议只从本仓库的 [GitHub Releases](https://github.com/Maxwell233/tdlib-media-uploader/releases) 下载，并在运行前核对 `SHA256SUMS`。构建脚本、平台构建 workflow、项目许可、作者署名和第三方依赖清单都公开在仓库中；发布 ZIP 也包含许可/署名文件，便于检查来源和再分发条件。SHA-256 只能证明文件与发布者提供的摘要一致，不能替代代码审查或操作系统安全认证。
 
-macOS v1.9.0 包未配置 Apple Developer 签名和公证，所以 Gatekeeper 可能显示“无法验证开发者”。请不要绕过来源核验后直接运行未知文件；确认仓库地址、标签和 SHA-256 后再按系统提示打开。Windows 版也不应被视为经过独立安全机构认证的程序。应用会调用随包提供或系统中的 FFmpeg/ExifTool 处理媒体；请确认这些工具来源和许可，并注意压缩失败、网络中断、Telegram 限制以及重复上传等运行风险。
+macOS v1.9.1 包未配置 Apple Developer 签名和公证，所以 Gatekeeper 可能显示“无法验证开发者”。请不要绕过来源核验后直接运行未知文件；确认仓库地址、标签和 SHA-256 后再按系统提示打开。Windows 版也不应被视为经过独立安全机构认证的程序。应用会调用随包提供或系统中的 FFmpeg/ExifTool 处理媒体；请确认这些工具来源和许可，并注意压缩失败、网络中断、Telegram 限制以及重复上传等运行风险。
 
 程序需要 Telegram API ID/API Hash，并会在本机 `data/` 保存 Telegram 登录数据库、代理设置、上传断点和用户输入的标题；这些数据不会随发布包提供。不要把 `data/config.toml`、API Hash、登录数据库、代理密码或缓存发给他人。上传目标、代理、媒体内容和 Telegram 账号权限均由使用者自行确认；请遵守 Telegram 使用条款、版权要求和目标群组/频道规则。若使用 ExifTool 或自行替换 FFmpeg，还需遵守对应上游许可证。
 

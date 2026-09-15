@@ -1,11 +1,31 @@
-### V1.9.0 更新
+### V1.9.1 更新
 
-- 所有用户数据统一放入 `data/`，包含配置、Telegram 登录、断点、标题、缓存、历史和日志；复制整个目录即可迁移 V1.9 数据。
-- Telegram/TDLib 登录数据库固定使用 `data/telegram/database` 和 `data/telegram/files`，程序目录与 `_internal` 保持只读。
-- 暂存目录改为带 marker 的受管目录，只清理程序创建的副本，避免误删用户文件。
-- 视频、图片和混合模式共用媒体身份与断点格式；Album 身份使用扫描快照，网络目录短暂断线不会改变分组。
-- Album 部分成功、取消或确认超时会进入 `UNKNOWN` 并阻止自动重发；发送日志记录成功、失败和待确认消息。
-- 普通账号的视频上限约为 2 GB，Premium 上限约为 4 GB，程序按 Telegram 精确字节边界检查；Caption 长度按 TDLib 当前配置检查。
-- 增加单实例锁、应用日志轮转和 `--self-test` 离线健康检查。
-- 修复 Windows 控制台代码页导致打包自检无法输出中文的问题。
-- macOS DMG 遇到 runner 短暂的 `hdiutil Resource busy` 时会自动有限重试。
+#### 数据与状态可靠性
+
+- 用户数据统一收敛到 `data/`；Telegram 登录数据库和文件统一使用 `data/telegram/database` 与 `data/telegram/files`。
+- video、image、mixed 共用媒体 identity 和 UploadState；Album identity 使用扫描快照并包含 source-root scope。
+- Telegram target identity 统一规范化；UNKNOWN journal 会阻止不确定发送结果被自动重复上传。
+
+#### 网络盘和扫描
+
+- SMB/NAS 扫描支持有界重试、目录枚举中断恢复和多次稳定快照检查。
+- 扫描跳过 symlink/junction；staging 使用带 marker 的受管目录，清理时不会删除非程序文件。
+- staging 对 symlink、junction 和其他 reparse point 失败关闭，降低误读或误删风险。
+
+#### Telegram 上传
+
+- Album 部分成功、失败、取消或超时会进入 UNKNOWN，不会自动整组重发。
+- 普通账号视频精确限制为 `4000 × 524288 bytes`，Premium 精确限制为 `8000 × 524288 bytes`。
+- Caption 长度按 TDLib 当前 `message_caption_length_max` 检查；单实例锁防止多个进程同时访问 TDLib、state 和 journal。
+
+#### 排序与 Album
+
+- video、image、mixed 共用自然数字排序；数字按整数升序，多级路径逐组件比较。
+- mtime 模式按修改时间从旧到新，mtime 相同时使用同一自然路径排序作为稳定排序。
+- 视频日期只用于月份分组，不覆盖组内排序；完整 Album plan 在预检前固定，deferred 文件不会导致后续文件补位或重新分组。
+
+#### 构建与发布验证
+
+- Windows x64 与 macOS arm64 均通过 offline regression、PyInstaller 构建、打包 `--self-test`、包验证和制品上传。
+- macOS DMG 创建针对偶发的 `hdiutil Resource busy` 增加有界重试；其他错误仍会保留诊断并立即失败。
+- `VERSION` 作为唯一版本来源，构建包和发布标题均从该文件读取。

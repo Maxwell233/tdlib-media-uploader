@@ -26,9 +26,14 @@ $setupFailed = $false
 try {
     Clear-Host
 
+    $appVersion = (Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "VERSION")).Trim()
+    if ([string]::IsNullOrWhiteSpace($appVersion)) {
+        throw "VERSION 文件为空，无法确定应用版本。"
+    }
+
     $line = "─" * 64
     Write-Host $line -ForegroundColor Cyan
-    Write-Host "  TDLib Media Uploader V1.9.0 · 初始环境安装" -ForegroundColor Cyan
+    Write-Host "  TDLib Media Uploader V$appVersion · 初始环境安装" -ForegroundColor Cyan
     Write-Host $line -ForegroundColor Cyan
     Write-Host ""
 
