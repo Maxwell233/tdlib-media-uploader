@@ -14,6 +14,7 @@ import album_metadata
 import app_config
 import gui_app
 import path_utils
+import self_test
 from instance_lock import InstanceLock, run_with_instance_lock
 
 
@@ -166,6 +167,40 @@ class V190HardeningTest(unittest.TestCase):
                 loaded = app_config._load()
             self.assertIn("telegram", loaded)
             self.assertEqual(existing.read_text(encoding="utf-8"), "this is not valid toml =")
+
+    def test_self_test_configures_stdout_and_stderr_for_unicode(self):
+        class Stream:
+            def __init__(self):
+                self.calls = []
+
+            def reconfigure(self, **kwargs):
+                self.calls.append(kwargs)
+
+        stdout = Stream()
+        stderr = Stream()
+        with patch.object(sys, "stdout", stdout), patch.object(sys, "stderr", stderr):
+            self_test.configure_cli_encoding()
+        self.assertEqual(stdout.calls, [{"encoding": "utf-8", "errors": "replace"}])
+        self.assertEqual(stderr.calls, [{"encoding": "utf-8", "errors": "replace"}])
+
+    def test_self_test_encoding_failure_is_non_fatal(self):
+        class Stream:
+            def reconfigure(self, **kwargs):
+                raise ValueError("stream is not reconfigurable")
+
+        with patch.object(sys, "stdout", Stream()), patch.object(sys, "stderr", Stream()):
+            self_test.configure_cli_encoding()
+
+    def test_self_test_configures_encoding_before_first_output(self):
+        events = []
+        with patch.object(
+            self_test,
+            "configure_cli_encoding",
+            side_effect=lambda: events.append("configure"),
+        ):
+            result = self_test.run_self_test(emit=lambda _message: events.append("emit"))
+        self.assertEqual(result, 0)
+        self.assertEqual(events[0], "configure")
 
     def test_direct_entrypoint_uses_shared_instance_lock(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -214,12 +214,52 @@ if [[ ! -L "$DMG_STAGE_DIR/Applications" ]]; then
     echo "DMG 暂存目录缺少 Applications 文件夹别名。" >&2
     exit 1
 fi
-hdiutil create \
-    -volname "TDLib Media Uploader V${VERSION}" \
-    -srcfolder "$DMG_STAGE_DIR" \
-    -ov \
-    -format UDZO \
-    "$DMG_PATH" >/dev/null
+
+# GitHub-hosted macOS runners can briefly report ``Resource busy`` while the
+# disk arbitration service releases a temporary image left by a previous
+# operation.  Keep the source directory unchanged and retry only this known
+# transient failure; other hdiutil errors remain fatal and retain their full
+# diagnostic output.
+create_dmg_with_retry() {
+    local max_attempts="${HDIUTIL_MAX_ATTEMPTS:-5}"
+    local attempt=1
+    local status=1
+    local log_file=""
+
+    while (( attempt <= max_attempts )); do
+        # A failed hdiutil invocation may leave its temporary image busy for
+        # a short time.  Cleanup is best-effort so that the retry can wait for
+        # disk arbitration instead of exiting under ``set -e``.
+        rm -f "$DMG_PATH" 2>/dev/null || true
+        log_file="$(mktemp "${TMPDIR:-/tmp}/tdlib-media-uploader-hdiutil.XXXXXX")"
+        if hdiutil create \
+            -volname "TDLib Media Uploader V${VERSION}" \
+            -srcfolder "$DMG_STAGE_DIR" \
+            -ov \
+            -format UDZO \
+            "$DMG_PATH" >"$log_file" 2>&1; then
+            rm -f "$log_file"
+            return 0
+        else
+            status=$?
+        fi
+
+        cat "$log_file" >&2
+        if ! grep -q "Resource busy" "$log_file" || (( attempt >= max_attempts )); then
+            rm -f "$log_file" "$DMG_PATH" 2>/dev/null || true
+            return "$status"
+        fi
+
+        echo "hdiutil reports Resource busy; retrying DMG creation (attempt $((attempt + 1))/$max_attempts) …" >&2
+        rm -f "$log_file" "$DMG_PATH" 2>/dev/null || true
+        sleep "$((2 ** attempt))"
+        attempt=$((attempt + 1))
+    done
+
+    return "$status"
+}
+
+create_dmg_with_retry
 (
     cd "$DIST_DIR"
     shasum -a 256 "$(basename "$DMG_PATH")" > "$(basename "$DMG_PATH").sha256"

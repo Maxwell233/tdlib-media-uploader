@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from runtime_paths import (
@@ -20,6 +21,29 @@ from runtime_paths import (
 )
 
 
+def configure_cli_encoding() -> None:
+    """Make command-line diagnostics safe on legacy Windows consoles.
+
+    PyInstaller's windowed executable can inherit a stream whose code page
+    cannot represent the Chinese paths reported by the self-test.  Reusing
+    the existing stream keeps redirection and CI capture intact while
+    replacing unrepresentable characters instead of aborting the check.
+    ``StringIO`` and other stream-like objects used by callers may not expose
+    ``reconfigure``; those streams are intentionally left untouched.
+    """
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, TypeError, ValueError):
+            # A redirected or embedded stream may reject changing its codec.
+            # The caller can still capture the diagnostic through that stream.
+            continue
+
+
 def _is_within(child: Path, parent: Path) -> bool:
     """Check containment without resolving links or touching network paths."""
 
@@ -32,6 +56,7 @@ def _is_within(child: Path, parent: Path) -> bool:
 
 
 def run_self_test(*, emit=print) -> int:
+    configure_cli_encoding()
     failures: list[str] = []
     emit(f"TDLib Media Uploader V{read_version()}")
     emit(f"资源目录：{RESOURCE_DIR}")
@@ -120,4 +145,4 @@ def run_self_test(*, emit=print) -> int:
     return 0
 
 
-__all__ = ["run_self_test"]
+__all__ = ["configure_cli_encoding", "run_self_test"]

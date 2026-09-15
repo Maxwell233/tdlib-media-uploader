@@ -7,3 +7,5 @@
 - Album 部分成功、取消或确认超时会进入 `UNKNOWN` 并阻止自动重发；发送日志记录成功、失败和待确认消息。
 - 普通账号的视频上限约为 2 GB，Premium 上限约为 4 GB，程序按 Telegram 精确字节边界检查；Caption 长度按 TDLib 当前配置检查。
 - 增加单实例锁、应用日志轮转和 `--self-test` 离线健康检查。
+- 修复 Windows 控制台代码页导致打包自检无法输出中文的问题。
+- macOS DMG 遇到 runner 短暂的 `hdiutil Resource busy` 时会自动有限重试。
