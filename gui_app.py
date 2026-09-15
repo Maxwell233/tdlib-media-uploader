@@ -68,6 +68,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QStackedWidget,
     QTableWidget,
@@ -2260,8 +2261,8 @@ class SettingsPage(QWidget):
         data_hint.setObjectName("mutedLabel")
         data_hint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         data_hint.setWordWrap(True)
+        data_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         data_layout.addWidget(data_hint)
-        layout.addWidget(data_box)
 
         log_box = QGroupBox("运行日志")
         log_layout = QVBoxLayout(log_box)
@@ -2272,8 +2273,20 @@ class SettingsPage(QWidget):
         )
         log_hint.setObjectName("mutedLabel")
         log_hint.setWordWrap(True)
+        log_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         log_layout.addWidget(log_hint)
-        layout.addWidget(log_box)
+
+        # These two diagnostic cards describe the same persistent data area.
+        # Keep them side by side to reduce the page's vertical footprint; the
+        # settings page itself is scrollable so narrow windows can still wrap
+        # long Windows/macOS paths without compressing the cards.
+        data_log_row = QWidget()
+        data_log_layout = QHBoxLayout(data_log_row)
+        data_log_layout.setContentsMargins(0, 0, 0, 0)
+        data_log_layout.setSpacing(14)
+        data_log_layout.addWidget(data_box, 1)
+        data_log_layout.addWidget(log_box, 1)
+        layout.addWidget(data_log_row)
 
         license_box = QGroupBox("许可与署名")
         license_layout = QVBoxLayout(license_box)
@@ -3165,14 +3178,18 @@ class MainWindow(QMainWindow):
         }
         self.sidebar_rows = {"video": 1, "image": 2, "mixed": 3, "inflight": 4, "task": 5, "history": 6, "settings": 7}
         for page in (self.home, self.video_page, self.image_page, self.mixed_page, self.inflight_page, self.task_page, self.history_page, self.settings_page):
-            if isinstance(page, UploadPage):
-                # Upload pages contain several stacked sections.  Keeping
-                # them in a scroll area prevents the Telegram target and
-                # action buttons from being clipped when the window is made
-                # shorter or narrower.
+            if isinstance(page, (UploadPage, SettingsPage)):
+                # Upload and settings pages contain several stacked sections.
+                # Keeping both in a scroll area prevents controls and wrapped
+                # diagnostic paths from being compressed or clipped when the
+                # window is made shorter or narrower.
                 scroll = QScrollArea()
                 scroll.setWidgetResizable(True)
                 scroll.setFrameShape(QFrame.Shape.NoFrame)
+                if isinstance(page, SettingsPage):
+                    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                    page.setMinimumWidth(0)
+                    page.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
                 scroll.setWidget(page)
                 self.stack.addWidget(scroll)
             else:

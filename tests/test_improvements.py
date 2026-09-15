@@ -18,13 +18,34 @@ import album_metadata as metadata
 import app_logging
 import gui_app as gui
 import path_utils
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
 
 
 class ImprovementsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_settings_page_scrolls_and_groups_data_and_log_cards(self):
+        window = gui.MainWindow()
+        try:
+            settings_index = window.sidebar_rows["settings"]
+            settings_scroll = window.stack.widget(settings_index)
+            self.assertIsInstance(settings_scroll, QScrollArea)
+            self.assertIs(settings_scroll.widget(), window.settings_page)
+
+            boxes = {
+                box.title(): box
+                for box in window.settings_page.findChildren(QGroupBox)
+            }
+            data_box = boxes["用户数据目录"]
+            log_box = boxes["运行日志"]
+            self.assertIs(data_box.parentWidget(), log_box.parentWidget())
+            self.assertIsInstance(data_box.parentWidget().layout(), QHBoxLayout)
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
 
     def test_caption_store_reads_once_and_preserves_other_edits(self):
         with tempfile.TemporaryDirectory() as directory:
