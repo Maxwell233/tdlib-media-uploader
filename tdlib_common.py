@@ -25,6 +25,7 @@ from upload_journal import (
     FAILED,
     InflightJournal,
     UNKNOWN,
+    _record_target,
     normalize_target,
 )
 
@@ -781,18 +782,9 @@ class TDJsonClient:
 
     @staticmethod
     def _journal_target(record: dict) -> dict:
-        nested = record.get("target") if isinstance(record, dict) else None
-        if isinstance(nested, dict):
-            required = {"target_mode", "chat_id", "forum_topic_id", "channel_chat_id"}
-            if not required.issubset(nested):
-                return {}
-            return normalize_target(nested)
-        if not isinstance(record, dict):
-            return {}
-        required = ("target_mode", "chat_id", "forum_topic_id", "channel_chat_id")
-        if not all(key in record for key in required):
-            return {}
-        return normalize_target({key: record.get(key) for key in required})
+        # Keep journal record parsing in one place so legacy v2 records and
+        # current canonical targets use identical mode-aware semantics.
+        return _record_target(record)
 
     @staticmethod
     def _journal_items(record: dict) -> list[dict]:

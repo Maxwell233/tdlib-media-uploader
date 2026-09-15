@@ -397,6 +397,148 @@ class ImprovementsTest(unittest.TestCase):
             self.assertIsNotNone(journal.unresolved("image", "legacy", target=first))
             self.assertIsNotNone(journal.unresolved("image", "legacy", target=second))
 
+    def test_forum_target_identity_ignores_irrelevant_channel_id(self):
+        from upload_journal import normalize_target
+
+        first = normalize_target(
+            {
+                "target_mode": "forum_topic",
+                "chat_id": 100,
+                "forum_topic_id": 10,
+                "channel_chat_id": 999,
+            }
+        )
+        second = normalize_target(
+            {
+                "target_mode": "forum_topic",
+                "chat_id": 100,
+                "forum_topic_id": 10,
+                "channel_chat_id": 888,
+            }
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(
+            first,
+            {
+                "target_mode": "forum_topic",
+                "chat_id": 100,
+                "forum_topic_id": 10,
+                "channel_chat_id": 0,
+            },
+        )
+
+    def test_channel_target_identity_ignores_irrelevant_forum_topic_id(self):
+        from upload_journal import normalize_target
+
+        first = normalize_target(
+            {
+                "target_mode": "channel",
+                "channel_chat_id": 200,
+                "forum_topic_id": 10,
+            }
+        )
+        second = normalize_target(
+            {
+                "target_mode": "channel",
+                "channel_chat_id": 200,
+                "forum_topic_id": 999,
+            }
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(
+            first,
+            {
+                "target_mode": "channel",
+                "chat_id": 200,
+                "forum_topic_id": 0,
+                "channel_chat_id": 200,
+            },
+        )
+
+    def test_target_identity_changes_for_topic_channel_or_mode(self):
+        from upload_journal import normalize_target
+
+        forum_topic_10 = normalize_target(
+            {"target_mode": "forum_topic", "chat_id": 100, "forum_topic_id": 10}
+        )
+        forum_topic_11 = normalize_target(
+            {"target_mode": "forum_topic", "chat_id": 100, "forum_topic_id": 11}
+        )
+        channel_200 = normalize_target(
+            {"target_mode": "channel", "channel_chat_id": 200}
+        )
+        channel_201 = normalize_target(
+            {"target_mode": "channel", "channel_chat_id": 201}
+        )
+        self.assertNotEqual(forum_topic_10, forum_topic_11)
+        self.assertNotEqual(channel_200, channel_201)
+        self.assertNotEqual(forum_topic_10, channel_200)
+
+    def test_forum_unknown_journal_matches_after_irrelevant_channel_change(self):
+        from upload_journal import InflightJournal
+
+        first = {
+            "target_mode": "forum_topic",
+            "chat_id": 100,
+            "forum_topic_id": 10,
+            "channel_chat_id": 999,
+        }
+        second = {**first, "channel_chat_id": 888}
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "forum-album", [{"path": "photo.jpg"}], target=first)
+            journal.unknown("image", "forum-album", "timeout", target=first)
+            self.assertIsNotNone(journal.unresolved("image", "forum-album", target=second))
+
+    def test_channel_unknown_journal_matches_after_irrelevant_topic_change(self):
+        from upload_journal import InflightJournal
+
+        first = {
+            "target_mode": "channel",
+            "channel_chat_id": 200,
+            "forum_topic_id": 10,
+        }
+        second = {**first, "forum_topic_id": 999}
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "channel-album", [{"path": "photo.jpg"}], target=first)
+            journal.unknown("image", "channel-album", "timeout", target=first)
+            self.assertIsNotNone(journal.unresolved("image", "channel-album", target=second))
+
+    def test_version_two_target_record_is_read_with_canonical_identity(self):
+        from hashlib import sha256
+
+        from upload_journal import InflightJournal, UNKNOWN
+
+        target = {
+            "target_mode": "forum_topic",
+            "chat_id": 100,
+            "forum_topic_id": 10,
+            "channel_chat_id": 999,
+        }
+        equivalent = {**target, "channel_chat_id": 888}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            journal = InflightJournal(root)
+            # Simulate the previous v2 filename hash, which included every
+            # target field before mode-aware canonicalization was introduced.
+            identity = json.dumps(target, sort_keys=True, separators=(",", ":"))
+            old_hash = sha256(f"image\nv2-album\n{identity}".encode("utf-8")).hexdigest()
+            (root / f"{old_hash}.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "kind": "image",
+                        "album_key": "v2-album",
+                        "status": UNKNOWN,
+                        "target": target,
+                        "items": [{"path": "photo.jpg"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertIsNotNone(journal.unresolved("image", "v2-album", target=equivalent))
+
     def test_validate_scan_root_retries_transient_stat(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -495,6 +637,30 @@ class ImprovementsTest(unittest.TestCase):
                     page = gui.InflightPage()
                     self.assertEqual(page.table.rowCount(), 1)
                     page.deleteLater()
+
+    def test_gui_marks_legacy_target_unknown_and_warns_before_sent_confirmation(self):
+        from upload_journal import InflightJournal
+
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory) / ".upload_inflight")
+            journal.prepare("image", "legacy-gui-album", [{"path": "photo.jpg"}])
+            journal.unknown("image", "legacy-gui-album", "timeout")
+            with patch.object(gui, "APP_DATA_DIR", Path(directory)), \
+                    patch("upload_journal.APP_DATA_DIR", Path(directory)):
+                page = gui.InflightPage()
+                self.assertEqual(page.table.item(0, 5).text(), "⚠ 旧版记录：目标未知")
+                page.table.selectRow(0)
+                with patch.object(
+                    gui.QMessageBox,
+                    "warning",
+                    return_value=gui.QMessageBox.StandardButton.No,
+                ) as warning:
+                    page._emit_choice(True)
+                warning_text = warning.call_args.args[2]
+                self.assertIn("旧版未记录 Telegram 目标", warning_text)
+                self.assertIn("当前配置的 Telegram 目标", warning_text)
+                self.assertIn("如果目标不一致，请不要确认已发送", warning_text)
+                page.deleteLater()
 
     def test_natural_sort_handles_unicode_numeric_runs_and_folder_names(self):
         self.assertEqual(

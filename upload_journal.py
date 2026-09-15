@@ -34,37 +34,97 @@ def _now() -> str:
 
 
 def normalize_target(target=None) -> dict:
-    """Return a JSON-safe target identity or an empty legacy identity."""
+    """Return the canonical identity for the effective Telegram target.
+
+    Target configuration contains fields for both destination modes, but the
+    inactive fields are not part of the actual Telegram destination.  Keeping
+    them in the journal hash would make an unrelated config edit turn an
+    ``UNKNOWN`` send into a second submission opportunity.  Canonicalize the
+    two modes separately and retain an empty mapping for target-less/invalid
+    legacy records so their conservative matching behavior is unchanged.
+    """
 
     if not isinstance(target, dict):
         return {}
-    result = {
-        "target_mode": str(target.get("target_mode", "")).strip().lower(),
-        "chat_id": int(target.get("chat_id", 0) or 0),
-        "forum_topic_id": int(target.get("forum_topic_id", 0) or 0),
-        "channel_chat_id": int(target.get("channel_chat_id", 0) or 0),
-    }
-    # A completely empty object is the legacy shape.  Keep that distinction:
-    # records without a target conservatively block every target.
-    if not any(result.values()):
+    mode = str(target.get("target_mode", "")).strip().lower()
+    if mode not in {"forum_topic", "channel"}:
         return {}
-    return result
+
+    def _as_int(value, default=0):
+        if value is None or value == "":
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    # ``group_chat_id`` was present in some config-shaped target mappings;
+    # prefer the canonical ``chat_id`` while retaining that compatibility
+    # alias as a fallback.  Inactive fields are deliberately never parsed.
+    chat_value = target.get("chat_id", target.get("group_chat_id", 0))
+    chat_id = _as_int(chat_value)
+    if chat_id is None:
+        return {}
+
+    if mode == "forum_topic":
+        topic_id = _as_int(target.get("forum_topic_id", 0))
+        if topic_id is None:
+            return {}
+        return {
+            "target_mode": "forum_topic",
+            "chat_id": chat_id,
+            "forum_topic_id": topic_id,
+            "channel_chat_id": 0,
+        }
+
+    channel_value = target.get("channel_chat_id", 0)
+    channel_id = _as_int(channel_value)
+    if channel_id is None:
+        return {}
+    effective_channel_id = channel_id or chat_id
+    return {
+        "target_mode": "channel",
+        "chat_id": effective_channel_id,
+        "forum_topic_id": 0,
+        "channel_chat_id": effective_channel_id,
+    }
 
 
 def _record_target(record: dict) -> dict:
-    nested = record.get("target")
+    """Read a target from current or older journal record shapes.
+
+    Version 2 records normally contain all four target fields, while a few
+    early integrations only persisted the fields relevant to their mode.  A
+    record is considered target-scoped only when its mode and effective
+    destination fields are present; otherwise it remains a conservative
+    target-less record and blocks matching Albums for every target.
+    """
+
+    def _candidate_has_identity(value) -> bool:
+        if not isinstance(value, dict):
+            return False
+        mode = str(value.get("target_mode", "")).strip().lower()
+        if mode == "forum_topic":
+            return (
+                ("chat_id" in value or "group_chat_id" in value)
+                and "forum_topic_id" in value
+            )
+        if mode == "channel":
+            return any(key in value for key in ("channel_chat_id", "chat_id", "group_chat_id"))
+        return False
+
+    candidates = []
+    nested = record.get("target") if isinstance(record, dict) else None
     if isinstance(nested, dict):
-        required = {"target_mode", "chat_id", "forum_topic_id", "channel_chat_id"}
-        if not required.issubset(nested):
-            return {}
-        value = normalize_target(nested)
-        if value:
-            return value
-    required = ("target_mode", "chat_id", "forum_topic_id", "channel_chat_id")
-    if not all(key in record for key in required):
-        return {}
-    fields = {key: record.get(key) for key in required}
-    return normalize_target(fields)
+        candidates.append(nested)
+    if isinstance(record, dict):
+        candidates.append(record)
+    for candidate in candidates:
+        if _candidate_has_identity(candidate):
+            value = normalize_target(candidate)
+            if value:
+                return value
+    return {}
 
 
 def _target_matches(record: dict, target=None) -> bool:

@@ -1945,10 +1945,26 @@ class InflightPage(QWidget):
         if not isinstance(record, dict):
             return
         action = "标记为已发送" if sent else "允许下次重新发送"
+        from upload_journal import _record_target
+
+        target = _record_target(record)
+        has_target = bool(target)
+        message = (
+            f"将{action}：\n{record.get('album_key', '')}\n\n"
+            "请确认你已经核对 Telegram 中的目标和 Album。"
+        )
+        if sent and not has_target:
+            message += (
+                "\n\n这是一条旧版未记录 Telegram 目标的上传记录。"
+                "\n程序无法确认它当时发送到哪个群组/Topic/频道。"
+                "\n\n只有在你确认“当前配置的 Telegram 目标”就是当时发送该 Album 的目标时，"
+                "才能选择“已发送”。"
+                "\n\n如果目标不一致，请不要确认已发送。"
+            )
         answer = QMessageBox.warning(
             self,
             "确认人工处理",
-            f"将{action}：\n{record.get('album_key', '')}\n\n请确认你已经核对 Telegram 中的目标和 Album。",
+            message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -1957,7 +1973,7 @@ class InflightPage(QWidget):
 
     def reload_records(self):
         try:
-            from upload_journal import InflightJournal, UNRESOLVED
+            from upload_journal import InflightJournal, UNRESOLVED, _record_target
 
             records = [
                 record for record in InflightJournal().list_unresolved()
@@ -1969,18 +1985,21 @@ class InflightPage(QWidget):
             return
         self.table.setRowCount(len(records))
         for row, record in enumerate(records):
-            target = record.get("target") if isinstance(record.get("target"), dict) else record
-            target_mode = str(target.get("target_mode", ""))
-            target_id = target.get("chat_id", "")
-            if target_mode != "channel" and target.get("forum_topic_id"):
-                target_id = f"{target_id} / Topic {target.get('forum_topic_id')}"
+            target = _record_target(record)
+            has_target = bool(target)
+            target_id = ""
+            if has_target:
+                target_mode = str(target.get("target_mode", ""))
+                target_id = target.get("chat_id", "")
+                if target_mode != "channel" and target.get("forum_topic_id"):
+                    target_id = f"{target_id} / Topic {target.get('forum_topic_id')}"
             values = [
                 _kind_label(record.get("kind", "unknown")),
                 record.get("album_key", ""),
                 record.get("status", ""),
                 record.get("created_at", ""),
                 record.get("updated_at", ""),
-                target_id or "旧版目标（未记录）",
+                target_id or "⚠ 旧版记录：目标未知",
                 len(record.get("items", []) or []),
                 record.get("error", ""),
             ]
