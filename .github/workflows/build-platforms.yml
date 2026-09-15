@@ -51,10 +51,18 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          $exe = "dist\TDLib Media Uploader\TDLib Media Uploader.exe"
+          $exe = (Resolve-Path -LiteralPath "dist\TDLib Media Uploader\TDLib Media Uploader.exe").Path
           if (-not (Test-Path -LiteralPath $exe)) { throw "EXE not found: $exe" }
-          & $exe --self-test
-          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows self-test failed: $LASTEXITCODE" }
+          $stdoutPath = Join-Path $env:RUNNER_TEMP "tdlib-self-test.stdout"
+          $stderrPath = Join-Path $env:RUNNER_TEMP "tdlib-self-test.stderr"
+          Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+          $process = Start-Process -FilePath $exe -ArgumentList @("--self-test") -Wait -PassThru `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+          $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { "" }
+          $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { "" }
+          if ($stdout) { Write-Output $stdout }
+          if ($stderr) { Write-Output $stderr }
+          if ($process.ExitCode -ne 0) { throw "Packaged Windows self-test failed: $($process.ExitCode)" }
 
       - name: Validate Windows x64 package
         shell: pwsh

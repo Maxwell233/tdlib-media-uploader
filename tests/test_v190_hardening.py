@@ -202,6 +202,20 @@ class V190HardeningTest(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(events[0], "configure")
 
+    def test_windows_packaged_self_test_checks_real_process_exit_code(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "build-platforms.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Start-Process -FilePath $exe", workflow)
+        self.assertIn("$process.ExitCode", workflow)
+        self.assertNotIn(
+            'if ($LASTEXITCODE -ne 0) { throw "Packaged Windows self-test failed',
+            workflow,
+        )
+
     def test_direct_entrypoint_uses_shared_instance_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             lock_path = Path(directory) / "data" / "app.lock"
