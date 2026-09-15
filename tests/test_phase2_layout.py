@@ -130,6 +130,10 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
             "tdlib_media_uploader.telegram.target",
             "tdlib_media_uploader.telegram.limits",
             "tdlib_media_uploader.telegram.send_result",
+            "tdlib_media_uploader.upload",
+            "tdlib_media_uploader.upload.engine",
+            "tdlib_media_uploader.upload.planner",
+            "tdlib_media_uploader.upload.preflight",
         }
         self.assertTrue(expected_modules <= package_modules)
         self.assertIn("from PyInstaller.utils.hooks import collect_all, collect_submodules", source)

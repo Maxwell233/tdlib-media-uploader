@@ -32,6 +32,9 @@ class ArchitectureContractTest(unittest.TestCase):
             "gui/__init__.py",
             "media/__init__.py",
             "upload/__init__.py",
+            "upload/engine.py",
+            "upload/planner.py",
+            "upload/preflight.py",
         }
         for relative_path in expected:
             self.assertTrue(
@@ -103,6 +106,7 @@ class ArchitectureContractTest(unittest.TestCase):
         self.assertIn("class ProgressEvent", models)
         self.assertIn("class UploadEngine", contracts)
         self.assertIn("class MediaStrategy", contracts)
+        self.assertIn("class UploadContext", contracts)
         self.assertIn("class EventSink", contracts)
         self.assertIn("class CancelToken", contracts)
 

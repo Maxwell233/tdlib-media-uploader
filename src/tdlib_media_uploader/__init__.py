@@ -10,6 +10,7 @@ from .contracts import (
     Event,
     EventSink,
     MediaStrategy,
+    UploadContext,
     UploadEngine,
 )
 from .core.models import (
@@ -39,6 +40,7 @@ __all__ = [
     "ProgressEvent",
     "ScanResult",
     "UploadBatchResult",
+    "UploadContext",
     "UploadEngine",
     "UploadRunResult",
 ]

@@ -82,6 +82,7 @@ class UploadBatchResult:
     message_ids: tuple[int, ...] = ()
     confirmed_items: tuple[MediaItem, ...] = ()
     error: str | None = None
+    deferred_items: tuple[MediaItem, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +131,10 @@ class UploadRunResult:
     status: str
     batches: tuple[UploadBatchResult, ...] = ()
     error: str | None = None
+    deferred_items: tuple[MediaItem, ...] = ()
+    failed_items: tuple[MediaItem, ...] = ()
+    scanned_items: tuple[MediaItem, ...] = ()
+    cancelled: bool = False
 
 
 Event = ProgressEvent | LogEvent | AuthEvent

@@ -107,6 +107,10 @@ PACKAGE_HIDDENIMPORTS = [
     "tdlib_media_uploader.telegram.target",
     "tdlib_media_uploader.telegram.limits",
     "tdlib_media_uploader.telegram.send_result",
+    "tdlib_media_uploader.upload",
+    "tdlib_media_uploader.upload.engine",
+    "tdlib_media_uploader.upload.planner",
+    "tdlib_media_uploader.upload.preflight",
 ]
 
 hiddenimports = [

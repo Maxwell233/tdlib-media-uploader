@@ -244,7 +244,8 @@ src/tdlib_media_uploader/core/models.py and contracts.py:
 
 - Data models: FileSnapshot, MediaItem, AlbumPlan, UploadBatchResult,
   ProgressEvent, LogEvent, AuthEvent, ScanResult and UploadRunResult.
-- Service protocols: UploadEngine, MediaStrategy, EventSink and CancelToken.
+- Service protocols: UploadEngine, MediaStrategy, EventSink and CancelToken;
+  UploadContext carries the injected run collaborators.
 - Durable send states: PREPARED, SUBMITTED, CONFIRMED, FAILED and UNKNOWN via
   BatchStatus.
 
@@ -261,6 +262,22 @@ Important semantics:
    only scans, plans and translates media-specific Telegram content.
 5. EventSink and CancelToken keep workers/UI adapters out of core and media
    algorithms.
+
+## Phase 5 engine checkpoint
+
+The main Agent owns the first reference implementation in
+`src/tdlib_media_uploader/upload/engine.py`, `planner.py` and `preflight.py`.
+The engine keeps the full `AlbumPlan.items` boundary immutable, narrows only
+`pending_items`, and invokes state/journal/sender/staging collaborators through
+`UploadContext`.  A confirmed send is checkpointed in this order:
+
+~~~
+PREPARED -> SUBMITTED -> CONFIRMED -> state checkpoint -> journal finalize
+~~~
+
+The reference stores are in-memory test adapters.  The existing V1.9 durable
+state, journal and TDLib implementations remain unchanged until the Image,
+Mixed and Video strategy migration wave supplies explicit adapters.
 
 ## Ownership table for the first parallel wave
 
