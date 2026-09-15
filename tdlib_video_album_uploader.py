@@ -1605,7 +1605,13 @@ def build_video_contents(items, caption: str, ui=None, cancel_event=None):
     return contents, valid_items, skipped
 
 
-def input_video(item, caption: str, cancel_event=None):
+def input_video(item, caption: str, cancel_event=None, *, generate_thumbnail=None):
+    """Build one TDLib video content object for standalone and mixed albums.
+
+    Mixed uploads use the same payload builder as standalone video uploads;
+    only the thumbnail preference differs by mode.
+    """
+
     path = item["path"]
     readiness = wait_for_file_ready(
         path,
@@ -1630,7 +1636,12 @@ def input_video(item, caption: str, cancel_event=None):
         STAGED_UPLOAD_PATHS[stable_path(path)] = source_path
     info = video_info(source_path)
     thumbnail = None
-    if cfg.VIDEO_GENERATE_THUMBNAIL:
+    thumbnail_enabled = (
+        cfg.VIDEO_GENERATE_THUMBNAIL
+        if generate_thumbnail is None
+        else bool(generate_thumbnail)
+    )
+    if thumbnail_enabled:
         if cancel_event is None:
             thumb_path, thumb_width, thumb_height = build_thumbnail(source_path)
         else:

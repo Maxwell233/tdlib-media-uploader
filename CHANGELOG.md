@@ -1,5 +1,19 @@
 # 更新记录
 
+## 1.9.3-beta1
+
+### TDLib 与混合上传修复
+
+- 回退 `tdjson`/TDLib Python 绑定到 `1.8.64.post1`，避免 `1.8.67` 在当前上传实现中的兼容性问题。
+- 混合上传的视频内容复用统一的视频 payload builder，确保 Photo + Video Album 始终带有有效的 `InputFile`。
+- 在写入上传 journal 或发送 TDLib 请求前校验 Photo、Video、缩略图和 cover 的 `InputFile` 结构；空 payload 会明确失败，不再以 TDLib `InputFile is not specified` 的泛化错误结束任务。
+- 上传失败诊断逐项记录内容类型、InputFile 类型、源路径存在性和大小，便于定位临时文件消失或构建异常。
+
+### 回归验证
+
+- 新增混合 Photo + Video 序列化、空 InputFile 发送前拦截、journal 不落 PREPARED 以及有效 Album 请求回归测试。
+- 通过完整离线测试、PyInstaller Windows x64 与 macOS arm64 构建验证后发布 beta1。
+
 ## 1.9.1
 
 ### 本次重新发布修复

@@ -1,3 +1,18 @@
+### V1.9.3-beta1 更新
+
+#### TDLib 与混合上传
+
+- 回退到 `tdjson 1.8.64.post1`，与当前 V2 GUI 兼容层和既有上传实现保持一致。
+- 混合上传的视频内容统一复用视频模式的 payload builder，避免 Photo + Video Album 生成缺少 `InputFile` 的内容。
+- 发送前校验 Photo、Video、`inputThumbnail`、cover 及嵌套 `InputFile`；缺少 `photo`/`video` 或错误结构会在 journal 写入前明确失败。
+- 上传失败日志增加每个媒体的内容类型、InputFile 类型、路径存在性、文件大小、thumbnail 和 cover 诊断。
+
+#### 回归验证
+
+- 已验证空 `InputFile` 不会调用 TDLib，也不会写入 `PREPARED` journal。
+- 已验证有效混合 Photo + Video payload 可以进入 `sendMessageAlbum`。
+- 完整离线回归与跨平台 PyInstaller 构建通过后发布 `v1.9.3-beta1`。
+
 ### V1.9.1 更新
 
 本次重新发布集中修复视频日期扫描和关闭日期后的上传稳定性：

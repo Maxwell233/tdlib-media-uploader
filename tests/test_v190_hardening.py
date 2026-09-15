@@ -105,6 +105,7 @@ class V190HardeningTest(unittest.TestCase):
         client.request = requests.append
         content = {
             "@type": "inputMessagePhoto",
+            "photo": {"@type": "inputFileId", "id": 1},
             "caption": {
                 "@type": "formattedText",
                 "text": "x" * 1025,
@@ -128,6 +129,7 @@ class V190HardeningTest(unittest.TestCase):
         }
         content = {
             "@type": "inputMessagePhoto",
+            "photo": {"@type": "inputFileId", "id": 1},
             "caption": {
                 "@type": "formattedText",
                 "text": "x" * 1500,

@@ -504,66 +504,15 @@ def report_scan_size_skips(skipped, ui=None):
 
 
 def _mixed_input_video(item, caption, cancel_event=None):
-    path = item["path"]
-    readiness = wait_for_file_ready(
-        path,
-        expected_size=item.get("scan_size"),
-        expected_mtime_ns=item.get("scan_mtime_ns"),
-        **_readiness_options(path),
-        cancel_event=cancel_event,
-    )
-    raise_for_file_readiness(path, readiness)
-    source_path = path
-    staging_mode = getattr(cfg, "STAGING_MODE", None)
-    if staging_mode is None or (
-        staging_mode == "off" and getattr(cfg, "STAGING_ENABLED", False)
-    ):
-        staging_mode = "always" if getattr(cfg, "STAGING_ENABLED", False) else "off"
-    if should_stage(path, staging_mode):
-        source_path = stage_file(
-            path,
-            readiness.snapshot,
-            staging_dir=cfg.STAGING_DIR,
-            staging_base_dir=getattr(cfg, "STAGING_BASE_DIR", cfg.STAGING_DIR),
-            cancel_event=cancel_event,
-        )
-        # Mixed video input is built here rather than through the standalone
-        # video uploader; register the copy in its shared cleanup map so a
-        # confirmed Album removes it while FAILED/UNKNOWN copies remain.
-        video_core.STAGED_UPLOAD_PATHS[stable_path(path)] = source_path
-    info = (
-        video_core.video_info(source_path)
-        if cancel_event is None
-        else video_core.video_info(source_path, cancel_event=cancel_event)
-    )
-    thumbnail = None
-    if getattr(cfg, "MIXED_GENERATE_THUMBNAIL", True):
-        if cancel_event is None:
-            thumb_path, width, height = video_core.build_thumbnail(source_path)
-        else:
-            thumb_path, width, height = video_core.build_thumbnail(source_path, cancel_event)
-        thumbnail = {
-            "@type": "inputThumbnail",
-            "thumbnail": {"@type": "inputFileLocal", "path": display_path(thumb_path)},
-            "width": int(width),
-            "height": int(height),
-        }
-    return {
-        "@type": "inputMessageVideo",
-        "video": {"@type": "inputFileLocal", "path": display_path(source_path)},
-        "thumbnail": thumbnail,
-        "cover": None,
-        "start_timestamp": 0,
-        "added_sticker_file_ids": [],
-        "duration": int(max(1, round(info["duration"]))),
-        "width": int(info["width"]),
-        "height": int(info["height"]),
-        "supports_streaming": True,
-        "caption": formatted_text(caption),
-        "show_caption_above_media": False,
-        "self_destruct_type": None,
-        "has_spoiler": False,
+    # Keep one authoritative TDLib video payload implementation.  Mixed
+    # orchestration still owns grouping/captions/state, while the shared
+    # builder owns readiness, staging, metadata and thumbnail shape.
+    kwargs = {
+        "generate_thumbnail": getattr(cfg, "MIXED_GENERATE_THUMBNAIL", True),
     }
+    if cancel_event is not None:
+        kwargs["cancel_event"] = cancel_event
+    return video_core.input_video(item, caption, **kwargs)
 
 
 def build_mixed_contents(items, caption: str, ui=None, cancel_event=None):

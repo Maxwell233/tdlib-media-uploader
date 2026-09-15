@@ -288,12 +288,16 @@ jobs:
           set -Eeuo pipefail
           version="$(tr -d '[:space:]' < VERSION)"
           tag="$GITHUB_REF_NAME"
+          release_flags=(--title "V${version}" --notes-file release-notes.md)
+          if [[ "$version" == *-* ]]; then
+            release_flags+=(--prerelease)
+          else
+            release_flags+=(--latest)
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" release-assets/*.zip release-assets/*.dmg release-assets/SHA256SUMS --clobber
-            gh release edit "$tag" --title "V${version}" --notes-file release-notes.md --latest
+            gh release edit "$tag" "${release_flags[@]}"
           else
             gh release create "$tag" release-assets/*.zip release-assets/*.dmg release-assets/SHA256SUMS \
-              --title "V${version}" \
-              --notes-file release-notes.md \
-              --latest
+              "${release_flags[@]}"
           fi
