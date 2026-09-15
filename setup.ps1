@@ -1,0 +1,126 @@
+﻿param(
+    [switch]$NoPause
+)
+
+$ErrorActionPreference = "Stop"
+Set-Location $PSScriptRoot
+
+function Invoke-NativeCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$Arguments = @()
+    )
+
+    & $FilePath @Arguments
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "命令执行失败（退出码 $LASTEXITCODE）：$FilePath $($Arguments -join ' ')"
+    }
+}
+
+$setupFailed = $false
+
+try {
+    Clear-Host
+
+    $appVersion = (Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "VERSION")).Trim()
+    if ([string]::IsNullOrWhiteSpace($appVersion)) {
+        throw "VERSION 文件为空，无法确定应用版本。"
+    }
+
+    $line = "─" * 64
+    Write-Host $line -ForegroundColor Cyan
+    Write-Host "  TDLib Media Uploader V$appVersion · 初始环境安装" -ForegroundColor Cyan
+    Write-Host $line -ForegroundColor Cyan
+    Write-Host ""
+
+    if (-not (Test-Path ".venv")) {
+        Write-Host "→ 创建 Python 3.13 虚拟环境 .venv" -ForegroundColor Yellow
+        Invoke-NativeCommand -FilePath "py" -Arguments @("-3.13", "-m", "venv", ".venv")
+    }
+    else {
+        Write-Host "✓ 已存在 .venv，继续使用。" -ForegroundColor Green
+    }
+
+    $python = ".\.venv\Scripts\python.exe"
+
+    if (-not (Test-Path $python)) {
+        throw "没有找到 $python。请确认已安装 Python 3.13 x64；如 .venv 已损坏，可删除 .venv 后重新运行 setup.ps1。"
+    }
+
+    Write-Host "→ 更新 pip" -ForegroundColor Yellow
+    Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--upgrade", "pip")
+
+    Write-Host "→ 安装项目依赖" -ForegroundColor Yellow
+    Write-Host "  tdjson 1.8.64.post1 / Pillow / imageio-ffmpeg / PySide6" -ForegroundColor DarkGray
+    Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--upgrade", "--force-reinstall", "--no-binary", "imageio-ffmpeg", "-r", "requirements-lock.txt")
+
+    Write-Host "→ 检查 tdjson 固定版本" -ForegroundColor Yellow
+    $tdjsonVersion = & $python -c "import importlib.metadata; print(importlib.metadata.version('tdjson'))"
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "无法读取 tdjson 版本。"
+    }
+
+    $tdjsonVersion = $tdjsonVersion.Trim()
+
+    if ($tdjsonVersion -ne "1.8.64.post1") {
+        Write-Host "  当前 tdjson=$tdjsonVersion，正在强制修正为 1.8.64.post1" -ForegroundColor Yellow
+        Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "tdjson==1.8.64.post1")
+    }
+    else {
+        Write-Host "✓ tdjson 版本正确：1.8.64.post1" -ForegroundColor Green
+    }
+
+    $dataDirectory = Join-Path $PSScriptRoot "data"
+    $dataConfig = Join-Path $dataDirectory "config.toml"
+    if (-not (Test-Path -LiteralPath $dataConfig)) {
+        if (-not (Test-Path ".\config.example.toml")) {
+            throw "找不到 config.example.toml，无法创建配置文件。"
+        }
+
+        New-Item -ItemType Directory -Force -Path $dataDirectory | Out-Null
+        Copy-Item ".\config.example.toml" $dataConfig
+        Write-Host "✓ 已创建 data\config.toml。" -ForegroundColor Green
+    }
+    else {
+        Write-Host "✓ 保留现有 data\config.toml，不会覆盖你的配置。" -ForegroundColor Green
+    }
+
+    Write-Host ""
+    Write-Host ("─" * 64) -ForegroundColor Green
+    Write-Host "安装完成" -ForegroundColor Green
+    Write-Host "  1. 编辑 data\config.toml（或在 GUI 中编辑配置）"
+    Write-Host "  2. 如需读取 EXIF/QuickTime，可安装 tools\exiftool.exe"
+    Write-Host "  3. 源码运行视频功能需准备 LGPL FFmpeg：放入 tools\ffmpeg\ffmpeg.exe 或加入 PATH"
+    Write-Host "  4. 双击 run.cmd，或运行 .\run.ps1"
+    Write-Host "  5. 项目现已仅保留 GUI 界面，上传核心由 GUI 调用。"
+    Write-Host ("─" * 64) -ForegroundColor Green
+    Write-Host ""
+    Write-Host "提示：默认 missing_date_policy = `"mtime`"，没有 ExifTool 也可上传视频。" -ForegroundColor DarkGray
+    Write-Host "提示：视频封面默认开启，如需关闭请在 data\config.toml 设置 generate_thumbnail = false。" -ForegroundColor DarkGray
+}
+catch {
+    $setupFailed = $true
+
+    Write-Host ""
+    Write-Host ("─" * 64) -ForegroundColor Red
+    Write-Host "安装失败" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host ("─" * 64) -ForegroundColor Red
+    Write-Host ""
+    Write-Host "常见处理：确认 Python 3.13 x64 已安装，或删除损坏的 .venv 后重试。" -ForegroundColor DarkYellow
+}
+finally {
+    if (-not $NoPause) {
+        Write-Host ""
+        [void](Read-Host "按 Enter 键关闭此窗口")
+    }
+}
+
+if ($setupFailed) {
+    exit 1
+}

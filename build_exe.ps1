@@ -63,9 +63,9 @@ function Resolve-PythonCommand {
     return $buildPython
 }
 
-$FfmpegReleaseTag = "autobuild-2026-09-15-13-18"
-$FfmpegArchiveName = "ffmpeg-N-126574-g912208af28-win64-lgpl.zip"
-$FfmpegArchiveSha256 = "2225d99bdd642ba615fb1c8fda94a915f40ea146a6a8e0739c486ebe745d6f6c"
+$FfmpegReleaseTag = "autobuild-2026-09-03-13-17"
+$FfmpegArchiveName = "ffmpeg-N-126390-g9fc8c785e2-win64-lgpl.zip"
+$FfmpegArchiveSha256 = "ba8bf7dec00022c2dbf2cbeb9a601d7e0d131990e276b8c5f88954775735ec8a"
 $FfmpegArchiveUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FfmpegReleaseTag/$FfmpegArchiveName"
 
 function Ensure-LgplFfmpeg {
