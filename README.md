@@ -117,6 +117,8 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 
 每个待发送 Album 在请求前会写入 `data/upload_inflight/<hash>.json`。状态依次记录为 `PREPARED`、`SUBMITTED`、`CONFIRMED`，正常断点写入后才删除；超时、断线、强制停止或部分成功会记录为 `UNKNOWN`，下一次不会自动重发可能已经提交的 Album。请打开侧栏的“未确认上传”，先在 Telegram 中核对对应目标，再手动处理；页面会同时显示目标、Album 标识和文件名。
 
+每个 Album 发送前还会校验 TDLib `inputMessagePhoto`/`inputMessageVideo` 的必需 InputFile 结构，以及可选 `inputThumbnail`、cover 中的嵌套文件。缺少 `photo`/`video`、错误的 `@type` 或空的本地路径会在写入发送 journal 前停止，并在日志中给出媒体索引、字段和安全 payload 摘要；上传失败诊断还会列出每个媒体的实际内容类型、InputFile 路径、存在性和大小。
+
 任务中心的“安全停止”会先停止启动新的 Album，并等待当前 Album 得到 Telegram 最终确认、写入断点后关闭 TDLib；界面在真正关闭完成前会保持扫描、上传和关键配置入口不可用。“强制停止”只用于卡死等情况，会立即关闭当前 TDLib 会话，已提交但未确认的 Album 必须在“未确认上传”中人工核对。长时间传输还受 `[tdlib] upload_stall_timeout_seconds` 无进度 watchdog 保护（默认 300 秒，设为 0 可关闭）；发生停滞时会记录详细诊断并保留 UNKNOWN。`[tdlib] session_rotation_albums` 可设置在指定数量的已确认 Album 后轮换 TDLib 会话，0 表示关闭，轮换只发生在断点和 journal 保存完成的 Album 边界。
 
 如果源文件位于 SMB/NAS，可在“设置与诊断”中选择本地暂存模式，或在配置中设置 `[staging] mode`：`off` 直接读取源文件，`network` 只暂存网络盘，`always` 暂存所有文件。程序会在 `data/cache/staging` 或你指定的受管目录中创建带 marker 的暂存副本，只清理自己创建的文件，不会递归删除 base directory 中的其他用户文件。

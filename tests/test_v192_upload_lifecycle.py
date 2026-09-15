@@ -68,6 +68,179 @@ class UploadLifecycleTest(unittest.TestCase):
         self.assertEqual(tdlib_common.REQUIRED_TDJSON_VERSION, "1.8.67")
         self.assertEqual(tdlib_common.verify_tdjson_version(), "1.8.67")
 
+    def test_input_message_photo_schema_accepts_local_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "photo.jpg"
+            path.write_bytes(b"photo")
+            tdlib_common.validate_input_message_contents([{
+                "@type": "inputMessagePhoto",
+                "photo": {"@type": "inputFileLocal", "path": str(path)},
+                "thumbnail": None,
+            }], items=[{"path": path}])
+
+    def test_input_message_schema_rejects_missing_or_malformed_files(self):
+        invalid_contents = [
+            {
+                "@type": "inputMessagePhoto",
+                "photo": None,
+            },
+            {
+                "@type": "inputMessagePhoto",
+                "photo": {},
+            },
+            {
+                "@type": "inputMessagePhoto",
+                "photo": {"@type": "inputFileLocal", "path": ""},
+            },
+            {
+                "@type": "inputMessageVideo",
+                "video": None,
+            },
+            {
+                "@type": "inputMessageVideo",
+                "video": {"@type": "inputFileId", "id": 1},
+                "thumbnail": {
+                    "@type": "inputThumbnail",
+                    "thumbnail": None,
+                    "width": 1,
+                    "height": 1,
+                },
+            },
+        ]
+        for content in invalid_contents:
+            with self.subTest(content=content):
+                with self.assertRaises(tdlib_common.InvalidTDLibInputPayload):
+                    tdlib_common.validate_input_message_contents([content])
+
+    def test_input_message_video_schema_accepts_optional_thumbnail_and_cover(self):
+        tdlib_common.validate_input_message_contents([{
+            "@type": "inputMessageVideo",
+            "video": {"@type": "inputFileId", "id": 7},
+            "thumbnail": None,
+            "cover": None,
+        }])
+
+    def test_input_thumbnail_schema_validates_nested_local_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "clip.mp4"
+            thumb = root / "clip.jpg"
+            video.write_bytes(b"video")
+            thumb.write_bytes(b"thumbnail")
+            tdlib_common.validate_input_message_contents([{
+                "@type": "inputMessageVideo",
+                "video": {"@type": "inputFileLocal", "path": str(video)},
+                "thumbnail": {
+                    "@type": "inputThumbnail",
+                    "thumbnail": {"@type": "inputFileLocal", "path": str(thumb)},
+                    "width": 320,
+                    "height": 180,
+                },
+                "cover": {"@type": "inputFileLocal", "path": str(thumb)},
+            }], items=[{"path": video}])
+
+    def test_mixed_video_delegates_to_standalone_payload_builder(self):
+        import tdlib_mixed_album_uploader as mixed_core
+
+        item = {"path": Path("clip.mp4"), "media_kind": "video"}
+        expected = {"@type": "inputMessageVideo", "video": {"@type": "inputFileId", "id": 1}}
+        with patch.object(mixed_core.video_core, "input_video", return_value=expected) as builder, \
+                patch.object(mixed_core.cfg, "MIXED_GENERATE_THUMBNAIL", False):
+            result = mixed_core._mixed_input_video(item, "caption")
+        self.assertIs(result, expected)
+        builder.assert_called_once_with(item, "caption", generate_thumbnail=False)
+
+    def test_mixed_payload_serialization_keeps_photo_and_video_input_files(self):
+        import tdlib_mixed_album_uploader as mixed_core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            photo_path = root / "photo.jpg"
+            video_path = root / "clip.mp4"
+            photo_path.write_bytes(b"photo")
+            video_path.write_bytes(b"video")
+            items = [
+                {"path": photo_path, "media_kind": "image"},
+                {"path": video_path, "media_kind": "video"},
+            ]
+            photo_content = {
+                "@type": "inputMessagePhoto",
+                "photo": {"@type": "inputFileLocal", "path": str(photo_path)},
+                "thumbnail": None,
+            }
+            video_content = {
+                "@type": "inputMessageVideo",
+                "video": {"@type": "inputFileLocal", "path": str(video_path)},
+                "thumbnail": None,
+                "cover": None,
+            }
+            with patch.object(mixed_core.image_core, "input_photo", return_value=photo_content), \
+                    patch.object(mixed_core, "_mixed_input_video", return_value=video_content):
+                contents, valid, skipped = mixed_core.build_mixed_contents(items, "Album")
+            self.assertEqual(len(valid), 2)
+            self.assertEqual(skipped, [])
+            serialized = json.loads(json.dumps(contents, ensure_ascii=False))
+            tdlib_common.validate_input_message_contents(serialized, items=items)
+            self.assertEqual(serialized[0]["photo"]["@type"], "inputFileLocal")
+            self.assertEqual(serialized[1]["video"]["@type"], "inputFileLocal")
+
+    def test_malformed_payload_fails_before_journal_prepare(self):
+        class Journal:
+            def __init__(self):
+                self.calls = []
+
+            def unresolved(self, *args, **kwargs):
+                return None
+
+            def prepare(self, *args, **kwargs):
+                self.calls.append("prepare")
+
+        journal = Journal()
+        client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
+        client.ui = type("UI", (), {"warning": lambda *_args: None})()
+        client.cancel_event = threading.Event()
+        client.inflight_journal = journal
+        client._last_request_dispatched = False
+        client._activity_lock = threading.Lock()
+        client._active_album_context = None
+        client._active_file_ids = set()
+        client.caption_length_limit = None
+        client._safe_diagnose_upload_failure = lambda *_args: None
+        client.request = lambda _query: self.fail("malformed payload reached TDLib")
+        with self.assertRaises(tdlib_common.InvalidTDLibInputPayload):
+            client.send_contents(
+                [{"@type": "inputMessagePhoto", "photo": None}],
+                album_key="malformed",
+                kind="image",
+                items=[{"path": Path("photo.jpg")}],
+            )
+        self.assertEqual(journal.calls, [])
+
+    def test_upload_failure_diagnostic_includes_each_payload_shape(self):
+        client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
+        contents = [
+            {
+                "@type": "inputMessagePhoto",
+                "photo": {"@type": "inputFileId", "id": 1},
+                "thumbnail": None,
+            },
+            {
+                "@type": "inputMessageVideo",
+                "video": {"@type": "inputFileRemote", "id": "remote-1"},
+                "thumbnail": None,
+                "cover": None,
+            },
+        ]
+        rows = client._payload_diagnostic_lines(
+            contents,
+            [{"path": Path("photo.jpg")}, {"path": Path("clip.mp4")}],
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertIn("content=inputMessagePhoto", rows[0])
+        self.assertIn("photo=type=inputFileId", rows[0])
+        self.assertIn("content=inputMessageVideo", rows[1])
+        self.assertIn("video=type=inputFileRemote", rows[1])
+
     def test_stale_image_upload_mapping_falls_back_to_source(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "photo.jpg"
@@ -158,7 +331,11 @@ class UploadLifecycleTest(unittest.TestCase):
 
         with self.assertRaises(tdlib_common.TDLibCancelled):
             client.send_contents(
-                [{"@type": "inputMessagePhoto", "caption": {"text": "", "entities": []}}],
+                [{
+                    "@type": "inputMessagePhoto",
+                    "photo": {"@type": "inputFileId", "id": 1},
+                    "caption": {"text": "", "entities": []},
+                }],
                 album_key="album-before-send",
                 kind="image",
                 items=[{"path": Path("clip.jpg")}],
@@ -199,7 +376,11 @@ class UploadLifecycleTest(unittest.TestCase):
         client.request = dispatched_request
         with self.assertRaises(tdlib_common.TDLibCancelled):
             client.send_contents(
-                [{"@type": "inputMessagePhoto", "caption": {"text": "", "entities": []}}],
+                [{
+                    "@type": "inputMessagePhoto",
+                    "photo": {"@type": "inputFileId", "id": 1},
+                    "caption": {"text": "", "entities": []},
+                }],
                 album_key="album-after-send",
                 kind="image",
                 items=[{"path": Path("clip.jpg")}],

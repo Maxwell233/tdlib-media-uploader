@@ -20,6 +20,8 @@
 
 - 新增安全/强制停止、watchdog 活动刷新、会话轮换、零结果重试、空分组和未确认文件名显示测试。
 - TDLib Python 绑定升级到 1.8.67（对应 TDLib 1.8.67），修复并验证新版本的本地文件上传接口。
+- 发送前新增 InputMessageContent schema 校验；`photo`、`video`、`inputThumbnail` 和嵌套 InputFile 缺失或类型错误会在写入 journal 前明确失败。
+- 上传失败诊断逐项记录实际 TDLib payload 的内容类型、InputFile 类型、路径存在性、文件大小、thumbnail 和 cover；混合视频复用视频模式的 payload builder，避免两套实现漂移。
 - 保持 video、image、mixed 的排序、Album 边界、断点、UNKNOWN journal、staging 和跨平台打包行为不变。
 
 ### V1.9.1 更新

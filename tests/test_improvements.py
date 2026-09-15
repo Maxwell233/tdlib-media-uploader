@@ -418,7 +418,10 @@ class ImprovementsTest(unittest.TestCase):
             with patch.object(client, "_safe_diagnose_upload_failure"):
                 with self.assertRaises(RuntimeError):
                     client.send_contents(
-                        [{"@type": "inputMessagePhoto"}],
+                        [{
+                            "@type": "inputMessagePhoto",
+                            "photo": {"@type": "inputFileId", "id": 1},
+                        }],
                         album_key="album-key",
                         kind="image",
                     )
@@ -1467,7 +1470,12 @@ class ImprovementsTest(unittest.TestCase):
             with patch.object(tdlib_common, "write_app_log") as write:
                 with self.assertRaises(tdlib_common.TDLibError):
                     client.send_contents(
-                        [{"@type": "inputMessageVideo"}],
+                        [{
+                            "@type": "inputMessageVideo",
+                            "video": {"@type": "inputFileId", "id": 1},
+                            "thumbnail": None,
+                            "cover": None,
+                        }],
                         items=[{"path": path, "scan_size": 5, "scan_mtime_ns": path.stat().st_mtime_ns}],
                     )
             self.assertTrue(write.called)

@@ -56,6 +56,10 @@ class UploadStalledError(RuntimeError):
     """No upload bytes or TDLib send-state activity was observed in time."""
 
 
+class InvalidTDLibInputPayload(ValueError):
+    """A generated InputMessageContent does not match TDLib's schema."""
+
+
 class SendResultUnknown(TimeoutError):
     """A submitted Album has known and/or unknown individual outcomes."""
 
@@ -92,6 +96,301 @@ def verify_tdjson_version() -> str:
 
 def formatted_text(text: str = "") -> dict:
     return {"@type": "formattedText", "text": text, "entities": []}
+
+
+_TDLIB_INPUT_FILE_TYPES = frozenset(
+    {
+        "inputFileLocal",
+        "inputFileId",
+        "inputFileRemote",
+        "inputFileGenerated",
+    }
+)
+
+
+def _safe_payload_summary(value, *, _depth: int = 0):
+    """Return a bounded, secret-free summary suitable for application logs."""
+
+    if _depth > 8:
+        return "<nested payload truncated>"
+    if isinstance(value, dict):
+        result = {}
+        payload_type = value.get("@type")
+        if payload_type is not None:
+            result["@type"] = str(payload_type)
+        for key, nested in value.items():
+            if key == "@type":
+                continue
+            if key in {"path", "original_path", "conversion"}:
+                if isinstance(nested, (str, Path)):
+                    text = str(nested)
+                    if key == "path":
+                        try:
+                            source = Path(text)
+                            result[key] = {
+                                "value": text,
+                                "exists": source.is_file(),
+                                "size": source.stat().st_size if source.is_file() else None,
+                            }
+                        except (OSError, TypeError, ValueError):
+                            result[key] = {"value": text, "exists": False, "size": None}
+                    else:
+                        result[key] = text
+                else:
+                    result[key] = repr(nested)
+            elif key == "caption" and isinstance(nested, dict):
+                text = nested.get("text", "")
+                result[key] = {
+                    "@type": nested.get("@type"),
+                    "length": len(str(text)) if text is not None else 0,
+                    "entities": len(nested.get("entities") or []),
+                }
+            elif isinstance(nested, (dict, list, tuple)):
+                result[key] = _safe_payload_summary(nested, _depth=_depth + 1)
+            elif isinstance(nested, (str, int, float, bool)) or nested is None:
+                result[key] = nested
+            else:
+                result[key] = repr(nested)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_safe_payload_summary(item, _depth=_depth + 1) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return repr(value)
+
+
+def _payload_source_label(items, index: int, content) -> str:
+    """Get a useful source filename without assuming a particular item shape."""
+
+    if isinstance(items, (list, tuple)) and index < len(items):
+        item = items[index]
+        raw = item.get("path") if isinstance(item, dict) else item
+        if raw:
+            return str(raw)
+    for raw_path in TDJsonClient._iter_local_input_paths(content):
+        if raw_path:
+            return str(raw_path)
+    return "<未提供源文件>"
+
+
+def _invalid_payload(
+    *,
+    index: int,
+    content_type: str,
+    source: str,
+    field: str,
+    actual,
+    content,
+) -> InvalidTDLibInputPayload:
+    summary = json.dumps(
+        _safe_payload_summary(content),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return InvalidTDLibInputPayload(
+        f"TDLib InputMessageContent 无效：content index={index + 1}, "
+        f"content_type={content_type or '<missing>'}, source={source}, "
+        f"field={field}, actual={actual!r}, summary={summary}"
+    )
+
+
+def _validate_input_file(
+    value,
+    *,
+    index: int,
+    content_type: str,
+    source: str,
+    field: str,
+    content,
+) -> None:
+    if not isinstance(value, dict):
+        raise _invalid_payload(
+            index=index,
+            content_type=content_type,
+            source=source,
+            field=field,
+            actual=value,
+            content=content,
+        )
+    file_type = value.get("@type")
+    if file_type not in _TDLIB_INPUT_FILE_TYPES:
+        raise _invalid_payload(
+            index=index,
+            content_type=content_type,
+            source=source,
+            field=f"{field}.@type",
+            actual=file_type,
+            content=content,
+        )
+    if file_type == "inputFileLocal":
+        path = value.get("path")
+        if not isinstance(path, (str, Path)) or not str(path).strip():
+            raise _invalid_payload(
+                index=index,
+                content_type=content_type,
+                source=source,
+                field=f"{field}.path",
+                actual=path,
+                content=content,
+            )
+    elif file_type == "inputFileId":
+        file_id = value.get("id")
+        if isinstance(file_id, bool) or not isinstance(file_id, int):
+            raise _invalid_payload(
+                index=index,
+                content_type=content_type,
+                source=source,
+                field=f"{field}.id",
+                actual=file_id,
+                content=content,
+            )
+    elif file_type == "inputFileRemote":
+        remote_id = value.get("id")
+        if not isinstance(remote_id, str) or not remote_id.strip():
+            raise _invalid_payload(
+                index=index,
+                content_type=content_type,
+                source=source,
+                field=f"{field}.id",
+                actual=remote_id,
+                content=content,
+            )
+    elif file_type == "inputFileGenerated":
+        original_path = value.get("original_path")
+        conversion = value.get("conversion")
+        if not isinstance(original_path, str) or not original_path.strip():
+            raise _invalid_payload(
+                index=index,
+                content_type=content_type,
+                source=source,
+                field=f"{field}.original_path",
+                actual=original_path,
+                content=content,
+            )
+        if not isinstance(conversion, str) or not conversion.strip():
+            raise _invalid_payload(
+                index=index,
+                content_type=content_type,
+                source=source,
+                field=f"{field}.conversion",
+                actual=conversion,
+                content=content,
+            )
+
+
+def _validate_input_thumbnail(
+    value,
+    *,
+    index: int,
+    content_type: str,
+    source: str,
+    field: str,
+    content,
+) -> None:
+    if not isinstance(value, dict) or value.get("@type") != "inputThumbnail":
+        raise _invalid_payload(
+            index=index,
+            content_type=content_type,
+            source=source,
+            field=f"{field}.@type",
+            actual=value,
+            content=content,
+        )
+    _validate_input_file(
+        value.get("thumbnail"),
+        index=index,
+        content_type=content_type,
+        source=source,
+        field=f"{field}.thumbnail",
+        content=content,
+    )
+    for dimension in ("width", "height"):
+        raw = value.get(dimension)
+        if raw is not None and (isinstance(raw, bool) or not isinstance(raw, int) or raw < 0):
+            raise _invalid_payload(
+                index=index,
+                content_type=content_type,
+                source=source,
+                field=f"{field}.{dimension}",
+                actual=raw,
+                content=content,
+            )
+
+
+def validate_input_message_contents(contents, *, items=None) -> None:
+    """Validate generated photo/video content before any journal/request.
+
+    This checks the TDLib object shape and required InputFile types.  Local
+    path existence is checked separately by ``_validate_local_input_paths`` so
+    a disappearing file keeps its more actionable FileNotFoundError and can be
+    diagnosed as a source race.
+    """
+
+    if not isinstance(contents, (list, tuple)) or not contents:
+        raise InvalidTDLibInputPayload(
+            "TDLib InputMessageContent 无效：contents 必须是非空列表"
+        )
+    for index, content in enumerate(contents):
+        content_type = content.get("@type") if isinstance(content, dict) else ""
+        source = _payload_source_label(items, index, content)
+        if content_type not in {"inputMessagePhoto", "inputMessageVideo"}:
+            raise _invalid_payload(
+                index=index,
+                content_type=str(content_type or ""),
+                source=source,
+                field="@type",
+                actual=content_type,
+                content=content,
+            )
+        if content_type == "inputMessagePhoto":
+            _validate_input_file(
+                content.get("photo"),
+                index=index,
+                content_type=content_type,
+                source=source,
+                field="photo",
+                content=content,
+            )
+            thumbnail = content.get("thumbnail")
+            if thumbnail is not None:
+                _validate_input_thumbnail(
+                    thumbnail,
+                    index=index,
+                    content_type=content_type,
+                    source=source,
+                    field="thumbnail",
+                    content=content,
+                )
+        else:
+            _validate_input_file(
+                content.get("video"),
+                index=index,
+                content_type=content_type,
+                source=source,
+                field="video",
+                content=content,
+            )
+            thumbnail = content.get("thumbnail")
+            if thumbnail is not None:
+                _validate_input_thumbnail(
+                    thumbnail,
+                    index=index,
+                    content_type=content_type,
+                    source=source,
+                    field="thumbnail",
+                    content=content,
+                )
+            cover = content.get("cover")
+            if cover is not None:
+                _validate_input_file(
+                    cover,
+                    index=index,
+                    content_type=content_type,
+                    source=source,
+                    field="cover",
+                    content=content,
+                )
 
 
 class HeadlessUI:
@@ -1002,9 +1301,17 @@ class TDJsonClient:
                 f" (size={snapshot.size}, mtime_ns={snapshot.mtime_ns}, id={stable_path(path)})"
             )
         detail = "\n".join(records) or "未提供媒体列表，无法检查本地源文件"
+        payload_rows = self._payload_diagnostic_lines(contents, items)
+        payload_detail = "\n".join(payload_rows) or "<无媒体 payload>"
+        request_type = getattr(self, "_active_request_type", None)
+        if not request_type:
+            request_type = "sendMessage" if len(contents or []) == 1 else "sendMessageAlbum"
         message = (
             f"TDLib 上传失败源诊断：{type(exc).__name__}: {exc}\n"
-            f"{detail}"
+            f"request_type={request_type}\n"
+            f"{detail}\n"
+            "TDLib payload:\n"
+            f"{payload_detail}"
         )
         write_app_log("ERROR", message, source="upload")
         warning = getattr(self.ui, "warning", None)
@@ -1157,6 +1464,72 @@ class TDJsonClient:
             raise FileNotFoundError(
                 f"TDLib 本地输入文件不存在或不可读取：{preview}"
             )
+
+    def _validate_input_message_contents(self, contents, items=None) -> None:
+        """Validate TDLib media content before persisting PREPARED."""
+
+        validate_input_message_contents(contents, items=items)
+
+    @staticmethod
+    def _input_file_diagnostic(value):
+        """Return a compact InputFile diagnostic without exposing credentials."""
+
+        if not isinstance(value, dict):
+            return repr(value)
+        file_type = value.get("@type")
+        if file_type == "inputFileLocal":
+            raw_path = value.get("path")
+            try:
+                path = Path(raw_path) if raw_path else None
+                exists = bool(path and path.is_file())
+                size = path.stat().st_size if exists else None
+            except (OSError, TypeError, ValueError):
+                exists, size = False, None
+            return (
+                f"type=inputFileLocal path={raw_path!s} "
+                f"exists={exists} size={size}"
+            )
+        if file_type in {"inputFileId", "inputFileRemote"}:
+            return f"type={file_type} id={value.get('id')!r}"
+        if file_type == "inputFileGenerated":
+            return (
+                "type=inputFileGenerated "
+                f"original_path={value.get('original_path')!r} "
+                f"conversion={value.get('conversion')!r}"
+            )
+        return f"type={file_type!r} value={_safe_payload_summary(value)!r}"
+
+    def _payload_diagnostic_lines(self, contents, items=None) -> list[str]:
+        """Describe every media content for opaque TDLib request failures."""
+
+        rows = []
+        for index, content in enumerate(contents or [], 1):
+            item = items[index - 1] if isinstance(items, (list, tuple)) and index <= len(items) else None
+            source = item.get("path") if isinstance(item, dict) else item
+            content_type = content.get("@type") if isinstance(content, dict) else None
+            media_field = "photo" if content_type == "inputMessagePhoto" else "video"
+            media = content.get(media_field) if isinstance(content, dict) else None
+            line = (
+                f"[{index}] source={source!s} content={content_type!s} "
+                f"{media_field}={self._input_file_diagnostic(media)}"
+            )
+            if isinstance(content, dict):
+                thumbnail = content.get("thumbnail")
+                if thumbnail is None:
+                    line += " thumbnail=None"
+                elif isinstance(thumbnail, dict):
+                    line += (
+                        " thumbnail="
+                        f"type={thumbnail.get('@type')!s} "
+                        f"file={self._input_file_diagnostic(thumbnail.get('thumbnail'))}"
+                    )
+                else:
+                    line += f" thumbnail={thumbnail!r}"
+                if content_type == "inputMessageVideo":
+                    cover = content.get("cover")
+                    line += f" cover={self._input_file_diagnostic(cover) if cover is not None else 'None'}"
+            rows.append(line)
+        return rows
 
     @staticmethod
     def _target_identity() -> dict:
@@ -1327,6 +1700,10 @@ class TDJsonClient:
         journal_target = self._target_identity() if journal_active else None
         submitted = False
         journal_terminal = False
+        self._active_request_type = (
+            "sendMessage" if isinstance(contents, (list, tuple)) and len(contents) == 1
+            else "sendMessageAlbum"
+        )
         self._last_request_dispatched = False
         with getattr(self, "_activity_lock", threading.Lock()):
             self._active_album_context = None
@@ -1347,6 +1724,11 @@ class TDJsonClient:
         # persisted.  A missing temporary artifact is a clean pre-dispatch
         # failure and must not create an UNKNOWN journal entry.
         try:
+            # Validate the complete InputMessageContent shape before PREPARED
+            # is persisted.  Path validation below remains separate so a
+            # source disappearing between build and dispatch keeps its
+            # actionable FileNotFoundError classification.
+            self._validate_input_message_contents(contents, items=items)
             self._validate_local_input_paths(contents)
         except Exception as exc:
             self._safe_diagnose_upload_failure(contents, items, exc)

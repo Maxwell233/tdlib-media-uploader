@@ -14,6 +14,8 @@
 - 网络目录意外返回 0 个文件时进行有界重新枚举并报告诊断；取消扫描状态不再伪装成空结果。
 - 修复空 Album 计划显示虚假“媒体组 1”；未确认上传页面显示文件名、目标和 Album 信息。
 - `tdjson`/TDLib Python 绑定升级到 1.8.67。
+- 发送前校验 Photo/Video/InputThumbnail 的 InputFile schema；payload 不完整时在 journal 写入前给出具体字段和安全摘要。
+- 上传失败日志逐项记录混合媒体的 TDLib payload 形状，并让混合视频复用视频模式的统一 builder。
 
 ## 1.9.1
 
