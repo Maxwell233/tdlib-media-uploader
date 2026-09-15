@@ -147,15 +147,18 @@ responsibilities to preserve while moving them behind V2 boundaries.
 | app_logging.py / self_test.py | Persistent diagnostics and offline health check | Used by GUI, TDLib and CI/package entrypoints |
 | .github/workflows/* | Fast offline/architecture gate and full Windows/macOS packaging gate | Main-Agent-owned CI boundary |
 
-The current high-level flow is:
+The V2-integrated high-level flow is:
 
-GUI MainWindow -> ScanWorker/_scan_result -> path_utils or media uploader
-scanner -> preview result -> UploadWorker -> media uploader -> tdlib_common
-TDJsonClient -> upload_state/upload_journal/staging/app_logging.
+GUI MainWindow -> ScanWorker -> gui.integration.scan_v2 -> media strategy
+-> preview result -> UploadWorker -> gui.integration.run_v2_upload
+-> UploadEngine -> TDLibSender/tdlib_common -> upload_state/upload_journal/
+staging/app_logging.
 
-The principal V1.9 architecture risk is that each media uploader owns a
-slightly different copy of scan, preflight, content construction, journal and
-state lifecycle, while gui_app.py reaches into module globals to connect them.
+The migration-period widgets still render the established dictionary-shaped
+preview contract, but the scan and upload workers now cross one explicit V2
+GUI boundary.  The legacy modules remain behind the strategy and sender
+adapters for media-specific probing and TDLib input construction; they no
+longer own the GUI upload lifecycle.
 
 ## Target package layout and dependency direction
 
@@ -191,11 +194,15 @@ src/tdlib_media_uploader/
 │   ├── mixed.py                   # MixedStrategy Agent
 │   └── video.py                   # VideoStrategy Agent
 ├── gui/
+│   ├── application.py             # main-owned lazy GUI bootstrap
+│   ├── events.py                   # main-owned Qt signal and auth bridges
+│   ├── integration.py             # main-owned Qt-free V2 workflow bridge
+│   ├── models.py                  # main-owned V2 preview translation
+│   ├── workers.py                  # main-owned scan/upload thread lifecycle
 │   ├── main_window.py             # main-owned application lifecycle
-│   ├── models.py
-│   ├── events.py
-│   ├── workers.py
 │   ├── pages/
+│   │   ├── home.py
+│   │   ├── task.py
 │   │   ├── video.py
 │   │   ├── image.py
 │   │   ├── mixed.py
@@ -278,6 +285,64 @@ PREPARED -> SUBMITTED -> CONFIRMED -> state checkpoint -> journal finalize
 The reference stores are in-memory test adapters.  The existing V1.9 durable
 state, journal and TDLib implementations remain unchanged until the Image,
 Mixed and Video strategy migration wave supplies explicit adapters.
+
+## Phase 6 GUI integration checkpoint
+
+`src/tdlib_media_uploader/gui/integration.py` now supplies the GUI boundary
+for all three strategies.  `scan_v2()` returns immutable V2 scan/planning
+models, while `run_v2_upload()` injects the durable legacy state and inflight
+journal into `UploadEngine`, adapts TDLib sends without enabling the legacy
+client journal, and translates progress/events back to the existing task
+center.  A confirmed engine checkpoint is the only path that removes staged
+media.  The root GUI keeps the dependency-free preview fallback for
+environments where the V2 strategy dependencies cannot be imported.
+
+## Phase 7 GUI bootstrap checkpoint
+
+`src/tdlib_media_uploader/gui/application.py` now owns the package-facing
+`main()` and `run_self_test()` entrypoints.  The self-test path loads only the
+offline checker, so it does not require Qt; a normal launch lazily delegates
+to the migration-period widget module.  `src/tdlib_media_uploader/app.py` and
+the PyInstaller spec both point at this package boundary, leaving the existing
+GUI pages behaviorally unchanged while the next page migration remains
+reversible.
+
+## Phase 8 GUI worker checkpoint
+
+`src/tdlib_media_uploader/gui/events.py` now owns the authentication and task
+center signal bridges, and `gui/workers.py` owns the scan/upload `QThread`
+lifecycles.  The compatibility GUI supplies explicit scan, target, source-root
+and configuration callbacks; the package workers never import `gui_app.py`.
+This keeps cancellation and result mapping in one place without changing the
+existing page signals or preview dictionary contract.
+
+## Phase 9 GUI preview-model checkpoint
+
+`src/tdlib_media_uploader/gui/models.py` now owns the V2 preview translation:
+item identity, immutable plan projection, group aggregation, byte totals and
+scan warning projection.  `gui_app.py` keeps only a thin compatibility wrapper
+for its existing private helper names, so the pages continue to receive the
+same dictionary shape while the model boundary remains Qt-free.
+
+## Phase 10 GUI page checkpoint
+
+The package now owns the overview and task-center widgets in
+`gui/pages/home.py` and `gui/pages/task.py`. Both pages keep their existing
+signals and public update methods, while their formatting and version lookup
+are local to the package boundary. `gui_app.py` imports these classes as
+compatibility exports; it no longer defines duplicate copies of either page.
+The media upload, settings, inflight and dialog widgets remain in the root
+module for the next page migration slice.
+
+## Phase 11 GUI upload-page checkpoint
+
+The shared media upload widget now lives in `gui/pages/upload.py`, with
+explicit `VideoPage`, `ImagePage` and `MixedPage` route classes.  The page
+consumes the existing preview dictionary and signal contracts, while its
+configuration, caption persistence and dialog hooks are supplied through
+`UploadPageServices`.  `gui_app.py` keeps the old `UploadPage(kind)`
+constructor as a compatibility shell and injects the legacy patch points;
+`MainWindow` instantiates the package-owned route classes.
 
 ## Ownership table for the first parallel wave
 

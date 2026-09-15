@@ -18,10 +18,17 @@ import shutil
 import stat
 import subprocess
 import sys
-import threading
 import tomllib
+from collections.abc import Mapping
 from collections import defaultdict
 from pathlib import Path
+
+
+_PACKAGE_SOURCE_ROOT = Path(__file__).resolve().parent / "src"
+if _PACKAGE_SOURCE_ROOT.is_dir() and str(_PACKAGE_SOURCE_ROOT) not in sys.path:
+    # Keep direct ``python gui_app.py`` launches compatible with the package
+    # worker boundary while the project is not installed as a wheel yet.
+    sys.path.insert(0, str(_PACKAGE_SOURCE_ROOT))
 
 from album_metadata import (
     CaptionLimitError,
@@ -31,7 +38,7 @@ from album_metadata import (
     validate_caption,
     with_filename_description,
 )
-from app_logging import APP_LOG_PATH, LOG_DIR, TDLIB_LOG_PATH, write_app_log, write_exception
+from app_logging import APP_LOG_PATH, LOG_DIR, TDLIB_LOG_PATH, write_app_log
 from path_utils import (
     file_mtime,
     is_link_or_junction,
@@ -43,7 +50,7 @@ from path_utils import (
     run_cancellable_process,
     validate_scan_root,
 )
-from PySide6.QtCore import QLibraryInfo, QObject, QThread, QTimer, Signal, Slot, Qt, QLockFile
+from PySide6.QtCore import QLibraryInfo, QTimer, Signal, Slot, Qt, QLockFile
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -92,6 +99,25 @@ from runtime_paths import (
 )
 from instance_lock import InstanceLock
 from self_test import run_self_test
+from tdlib_media_uploader.gui.events import AuthBridge, GuiConsoleUI
+from tdlib_media_uploader.gui.models import (
+    caption_payload as _v2_caption_payload,
+    group_key as _v2_group_key,
+    item_dict as _v2_item_dict,
+    item_identity as _v2_item_identity,
+    plan_dict as _v2_plan_dict,
+    scan_result as _translate_v2_scan_result,
+)
+from tdlib_media_uploader.gui.pages import (
+    HomePage,
+    ImagePage as _PackageImagePage,
+    MixedPage as _PackageMixedPage,
+    TaskPage,
+    UploadPage as _PackageUploadPage,
+    UploadPageServices,
+    VideoPage as _PackageVideoPage,
+)
+from tdlib_media_uploader.gui.workers import ScanWorker, UploadWorker
 
 
 PROJECT_DIR = RESOURCE_DIR
@@ -233,6 +259,13 @@ def _target_for(kind: str) -> dict:
         "forum_topic_id": _cfg("FORUM_TOPIC_ID", 0),
         "chat_id": _cfg("CHAT_ID", 0),
     }
+
+
+def _source_root_for(kind: str) -> Path:
+    """Return the configured source root for a worker boundary call."""
+
+    normalized = _require_kind(kind)
+    return Path(_cfg(KIND_PATH_KEYS[normalized], PROJECT_DIR))
 
 
 def _fmt_size(value: float | int | None) -> str:
@@ -752,7 +785,7 @@ def _cancelled_scan_result(
     }
 
 
-def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
+def _legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
     """Scan using the existing core when available, with a preview fallback."""
     kind = str(kind).strip().lower()
     if kind not in MEDIA_KINDS:
@@ -1250,347 +1283,69 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
     }
 
 
-class ScanWorker(QThread):
-    completed = Signal(object)
-    cancelled = Signal(object)
-    failed = Signal(str)
-    progress_changed = Signal(str, object)
+def _load_v2_gui_integration():
+    """Load the package GUI boundary in both source and installed layouts."""
 
-    def __init__(self, kind: str):
-        super().__init__()
-        self.kind = _require_kind(kind)
-        self.cancel_event = threading.Event()
-
-    def request_stop(self):
-        """Request cancellation without terminating the worker thread."""
-
-        self.cancel_event.set()
-
-    def _report_progress(self, payload: dict):
-        self.progress_changed.emit(self.kind, payload)
-
-    def run(self):
-        try:
-            result = _scan_result(
-                self.kind,
-                progress_callback=self._report_progress,
-                cancel_event=self.cancel_event,
-            )
-            if result.get("cancelled"):
-                self.cancelled.emit(result)
-            else:
-                self.completed.emit(result)
-        except Exception as exc:
-            write_exception(f"{self.kind} 扫描失败", exc, source=f"scan/{self.kind}")
-            self.failed.emit(f"扫描失败：{type(exc).__name__}: {exc}")
-
-
-class AuthBridge(QObject):
-    requested = Signal(str, bool)
-
-    def __init__(self):
-        super().__init__()
-        self._lock = threading.Lock()
-        self._event: threading.Event | None = None
-        self._value = ""
-
-    def ask(self, prompt: str, password: bool = False) -> str:
-        event = threading.Event()
-        with self._lock:
-            self._event = event
-            self._value = ""
-        self.requested.emit(prompt, password)
-        event.wait(3600)
-        with self._lock:
-            value = self._value
-            self._event = None
-        return value
-
-    def answer(self, value: str):
-        with self._lock:
-            self._value = value
-            event = self._event
-        if event is not None:
-            event.set()
-
-
-class GuiConsoleUI(QObject):
-    """GUI signal adapter implementing the backend upload callbacks."""
-
-    message_added = Signal(str, str)
-    progress_changed = Signal(object)
-    album_changed = Signal(object)
-    target_changed = Signal(object)
-
-    def __init__(self, auth_bridge: AuthBridge, kind: str = ""):
-        super().__init__()
-        self.auth_bridge = auth_bridge
-        self.kind = kind
-        self._client = None
-        self._client_lock = threading.Lock()
-        self._stop_requested = threading.Event()
-
-    @property
-    def stop_requested(self) -> bool:
-        return self._stop_requested.is_set()
-
-    @property
-    def cancel_event(self):
-        """Expose the shared event to scan/media helpers."""
-
-        return self._stop_requested
-
-    def register_client(self, client):
-        with self._client_lock:
-            self._client = client
-            stop_already_requested = self._stop_requested.is_set()
-        if stop_already_requested:
-            # The user can press stop while TDLib is still starting.  Carry
-            # that request into the newly created client instead of allowing
-            # the first upload to begin.
-            client.cancel()
-
-    def request_stop(self):
-        self._stop_requested.set()
-        self.auth_bridge.answer("")
-        with self._client_lock:
-            client = self._client
-        if client is not None:
-            client.cancel()
-
-    def prompt(self, text: str, *, password: bool = False) -> str:
-        value = self.auth_bridge.ask(text, password)
-        if not value:
-            self.request_stop()
-        return value
-
-    def _message(self, level: str, text):
-        message = str(text)
-        level_name = {
-            "log": "INFO",
-            "info": "INFO",
-            "success": "INFO",
-            "banner": "INFO",
-            "summary": "INFO",
-            "warning": "WARNING",
-            "error": "ERROR",
-        }.get(level, "INFO")
-        write_app_log(level_name, message, source=f"gui/{self.kind or 'app'}")
-        self.message_added.emit(level, message)
-
-    def log(self, text=""):
-        self._message("log", text)
-
-    def info(self, text):
-        self._message("info", text)
-
-    def success(self, text):
-        self._message("success", text)
-
-    def warning(self, text):
-        self._message("warning", text)
-
-    def error(self, text):
-        self._message("error", text)
-
-    def banner(self, title: str, subtitle: str = "", *, accent="cyan"):
-        self._message("banner", f"{title}\n{subtitle}".strip())
-
-    def summary(self, title, rows, *, kind="VIDEO"):
-        body = [str(title)] + [f"{key}: {value}" for key, value in rows]
-        self._message("summary", "\n".join(body))
-
-    def files(self, title, columns, rows, *, kind="VIDEO", caption=None):
-        suffix = f"\n{caption}" if caption else ""
-        self._message("info", f"{title} · {len(list(rows))} 项{suffix}")
-
-    def groups(self, title, rows, *, kind="VIDEO"):
-        self._message("info", f"{title} · {len(list(rows))} 组")
-
-    def target(self, chat_title, topic_name, chat_id, topic_id):
-        payload = {
-            "kind": self.kind,
-            "target_mode": str(_cfg("TARGET_MODE", "forum_topic")),
-            "chat_title": chat_title or "(未命名)",
-            "topic_name": topic_name or "",
-            "chat_id": chat_id,
-            "topic_id": topic_id,
-        }
-        self.target_changed.emit(payload)
-        suffix = f" / {payload['topic_name']}" if payload["topic_name"] else "（频道）"
-        self._message("success", f"Telegram 目标：{payload['chat_title']}{suffix}")
-
-    def album(self, *, kind, title, subtitle="", rows=None):
-        self.album_changed.emit({
-            "kind": kind,
-            "title": title,
-            "subtitle": subtitle,
-            "rows": list(rows or []),
-        })
-
-    def confirm_upload(self) -> bool:
-        return not self.stop_requested
-
-    def cancelled(self):
-        self.warning("已取消，没有开始上传。")
-
-    def progress(self, **kwargs):
-        self.progress_changed.emit(dict(kwargs))
-
-    def finish(self):
-        return None
-
-
-class UploadWorker(QThread):
-    completed = Signal(bool, str)
-
-    def __init__(self, kind: str, auth_bridge: AuthBridge):
-        super().__init__()
-        self.kind = _require_kind(kind)
-        self.ui = GuiConsoleUI(auth_bridge, kind)
-
-    def request_stop(self):
-        self.ui.request_stop()
-
-    def run(self):
-        try:
-            activate = getattr(cfg, "activate_target", None)
-            if callable(activate):
-                activate(self.kind)
-            if self.kind == "video":
-                import tdlib_video_album_uploader as core
-                import tdlib_video_app as entry
-
-                core.STATE_DIR = VIDEO_STATE_DIR
-                core.UI = self.ui
-                core._INSTANCE_LOCK_HELD = True
-                entry.UI = self.ui
-                entry._INSTANCE_LOCK_HELD = True
-                entry.main()
-            elif self.kind == "image":
-                import tdlib_image_album_uploader as core
-
-                core.UI = self.ui
-                core._INSTANCE_LOCK_HELD = True
-                core.main()
-            elif self.kind == "mixed":
-                import tdlib_mixed_album_uploader as core
-
-                core.STATE_DIR = MIXED_STATE_DIR
-                core.UI = self.ui
-                core._INSTANCE_LOCK_HELD = True
-                core.main()
-            else:
-                raise ValueError(f"未知媒体类型：{self.kind}")
-            if self.ui.stop_requested:
-                self.completed.emit(False, "任务已立即停止；完整完成的 Album 已保存断点。")
-            else:
-                self.completed.emit(True, "上传任务完成。")
-        except Exception as exc:
-            if type(exc).__name__ == "TDLibCancelled" or self.ui.stop_requested:
-                self.completed.emit(False, "任务已立即停止；完整完成的 Album 已保存断点。")
-            else:
-                self.ui.error(f"程序停止：{type(exc).__name__}: {exc}")
-                write_exception(
-                    f"{self.kind} 上传线程失败",
-                    exc,
-                    source=f"upload/{self.kind}",
-                )
-                self.completed.emit(False, f"任务失败：{type(exc).__name__}: {exc}")
-
-
-def _card(title: str, value: str = "—") -> tuple[QFrame, QLabel]:
-    frame = QFrame()
-    frame.setObjectName("statCard")
-    layout = QVBoxLayout(frame)
-    layout.setContentsMargins(18, 14, 18, 14)
-    title_label = QLabel(title)
-    title_label.setObjectName("mutedLabel")
-    value_label = QLabel(value)
-    value_label.setObjectName("statValue")
-    layout.addWidget(title_label)
-    layout.addWidget(value_label)
-    return frame, value_label
-
-
-class HomePage(QWidget):
-    start_upload = Signal(str)
-    open_settings = Signal()
-
-    def __init__(self):
-        super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(18)
-
-        heading = QLabel("概览")
-        heading.setObjectName("pageTitle")
-        subtitle = QLabel("本地媒体 → Telegram 超级群组 Topic 或 Channel")
-        subtitle.setObjectName("mutedLabel")
-        layout.addWidget(heading)
-        layout.addWidget(subtitle)
-
-        stats = QGridLayout()
-        stats.setSpacing(12)
-        self.connection_card, self.connection_value = _card("Telegram 状态", "未连接")
-        self.task_card, self.task_value = _card("当前任务", "无")
-        self.today_card, self.today_value = _card("本次扫描", "—")
-        stats.addWidget(self.connection_card, 0, 0)
-        stats.addWidget(self.task_card, 0, 1)
-        stats.addWidget(self.today_card, 0, 2)
-        layout.addLayout(stats)
-
-        task_box = QGroupBox("快速开始")
-        task_layout = QHBoxLayout(task_box)
-        task_layout.setContentsMargins(18, 20, 18, 20)
-        video = QPushButton("上传视频")
-        video.setObjectName("primaryButton")
-        image = QPushButton("上传图片")
-        image.setObjectName("secondaryButton")
-        mixed = QPushButton("混合上传")
-        mixed.setObjectName("secondaryButton")
-        settings = QPushButton("配置与诊断")
-        settings.setObjectName("secondaryButton")
-        video.clicked.connect(lambda: self.start_upload.emit("video"))
-        image.clicked.connect(lambda: self.start_upload.emit("image"))
-        mixed.clicked.connect(lambda: self.start_upload.emit("mixed"))
-        settings.clicked.connect(self.open_settings)
-        task_layout.addWidget(video)
-        task_layout.addWidget(image)
-        task_layout.addWidget(mixed)
-        task_layout.addWidget(settings)
-        task_layout.addStretch(1)
-        layout.addWidget(task_box)
-
-        note = QGroupBox(f"V{APP_VERSION} 运行提示")
-        note_layout = QVBoxLayout(note)
-        note_body = QLabel(
-            "先配置 Telegram 信息，再选择目录并扫描。视频、图片和混合上传可分别设置目标。\n"
-            "选中媒体组即可编辑标题；确认预览后开始上传。\n"
-            "一次只能运行一个任务。安全停止后重新扫描，已完成的媒体组会自动跳过。"
+    try:
+        from tdlib_media_uploader.gui.integration import (  # noqa: PLC0415
+            V2IntegrationUnavailable,
+            run_v2_upload,
+            scan_v2,
         )
-        note_body.setWordWrap(True)
-        note_layout.addWidget(note_body)
-        layout.addWidget(note)
-        layout.addStretch(1)
-        self.set_connection("未连接", False)
+    except ModuleNotFoundError:
+        source_root = Path(__file__).resolve().parent / "src"
+        if source_root.is_dir() and str(source_root) not in sys.path:
+            sys.path.insert(0, str(source_root))
+        from tdlib_media_uploader.gui.integration import (  # noqa: PLC0415
+            V2IntegrationUnavailable,
+            run_v2_upload,
+            scan_v2,
+        )
+    return V2IntegrationUnavailable, run_v2_upload, scan_v2
 
-    def update_scan(self, result: dict):
-        self.today_value.setText(
-            f"{result['total_files']} 个文件 · {_fmt_size(result['total_bytes'])}"
+
+def _v2_scan_result(bundle, *, progress_callback=None, cancel_event=None) -> dict:
+    """Translate V2 scan/plan models into the existing preview page contract."""
+    return _translate_v2_scan_result(
+        bundle,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+        cancelled_result_factory=_cancelled_scan_result,
+        size_resolver=_item_size,
+        logger=write_app_log,
+        caption_store_factory=CaptionStore,
+    )
+
+
+def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
+    """Run the V2 strategy scan, retaining the old preview fallback."""
+
+    kind = _require_kind(kind)
+    if cfg is None:
+        raise RuntimeError(_CONFIG_ERROR or "配置不可用。")
+    try:
+        unavailable, _run_v2_upload, scan_v2 = _load_v2_gui_integration()
+        import runtime_paths as _runtime_paths  # noqa: PLC0415
+
+        bundle = scan_v2(
+            kind,
+            source_root=Path(_cfg(KIND_PATH_KEYS[kind], PROJECT_DIR)),
+            target=_target_for(kind),
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
+            config=cfg,
+            runtime_paths=_runtime_paths,
+        )
+        return _v2_scan_result(bundle, progress_callback=progress_callback, cancel_event=cancel_event)
+    except unavailable:
+        return _legacy_scan_result(
+            kind,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
         )
 
-    def clear_scan(self):
-        self.today_value.setText("—")
 
-    def set_connection(self, text: str, good: bool = False):
-        self.connection_value.setText(text)
-        self.connection_value.setProperty("good", good)
-        self.connection_value.style().unpolish(self.connection_value)
-        self.connection_value.style().polish(self.connection_value)
-
-
-class UploadPage(QWidget):
+class _LegacyUploadPage(QWidget):
     start_requested = Signal(str)
     path_selected = Signal(str, str)
     scan_requested = Signal(str)
@@ -2028,106 +1783,36 @@ class UploadPage(QWidget):
             self.status_label.setText("任务运行中，请在任务中心查看进度")
 
 
-class TaskPage(QWidget):
-    stop_requested = Signal()
+def _upload_page_services() -> UploadPageServices:
+    """Inject legacy globals while the package owns the upload page widget."""
 
-    def __init__(self):
-        super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(14)
-        title_row = QHBoxLayout()
-        self.title = QLabel("任务中心")
-        self.title.setObjectName("pageTitle")
-        self.task_status = QLabel("无正在运行的任务")
-        self.task_status.setObjectName("mutedLabel")
-        title_row.addWidget(self.title)
-        title_row.addStretch(1)
-        title_row.addWidget(self.task_status)
-        layout.addLayout(title_row)
+    return UploadPageServices(
+        require_kind=_require_kind,
+        kind_label=_kind_label,
+        config_getter=_cfg,
+        target_getter=_target_for,
+        path_keys=KIND_PATH_KEYS,
+        project_dir=PROJECT_DIR,
+        path_text=_path_text,
+        size_formatter=_fmt_size,
+        item_size=_item_size,
+        stable_path=stable_path,
+        filename_description=with_filename_description,
+        compose_caption=compose_caption,
+        validate_caption=validate_caption,
+        caption_store_factory=CaptionStore,
+        caption_limit=CAPTION_EDITOR_SOFT_LIMIT,
+        dialog_class=QDialog,
+        message_box_class=QMessageBox,
+        file_dialog_class=QFileDialog,
+    )
 
-        progress_box = QGroupBox("当前 Album")
-        progress_layout = QVBoxLayout(progress_box)
-        self.album_label = QLabel("尚未开始")
-        self.album_label.setObjectName("valueLabel")
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 1000)
-        self.progress.setValue(0)
-        self.progress.setTextVisible(True)
-        self.metrics = QLabel("速度 — · Mbps — · ETA --:-- · 文件 0/0 · 已传 0 B")
-        self.metrics.setObjectName("mutedLabel")
-        progress_layout.addWidget(self.album_label)
-        progress_layout.addWidget(self.progress)
-        progress_layout.addWidget(self.metrics)
-        layout.addWidget(progress_box)
 
-        split = QHBoxLayout()
-        album_box = QGroupBox("Album 文件")
-        album_layout = QVBoxLayout(album_box)
-        self.album_files = QListWidget()
-        album_layout.addWidget(self.album_files)
-        log_box = QGroupBox("运行日志")
-        log_layout = QVBoxLayout(log_box)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(2000)
-        log_layout.addWidget(self.log)
-        split.addWidget(album_box, 1)
-        split.addWidget(log_box, 2)
-        layout.addLayout(split, 1)
+class UploadPage(_PackageUploadPage):
+    """Compatibility shell that keeps root-level construction stable."""
 
-        bottom = QHBoxLayout()
-        self.stop_button = QPushButton("安全停止")
-        self.stop_button.setObjectName("dangerButton")
-        self.stop_button.setEnabled(False)
-        self.stop_button.clicked.connect(self.stop_requested)
-        bottom.addStretch(1)
-        bottom.addWidget(self.stop_button)
-        layout.addLayout(bottom)
-
-    def start_session(self, kind: str, result: dict):
-        self.title.setText(f"任务中心 · {_kind_label(kind)}")
-        self.task_status.setText("正在启动…")
-        self.stop_button.setEnabled(True)
-        self.progress.setValue(0)
-        self.metrics.setText(
-            f"待上传 {result['pending_files']} 个 · {_fmt_size(result['pending_bytes'])} · "
-            f"{result['album_count']} 个 Album"
-        )
-        self.album_files.clear()
-        self.log.clear()
-
-    @Slot(str, str)
-    def add_message(self, level: str, text: str):
-        prefix = {"success": "✓", "warning": "!", "error": "✗", "info": "ℹ"}.get(level, "·")
-        self.log.appendPlainText(f"{prefix} {text}")
-        self.task_status.setText(text.splitlines()[0][:100] if text else "运行中")
-
-    @Slot(object)
-    def show_album(self, payload: dict):
-        self.album_label.setText(f"{payload.get('title', '')} · {payload.get('subtitle', '')}")
-        self.album_files.clear()
-        for row in payload.get("rows", []):
-            self.album_files.addItem(str(row))
-
-    @Slot(object)
-    def show_progress(self, payload: dict):
-        ratio = max(0.0, min(float(payload.get("ratio", 0)), 1.0))
-        self.progress.setValue(round(ratio * 1000))
-        speed = float(payload.get("speed", 0) or 0)
-        mbps = speed * 8 / 1_000_000
-        self.metrics.setText(
-            f"速度 {_fmt_size(speed)}/s · {mbps:,.1f} Mbps · "
-            f"ETA {_fmt_eta(payload.get('eta'))} · "
-            f"Album {payload.get('album_number', 0)}/{payload.get('album_total', 0)} · "
-            f"文件 {payload.get('done_files', 0)}/{payload.get('total_files', 0)} · "
-            f"已传 {_fmt_size(payload.get('done_bytes', 0))} / {_fmt_size(payload.get('total_bytes', 0))}"
-        )
-
-    def finish_session(self, success: bool, message: str):
-        self.stop_button.setEnabled(False)
-        self.task_status.setText("已完成" if success else message)
-        self.log.appendPlainText(("✓ " if success else "! ") + message)
+    def __init__(self, kind: str, *, services: UploadPageServices | None = None):
+        super().__init__(kind, services=services or _upload_page_services())
 
 
 class InflightPage(QWidget):
@@ -3386,9 +3071,10 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.home = HomePage()
-        self.video_page = UploadPage("video")
-        self.image_page = UploadPage("image")
-        self.mixed_page = UploadPage("mixed")
+        page_services = _upload_page_services()
+        self.video_page = _PackageVideoPage(services=page_services)
+        self.image_page = _PackageImagePage(services=page_services)
+        self.mixed_page = _PackageMixedPage(services=page_services)
         self.inflight_page = InflightPage()
         self.task_page = TaskPage()
         self.history_page = HistoryPage()
@@ -3400,7 +3086,7 @@ class MainWindow(QMainWindow):
         }
         self.sidebar_rows = {"video": 1, "image": 2, "mixed": 3, "inflight": 4, "task": 5, "history": 6, "settings": 7}
         for page in (self.home, self.video_page, self.image_page, self.mixed_page, self.inflight_page, self.task_page, self.history_page, self.settings_page):
-            if isinstance(page, (UploadPage, SettingsPage)):
+            if isinstance(page, (_PackageUploadPage, SettingsPage)):
                 # Upload and settings pages contain several stacked sections.
                 # Keeping both in a scroll area prevents controls and wrapped
                 # diagnostic paths from being compressed or clipped when the
@@ -3463,7 +3149,7 @@ class MainWindow(QMainWindow):
         old = self.scanners.get(kind)
         if old is not None and old.isRunning():
             return
-        worker = ScanWorker(kind)
+        worker = ScanWorker(kind, scan_runner=_scan_result)
         self.scanners[kind] = worker
         page = self._upload_page(kind)
         page.set_scanning(True)
@@ -3596,7 +3282,14 @@ class MainWindow(QMainWindow):
         self.started_at = _dt.datetime.now().isoformat(timespec="seconds")
         self.task_page.start_session(kind, result)
         self.sidebar.setCurrentRow(self.sidebar_rows["task"])
-        worker = UploadWorker(kind, self.auth_bridge)
+        worker = UploadWorker(
+            kind,
+            self.auth_bridge,
+            result,
+            target_provider=_target_for,
+            source_root_provider=_source_root_for,
+            config=cfg,
+        )
         self.worker = worker
         worker.ui.message_added.connect(self.task_page.add_message)
         worker.ui.progress_changed.connect(self.task_page.show_progress)

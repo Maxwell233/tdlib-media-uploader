@@ -193,7 +193,7 @@ Windows 和 macOS 构建使用各自平台的原生 runner，并行执行离线�
 
 输出为 Windows 的 `dist/TDLib Media Uploader/TDLib Media Uploader.exe` 及 Windows x64 ZIP，和 macOS 的 `dist/TDLib Media Uploader.app` 及带版本号的 macOS arm64 DMG。DMG 根目录包含应用和指向系统 `/Applications` 的 `Applications` 文件夹别名，便于拖放安装。Windows 构建同时校验 EXE 嵌入图标、Qt 图标资源和稳定的 AppUserModelID，避免打包后任务栏图标缺失或归组异常。构建包不包含个人配置、断点、封面缓存、媒体文件或登录数据；macOS 包另附 FFmpeg 构建信息。
 
-核心文件：`src/tdlib_media_uploader/app.py`（V2 package 入口）、`gui_app.py`（迁移期间的 GUI 实现）、`app_config.py`（配置兼容层）、`tdlib_video_app.py`、`tdlib_video_album_uploader.py`、`tdlib_image_album_uploader.py`、`tdlib_mixed_album_uploader.py`（由界面调用的媒体上传流程）、`tdlib_common.py`（TDLib）。上传流程入口也会复用 `data/app.lock`；通常不需要单独启动这些内部模块。
+核心文件：`src/tdlib_media_uploader/app.py`（V2 package 入口）、`src/tdlib_media_uploader/gui/application.py`（GUI 启动与自检边界）、`src/tdlib_media_uploader/gui/events.py` 与 `src/tdlib_media_uploader/gui/workers.py`（GUI 事件和线程边界）、`src/tdlib_media_uploader/gui/models.py`（预览模型适配）、`gui_app.py`（迁移期间的 GUI 页面实现）、`app_config.py`（配置兼容层）、`tdlib_video_app.py`、`tdlib_video_album_uploader.py`、`tdlib_image_album_uploader.py`、`tdlib_mixed_album_uploader.py`（由界面调用的媒体上传流程）、`tdlib_common.py`（TDLib）。上传流程入口也会复用 `data/app.lock`；通常不需要单独启动这些内部模块。
 
 版本使用“主版本.功能版本.修订版本”：日常优化增加最后一位，较大功能更新增加中间一位。版本号唯一存放在根目录 `VERSION`，程序、界面和构建脚本会从该文件读取。此次修改见 [CHANGELOG.md](CHANGELOG.md)。
 
