@@ -141,11 +141,13 @@ Windows 源码运行（Windows 10/11 x64、Python 3.13 x64、PowerShell）：
 ```powershell
 git clone https://github.com/Maxwell233/tdlib-media-uploader.git
 cd tdlib-media-uploader
-.\setup.cmd
-.\run.cmd
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install --no-cache-dir --upgrade --force-reinstall --no-binary imageio-ffmpeg -r requirements-lock.txt
+.\.venv\Scripts\python.exe .\gui_app.py
 ```
 
-安装脚本创建 `.venv`、安装依赖并创建本地配置。也可用 `setup.ps1` / `run.ps1`；若执行策略阻止脚本，可在当前 PowerShell 进程运行 `Set-ExecutionPolicy -Scope Process Bypass`。自动安装可用 `.\setup.ps1 -NoPause`。
+源码运行不再依赖单独的安装或启动脚本；上述命令会创建 `.venv`、安装固定版本依赖，并直接启动 GUI。首次启动会在统一数据目录中创建配置模板。
 
 依赖由 `requirements-lock.txt` 和 `requirements-build-lock.txt` 固定版本，其中包含 `tdjson==1.8.64.post1`、Pillow、imageio-ffmpeg、PySide6 和 PyInstaller。固定 TDLib 版本是为了兼容现有上传实现，请勿随意升级。源码和便携包都使用图形界面。
 
@@ -154,11 +156,13 @@ macOS 源码运行（Apple Silicon、Python 3.13）：
 ```bash
 git clone https://github.com/Maxwell233/tdlib-media-uploader.git
 cd tdlib-media-uploader
-./setup.sh
-./run.sh
+python3.13 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install --no-cache-dir --upgrade --force-reinstall --no-binary imageio-ffmpeg -r requirements-lock.txt
+.venv/bin/python gui_app.py
 ```
 
-也可以双击 `setup.command` 和 `run.command`。源码运行的视频封面需要自行准备 LGPL FFmpeg；发布包已在构建阶段准备并检查。
+源码运行的视频封面需要自行准备 LGPL FFmpeg；发布包已在构建阶段准备并检查。
 
 离线回归测试（安装依赖后运行）：
 
@@ -168,7 +172,7 @@ python -m unittest discover -s tests -v
 
 便携包支持 `--self-test` 离线检查。全新包即使还没有 `data/config.toml` 也可以直接运行；检查只验证资源、可写数据目录、TDLib 路径和可选 FFmpeg，不会连接 Telegram 或修改正式配置。
 
-如 `.venv` 损坏，可删除项目中的 `.venv` 后重新运行对应平台安装脚本。
+如 `.venv` 损坏，可删除项目中的 `.venv`，然后按上面的平台命令重新创建并安装依赖。
 
 ## 构建 Windows 和 macOS 包
 
