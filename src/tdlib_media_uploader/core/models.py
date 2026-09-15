@@ -74,6 +74,24 @@ class AlbumPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class ContentBuildResult:
+    """Contents plus per-item outcomes discovered while building an Album.
+
+    Most strategies can return a plain sequence of Telegram contents.  A
+    strategy that encounters a transient source-readability problem after
+    preflight may instead return this result and defer only the affected
+    items, allowing the engine to send the remaining items without changing
+    the Album boundary.
+    """
+
+    contents: tuple[Mapping[str, Any], ...] = ()
+    ready_items: tuple[MediaItem, ...] | None = None
+    deferred_items: tuple[MediaItem, ...] = ()
+    failed_items: tuple[MediaItem, ...] = ()
+    errors: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class UploadBatchResult:
     """The final observed result for one Album send attempt."""
 
@@ -144,6 +162,7 @@ __all__ = [
     "AlbumPlan",
     "AuthEvent",
     "BatchStatus",
+    "ContentBuildResult",
     "Event",
     "FileSnapshot",
     "LogEvent",

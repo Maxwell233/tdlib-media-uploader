@@ -13,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
 from tdlib_media_uploader import (  # noqa: E402
     AlbumPlan,
     BatchStatus,
+    ContentBuildResult,
     FileSnapshot,
     MediaItem,
     ScanResult,
@@ -188,6 +189,36 @@ class Phase5EngineContractTest(unittest.TestCase):
         self.assertEqual(result.deferred_items, (items[1],))
         self.assertEqual(strategy.contents_calls[0].pending_items, (items[0],))
         self.assertEqual(sender.calls, 1)
+
+    def test_content_build_can_defer_one_item_and_send_the_rest(self):
+        items = _items(3)
+
+        class RuntimeSkipStrategy(_Strategy):
+            def build_contents(self, plan, *, cancel_token, event_sink, context=None):
+                deferred = plan.pending_items[-1:]
+                ready = plan.pending_items[:-1]
+                return ContentBuildResult(
+                    contents=tuple(
+                        {"@type": "inputMessagePhoto", "path": str(item.path)}
+                        for item in ready
+                    ),
+                    deferred_items=deferred,
+                )
+
+        sender = _Sender(SendResult(BatchStatus.CONFIRMED, succeeded_ids=(11, 12)))
+        state = MemoryStateStore()
+        result = UploadEngine(sender=sender, state=state).run(
+            RuntimeSkipStrategy(items), source_root=Path("/media"), target={}
+        )
+
+        self.assertEqual(result.status, RUN_PARTIAL)
+        self.assertEqual(result.deferred_items, (items[-1],))
+        self.assertEqual(sender.calls, 1)
+        self.assertEqual(len(state.completed), 2)
+        self.assertEqual(
+            {key[0] for key in state.completed},
+            {str(items[0].path), str(items[1].path)},
+        )
 
     def test_cancel_before_submit_leaves_no_journal(self):
         items = _items()

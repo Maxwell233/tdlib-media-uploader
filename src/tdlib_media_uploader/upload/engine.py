@@ -22,6 +22,7 @@ from ..contracts import CancelToken, EventSink, MediaStrategy, UploadContext
 from ..core.models import (
     AlbumPlan,
     BatchStatus,
+    ContentBuildResult,
     LogEvent,
     MediaItem,
     ProgressEvent,
@@ -99,7 +100,7 @@ class Stager(Protocol):
         """Return a content plan, retaining the source plan for identity."""
 
     def cleanup(self, plan: AlbumPlan, *, context: UploadContext, confirmed: bool) -> None:
-        """Release staged files after the journal is finalized."""
+        """Release staged files after a confirmed or abandoned attempt."""
 
 
 class _NeverCancelToken:
@@ -571,10 +572,78 @@ class UploadEngine:
         return effective
 
     @staticmethod
-    def _cleanup(stager: Any, plan: AlbumPlan, context: UploadContext) -> None:
+    def _cleanup(
+        stager: Any,
+        plan: AlbumPlan,
+        context: UploadContext,
+        *,
+        confirmed: bool,
+    ) -> None:
         function = getattr(stager, "cleanup", None)
         if callable(function):
-            _call_supported(function, (plan,), context=context, confirmed=True)
+            _call_supported(function, (plan,), context=context, confirmed=confirmed)
+
+    @staticmethod
+    def _normalize_content_result(
+        value: Any,
+        plan: AlbumPlan,
+    ) -> tuple[
+        tuple[Mapping[str, Any], ...],
+        tuple[MediaItem, ...],
+        tuple[MediaItem, ...],
+        tuple[MediaItem, ...],
+        tuple[str, ...],
+    ]:
+        """Normalize plain strategy output or an item-aware build result."""
+
+        if isinstance(value, ContentBuildResult):
+            contents = tuple(value.contents)
+            deferred = tuple(value.deferred_items)
+            failed = tuple(value.failed_items)
+            explicit_ready = value.ready_items
+            if explicit_ready is None:
+                excluded = {_item_key(item) for item in (*deferred, *failed)}
+                ready = tuple(
+                    item for item in plan.pending_items if _item_key(item) not in excluded
+                )
+            else:
+                ready = tuple(explicit_ready)
+            errors = tuple(str(error) for error in value.errors if str(error))
+        else:
+            contents = tuple(value)
+            ready = tuple(plan.pending_items)
+            deferred = ()
+            failed = ()
+            errors = ()
+
+        pending_keys = [_item_key(item) for item in plan.pending_items]
+        pending_set = set(pending_keys)
+        if len(pending_set) != len(pending_keys):
+            raise ValueError("Album 待上传项 identity 重复")
+
+        def validate_partition(name: str, items: Sequence[MediaItem]) -> tuple[MediaItem, ...]:
+            normalized = tuple(items)
+            keys = [_item_key(item) for item in normalized]
+            if len(set(keys)) != len(keys):
+                raise ValueError(f"内容构建结果的 {name} identity 重复")
+            unknown = set(keys) - pending_set
+            if unknown:
+                raise ValueError(f"内容构建结果的 {name} 包含不属于当前 Album 的项")
+            return normalized
+
+        ready = validate_partition("ready_items", ready)
+        deferred = validate_partition("deferred_items", deferred)
+        failed = validate_partition("failed_items", failed)
+        ready_keys = {_item_key(item) for item in ready}
+        deferred_keys = {_item_key(item) for item in deferred}
+        failed_keys = {_item_key(item) for item in failed}
+        if ready_keys & deferred_keys or ready_keys & failed_keys or deferred_keys & failed_keys:
+            raise ValueError("内容构建结果的 item outcome 不能重叠")
+        if ready_keys | deferred_keys | failed_keys != pending_set:
+            raise ValueError("内容构建结果没有覆盖全部 Album 待上传项")
+        if len(contents) != len(ready):
+            raise ValueError("策略生成的 Telegram 内容数量必须与 ready_items 数量一致")
+        return contents, ready, deferred, failed, errors
 
     def run(
         self,
@@ -755,6 +824,7 @@ class UploadEngine:
                     continue
 
             ready_items = tuple(current_plan.pending_items)
+            batch_deferred = tuple(plan_deferred)
             effective_plan = current_plan
             if run_context.stager is not None:
                 try:
@@ -775,21 +845,50 @@ class UploadEngine:
 
             try:
                 _check_cancel(token)
-                contents = tuple(
-                    _call_supported(
-                        getattr(strategy, "build_contents"),
-                        (effective_plan,),
-                        cancel_token=token,
-                        event_sink=sink,
-                        context=run_context,
-                    )
+                built_contents = _call_supported(
+                    getattr(strategy, "build_contents"),
+                    (effective_plan,),
+                    cancel_token=token,
+                    event_sink=sink,
+                    context=run_context,
                 )
+                (
+                    contents,
+                    ready_items,
+                    build_deferred,
+                    build_failed,
+                    build_errors,
+                ) = self._normalize_content_result(built_contents, effective_plan)
+                batch_deferred = tuple((*plan_deferred, *build_deferred))
+                deferred_items.extend(build_deferred)
+                failed_items.extend(build_failed)
+                for build_error in build_errors:
+                    errors.append(f"Album {plan.key} 内容构建提示：{build_error}")
+                if not ready_items:
+                    if run_context.stager is not None:
+                        try:
+                            self._cleanup(
+                                run_context.stager,
+                                effective_plan,
+                                run_context,
+                                confirmed=False,
+                            )
+                        except Exception as cleanup_error:
+                            errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
+                    if build_failed:
+                        message = "; ".join(build_errors) or "内容构建失败"
+                        errors.append(f"Album {plan.key} 内容构建失败：{message}")
+                        batches.append(
+                            UploadBatchResult(
+                                plan.key,
+                                BatchStatus.FAILED,
+                                error=message,
+                                deferred_items=batch_deferred,
+                            )
+                        )
+                    continue
                 if not contents:
                     raise ValueError("不能发送空的 Telegram Album")
-                if len(contents) != len(effective_plan.pending_items):
-                    raise ValueError(
-                        "策略生成的 Telegram 内容数量必须与 Album 待上传项数一致"
-                    )
             except Exception as error:
                 if _is_cancel_error(error, token):
                     cancelled = True
@@ -797,8 +896,20 @@ class UploadEngine:
                 message = f"Album {plan.key} 内容构建失败：{error}"
                 errors.append(message)
                 failed_items.extend(ready_items)
+                if run_context.stager is not None:
+                    try:
+                        self._cleanup(
+                            run_context.stager,
+                            effective_plan,
+                            run_context,
+                            confirmed=False,
+                        )
+                    except Exception as cleanup_error:
+                        errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
                 batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
                 continue
+
+            send_plan = restrict_plan(effective_plan, ready_items)
 
             try:
                 unresolved = self._journal_call(
@@ -854,7 +965,7 @@ class UploadEngine:
 
             observed: _ObservedSend
             try:
-                raw_result = self._send(run_context.sender, contents, effective_plan, run_context)
+                raw_result = self._send(run_context.sender, contents, send_plan, run_context)
                 observed = _normalize_send_result(raw_result, len(ready_items))
                 if _is_cancel_requested(token) and observed.status is not BatchStatus.CONFIRMED:
                     cancelled = True
@@ -892,7 +1003,7 @@ class UploadEngine:
                         BatchStatus.FAILED,
                         message_ids=observed.message_ids,
                         error=observed.error,
-                        deferred_items=plan_deferred,
+                        deferred_items=batch_deferred,
                     )
                 )
                 continue
@@ -1007,7 +1118,12 @@ class UploadEngine:
                     target=run_context.target,
                 )
                 if run_context.stager is not None:
-                    self._cleanup(run_context.stager, effective_plan, run_context)
+                    self._cleanup(
+                        run_context.stager,
+                        effective_plan,
+                        run_context,
+                        confirmed=True,
+                    )
             except Exception as cleanup_error:
                 # The send and state checkpoint are complete.  Keep the
                 # successful batch but surface cleanup/finalization failure.

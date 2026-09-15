@@ -9,6 +9,7 @@ from typing import Any, Mapping, Protocol, Sequence
 from .core.models import (
     AlbumPlan,
     Event,
+    ContentBuildResult,
     ScanResult,
     UploadRunResult,
 )
@@ -86,8 +87,8 @@ class MediaStrategy(Protocol):
         cancel_token: CancelToken,
         event_sink: EventSink,
         context: UploadContext | None = None,
-    ) -> Sequence[Mapping[str, Any]]:
-        """Translate one stable plan into TDLib input message content."""
+    ) -> Sequence[Mapping[str, Any]] | ContentBuildResult:
+        """Translate one stable plan into TDLib content and item outcomes."""
 
 
 class UploadEngine(Protocol):
