@@ -1,4 +1,4 @@
-tdjson==1.8.64.post1
+tdjson==1.8.67
 Pillow==12.3.0
 imageio-ffmpeg==0.6.0
 PySide6==6.11.2

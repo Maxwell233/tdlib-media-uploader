@@ -838,6 +838,7 @@ class ScanResult:
     # upload revalidation.  Reusing it avoids a second network ``stat`` for
     # every matching file while retaining the old two-value unpacking API.
     snapshots: dict[str, FileSnapshot] = field(default_factory=dict)
+    diagnostic: dict = field(default_factory=dict)
 
     def __iter__(self):
         # Existing integrations unpack ``paths, errors``.  Keep that API while
@@ -1281,14 +1282,33 @@ def iter_files(
     warnings: list[str] = []
     snapshots: dict[str, FileSnapshot] = {}
     cancelled = False
+    diagnostic = {
+        "source_root": str(root),
+        "extensions": sorted(accepted),
+        "directories_scanned": 0,
+        "entries_seen": 0,
+        "extension_matched": 0,
+        "regular_files": 0,
+        "accepted": 0,
+        "skipped": {},
+    }
+
+    def skipped(reason: str) -> None:
+        values = diagnostic["skipped"]
+        values[reason] = int(values.get(reason, 0)) + 1
 
     if is_link_or_junction(root):
+        skipped("link_or_junction")
+        diagnostic["warnings"] = 1
+        diagnostic["errors"] = 0
+        diagnostic["cancelled"] = False
         return ScanResult(
             paths,
             errors,
             [f"跳过符号链接或 junction：{root}"],
             False,
             snapshots,
+            diagnostic,
         )
 
     # Keep the traversal iterative. A recursive scanner can hit Python's
@@ -1301,8 +1321,10 @@ def iter_files(
             cancelled = True
             break
         directory = stack.pop()
+        diagnostic["directories_scanned"] += 1
         if is_link_or_junction(directory):
             warnings.append(f"跳过符号链接或 junction：{directory}")
+            skipped("link_or_junction")
             continue
         try:
             for entry in iter_directory_entries_with_retry(
@@ -1315,6 +1337,7 @@ def iter_files(
                 if _cancelled(cancel_event):
                     cancelled = True
                     break
+                diagnostic["entries_seen"] += 1
                 try:
                     # The non-following stat is both the type check and
                     # the discovery snapshot.  Avoid a separate ``is_symlink``
@@ -1330,10 +1353,14 @@ def iter_files(
                     )
                     if _is_reparse_info(info):
                         warnings.append(f"跳过符号链接或 junction：{entry.path}")
+                        skipped("link_or_junction")
                         continue
                     if stat.S_ISDIR(info.st_mode):
                         stack.append(entry.path)
                         continue
+
+                    if stat.S_ISREG(info.st_mode):
+                        diagnostic["regular_files"] += 1
 
                     # Avoid constructing Path objects for files that will be
                     # rejected by the extension filter. This spelling matches
@@ -1341,10 +1368,13 @@ def iter_files(
                     # ``.hidden`` (both have no suffix).
                     ext = _entry_suffix(entry.name)
                     if ext.lower() not in accepted:
+                        skipped("extension")
                         continue
+                    diagnostic["extension_matched"] += 1
                     if stat.S_ISREG(info.st_mode) and info.st_size > 0:
                         path = Path(entry.path)
                         paths.append(path)
+                        diagnostic["accepted"] += 1
                         mtime_ns = getattr(info, "st_mtime_ns", None)
                         if mtime_ns is None:
                             mtime_ns = int(info.st_mtime * 1_000_000_000)
@@ -1353,13 +1383,19 @@ def iter_files(
                             int(info.st_size),
                             int(mtime_ns),
                         )
+                    elif stat.S_ISREG(info.st_mode):
+                        skipped("empty")
+                    else:
+                        skipped("not_regular")
                 except TimeoutError as error:
                     if _cancelled(cancel_event):
                         cancelled = True
                         break
                     errors.append(f"{entry.path}: {error}")
+                    skipped("stat_error")
                 except OSError as error:
                     errors.append(f"{entry.path}: {error}")
+                    skipped("stat_error")
             if cancelled:
                 break
         except TimeoutError as error:
@@ -1367,7 +1403,12 @@ def iter_files(
                 cancelled = True
                 break
             errors.append(f"{directory}: {error}")
+            skipped("directory_error")
         except OSError as error:
             errors.append(f"{directory}: {error}")
+            skipped("directory_error")
 
-    return ScanResult(paths, errors, warnings, cancelled, snapshots)
+    diagnostic["errors"] = len(errors)
+    diagnostic["warnings"] = len(warnings)
+    diagnostic["cancelled"] = cancelled
+    return ScanResult(paths, errors, warnings, cancelled, snapshots, diagnostic)

@@ -37,7 +37,7 @@ Windows x64 构建、PyInstaller macOS arm64 `.app` 构建，以及源码中实�
 
 | 组件 | 版本/来源 | 上游许可证 | 是否强传染 | 对本项目的影响与处理 |
 | --- | --- | --- | --- | --- |
-| `tdjson` | `1.8.64.post1`，`requirements.txt` | MIT（Python 绑定；wheel 内含预编译 TDLib） | 否 | 保留 MIT 条款；同时遵守 wheel 内 TDLib 的独立许可证。 |
+| `tdjson` | `1.8.67`，`requirements.txt` | MIT（Python 绑定；wheel 内含预编译 TDLib） | 否 | 保留 MIT 条款；同时遵守 wheel 内 TDLib 的独立许可证。 |
 | TDLib | `tdjson` wheel 内的原生库 | Boost Software License 1.0 | 否 | 允许组合和再分发；保留上游许可链接。 |
 | Pillow | `>=11.0` | MIT-CMU | 否 | 许可宽松，但分发时保留上游许可与署名说明。 |
 | `imageio-ffmpeg` | `>=0.6.0`；安装脚本使用 `--no-binary imageio-ffmpeg` | BSD 2-Clause | 否 | 仅使用 Python wrapper；不把其 wheel 内置的 FFmpeg 二进制放进发布包。 |
@@ -75,7 +75,7 @@ Qt、TDLib 和 FFmpeg 的发行包还可能包含由其他作者提供的 ICU、
 
 ## 上游来源
 
-- [`tdjson` 1.8.64.post1（PyPI）](https://pypi.org/project/tdjson/1.8.64.post1/)
+- [`tdjson` 1.8.67（PyPI）](https://pypi.org/project/tdjson/1.8.67/)
 - [TDLib 许可证](https://github.com/tdlib/td/blob/master/LICENSE_1_0.txt)
 - [TDLib 代理 API：addProxy](https://core.telegram.org/tdlib/docs/classtd_1_1td__api_1_1add_proxy.html)
 - [Pillow 许可证](https://github.com/python-pillow/Pillow/blob/main/LICENSE)

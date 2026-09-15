@@ -233,6 +233,17 @@ class V190HardeningTest(unittest.TestCase):
         self.assertIn("pattern: tdlib-media-uploader-${{ github.ref_name }}-*", workflow)
         self.assertIn("merge-multiple: true", workflow)
 
+    def test_release_workflow_extracts_only_current_release_notes(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "build-platforms.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('awk -v version="$version"', workflow)
+        self.assertIn('"### V" version " 更新"', workflow)
+        self.assertIn("found && (/^### V[0-9]/ || /^## /) { exit }", workflow)
+
     def test_direct_entrypoint_uses_shared_instance_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             lock_path = Path(directory) / "data" / "app.lock"

@@ -182,7 +182,16 @@ class InflightJournal:
             path = source.get("path")
             if path is None:
                 continue
-            value = {"path": stable_path(path)}
+            display_path = source.get("display_path") or str(path)
+            display_name = source.get("display_name") or Path(path).name
+            value = {
+                "path": stable_path(path),
+                # Keep a human-readable copy beside the stable identity.  The
+                # latter may be normalized/case-folded on Windows and is a
+                # poor value for manual UNKNOWN reconciliation.
+                "display_path": str(display_path),
+                "display_name": str(display_name),
+            }
             for source_key, target_key in (
                 ("scan_size", "size"),
                 ("scan_mtime_ns", "mtime_ns"),

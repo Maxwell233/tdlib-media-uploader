@@ -238,9 +238,14 @@ jobs:
             exit 1
           fi
           if [[ -f RELEASE_NOTES.md ]]; then
-            # Keep the release page focused on this build.  The full history
-            # remains in CHANGELOG.md and is not copied into every release.
-            changelog_notes="$(cat RELEASE_NOTES.md)"
+            # Keep the release page focused on this build.  RELEASE_NOTES.md
+            # may retain older sections for local reference, but only the
+            # section matching this tag belongs on the release page.
+            changelog_notes="$(awk -v version="$version" '
+              $0 == "### V" version " 更新" { found=1; print; next }
+              found && (/^### V[0-9]/ || /^## /) { exit }
+              found { print }
+            ' RELEASE_NOTES.md)"
           else
             changelog_notes="$(awk -v version="$version" '
               $0 == "## " version { found=1; print; next }

@@ -51,7 +51,14 @@ from path_utils import (
     wait_for_file_ready,
 )
 import app_config as cfg
-from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
+from tdlib_common import (
+    HeadlessUI,
+    TDJsonClient,
+    TDLibCancelled,
+    formatted_text,
+    graceful_stop_requested,
+    verify_tdjson_version,
+)
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR, VIDEO_STATE_DIR, THUMBNAIL_CACHE_DIR
 from staging import cleanup_staging, remove_staged_file, should_stage, stage_file
 from instance_lock import run_with_instance_lock
@@ -64,6 +71,7 @@ LAST_SCAN_WARNINGS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
 LAST_SCAN_PREMIUM_REQUIRED: list[dict] = []
 LAST_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
+LAST_SCAN_DIAGNOSTIC: dict = {}
 STAGED_UPLOAD_PATHS: dict[str, Path] = {}
 DEFERRED_STATUS = "DEFERRED"
 
@@ -280,7 +288,7 @@ def month_caption(month_key: str) -> str:
 
 
 def scan_videos(cancel_event=None) -> list[Path]:
-    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_PREMIUM_REQUIRED, LAST_SCAN_SNAPSHOTS
+    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_PREMIUM_REQUIRED, LAST_SCAN_SNAPSHOTS, LAST_SCAN_DIAGNOSTIC
     try:
         root = validate_scan_root(
             cfg.VIDEO_DIR,
@@ -295,6 +303,7 @@ def scan_videos(cancel_event=None) -> list[Path]:
         LAST_SCAN_SIZE_SKIPS = []
         LAST_SCAN_PREMIUM_REQUIRED = []
         LAST_SCAN_SNAPSHOTS = {}
+        LAST_SCAN_DIAGNOSTIC = {"source_root": str(cfg.VIDEO_DIR), "cancelled": True}
         return []
     scan_result = iter_files(
         root,
@@ -307,6 +316,7 @@ def scan_videos(cancel_event=None) -> list[Path]:
     videos = scan_result.paths
     LAST_SCAN_ERRORS = list(scan_result.errors)
     LAST_SCAN_WARNINGS = list(scan_result.warnings)
+    LAST_SCAN_DIAGNOSTIC = dict(getattr(scan_result, "diagnostic", {}) or {})
     if scan_result.cancelled:
         LAST_SCAN_WARNINGS.append("目录扫描已取消")
     LAST_SCAN_SIZE_SKIPS = []
@@ -403,6 +413,14 @@ READINESS_ATTEMPTS = int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", 3))
 def _cancel_requested(cancel_event=None) -> bool:
     if cancel_event is not None and cancel_event.is_set():
         return True
+    # A graceful stop is intentionally allowed to finish the current Album.
+    # Only an explicit force-stop may interrupt metadata/readiness work in
+    # progress.  Older UI implementations do not expose this property, so
+    # retain the legacy ``stop_requested`` fallback only when force-stop is
+    # unavailable.
+    force_requested = getattr(UI, "force_stop_requested", None)
+    if force_requested is not None:
+        return bool(force_requested)
     return bool(getattr(UI, "stop_requested", False))
 
 
@@ -1462,6 +1480,8 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
 
     def worker(item):
         path = item["path"]
+        if cancel_event is not None and cancel_event.is_set():
+            raise TDLibCancelled("上传已强制停止")
         try:
             readiness = wait_for_file_ready(
                 path,
@@ -1487,6 +1507,8 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
                 prepare_video(path, cancel_event)
             return None
         except Exception as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TDLibCancelled("上传已强制停止") from exc
             readiness_record = _readiness_record(exc)
             record = {
                 "item": item,
@@ -1577,6 +1599,8 @@ def build_video_contents(items, caption: str, ui=None, cancel_event=None):
     valid_items = []
     skipped = []
     for item in items:
+        if cancel_event is not None and cancel_event.is_set():
+            raise TDLibCancelled("上传已强制停止")
         try:
             item_caption = caption if not valid_items else ""
             if cancel_event is None:
@@ -1585,6 +1609,8 @@ def build_video_contents(items, caption: str, ui=None, cancel_event=None):
                 contents.append(input_video(item, item_caption, cancel_event))
             valid_items.append(item)
         except Exception as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TDLibCancelled("上传已强制停止") from exc
             path = item["path"]
             record = {
                 "item": item,
@@ -1628,7 +1654,11 @@ def input_video(item, caption: str, cancel_event=None):
             cancel_event=cancel_event,
         )
         STAGED_UPLOAD_PATHS[stable_path(path)] = source_path
-    info = video_info(source_path)
+    info = (
+        video_info(source_path)
+        if cancel_event is None
+        else video_info(source_path, cancel_event=cancel_event)
+    )
     thumbnail = None
     if cfg.VIDEO_GENERATE_THUMBNAIL:
         if cancel_event is None:
@@ -2085,11 +2115,15 @@ def _main_impl():
         client.set_fast_options()
         client.validate_target()
         album_global = 0
+        stopped_after_album = False
 
         month_plan_groups = defaultdict(list)
         for plan in pending_plans:
             month_plan_groups[plan["month_key"]].append(plan)
         for month_key in sorted(month_plan_groups):
+            if graceful_stop_requested(UI):
+                stopped_after_album = True
+                break
             month_plans = month_plan_groups[month_key]
             month_items = [item for plan in month_plans for item in plan["pending_items"]]
             month_album_total = len(month_plans)
@@ -2101,6 +2135,9 @@ def _main_impl():
             UI.log("=" * 82)
 
             for plan in month_plans:
+                if graceful_stop_requested(UI):
+                    stopped_after_album = True
+                    break
                 album_items = [
                     item for item in plan["pending_items"]
                     if stable_path(item["path"]) not in preflight_skipped_paths
@@ -2125,6 +2162,8 @@ def _main_impl():
                         label,
                         cancel_event=cancel_event,
                     )
+                if cancel_event is not None and cancel_event.is_set():
+                    raise TDLibCancelled("上传已强制停止")
                 if runtime_skipped:
                     skipped_items.extend(runtime_skipped)
                     progress.skip_items([record["item"] for record in runtime_skipped])
@@ -2179,9 +2218,18 @@ def _main_impl():
                 cleanup_confirmed_staging([item["path"] for item in ready_items])
                 progress.finish_album(ready_items)
                 UI.log(f"Album 发送完成，Caption={label or '无'}，断点已保存。")
+                if graceful_stop_requested(UI):
+                    stopped_after_album = True
+                    break
+                if getattr(client, "should_rotate", lambda _count: False)(album_global):
+                    client = client.rotate_session(
+                        progress.handle_update,
+                        "TDLib Video Album Uploader",
+                    )
+                    caption_limit = int(getattr(client, "caption_length_limit", None) or caption_limit)
 
         UI.log("\n" + "=" * 82)
-        UI.log("全部视频上传完成。")
+        UI.log("已在当前 Album 完成后安全停止。" if stopped_after_album else "全部视频上传完成。")
         report_skipped_videos(skipped_items, final=True)
         UI.log("=" * 82)
     finally:

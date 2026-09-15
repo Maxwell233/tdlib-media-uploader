@@ -29,7 +29,7 @@ from upload_journal import (
     normalize_target,
 )
 
-REQUIRED_TDJSON_VERSION = "1.8.64.post1"
+REQUIRED_TDJSON_VERSION = "1.8.67"
 PROJECT_DIR = APP_DATA_DIR
 
 
@@ -44,8 +44,16 @@ class TDLibCancelled(RuntimeError):
     """Raised when a GUI or caller requests an immediate upload stop."""
 
 
+class TDLibGracefulStop(RuntimeError):
+    """Raised when a boundary-safe stop is requested before an Album starts."""
+
+
 class UploadUnknownError(RuntimeError):
     """The Telegram request may have been accepted but was not confirmed."""
+
+
+class UploadStalledError(RuntimeError):
+    """No upload bytes or TDLib send-state activity was observed in time."""
 
 
 class SendResultUnknown(TimeoutError):
@@ -54,6 +62,18 @@ class SendResultUnknown(TimeoutError):
     def __init__(self, message: str, result: dict):
         super().__init__(message)
         self.result = result
+
+
+def graceful_stop_requested(ui) -> bool:
+    """Return whether the caller requested a boundary-safe stop."""
+
+    return bool(getattr(ui, "stop_requested", False)) and not bool(
+        getattr(ui, "force_stop_requested", False)
+    )
+
+
+def force_stop_requested(ui) -> bool:
+    return bool(getattr(ui, "force_stop_requested", False))
 
 
 def verify_tdjson_version() -> str:
@@ -181,7 +201,17 @@ def build_tdlib_parameters(device_model: str) -> dict:
 class TDJsonClient:
     """Small synchronous wrapper around TDLib's JSON interface."""
 
+    # tdjson exposes one process-wide receive queue.  More than one consumer
+    # can silently steal another client's update, so session rotation must wait
+    # until the previous receiver has actually exited.
+    _receiver_guard = threading.Lock()
+    _active_receiver: threading.Thread | None = None
+
     def __init__(self, ui, device_model: str):
+        with TDJsonClient._receiver_guard:
+            active = TDJsonClient._active_receiver
+            if active is not None and active.is_alive():
+                raise RuntimeError("TDLib receiver 尚未退出，不能创建新的客户端。")
         self.ui = ui
         self.device_model = device_model
         TDLIB_DATABASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -217,9 +247,20 @@ class TDJsonClient:
         self.client_id = tdjson.td_create_client_id()
         self.pending: dict[str, queue.Queue] = {}
         self.pending_lock = threading.Lock()
+        # Set immediately after an outbound request reaches ``td_send``.  A
+        # force stop that races the response must keep the Album UNKNOWN even
+        # when ``request()`` raises before returning a response.
+        self._last_request_dispatched = False
         self.auth_queue: queue.Queue = queue.Queue()
         self.send_events: dict[int, tuple[str, dict]] = {}
         self.send_condition = threading.Condition()
+        self._activity_lock = threading.Lock()
+        self._last_activity_time = time.monotonic()
+        self._last_activity_reason = "client-created"
+        self._file_progress: dict[int, int] = {}
+        self._file_states: dict[int, tuple] = {}
+        self._active_file_ids: set[int] = set()
+        self._active_album_context: dict | None = None
         # Keep close idempotent because a stop request can arrive while a
         # sendMessage request is still waiting for its response.
         self.close_lock = threading.Lock()
@@ -238,7 +279,16 @@ class TDJsonClient:
             name="TDLibReceiver",
             daemon=True,
         )
-        self.receiver_thread.start()
+        with TDJsonClient._receiver_guard:
+            active = TDJsonClient._active_receiver
+            if active is not None and active.is_alive():
+                raise RuntimeError("TDLib receiver 尚未退出，不能创建新的客户端。")
+            TDJsonClient._active_receiver = self.receiver_thread
+            try:
+                self.receiver_thread.start()
+            except Exception:
+                TDJsonClient._active_receiver = None
+                raise
 
     @staticmethod
     def _encode(obj: dict) -> bytes:
@@ -261,13 +311,24 @@ class TDJsonClient:
         tdjson.td_send(self.client_id, self._encode(query))
 
     def cancel(self):
-        """Stop promptly and cooperatively, including an active TDLib upload."""
+        """Force-stop the client and preserve UNKNOWN semantics for sent media."""
         self.cancel_event.set()
-        # TDLib 1.8.64 does not expose a generic cancelUploadFile method for
+        # TDLib does not expose a generic cancelUploadFile method for
         # media sent through sendMessage/sendMessageAlbum.  Closing the client
         # is the supported way to abort the in-flight transfer; send it here
         # immediately instead of waiting for the worker's finally block.
         self._send_close_now()
+        with self.send_condition:
+            self.send_condition.notify_all()
+
+    def request_graceful_stop(self):
+        """Mark a caller's graceful stop without interrupting the current Album.
+
+        The GUI owns the boundary decision.  This method intentionally does
+        not set ``cancel_event`` or close TDLib; the active Album can therefore
+        reach its normal confirmation/checkpoint path.
+        """
+
         with self.send_condition:
             self.send_condition.notify_all()
 
@@ -298,8 +359,10 @@ class TDJsonClient:
         waiter: queue.Queue = queue.Queue(maxsize=1)
         with self.pending_lock:
             self.pending[extra] = waiter
+        self._last_request_dispatched = False
         try:
             self.send_raw(payload)
+            self._last_request_dispatched = True
         except Exception:
             with self.pending_lock:
                 self.pending.pop(extra, None)
@@ -364,14 +427,18 @@ class TDJsonClient:
                         self.auth_queue.put(state)
                 elif kind == "updateMessageSendSucceeded":
                     old_id = obj.get("old_message_id")
+                    self._mark_message_activity(old_id, "message-send-succeeded")
                     with self.send_condition:
                         self.send_events[old_id] = ("success", obj)
                         self.send_condition.notify_all()
                 elif kind == "updateMessageSendFailed":
                     old_id = obj.get("old_message_id")
+                    self._mark_message_activity(old_id, "message-send-failed")
                     with self.send_condition:
                         self.send_events[old_id] = ("failed", obj)
                         self.send_condition.notify_all()
+                elif kind == "updateFile":
+                    self._record_file_activity(obj.get("file") or {})
                 for callback in list(self.update_callbacks):
                     try:
                         callback(obj)
@@ -380,6 +447,175 @@ class TDJsonClient:
             except Exception as exc:
                 self.ui.warning(f"TDLib receiver 异常：{type(exc).__name__}: {exc}")
                 time.sleep(1)
+        # A receiver can also leave the loop after TDLib reports a closed
+        # client.  Clear the process-wide guard here as well as in ``close``
+        # so a failed/remote close cannot leave a stale thread identity behind.
+        with TDJsonClient._receiver_guard:
+            if TDJsonClient._active_receiver is threading.current_thread():
+                TDJsonClient._active_receiver = None
+
+    def _mark_activity(self, reason: str) -> None:
+        with getattr(self, "_activity_lock", threading.Lock()):
+            self._last_activity_time = time.monotonic()
+            self._last_activity_reason = str(reason)
+
+    def _mark_message_activity(self, message_id, reason: str) -> None:
+        """Refresh the watchdog only for messages in the active Album."""
+
+        context = getattr(self, "_active_album_context", None)
+        if isinstance(context, dict):
+            message_ids = {
+                value for value in context.get("message_ids", []) if value is not None
+            }
+            if message_ids and message_id not in message_ids:
+                return
+        self._mark_activity(reason)
+
+    @staticmethod
+    def _uploaded_size(file_obj: dict) -> int:
+        values = []
+        for section_name in ("remote", "local"):
+            section = file_obj.get(section_name) or {}
+            for key in ("uploaded_size", "downloaded_size"):
+                value = section.get(key)
+                if isinstance(value, (int, float)):
+                    values.append(int(value))
+        return max(values or [0])
+
+    def _record_file_activity(self, file_obj: dict) -> None:
+        file_id = file_obj.get("id")
+        uploaded = self._uploaded_size(file_obj)
+        if file_id is None:
+            if uploaded:
+                self._mark_activity("file-progress")
+            return
+        active_ids = getattr(self, "_active_file_ids", set())
+        if active_ids and file_id not in active_ids:
+            return
+        with getattr(self, "_activity_lock", threading.Lock()):
+            previous = getattr(self, "_file_progress", {}).get(file_id, -1)
+            remote = file_obj.get("remote") or {}
+            local = file_obj.get("local") or {}
+            state = (
+                bool(remote.get("is_uploading_completed")),
+                bool(remote.get("is_uploading_active")),
+                bool(local.get("is_downloading_completed")),
+                bool(local.get("is_downloading_active")),
+            )
+            previous_state = getattr(self, "_file_states", {}).get(file_id)
+            self._file_progress[file_id] = uploaded
+            self._file_states[file_id] = state
+            changed = uploaded != previous
+            completed = bool(remote.get("is_uploading_completed"))
+            if changed or completed or state != previous_state:
+                self._last_activity_time = time.monotonic()
+                self._last_activity_reason = (
+                    "file-completed" if completed else "file-progress"
+                )
+
+    def _begin_album_watchdog(self, album_key, kind, items, messages=None) -> None:
+        records = []
+        for item in items or []:
+            path = item.get("path") if isinstance(item, dict) else item
+            expected = None
+            if isinstance(item, dict):
+                expected = item.get("scan_size") or item.get("size")
+            records.append({
+                "path": str(path),
+                "expected_size": int(expected) if expected is not None else None,
+            })
+        file_ids = set()
+        for message in messages or []:
+            content = (message or {}).get("content") if isinstance(message, dict) else None
+            if not isinstance(content, dict):
+                continue
+            media = content.get("video") or content.get("photo") or {}
+            candidates = []
+            if isinstance(media, dict):
+                if isinstance(media.get("video"), dict):
+                    candidates.append(media["video"])
+                candidates.extend(
+                    value.get("photo") for value in media.get("sizes", [])
+                    if isinstance(value, dict) and isinstance(value.get("photo"), dict)
+                )
+            file_ids.update(
+                value.get("id") for value in candidates
+                if isinstance(value, dict) and value.get("id") is not None
+            )
+        with getattr(self, "_activity_lock", threading.Lock()):
+            self._active_album_context = {
+                "album_key": album_key or "",
+                "kind": kind or "unknown",
+                # Capture the effective destination at submission time so a
+                # later configuration change cannot make a stall diagnostic
+                # point at the wrong chat/topic.
+                "target": self._target_identity(),
+                "items": records,
+                "message_ids": [m.get("id") for m in (messages or []) if isinstance(m, dict)],
+                "pending_ids": [],
+                "succeeded_ids": [],
+                "failed_ids": [],
+                "started_at": time.time(),
+            }
+            self._last_activity_time = time.monotonic()
+            self._last_activity_reason = "album-submitted"
+            self._file_progress = {}
+            self._file_states = {}
+            self._active_file_ids = {int(value) for value in file_ids}
+
+    def _stall_snapshot(self) -> tuple[float, str, dict | None, dict[int, int]]:
+        lock = getattr(self, "_activity_lock", threading.Lock())
+        with lock:
+            return (
+                float(getattr(self, "_last_activity_time", time.monotonic())),
+                str(getattr(self, "_last_activity_reason", "unknown")),
+                getattr(self, "_active_album_context", None),
+                dict(getattr(self, "_file_progress", {})),
+            )
+
+    def _check_upload_stall(self) -> None:
+        raw_timeout = getattr(cfg, "TDLIB_UPLOAD_STALL_TIMEOUT", 300)
+        try:
+            stall_timeout = float(raw_timeout)
+        except (TypeError, ValueError):
+            stall_timeout = 0.0
+        if stall_timeout <= 0:
+            return
+        last_activity, reason, context, file_progress = self._stall_snapshot()
+        if context is None:
+            return
+        duration = time.monotonic() - last_activity
+        if duration < stall_timeout:
+            return
+        rows = [
+            f"file_id={file_id} uploaded_size={uploaded}"
+            for file_id, uploaded in sorted(file_progress.items(), key=lambda value: str(value[0]))
+        ]
+        rows.extend(
+            f"path={item.get('path')} expected_size={item.get('expected_size')}"
+            for item in context.get("items", [])
+        )
+        status_text = (
+            f"pending_ids={context.get('pending_ids', [])} "
+            f"succeeded_ids={context.get('succeeded_ids', [])} "
+            f"failed_ids={context.get('failed_ids', [])}"
+        )
+        message = (
+            f"Album 上传疑似卡住：{context.get('album_key')} "
+            f"kind={context.get('kind')} stall={duration:.1f}s "
+            f"target={context.get('target', {})} "
+            f"last_activity_time={last_activity:.6f} "
+            f"last_activity={reason} message_ids={context.get('message_ids', [])} {status_text}\n"
+            + "\n".join(rows)
+        )
+        write_app_log("ERROR", message, source="upload/stall")
+        warning = getattr(self.ui, "warning", None)
+        if callable(warning):
+            try:
+                warning("当前 Album 长时间没有上传进度，已标记为未确认上传；请在页面中人工核对。")
+            except Exception:
+                pass
+        raise UploadStalledError(message)
 
     @staticmethod
     def _configured_proxy() -> dict:
@@ -529,6 +765,8 @@ class TDJsonClient:
             value = input(text)
         value = str(value).strip()
         if not value:
+            if graceful_stop_requested(self.ui):
+                raise TDLibGracefulStop("上传已请求安全停止")
             self._raise_if_cancelled()
         return value
 
@@ -668,6 +906,9 @@ class TDJsonClient:
 
         deadline = time.monotonic() + timeout
         results = {}
+        context = getattr(self, "_active_album_context", None)
+        if isinstance(context, dict):
+            context["pending_ids"] = list(pending_ids)
         with self.send_condition:
             while len(results) < len(pending_ids):
                 if getattr(self, "cancel_event", threading.Event()).is_set():
@@ -676,6 +917,7 @@ class TDJsonClient:
                         "上传在 Telegram 状态确认前被取消",
                         result_payload(unknown),
                     )
+                self._check_upload_stall()
                 for old_id in pending_ids:
                     if old_id in results:
                         continue
@@ -686,13 +928,18 @@ class TDJsonClient:
                     if status == "failed":
                         error_obj = update.get("error", {})
                         failed_ids.append(old_id)
+                        if isinstance(context, dict):
+                            context["failed_ids"] = list(failed_ids)
                         results[old_id] = update
                     else:
                         new_id = update.get("message", {}).get("id") or old_id
                         succeeded_ids.append(new_id)
+                        if isinstance(context, dict):
+                            context["succeeded_ids"] = list(succeeded_ids)
                         results[old_id] = update
                 if len(results) >= len(pending_ids):
                     break
+                self._check_upload_stall()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     unknown = [value for value in pending_ids if value not in results]
@@ -700,7 +947,13 @@ class TDJsonClient:
                         "等待 Telegram 确认发送成功超时",
                         result_payload(unknown),
                     )
-                self.send_condition.wait(min(1, remaining))
+                stall_timeout = float(getattr(cfg, "TDLIB_UPLOAD_STALL_TIMEOUT", 300) or 0)
+                if stall_timeout > 0:
+                    last_activity, _reason, _context, _progress = self._stall_snapshot()
+                    until_stall = max(0.05, stall_timeout - (time.monotonic() - last_activity))
+                else:
+                    until_stall = 1.0
+                self.send_condition.wait(min(1.0, remaining, until_stall))
 
         for old_id in pending_ids:
             with self.send_condition:
@@ -860,6 +1113,50 @@ class TDJsonClient:
                 raise ValueError(
                     f"标题超过 Telegram Caption 限制（{len(str(text))}/{limit} 字符）"
                 )
+
+    @staticmethod
+    def _iter_local_input_paths(value):
+        """Yield every ``inputFileLocal`` path contained in a TDLib payload."""
+
+        if isinstance(value, dict):
+            if value.get("@type") == "inputFileLocal":
+                yield value.get("path")
+                return
+            for nested in value.values():
+                yield from TDJsonClient._iter_local_input_paths(nested)
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                yield from TDJsonClient._iter_local_input_paths(nested)
+
+    def _validate_local_input_paths(self, contents) -> None:
+        """Fail before a TDLib request when a generated local input vanished.
+
+        TDLib reports this situation as the generic 400 ``Can't find real file
+        path`` error.  The media builders already perform readiness checks, but
+        a temporary compression/staging artifact can still disappear between
+        construction and request dispatch (especially after an interrupted
+        task).  Checking the exact paths recursively here avoids submitting an
+        Album that TDLib cannot read and keeps the in-flight journal clean.
+        """
+
+        missing = []
+        for raw_path in self._iter_local_input_paths(contents):
+            if not raw_path:
+                missing.append("<empty path>")
+                continue
+            try:
+                exists = Path(raw_path).is_file()
+            except (OSError, TypeError, ValueError):
+                exists = False
+            if not exists:
+                missing.append(str(raw_path))
+        if missing:
+            preview = ", ".join(missing[:5])
+            if len(missing) > 5:
+                preview += f" …（另有 {len(missing) - 5} 个）"
+            raise FileNotFoundError(
+                f"TDLib 本地输入文件不存在或不可读取：{preview}"
+            )
 
     @staticmethod
     def _target_identity() -> dict:
@@ -1030,6 +1327,10 @@ class TDJsonClient:
         journal_target = self._target_identity() if journal_active else None
         submitted = False
         journal_terminal = False
+        self._last_request_dispatched = False
+        with getattr(self, "_activity_lock", threading.Lock()):
+            self._active_album_context = None
+            self._active_file_ids = set()
         if journal_active:
             unresolved = journal.unresolved(selected_kind, album_key, target=journal_target)
             if unresolved is not None:
@@ -1042,6 +1343,14 @@ class TDJsonClient:
                     warning(message)
                 raise UploadUnknownError(message)
         self._validate_caption_length(contents)
+        # Validate all generated inputFileLocal paths before PREPARED is
+        # persisted.  A missing temporary artifact is a clean pre-dispatch
+        # failure and must not create an UNKNOWN journal entry.
+        try:
+            self._validate_local_input_paths(contents)
+        except Exception as exc:
+            self._safe_diagnose_upload_failure(contents, items, exc)
+            raise
         if journal_active:
             journal.prepare(
                 selected_kind,
@@ -1093,6 +1402,7 @@ class TDJsonClient:
                 submitted = True
             if progress is not None and items is not None:
                 progress.register_messages(messages, items)
+            self._begin_album_watchdog(album_key, selected_kind, items, messages)
             result = self.wait_for_send_results(messages)
             if not isinstance(result, dict):
                 result = {"succeeded": list(result or []), "failed": [], "pending": []}
@@ -1168,14 +1478,28 @@ class TDJsonClient:
             if journal_active:
                 # A request that was submitted but never fully observed is
                 # always UNKNOWN, including cancellation after submission.
-                journal.unknown(selected_kind, album_key, str(exc), target=journal_target)
+                dispatched = bool(getattr(self, "_last_request_dispatched", False))
+                if isinstance(exc, TDLibCancelled) and not submitted and not dispatched:
+                    # Force-stop before sendMessage/sendMessageAlbum reached
+                    # TDLib is a clean abort.  Keep a terminal FAILED record
+                    # (rather than UNKNOWN) so the prepared journal cannot
+                    # block the next run.
+                    journal.failed(selected_kind, album_key, str(exc), target=journal_target)
+                else:
+                    journal.unknown(selected_kind, album_key, str(exc), target=journal_target)
             self._safe_diagnose_upload_failure(contents, items, exc)
             raise
         except Exception as exc:
+            if isinstance(exc, UploadStalledError):
+                # A stalled transfer must tear down this TDLib session before
+                # control returns to the uploader.  The journal transition
+                # below still records UNKNOWN, so a later run cannot resend
+                # an Album whose server-side outcome is uncertain.
+                self.cancel()
             if journal_active:
                 if journal_terminal:
                     pass
-                elif submitted:
+                elif submitted or bool(getattr(self, "_last_request_dispatched", False)):
                     journal.unknown(selected_kind, album_key, str(exc), target=journal_target)
                 else:
                     journal.failed(selected_kind, album_key, str(exc), target=journal_target)
@@ -1197,5 +1521,56 @@ class TDJsonClient:
         self.stop_event.set()
         with self.send_condition:
             self.send_condition.notify_all()
-        if self.receiver_thread.is_alive():
-            self.receiver_thread.join(timeout=3)
+        receiver = getattr(self, "receiver_thread", None)
+        if receiver is not None and receiver.is_alive():
+            # td_receive() uses a one-second timeout.  Waiting without a
+            # bounded join is intentional: creating a replacement client
+            # while this thread is alive can consume the replacement client's
+            # updates from tdjson's process-wide queue.
+            receiver.join()
+        with TDJsonClient._receiver_guard:
+            if getattr(TDJsonClient, "_active_receiver", None) is receiver:
+                TDJsonClient._active_receiver = None
+
+    def should_rotate(self, confirmed_albums: int) -> bool:
+        try:
+            threshold = int(getattr(cfg, "TDLIB_SESSION_ROTATION_ALBUMS", 0))
+        except (TypeError, ValueError):
+            threshold = 0
+        return threshold > 0 and confirmed_albums > 0 and confirmed_albums % threshold == 0
+
+    def rotate_session(self, update_callback=None, device_model: str | None = None):
+        """Rotate after a caller has finalized a confirmed Album.
+
+        The old client is fully closed before constructing the replacement, so
+        two receiver threads never compete for tdjson.td_receive().
+        """
+
+        callback = update_callback
+        if callback is not None:
+            self.remove_update_callback(callback)
+        ui = self.ui
+        model = device_model or self.device_model
+        self.close()
+        replacement = None
+        try:
+            replacement = type(self)(ui, model)
+            replacement.login()
+            replacement.refresh_account_limits()
+            replacement.set_fast_options()
+            replacement.validate_target()
+        except Exception:
+            if replacement is not None:
+                try:
+                    replacement.close()
+                except Exception:
+                    pass
+            raise
+        if callback is not None:
+            replacement.add_update_callback(callback)
+        write_app_log(
+            "INFO",
+            f"TDLib session 已在 Album 边界轮换：{model}",
+            source="tdlib",
+        )
+        return replacement

@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import tomllib
 from collections import defaultdict
 from pathlib import Path
@@ -98,6 +99,7 @@ PROJECT_DIR = RESOURCE_DIR
 APP_VERSION = read_version()
 MEDIA_KINDS = ("video", "image", "mixed")
 KIND_LABELS = {"video": "视频", "image": "图片", "mixed": "混合"}
+_LAST_SUCCESSFUL_SCAN_COUNTS: dict[tuple[str, str], int] = {}
 # The editor is normally used before a Telegram session is opened, so its
 # local validation is a soft ceiling.  Each uploader revalidates against
 # TDLib's ``message_caption_length_max`` immediately before sending.
@@ -720,6 +722,7 @@ def _cancelled_scan_result(
     scan_errors=None,
     scan_warnings=None,
     scan_size_skips=None,
+    scan_diagnostic=None,
 ) -> dict:
     """Build an explicit cancellation result instead of a fake empty scan."""
 
@@ -747,12 +750,13 @@ def _cancelled_scan_result(
         "scan_size_skips": list(scan_size_skips or []),
         "scan_skipped_files": 0,
         "scan_compress_files": 0,
+        "scan_diagnostic": dict(scan_diagnostic or {}),
         "ignored_root_media": [str(path) for path in (ignored_root_media or [])],
         "target": _target_for(kind),
     }
 
 
-def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
+def _scan_result_once(kind: str, progress_callback=None, cancel_event=None) -> dict:
     """Scan using the existing core when available, with a preview fallback."""
     kind = str(kind).strip().lower()
     if kind not in MEDIA_KINDS:
@@ -771,6 +775,7 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
     scan_errors: list[str] = []
     scan_warnings: list[str] = []
     scan_size_skips: list[dict] = []
+    scan_diagnostic: dict = {}
     try:
         if kind == "video":
             import tdlib_video_album_uploader as core_module
@@ -796,6 +801,7 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
             scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
             scan_warnings = list(getattr(core, "LAST_SCAN_WARNINGS", []))
             scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
+            scan_diagnostic = dict(getattr(core, "LAST_SCAN_DIAGNOSTIC", {}) or {})
             metadata = {}
             exiftool = Path(_cfg("EXIFTOOL_PATH", ""))
             read_dates = bool(_cfg("VIDEO_READ_DATES", True))
@@ -837,6 +843,7 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
                     kind,
                     core_available=core is not None,
                     warning="扫描已取消",
+                    scan_diagnostic=scan_diagnostic,
                 )
             if cancel_event is None:
                 items, missing = core.build_items(
@@ -915,6 +922,7 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
             scan_warnings = list(getattr(core, "LAST_SCAN_WARNINGS", []))
             scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
             ignored_root_media = list(getattr(core, "LAST_SCAN_IGNORED_ROOT_MEDIA", []))
+            scan_diagnostic = dict(getattr(core, "LAST_SCAN_DIAGNOSTIC", {}) or {})
             state = core.UploadState()
         else:
             root = Path(_cfg("MIXED_DIR", PROJECT_DIR))
@@ -939,6 +947,7 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
             scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
             scan_warnings = list(getattr(core, "LAST_SCAN_WARNINGS", []))
             scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
+            scan_diagnostic = dict(getattr(core, "LAST_SCAN_DIAGNOSTIC", {}) or {})
             state = core.UploadState()
         else:
             paths, scan_size_skips = _apply_size_limits(
@@ -956,6 +965,7 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
             scan_errors=scan_errors,
             scan_warnings=scan_warnings,
             scan_size_skips=scan_size_skips,
+            scan_diagnostic=scan_diagnostic,
         )
 
     completion_cache = {}
@@ -1243,11 +1253,86 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
         "scan_warnings": scan_warnings,
         "cancelled": bool(cancel_event is not None and cancel_event.is_set()),
         "scan_size_skips": scan_size_skips,
+        "scan_diagnostic": scan_diagnostic,
         "scan_skipped_files": len(scan_rejected),
         "scan_compress_files": len(scan_compressing),
         "ignored_root_media": [str(path) for path in ignored_root_media],
         "target": _target_for(kind),
     }
+
+
+def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
+    """Run a scan and guard against a transient, misleading zero result.
+
+    A reconnecting SMB/NAS can report an empty enumeration even though the
+    source root is still present.  Retry with fresh scanner state before
+    handing that result to the GUI.  A genuinely empty directory is accepted
+    on the first scan; after a previously populated scan, a final zero is
+    returned with an explicit warning instead of looking like a clean reset.
+    """
+
+    result = _scan_result_once(
+        kind,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+    )
+    if result.get("cancelled"):
+        return result
+    root = Path(_cfg(KIND_PATH_KEYS[_require_kind(kind)], ""))
+    root_key = (str(kind).strip().lower(), stable_path(root))
+    previous_count = _LAST_SUCCESSFUL_SCAN_COUNTS.get(root_key, 0)
+    if result.get("total_files", 0) == 0 and previous_count > 0:
+        root_readable = False
+        try:
+            root_readable = root.is_dir() and not is_link_or_junction(root)
+        except OSError:
+            root_readable = False
+        if root_readable:
+            delays = (0.5, 1.0, 2.0)
+            for retry_index, delay in enumerate(delays, 1):
+                if cancel_event is not None and cancel_event.is_set():
+                    return _cancelled_scan_result(
+                        kind,
+                        core_available=bool(result.get("core_available")),
+                        warning="扫描已取消",
+                    )
+                if cancel_event is not None:
+                    if cancel_event.wait(delay):
+                        return _cancelled_scan_result(
+                            kind,
+                            core_available=bool(result.get("core_available")),
+                            warning="扫描已取消",
+                        )
+                else:
+                    time.sleep(delay)
+                retry_result = _scan_result_once(
+                    kind,
+                    progress_callback=progress_callback,
+                    cancel_event=cancel_event,
+                )
+                if retry_result.get("cancelled"):
+                    return retry_result
+                if retry_result.get("total_files", 0) > 0:
+                    result = retry_result
+                    result["warning"] = (
+                        f"目录短暂返回 0 个文件，已在第 {retry_index} 次重新枚举后恢复。"
+                        + (f"；{result.get('warning')}" if result.get("warning") else "")
+                    )
+                    break
+            else:
+                result["status"] = "warning"
+                result["warning"] = (
+                    f"扫描结果异常：上次成功扫描 {previous_count} 个文件，本次连续重试后仍为 0；"
+                    "未将其视为正常空目录，请检查网络盘并重新扫描。"
+                )
+                result["scan_diagnostic"] = {
+                    "source_root": str(root),
+                    "previous_successful_count": previous_count,
+                    "retry_delays_seconds": list(delays),
+                }
+    if result.get("total_files", 0) > 0:
+        _LAST_SUCCESSFUL_SCAN_COUNTS[root_key] = int(result["total_files"])
+    return result
 
 
 class ScanWorker(QThread):
@@ -1329,29 +1414,49 @@ class GuiConsoleUI(QObject):
         self._client = None
         self._client_lock = threading.Lock()
         self._stop_requested = threading.Event()
+        self._force_stop_requested = threading.Event()
 
     @property
     def stop_requested(self) -> bool:
         return self._stop_requested.is_set()
 
     @property
-    def cancel_event(self):
-        """Expose the shared event to scan/media helpers."""
+    def force_stop_requested(self) -> bool:
+        return self._force_stop_requested.is_set()
 
-        return self._stop_requested
+    @property
+    def cancel_event(self):
+        """Expose only the force-stop event to cancellable media helpers."""
+
+        return self._force_stop_requested
 
     def register_client(self, client):
         with self._client_lock:
             self._client = client
             stop_already_requested = self._stop_requested.is_set()
-        if stop_already_requested:
-            # The user can press stop while TDLib is still starting.  Carry
-            # that request into the newly created client instead of allowing
-            # the first upload to begin.
+            force_already_requested = self._force_stop_requested.is_set()
+        if force_already_requested:
             client.cancel()
+        elif stop_already_requested:
+            request_graceful = getattr(client, "request_graceful_stop", None)
+            if callable(request_graceful):
+                request_graceful()
 
     def request_stop(self):
+        """Request a boundary-safe stop; the active Album may finish."""
         self._stop_requested.set()
+        self.auth_bridge.answer("")
+        with self._client_lock:
+            client = self._client
+        if client is not None:
+            request_graceful = getattr(client, "request_graceful_stop", None)
+            if callable(request_graceful):
+                request_graceful()
+
+    def force_stop(self):
+        """Abort immediately; submitted media remains UNKNOWN."""
+        self._stop_requested.set()
+        self._force_stop_requested.set()
         self.auth_bridge.answer("")
         with self._client_lock:
             client = self._client
@@ -1361,7 +1466,12 @@ class GuiConsoleUI(QObject):
     def prompt(self, text: str, *, password: bool = False) -> str:
         value = self.auth_bridge.ask(text, password)
         if not value:
-            self.request_stop()
+            # ``request_stop`` wakes an authentication prompt by answering an
+            # empty value.  That is a boundary-safe stop request, not an
+            # implicit force-stop.  Only an unsolicited empty answer (or an
+            # already explicit force request) should tear down TDLib now.
+            if not self.stop_requested:
+                self.force_stop()
         return value
 
     def _message(self, level: str, text):
@@ -1448,9 +1558,17 @@ class UploadWorker(QThread):
         super().__init__()
         self.kind = _require_kind(kind)
         self.ui = GuiConsoleUI(auth_bridge, kind)
+        self.result: tuple[bool, str] | None = None
+
+    def _emit_completed(self, success: bool, message: str) -> None:
+        self.result = (bool(success), str(message))
+        self.completed.emit(bool(success), str(message))
 
     def request_stop(self):
         self.ui.request_stop()
+
+    def force_stop(self):
+        self.ui.force_stop()
 
     def run(self):
         try:
@@ -1482,13 +1600,26 @@ class UploadWorker(QThread):
                 core.main()
             else:
                 raise ValueError(f"未知媒体类型：{self.kind}")
-            if self.ui.stop_requested:
-                self.completed.emit(False, "任务已立即停止；完整完成的 Album 已保存断点。")
+            if self.ui.force_stop_requested:
+                self._emit_completed(
+                    False,
+                    "任务已强制停止；当前 Album 的发送结果可能未知，请在‘未确认上传’中人工确认。",
+                )
+            elif self.ui.stop_requested:
+                self._emit_completed(False, "已在 Album 边界停止；完整完成的 Album 已保存断点。")
             else:
-                self.completed.emit(True, "上传任务完成。")
+                self._emit_completed(True, "上传任务完成。")
         except Exception as exc:
-            if type(exc).__name__ == "TDLibCancelled" or self.ui.stop_requested:
-                self.completed.emit(False, "任务已立即停止；完整完成的 Album 已保存断点。")
+            if self.ui.force_stop_requested or type(exc).__name__ == "TDLibCancelled":
+                self._emit_completed(
+                    False,
+                    "任务已强制停止；当前 Album 的发送结果可能未知，请在‘未确认上传’中人工确认。",
+                )
+            elif (
+                type(exc).__name__ == "TDLibGracefulStop"
+                or (self.ui.stop_requested and type(exc).__name__ != "UploadStalledError")
+            ):
+                self._emit_completed(False, "已在 Album 边界停止；完整完成的 Album 已保存断点。")
             else:
                 self.ui.error(f"程序停止：{type(exc).__name__}: {exc}")
                 write_exception(
@@ -1496,7 +1627,7 @@ class UploadWorker(QThread):
                     exc,
                     source=f"upload/{self.kind}",
                 )
-                self.completed.emit(False, f"任务失败：{type(exc).__name__}: {exc}")
+                self._emit_completed(False, f"任务失败：{type(exc).__name__}: {exc}")
 
 
 def _card(title: str, value: str = "—") -> tuple[QFrame, QLabel]:
@@ -1739,6 +1870,17 @@ class UploadPage(QWidget):
         self.tree.clear()
         completed_paths = set(result.get("completed_paths", []))
         for group in result["groups"]:
+            raw_plans = group.get("album_plans")
+            # An empty scan/group is not an Album.  In particular, do not
+            # manufacture the legacy fallback row for ``items=[]``.  Plans
+            # containing no items are filtered as well so stale state cannot
+            # render an empty row as a completed Album.
+            if raw_plans is None:
+                plans = None
+            else:
+                plans = [plan for plan in raw_plans if plan.get("items")]
+            if not group.get("items") and not plans:
+                continue
             label = (
                 f"{group['label']} · {len(group['items'])} 个 · "
                 f"已完成 {group['completed']} · 待上传 {group['pending']} · "
@@ -1748,13 +1890,16 @@ class UploadPage(QWidget):
             if self.kind in {"video", "mixed"}:
                 self.tree.addTopLevelItem(top)
                 top.setExpanded(True)
-            plans = group.get("album_plans") or [{
-                "key": "",
-                "number": 1,
-                "items": group["items"],
-                "pending_items": [item for item in group["items"] if stable_path(item["path"] if isinstance(item, dict) else item) not in completed_paths],
-                "caption": {"text": group.get("caption", ""), "base_label": group.get("caption", ""), "custom_text": ""},
-            }]
+            if plans is None:
+                # Only an omitted plan list means a legacy preview fallback.
+                # An explicit [] is a valid empty result and must stay empty.
+                plans = [{
+                    "key": "",
+                    "number": 1,
+                    "items": group["items"],
+                    "pending_items": [item for item in group["items"] if stable_path(item["path"] if isinstance(item, dict) else item) not in completed_paths],
+                    "caption": {"text": group.get("caption", ""), "base_label": group.get("caption", ""), "custom_text": ""},
+                }]
             for plan in plans:
                 album_items = plan.get("items", [])
                 pending_count = len(plan.get("pending_items", []))
@@ -2030,6 +2175,7 @@ class UploadPage(QWidget):
 
 class TaskPage(QWidget):
     stop_requested = Signal()
+    force_stop_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -2078,17 +2224,23 @@ class TaskPage(QWidget):
 
         bottom = QHBoxLayout()
         self.stop_button = QPushButton("安全停止")
-        self.stop_button.setObjectName("dangerButton")
+        self.stop_button.setObjectName("secondaryButton")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop_requested)
+        self.force_stop_button = QPushButton("强制停止")
+        self.force_stop_button.setObjectName("dangerButton")
+        self.force_stop_button.setEnabled(False)
+        self.force_stop_button.clicked.connect(self.force_stop_requested)
         bottom.addStretch(1)
         bottom.addWidget(self.stop_button)
+        bottom.addWidget(self.force_stop_button)
         layout.addLayout(bottom)
 
     def start_session(self, kind: str, result: dict):
         self.title.setText(f"任务中心 · {_kind_label(kind)}")
         self.task_status.setText("正在启动…")
         self.stop_button.setEnabled(True)
+        self.force_stop_button.setEnabled(True)
         self.progress.setValue(0)
         self.metrics.setText(
             f"待上传 {result['pending_files']} 个 · {_fmt_size(result['pending_bytes'])} · "
@@ -2126,6 +2278,7 @@ class TaskPage(QWidget):
 
     def finish_session(self, success: bool, message: str):
         self.stop_button.setEnabled(False)
+        self.force_stop_button.setEnabled(False)
         self.task_status.setText("已完成" if success else message)
         self.log.appendPlainText(("✓ " if success else "! ") + message)
 
@@ -2150,9 +2303,9 @@ class InflightPage(QWidget):
         title_row.addWidget(self.hint)
         layout.addLayout(title_row)
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(
-            ["媒体类型", "Album 标识", "状态", "创建时间", "最后更新", "目标", "文件数", "错误原因"]
+            ["媒体类型", "文件", "状态", "创建时间", "最后更新", "目标", "文件数", "Album 标识", "错误原因"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -2191,8 +2344,15 @@ class InflightPage(QWidget):
 
         target = _record_target(record)
         has_target = bool(target)
+        display_items = self._display_items(record)
+        file_text = "\n".join(display_items) or "（记录中没有文件名）"
+        target_text = self._target_text(target)
         message = (
-            f"将{action}：\n{record.get('album_key', '')}\n\n"
+            f"将{action}：\n"
+            f"Telegram 目标：{target_text}\n"
+            f"Album ID：{record.get('album_key', '')}\n"
+            f"文件数量：{len(record.get('items', []) or [])}\n"
+            f"文件：\n{file_text}\n\n"
             "请确认你已经核对 Telegram 中的目标和 Album。"
         )
         if sent and not has_target:
@@ -2213,6 +2373,34 @@ class InflightPage(QWidget):
         if answer == QMessageBox.StandardButton.Yes:
             self.reconciliation_requested.emit(record, sent)
 
+    @staticmethod
+    def _display_items(record: dict) -> list[str]:
+        values = []
+        for raw in record.get("items", []) if isinstance(record, dict) else []:
+            if isinstance(raw, dict):
+                value = raw.get("display_name")
+                if not value:
+                    # Older journals only stored the stable path.  Show a
+                    # filename in the compact column while retaining the full
+                    # path in the tooltip when a display path is available.
+                    value = raw.get("display_path") or raw.get("path")
+            else:
+                value = raw
+            if value:
+                text = str(value)
+                values.append(Path(text.replace("\\", "/")).name or text)
+        return values
+
+    @staticmethod
+    def _target_text(target: dict) -> str:
+        if not target:
+            return "⚠ 旧版记录：目标未知"
+        mode = str(target.get("target_mode", ""))
+        chat_id = target.get("chat_id", "")
+        if mode == "channel":
+            return f"频道 {chat_id}"
+        return f"群组 {chat_id} / Topic {target.get('forum_topic_id', '')}"
+
     def reload_records(self):
         try:
             from upload_journal import InflightJournal, UNRESOLVED, _record_target
@@ -2231,24 +2419,32 @@ class InflightPage(QWidget):
             has_target = bool(target)
             target_id = ""
             if has_target:
-                target_mode = str(target.get("target_mode", ""))
-                target_id = target.get("chat_id", "")
-                if target_mode != "channel" and target.get("forum_topic_id"):
-                    target_id = f"{target_id} / Topic {target.get('forum_topic_id')}"
+                target_id = self._target_text(target)
+            display_items = self._display_items(record)
+            if len(display_items) == 1:
+                file_summary = display_items[0]
+            elif display_items:
+                preview = display_items[:3]
+                file_summary = "、".join(preview) + f" … (+{len(display_items) - len(preview)})"
+            else:
+                file_summary = "（未知文件）"
             values = [
                 _kind_label(record.get("kind", "unknown")),
-                record.get("album_key", ""),
+                file_summary,
                 record.get("status", ""),
                 record.get("created_at", ""),
                 record.get("updated_at", ""),
                 target_id or "⚠ 旧版记录：目标未知",
                 len(record.get("items", []) or []),
+                record.get("album_key", ""),
                 record.get("error", ""),
             ]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
                 if column == 0:
                     cell.setData(Qt.ItemDataRole.UserRole, record)
+                if column == 1:
+                    cell.setToolTip("\n".join(display_items) or "记录中没有可显示的文件名")
                 self.table.setItem(row, column, cell)
         self.table.resizeColumnsToContents()
         self.hint.setText(
@@ -3229,6 +3425,14 @@ class ScanToolsDialog(QDialog):
         )
         process_form.addRow("ExifTool 批次大小", self.exiftool_batch_size)
         process_form.addRow("ExifTool 重试次数", self.exiftool_retries)
+        self.upload_stall_timeout = integer_option(
+            _cfg("TDLIB_UPLOAD_STALL_TIMEOUT", 300), 0, 86400, " 秒"
+        )
+        self.session_rotation_albums = integer_option(
+            _cfg("TDLIB_SESSION_ROTATION_ALBUMS", 0), 0, 10000, " 个 Album"
+        )
+        process_form.addRow("上传无进度超时", self.upload_stall_timeout)
+        process_form.addRow("Session 轮换间隔", self.session_rotation_albums)
         content_layout.addWidget(process_box)
 
         hint = QLabel(
@@ -3283,6 +3487,8 @@ class ScanToolsDialog(QDialog):
         values.update({("process", key): widget.value() for key, widget in self.process_timeouts.items()})
         values[("process", "exiftool_batch_size")] = self.exiftool_batch_size.value()
         values[("process", "exiftool_retries")] = self.exiftool_retries.value()
+        values[("tdlib", "upload_stall_timeout_seconds")] = self.upload_stall_timeout.value()
+        values[("tdlib", "session_rotation_albums")] = self.session_rotation_albums.value()
         error = _write_config_values(values)
         if error:
             QMessageBox.critical(self, "保存失败", error)
@@ -3353,6 +3559,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(860, 560)
         self.resize(1240, 800)
         self.worker: UploadWorker | None = None
+        self._pending_upload_finish: tuple[bool, str] | None = None
         self.scanners: dict[str, ScanWorker] = {}
         self.active_kind = ""
         self.active_result = None
@@ -3429,6 +3636,7 @@ class MainWindow(QMainWindow):
             page.path_selected.connect(self._save_source_path)
             page.edit_target_requested.connect(self._edit_target)
         self.task_page.stop_requested.connect(self._stop_upload)
+        self.task_page.force_stop_requested.connect(self._force_stop_upload)
         self.inflight_page.reconciliation_requested.connect(self._reconcile_inflight)
         self.settings_page.open_editor.connect(self._edit_config)
         self.settings_page.open_scan_tools.connect(self._edit_scan_tools)
@@ -3454,10 +3662,10 @@ class MainWindow(QMainWindow):
 
     def _scan(self, kind: str):
         kind = _require_kind(kind)
-        if self.worker is not None and self.worker.isRunning():
-            QMessageBox.warning(self, "任务运行中", "当前已有上传任务，请先安全停止后再扫描。")
+        if self.worker is not None:
+            QMessageBox.warning(self, "任务运行中", "当前上传任务仍在收尾，请等待 TDLib 完全关闭后再扫描。")
             return
-        if any(scanner.isRunning() for scanner in self.scanners.values()):
+        if self.scanners:
             QMessageBox.warning(self, "扫描运行中", "当前已有目录扫描，请等待扫描完成后再扫描另一个类型。")
             return
         old = self.scanners.get(kind)
@@ -3471,6 +3679,7 @@ class MainWindow(QMainWindow):
         worker.cancelled.connect(lambda result, k=kind: self._scan_done(k, result))
         worker.failed.connect(lambda message, k=kind: self._scan_failed(k, message))
         worker.progress_changed.connect(self._scan_progress)
+        worker.finished.connect(lambda w=worker, k=kind: self._scan_thread_finished(k, w))
         worker.finished.connect(worker.deleteLater)
         worker.start()
 
@@ -3507,7 +3716,7 @@ class MainWindow(QMainWindow):
 
     def _scan_done(self, kind: str, result: dict):
         kind = _require_kind(kind)
-        scanner = self.scanners.pop(kind, None)
+        scanner = self.scanners.get(kind)
         page = self._upload_page(kind)
         page.set_scanning(False)
         cancelled = bool(
@@ -3524,11 +3733,16 @@ class MainWindow(QMainWindow):
 
     def _scan_failed(self, kind: str, message: str):
         kind = _require_kind(kind)
-        self.scanners.pop(kind, None)
         page = self._upload_page(kind)
         page.set_scanning(False)
         page.status_label.setText(message)
         self.statusBar().showMessage(message)
+
+    def _scan_thread_finished(self, kind: str, worker: ScanWorker):
+        """Remove a scanner only after its QThread has really finished."""
+
+        if self.scanners.get(kind) is worker:
+            self.scanners.pop(kind, None)
 
     def _save_source_path(self, kind: str, path: str):
         kind = _require_kind(kind)
@@ -3555,11 +3769,11 @@ class MainWindow(QMainWindow):
 
     def _start_upload(self, kind: str):
         kind = _require_kind(kind)
-        if any(scanner.isRunning() for scanner in self.scanners.values()):
+        if self.scanners:
             QMessageBox.information(self, "正在扫描", "请等待目录扫描完成后再上传。")
             return
-        if self.worker is not None and self.worker.isRunning():
-            QMessageBox.warning(self, "任务运行中", "图片和视频任务不能同时运行。")
+        if self.worker is not None:
+            QMessageBox.warning(self, "任务运行中", "当前上传任务仍在运行或收尾，请等待任务线程完全退出。")
             return
         page = self._upload_page(kind)
         result = page.result
@@ -3598,7 +3812,14 @@ class MainWindow(QMainWindow):
         worker.ui.progress_changed.connect(self.task_page.show_progress)
         worker.ui.album_changed.connect(self.task_page.show_album)
         worker.ui.target_changed.connect(self._target_from_worker)
-        worker.completed.connect(self._upload_finished)
+        # Keep the worker identity with the queued signal.  Qt may deliver a
+        # QThread's ``finished`` signal before a queued ``completed`` slot;
+        # an old completion must never update a newer task after teardown.
+        worker.completed.connect(
+            lambda success, message, w=worker: self._upload_finished_for_worker(
+                w, success, message
+            )
+        )
         worker.finished.connect(lambda w=worker: self._worker_thread_finished(w))
         for upload_page in self.upload_pages.values():
             upload_page.set_running(True)
@@ -3630,49 +3851,94 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             answer = QMessageBox.question(
                 self,
-                "立即停止上传",
-                "将立即取消当前文件/Album 的 TDLib 上传；未完整发送的 Album 不会写入断点，"
-                "下次会重新处理。是否继续？",
+                "安全停止上传",
+                "不会开始新的 Album；当前 Album 会等待 Telegram 最终确认，"
+                "保存断点后关闭 TDLib。是否在当前 Album 完成后停止？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer == QMessageBox.StandardButton.Yes:
                 self.worker.request_stop()
-                self.task_page.task_status.setText("正在立即停止…")
-                self.statusBar().showMessage("正在立即停止上传任务…")
+                self.task_page.task_status.setText("将在当前 Album 完成后停止")
+                self.statusBar().showMessage("将在当前 Album 完成后停止…")
+
+    def _force_stop_upload(self):
+        if self.worker is not None and self.worker.isRunning():
+            answer = QMessageBox.warning(
+                self,
+                "强制停止上传",
+                "将立即关闭 TDLib。当前已提交但未确认的 Album 可能已发送，"
+                "会保留在‘未确认上传’中，不能自动重传。确定继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.worker.ui.force_stop()
+                self.task_page.task_status.setText("正在强制关闭 TDLib…")
+                self.statusBar().showMessage("正在强制停止上传任务…")
+
+    def _upload_finished_for_worker(
+        self,
+        worker: UploadWorker,
+        success: bool,
+        message: str,
+    ):
+        if self.worker is not worker:
+            return
+        self._upload_finished(success, message)
 
     def _upload_finished(self, success: bool, message: str):
+        if self.worker is None:
+            # The lifecycle barrier already finalized this worker.  This can
+            # happen when Qt delivers a queued ``completed`` signal after
+            # QThread.finished; silently ignore the stale notification.
+            return
         write_app_log(
             "INFO" if success else "ERROR",
             f"{self.active_kind} 任务结束：{message}",
             source=f"upload/{self.active_kind or 'app'}",
         )
-        if self.active_result is not None:
-            records = _load_history()
-            records.append({
-                "started_at": self.started_at,
-                "finished_at": _dt.datetime.now().isoformat(timespec="seconds"),
-                "kind": self.active_kind,
-                "source_dir": self.active_result.get("source_dir", ""),
-                "total_files": self.active_result.get("total_files", 0),
-                "total_bytes": self.active_result.get("total_bytes", 0),
-                "success": success,
-                "message": message,
-            })
-            _save_history(records)
-
-        self.task_page.finish_session(success, message)
-        page = self._upload_page(self.active_kind)
-        for upload_page in self.upload_pages.values():
-            upload_page.set_running(False)
-        page.clear_scan_result()
-        self.home.task_value.setText("无")
-        self.home.set_connection("已连接" if success else "未连接", success)
-        self.statusBar().showMessage(message)
-        self.history_page.reload_records()
-        self.inflight_page.reload_records()
+        # ``completed`` is emitted from UploadWorker.run before QThread emits
+        # ``finished``.  Keep every page locked until the receiver thread and
+        # TDLib teardown have actually completed.
+        self._pending_upload_finish = (success, message)
+        self.task_page.stop_button.setEnabled(False)
+        self.task_page.force_stop_button.setEnabled(False)
+        self.task_page.task_status.setText("正在关闭 TDLib…")
+        self.statusBar().showMessage("正在关闭 TDLib…")
 
     def _worker_thread_finished(self, worker: UploadWorker):
         if self.worker is worker:
+            # Queued signal delivery normally sends ``completed`` first, but
+            # the QThread finished signal is the lifecycle barrier.  Use the
+            # worker's durable result as a fallback if Qt delivers finished
+            # before the queued completion callback.
+            finish = self._pending_upload_finish or getattr(worker, "result", None)
+            self._pending_upload_finish = None
+            if finish is not None:
+                success, message = finish
+                if self.active_result is not None:
+                    records = _load_history()
+                    records.append({
+                        "started_at": self.started_at,
+                        "finished_at": _dt.datetime.now().isoformat(timespec="seconds"),
+                        "kind": self.active_kind,
+                        "source_dir": self.active_result.get("source_dir", ""),
+                        "total_files": self.active_result.get("total_files", 0),
+                        "total_bytes": self.active_result.get("total_bytes", 0),
+                        "success": success,
+                        "message": message,
+                    })
+                    _save_history(records)
+                self.task_page.finish_session(success, message)
+                for upload_page in self.upload_pages.values():
+                    upload_page.set_running(False)
+                if self.active_kind:
+                    self._upload_page(self.active_kind).clear_scan_result()
+                self.home.task_value.setText("无")
+                self.home.set_connection("已连接" if success else "未连接", success)
+                self.statusBar().showMessage(message)
+                self.history_page.reload_records()
+                self.inflight_page.reload_records()
             self.worker = None
         worker.deleteLater()
 
@@ -3682,10 +3948,7 @@ class MainWindow(QMainWindow):
 
         if not isinstance(record, dict):
             return
-        if (
-            self.worker is not None
-            and self.worker.isRunning()
-        ) or any(scanner.isRunning() for scanner in self.scanners.values()):
+        if self.worker is not None or self.scanners:
             QMessageBox.warning(
                 self,
                 "任务运行中",
@@ -3726,10 +3989,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("未确认上传记录已更新")
 
     def _cache_operation_allowed(self) -> bool:
-        if self.worker is not None and self.worker.isRunning():
+        if self.worker is not None:
             QMessageBox.warning(self, "任务运行中", "上传任务运行时不能清理缓存，请先安全停止任务。")
             return False
-        active_scans = [worker for worker in self.scanners.values() if worker.isRunning()]
+        active_scans = list(self.scanners.values())
         if active_scans:
             QMessageBox.warning(self, "扫描运行中", "目录扫描运行时不能清理缓存，请等待扫描完成。")
             return False
@@ -3814,7 +4077,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("扫描与外部工具设置已保存")
 
     def _can_change_configuration(self):
-        if (self.worker is not None and self.worker.isRunning()) or any(scanner.isRunning() for scanner in self.scanners.values()):
+        if self.worker is not None or self.scanners:
             QMessageBox.information(self, "任务进行中", "请等待扫描完成或停止上传后再修改配置。")
             return False
         return True
@@ -3836,7 +4099,7 @@ class MainWindow(QMainWindow):
                 self.worker.request_stop()
 
     def closeEvent(self, event):
-        if self.worker is not None and self.worker.isRunning():
+        if self.worker is not None:
             answer = QMessageBox.question(
                 self,
                 "任务运行中",
@@ -3846,7 +4109,7 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
-            self.worker.request_stop()
+            self.worker.force_stop()
             if not self.worker.wait(10000):
                 QMessageBox.warning(self, "仍在运行", "TDLib 尚未结束，请稍后再关闭窗口。")
                 event.ignore()

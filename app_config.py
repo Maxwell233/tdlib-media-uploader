@@ -792,6 +792,29 @@ TDLIB_MESSAGE_SEND_TIMEOUT = int(
     )
 )
 
+# A long absolute send timeout is still useful for very large media, but it
+# must not be the only way to detect a stalled Album.  The inactivity watchdog
+# is deliberately separate and can be disabled with 0 for unusual links that
+# are known to pause for longer than the default.
+TDLIB_UPLOAD_STALL_TIMEOUT = _bounded_int(
+    tdlib,
+    "upload_stall_timeout_seconds",
+    300,
+    0,
+    7 * 24 * 60 * 60,
+)
+
+# Rotate the TDLib session only at confirmed Album boundaries.  This is a
+# lifecycle safeguard for long jobs, rather than a file-count limit.  Zero
+# keeps the historical single-session behaviour.
+TDLIB_SESSION_ROTATION_ALBUMS = _bounded_int(
+    tdlib,
+    "session_rotation_albums",
+    0,
+    0,
+    100_000,
+)
+
 TDLIB_DATABASE_ENCRYPTION_KEY = str(
     tdlib.get(
         "database_encryption_key",

@@ -1,5 +1,5 @@
 # ============================================================
-# TDLib Media Uploader V1.9.1
+# TDLib Media Uploader V1.9.2
 #
 # 首次使用：
 #   1. 复制本文件为 data/config.toml
@@ -250,6 +250,15 @@ reset_state = false
 log_verbosity = 1
 request_timeout_seconds = 120
 message_send_timeout_seconds = 86400
+# Abort an Album only after this many seconds without uploaded-byte or TDLib
+# send-state progress.  Large files may legitimately take a long time; this
+# watchdog is independent from message_send_timeout_seconds.  Set to 0 to
+# disable it.
+upload_stall_timeout_seconds = 300
+# Close and recreate the TDLib client after this many confirmed Albums.  The
+# rotation happens only after the checkpoint and in-flight journal are saved.
+# Set to 0 to keep one session for the whole task.
+session_rotation_albums = 0
 
 database_encryption_key = ""
 

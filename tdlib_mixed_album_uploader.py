@@ -47,7 +47,14 @@ from path_utils import (
     wait_for_file_ready,
 )
 import app_config as cfg
-from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
+from tdlib_common import (
+    HeadlessUI,
+    TDJsonClient,
+    TDLibCancelled,
+    formatted_text,
+    graceful_stop_requested,
+    verify_tdjson_version,
+)
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR, MIXED_STATE_DIR
 from staging import cleanup_staging, remove_staged_file, should_stage, stage_file
 from instance_lock import run_with_instance_lock
@@ -62,6 +69,7 @@ LAST_SCAN_ERRORS: list[str] = []
 LAST_SCAN_WARNINGS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
 LAST_SCAN_IGNORED_ROOT_MEDIA: list[Path] = []
+LAST_SCAN_DIAGNOSTIC: dict = {}
 DEFERRED_STATUS = "DEFERRED"
 UI = HeadlessUI()
 MEDIA_DATE_MAX_WORKERS = 4
@@ -258,13 +266,14 @@ def _group_items(group_path: Path, group_name: str, cancel_event=None) -> list[d
 
 def scan_mixed_groups(cancel_event=None) -> list[dict]:
     """Scan each first-level directory as a separate mixed-media group."""
-    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_IGNORED_ROOT_MEDIA
+    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_IGNORED_ROOT_MEDIA, LAST_SCAN_DIAGNOSTIC
     root = Path(cfg.MIXED_DIR)
     _validate_extensions()
     LAST_SCAN_ERRORS = []
     LAST_SCAN_WARNINGS = []
     LAST_SCAN_SIZE_SKIPS = []
     LAST_SCAN_IGNORED_ROOT_MEDIA = []
+    LAST_SCAN_DIAGNOSTIC = {"source_root": str(root), "directories_scanned": 0, "entries_seen": 0}
     try:
         root = validate_scan_root(
             root,
@@ -292,6 +301,7 @@ def scan_mixed_groups(cancel_event=None) -> list[dict]:
             if cancel_event is not None and cancel_event.is_set():
                 LAST_SCAN_WARNINGS.append("目录扫描已取消")
                 break
+            LAST_SCAN_DIAGNOSTIC["entries_seen"] += 1
             try:
                 info = retry_fs_operation(
                     lambda entry=entry: entry.stat(follow_symlinks=False),
@@ -330,6 +340,14 @@ def scan_mixed_groups(cancel_event=None) -> list[dict]:
     # membership or be mixed with a first-level folder.
     if root_files:
         LAST_SCAN_IGNORED_ROOT_MEDIA = list(root_files)
+    LAST_SCAN_DIAGNOSTIC.update({
+        "directories_scanned": len(directories) + 1,
+        "accepted_groups": len(groups),
+        "root_media_ignored": len(root_files),
+        "errors": len(LAST_SCAN_ERRORS),
+        "warnings": len(LAST_SCAN_WARNINGS),
+        "cancelled": any("取消" in str(value) for value in LAST_SCAN_WARNINGS),
+    })
     return groups
 
 
@@ -394,6 +412,8 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
 
     def worker(item):
         path = item["path"]
+        if cancel_event is not None and cancel_event.is_set():
+            raise TDLibCancelled("上传已强制停止")
         try:
             readiness = wait_for_file_ready(
                 path,
@@ -420,6 +440,8 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
                 image_core.image_info(path)
             return None
         except Exception as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TDLibCancelled("上传已强制停止") from exc
             text = str(exc)
             category = "size" if "超过 Telegram" in text else "deferred" if _deferred(exc) else "unreadable"
             readiness_record = _readiness_record(exc)
@@ -572,6 +594,8 @@ def build_mixed_contents(items, caption: str, ui=None, cancel_event=None):
     video_core.UI = target
     contents, valid, skipped = [], [], []
     for item in items:
+        if cancel_event is not None and cancel_event.is_set():
+            raise TDLibCancelled("上传已强制停止")
         media_kind = item.get("media_kind")
         if media_kind not in {"video", "image"}:
             raise ValueError(f"未知混合媒体类型：{media_kind!r}")
@@ -615,6 +639,8 @@ def build_mixed_contents(items, caption: str, ui=None, cancel_event=None):
             contents.append(content)
             valid.append(item)
         except Exception as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TDLibCancelled("上传已强制停止") from exc
             path = item["path"]
             record = {
                 "item": item,
@@ -878,7 +904,12 @@ def _main_impl():
                 progress.skip_items(premium_items)
         client.set_fast_options()
         client.validate_target()
+        stopped_after_album = False
+        confirmed_albums = 0
         for index, plan in enumerate(pending_plans, 1):
+            if graceful_stop_requested(UI):
+                stopped_after_album = True
+                break
             # Keep the original plan boundary even when one item was deferred
             # during preflight.  Only the current send list is filtered.
             album_items = [
@@ -902,6 +933,8 @@ def _main_impl():
                 contents, ready, runtime_skipped = build_mixed_contents(
                     album_items, label, UI, cancel_event
                 )
+            if cancel_event is not None and cancel_event.is_set():
+                raise TDLibCancelled("上传已强制停止")
             if runtime_skipped:
                 skipped.extend(runtime_skipped)
                 progress.skip_items([record["item"] for record in runtime_skipped])
@@ -947,8 +980,22 @@ def _main_impl():
             cleanup_confirmed_staging(ready)
             progress.finish_album(ready)
             UI.success(f"混合 Album 发送成功：{plan['group_name']} / {plan['number']}")
+            confirmed_albums += 1
+            if graceful_stop_requested(UI):
+                stopped_after_album = True
+                break
+            if getattr(client, "should_rotate", lambda _count: False)(confirmed_albums):
+                client = client.rotate_session(
+                    progress.handle_update,
+                    "TDLib Mixed Album Uploader",
+                )
+                caption_limit = int(getattr(client, "caption_length_limit", None) or caption_limit)
         report_skipped_mixed(skipped, UI)
-        UI.banner("全部混合媒体上传完成", f"共完成 {len(pending_plans)} 个 Album · 断点已保存", accent="green")
+        UI.banner(
+            "已在当前 Album 完成后安全停止" if stopped_after_album else "全部混合媒体上传完成",
+            f"已处理 {index if pending_plans else 0}/{len(pending_plans)} 个 Album · 断点已保存",
+            accent="green",
+        )
     finally:
         client.remove_update_callback(progress.handle_update)
         client.close()

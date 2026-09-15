@@ -38,7 +38,14 @@ from path_utils import (
     wait_for_file_ready,
 )
 import app_config as cfg
-from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
+from tdlib_common import (
+    HeadlessUI,
+    TDJsonClient,
+    TDLibCancelled,
+    formatted_text,
+    graceful_stop_requested,
+    verify_tdjson_version,
+)
 from runtime_paths import APP_DATA_DIR, RESOURCE_DIR, IMAGE_STATE_DIR, IMAGE_COMPRESSION_CACHE_DIR
 from staging import cleanup_staging, remove_staged_file, should_stage, stage_file
 from instance_lock import run_with_instance_lock
@@ -48,6 +55,7 @@ STATE_DIR = IMAGE_STATE_DIR
 LAST_SCAN_ERRORS: list[str] = []
 LAST_SCAN_WARNINGS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
+LAST_SCAN_DIAGNOSTIC: dict = {}
 DEFERRED_STATUS = "DEFERRED"
 IMAGE_UPLOAD_PATHS: dict[str, Path] = {}
 STAGED_UPLOAD_PATHS: dict[str, Path] = {}
@@ -166,7 +174,7 @@ def file_signature(path: Path, snapshot=None) -> str:
 
 
 def scan_images(cancel_event=None) -> list[Path]:
-    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, IMAGE_SCAN_SNAPSHOTS
+    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, IMAGE_SCAN_SNAPSHOTS, LAST_SCAN_DIAGNOSTIC
     try:
         root = validate_scan_root(
             cfg.IMAGE_DIR,
@@ -180,6 +188,7 @@ def scan_images(cancel_event=None) -> list[Path]:
         LAST_SCAN_WARNINGS = ["目录扫描已取消"]
         LAST_SCAN_SIZE_SKIPS = []
         IMAGE_SCAN_SNAPSHOTS = {}
+        LAST_SCAN_DIAGNOSTIC = {"source_root": str(cfg.IMAGE_DIR), "cancelled": True}
         return []
     scan_result = iter_files(
         root,
@@ -192,6 +201,7 @@ def scan_images(cancel_event=None) -> list[Path]:
     images = scan_result.paths
     LAST_SCAN_ERRORS = list(scan_result.errors)
     LAST_SCAN_WARNINGS = list(scan_result.warnings)
+    LAST_SCAN_DIAGNOSTIC = dict(getattr(scan_result, "diagnostic", {}) or {})
     if scan_result.cancelled:
         LAST_SCAN_WARNINGS.append("目录扫描已取消")
     LAST_SCAN_SIZE_SKIPS = []
@@ -372,7 +382,29 @@ def compress_image(path: Path, cancel_event=None) -> Path:
 
 
 def upload_path(path: Path) -> Path:
-    return IMAGE_UPLOAD_PATHS.get(stable_path(path), path)
+    """Return a prepared image path only while its temporary file is valid.
+
+    Compression/staging maps live for the lifetime of the Python process.  A
+    previous task can be interrupted after its temporary artifact has been
+    removed, leaving a stale mapping behind.  Passing that stale path to
+    TDLib produces the opaque ``Can't find real file path`` error.  Validate
+    the mapped artifact at the point of use and fall back to the original
+    source when it no longer exists; the next upload attempt will rebuild it
+    when necessary.
+    """
+
+    key = stable_path(path)
+    candidate = IMAGE_UPLOAD_PATHS.get(key)
+    if candidate is None:
+        return path
+    candidate = Path(candidate)
+    try:
+        if candidate.is_file():
+            return candidate
+    except OSError:
+        pass
+    IMAGE_UPLOAD_PATHS.pop(key, None)
+    return path
 
 
 def cleanup_compressed_images() -> None:
@@ -419,6 +451,8 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
     total = len(paths)
 
     def worker(path):
+        if cancel_event is not None and cancel_event.is_set():
+            raise TDLibCancelled("上传已强制停止")
         try:
             expected = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
             readiness = wait_for_file_ready(
@@ -446,6 +480,8 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
                 image_info(path)
                 return None
         except Exception as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TDLibCancelled("上传已强制停止") from exc
             readiness_record = _readiness_record(exc)
             record = {
                 "path": path,
@@ -614,6 +650,8 @@ def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
     valid_paths = []
     skipped = []
     for path in paths:
+        if cancel_event is not None and cancel_event.is_set():
+            raise TDLibCancelled("上传已强制停止")
         try:
             expected = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
             item_caption = caption if not valid_paths else ""
@@ -635,6 +673,8 @@ def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
                 contents.append(input_photo(path, item_caption, **kwargs))
             valid_paths.append(path)
         except Exception as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TDLibCancelled("上传已强制停止") from exc
             try:
                 current_size = path.stat().st_size
             except OSError:
@@ -1019,7 +1059,11 @@ def _main_impl():
         client.validate_target()
 
         album_global = 0
+        stopped_after_album = False
         for plan in pending_plans:
+            if graceful_stop_requested(UI):
+                stopped_after_album = True
+                break
             album_paths = [
                 path for path in plan["pending_items"]
                 if stable_path(path) not in preflight_skipped_paths
@@ -1047,6 +1091,8 @@ def _main_impl():
                     UI,
                     cancel_event,
                 )
+            if cancel_event is not None and cancel_event.is_set():
+                raise TDLibCancelled("上传已强制停止")
             if runtime_skipped:
                 skipped_items.extend(runtime_skipped)
                 progress.skip_items([record["path"] for record in runtime_skipped])
@@ -1105,10 +1151,19 @@ def _main_impl():
             cleanup_confirmed_staging(ready_paths)
             progress.finish_album(ready_paths)
             UI.success(f"图片 Album {album_number} 发送成功 · Caption={caption or '无'} · 断点已保存。")
+            if graceful_stop_requested(UI):
+                stopped_after_album = True
+                break
+            if getattr(client, "should_rotate", lambda _count: False)(album_global):
+                client = client.rotate_session(
+                    progress.handle_update,
+                    "TDLib Image Album Uploader",
+                )
+                caption_limit = int(getattr(client, "caption_length_limit", None) or caption_limit)
 
         UI.banner(
-            "全部图片上传完成",
-            f"共完成 {total_albums} 个 Album · 断点已保存",
+            "已在当前 Album 完成后安全停止" if stopped_after_album else "全部图片上传完成",
+            f"已处理 {album_global}/{total_albums} 个 Album · 断点已保存",
             accent="green",
         )
         report_skipped_images(skipped_items, UI, final=True)

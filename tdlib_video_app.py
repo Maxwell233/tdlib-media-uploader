@@ -451,11 +451,15 @@ def _main_impl():
         client.validate_target()
 
         album_global = 0
+        stopped_after_album = False
 
         month_plan_groups = {}
         for plan in pending_plans:
             month_plan_groups.setdefault(plan["month_key"], []).append(plan)
         for month_key in sorted(month_plan_groups):
+            if core.graceful_stop_requested(UI):
+                stopped_after_album = True
+                break
             month_plans = month_plan_groups[month_key]
             month_items = [item for plan in month_plans for item in plan["pending_items"]]
             month_album_total = len(month_plans)
@@ -473,6 +477,9 @@ def _main_impl():
             )
 
             for plan in month_plans:
+                if core.graceful_stop_requested(UI):
+                    stopped_after_album = True
+                    break
                 album_items = [
                     item for item in plan["pending_items"]
                     if core.stable_path(item["path"]) not in preflight_skipped_paths
@@ -501,6 +508,8 @@ def _main_impl():
                         UI,
                         cancel_event,
                     )
+                if cancel_event is not None and cancel_event.is_set():
+                    raise core.TDLibCancelled("上传已强制停止")
                 if runtime_skipped:
                     skipped_items.extend(runtime_skipped)
                     progress.skip_items([
@@ -594,11 +603,23 @@ def _main_impl():
                     f"Caption={label} · "
                     "断点已保存。"
                 )
+                if core.graceful_stop_requested(UI):
+                    stopped_after_album = True
+                    break
+                if getattr(client, "should_rotate", lambda _count: False)(album_global):
+                    client = client.rotate_session(
+                        progress.handle_update,
+                        "TDLib Video Album Uploader",
+                    )
+                    caption_limit = int(
+                        getattr(client, "caption_length_limit", None)
+                        or caption_limit
+                    )
 
         UI.banner(
-            "全部视频上传完成",
+            "已在当前 Album 完成后安全停止" if stopped_after_album else "全部视频上传完成",
             (
-                f"共完成 {total_albums} 个 Album · "
+                f"已处理 {album_global}/{total_albums} 个 Album · "
                 "断点已保存"
             ),
             accent="green",

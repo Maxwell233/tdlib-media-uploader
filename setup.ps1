@@ -55,7 +55,7 @@ try {
     Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--upgrade", "pip")
 
     Write-Host "→ 安装项目依赖" -ForegroundColor Yellow
-    Write-Host "  tdjson 1.8.64.post1 / Pillow / imageio-ffmpeg / PySide6" -ForegroundColor DarkGray
+    Write-Host "  tdjson 1.8.67 / Pillow / imageio-ffmpeg / PySide6" -ForegroundColor DarkGray
     Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--upgrade", "--force-reinstall", "--no-binary", "imageio-ffmpeg", "-r", "requirements-lock.txt")
 
     Write-Host "→ 检查 tdjson 固定版本" -ForegroundColor Yellow
@@ -67,12 +67,12 @@ try {
 
     $tdjsonVersion = $tdjsonVersion.Trim()
 
-    if ($tdjsonVersion -ne "1.8.64.post1") {
-        Write-Host "  当前 tdjson=$tdjsonVersion，正在强制修正为 1.8.64.post1" -ForegroundColor Yellow
-        Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "tdjson==1.8.64.post1")
+    if ($tdjsonVersion -ne "1.8.67") {
+        Write-Host "  当前 tdjson=$tdjsonVersion，正在强制修正为 1.8.67" -ForegroundColor Yellow
+        Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "tdjson==1.8.67")
     }
     else {
-        Write-Host "✓ tdjson 版本正确：1.8.64.post1" -ForegroundColor Green
+        Write-Host "✓ tdjson 版本正确：1.8.67" -ForegroundColor Green
     }
 
     $dataDirectory = Join-Path $PSScriptRoot "data"
