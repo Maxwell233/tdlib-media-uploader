@@ -2214,6 +2214,7 @@ class HistoryPage(QWidget):
 
 class SettingsPage(QWidget):
     open_editor = Signal()
+    open_scan_tools = Signal()
     clear_all_requested = Signal()
     clear_thumb_requested = Signal()
 
@@ -2247,7 +2248,18 @@ class SettingsPage(QWidget):
         edit.setObjectName("primaryButton")
         edit.clicked.connect(self.open_editor)
         config_layout.addWidget(edit)
-        config_layout.addWidget(QLabel("GUI 会保留现有 config.toml 注释；视频、图片和混合目标可分别设置。"))
+        scan_tools = QPushButton("扫描与外部工具")
+        scan_tools.setObjectName("secondaryButton")
+        scan_tools.clicked.connect(self.open_scan_tools)
+        config_layout.addWidget(scan_tools)
+        config_hint = QLabel(
+            "GUI 会保留现有 config.toml 注释；账号、目录、暂存和代理在编辑配置中设置，"
+            "扫描稳定性、ExifTool、FFmpeg 超时和批次在扫描与外部工具中设置。"
+        )
+        config_hint.setObjectName("mutedLabel")
+        config_hint.setWordWrap(True)
+        config_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        config_layout.addWidget(config_hint, 1)
         config_layout.addStretch(1)
         layout.addWidget(config_box)
 
@@ -2720,6 +2732,14 @@ class ConfigDialog(QDialog):
         self.setWindowTitle(f"编辑配置 · V{APP_VERSION}")
         self.setMinimumWidth(620)
         layout = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        content.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
         form = QFormLayout()
         self.fields = {}
 
@@ -2735,8 +2755,6 @@ class ConfigDialog(QDialog):
         form.addRow("视频目录", field("video_dir", _cfg("VIDEO_DIR", "")))
         form.addRow("图片目录", field("image_dir", _cfg("IMAGE_DIR", "")))
         form.addRow("混合目录", field("mixed_dir", _cfg("MIXED_DIR", "")))
-        default_exiftool = "tools/exiftool.exe" if os.name == "nt" else "tools/exiftool"
-        form.addRow("ExifTool 路径", field("exiftool_path", _cfg("EXIFTOOL_PATH", default_exiftool)))
         self.staging_enabled = QCheckBox("启用本地暂存（适合 SMB/NAS）")
         self.staging_enabled.setChecked(bool(_cfg("STAGING_ENABLED", False)))
         form.addRow("上传暂存", self.staging_enabled)
@@ -2782,139 +2800,8 @@ class ConfigDialog(QDialog):
         self.staging_mode.currentIndexChanged.connect(sync_legacy_enabled)
         self.staging_enabled.toggled.connect(sync_mode_from_legacy)
         sync_legacy_enabled(self.staging_mode.currentIndex())
-        layout.addLayout(form)
+        content_layout.addLayout(form)
 
-        scan_box = QGroupBox("扫描与外部工具")
-        scan_form = QFormLayout(scan_box)
-
-        def integer_option(name, value, minimum, maximum, suffix=""):
-            widget = QSpinBox()
-            widget.setRange(minimum, maximum)
-            widget.setValue(int(value))
-            if suffix:
-                widget.setSuffix(suffix)
-            return widget
-
-        def decimal_option(name, value, minimum, maximum, decimals=2, suffix=""):
-            widget = QDoubleSpinBox()
-            widget.setRange(minimum, maximum)
-            widget.setDecimals(decimals)
-            widget.setValue(float(value))
-            if suffix:
-                widget.setSuffix(suffix)
-            return widget
-
-        self.scan_stability_checks = integer_option(
-            "stability_checks", _cfg("SCAN_STABILITY_CHECKS", 2), 1, 8, " 次"
-        )
-        self.scan_stability_interval = decimal_option(
-            "stability_interval_seconds",
-            _cfg("SCAN_STABILITY_INTERVAL_SECONDS", 0.05),
-            0.0,
-            5.0,
-            2,
-            " 秒",
-        )
-        self.scan_stability_checks_local = integer_option(
-            "stability_checks_local", _cfg("SCAN_STABILITY_CHECKS_LOCAL", 2), 1, 8, " 次"
-        )
-        self.scan_stability_interval_local = decimal_option(
-            "stability_interval_local_seconds",
-            _cfg("SCAN_STABILITY_INTERVAL_LOCAL_SECONDS", 0.05),
-            0.0,
-            30.0,
-            2,
-            " 秒",
-        )
-        self.scan_stability_checks_network = integer_option(
-            "stability_checks_network", _cfg("SCAN_STABILITY_CHECKS_NETWORK", 3), 1, 8, " 次"
-        )
-        self.scan_stability_interval_network = decimal_option(
-            "stability_interval_network_seconds",
-            _cfg("SCAN_STABILITY_INTERVAL_NETWORK_SECONDS", 0.5),
-            0.0,
-            60.0,
-            2,
-            " 秒",
-        )
-        self.scan_discovery_attempts = integer_option(
-            "discovery_attempts", _cfg("SCAN_DISCOVERY_ATTEMPTS", 3), 1, 8, " 次"
-        )
-        self.scan_discovery_initial_delay = decimal_option(
-            "discovery_initial_delay_seconds",
-            _cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
-            0.0,
-            10.0,
-            2,
-            " 秒",
-        )
-        self.scan_discovery_max_delay = decimal_option(
-            "discovery_max_delay_seconds",
-            _cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
-            0.0,
-            60.0,
-            2,
-            " 秒",
-        )
-        self.scan_readiness_attempts = integer_option(
-            "readiness_attempts", _cfg("SCAN_READINESS_ATTEMPTS", 3), 1, 8, " 次"
-        )
-        self.scan_probe_bytes = integer_option(
-            "read_probe_bytes", _cfg("SCAN_READ_PROBE_BYTES", 65536), 1, 4 * 1024 * 1024, " 字节"
-        )
-        self.scan_workers_local = integer_option(
-            "io_workers_local", _cfg("IO_WORKERS_LOCAL", 4), 1, 32, " 个"
-        )
-        self.scan_workers_network = integer_option(
-            "io_workers_network", _cfg("IO_WORKERS_NETWORK", 2), 1, 16, " 个"
-        )
-        scan_form.addRow("稳定性检查次数", self.scan_stability_checks)
-        scan_form.addRow("稳定性检查间隔", self.scan_stability_interval)
-        scan_form.addRow("本地稳定检查次数", self.scan_stability_checks_local)
-        scan_form.addRow("本地稳定检查间隔", self.scan_stability_interval_local)
-        scan_form.addRow("网络稳定检查次数", self.scan_stability_checks_network)
-        scan_form.addRow("网络稳定检查间隔", self.scan_stability_interval_network)
-        scan_form.addRow("目录发现重试次数", self.scan_discovery_attempts)
-        scan_form.addRow("发现首次等待", self.scan_discovery_initial_delay)
-        scan_form.addRow("发现最大等待", self.scan_discovery_max_delay)
-        scan_form.addRow("不可读重试次数", self.scan_readiness_attempts)
-        scan_form.addRow("读探针大小", self.scan_probe_bytes)
-        scan_form.addRow("本地 I/O 并发", self.scan_workers_local)
-        scan_form.addRow("网络 I/O 并发", self.scan_workers_network)
-
-        self.process_timeouts = {}
-        for key, label, default in (
-            ("exiftool_timeout_seconds", "ExifTool 超时", 120),
-            ("ffmpeg_metadata_timeout_seconds", "FFmpeg 日期超时", 30),
-            ("ffmpeg_info_timeout_seconds", "FFmpeg 信息超时", 30),
-            ("ffmpeg_thumbnail_timeout_seconds", "FFmpeg 封面超时", 45),
-            ("ffmpeg_compression_timeout_seconds", "FFmpeg 压缩超时", 45),
-        ):
-            widget = decimal_option(
-                key,
-                _cfg({
-                    "exiftool_timeout_seconds": "EXIFTOOL_TIMEOUT_SECONDS",
-                    "ffmpeg_metadata_timeout_seconds": "FFMPEG_METADATA_TIMEOUT_SECONDS",
-                    "ffmpeg_info_timeout_seconds": "FFMPEG_INFO_TIMEOUT_SECONDS",
-                    "ffmpeg_thumbnail_timeout_seconds": "FFMPEG_THUMBNAIL_TIMEOUT_SECONDS",
-                    "ffmpeg_compression_timeout_seconds": "FFMPEG_COMPRESSION_TIMEOUT_SECONDS",
-                }[key], default),
-                1.0,
-                86400.0,
-                1,
-                " 秒",
-            )
-            self.process_timeouts[key] = widget
-            scan_form.addRow(label, widget)
-        self.exiftool_batch_size = integer_option(
-            "exiftool_batch_size", _cfg("EXIFTOOL_BATCH_SIZE", 256), 1, 4096, " 个文件"
-        )
-        self.exiftool_retries = integer_option(
-            "exiftool_retries", _cfg("EXIFTOOL_RETRIES", 2), 0, 5, " 次"
-        )
-        scan_form.addRow("ExifTool 批次大小", self.exiftool_batch_size)
-        scan_form.addRow("ExifTool 重试次数", self.exiftool_retries)
-        layout.addWidget(scan_box)
 
         proxy_box = QGroupBox("网络代理（独立设置，默认关闭）")
         proxy_form = QFormLayout(proxy_box)
@@ -2968,7 +2855,7 @@ class ConfigDialog(QDialog):
         self.proxy_enabled.toggled.connect(self._update_proxy_fields)
         self.proxy_type.currentIndexChanged.connect(self._update_proxy_fields)
         self._update_proxy_fields()
-        layout.addWidget(proxy_box)
+        content_layout.addWidget(proxy_box)
 
         hint = QLabel(
             "视频、图片和混合上传的 Album、Caption 及处理选项请在各自上传页面的“编辑目标”中设置。"
@@ -2978,12 +2865,24 @@ class ConfigDialog(QDialog):
         )
         hint.setObjectName("mutedLabel")
         hint.setWordWrap(True)
-        layout.addWidget(hint)
+        content_layout.addWidget(hint)
+
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.resize(760, 700)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.setMaximumHeight(max(420, available.height() - 80))
+            self.resize(
+                min(self.width(), max(620, available.width() - 80)),
+                min(self.height(), max(420, available.height() - 80)),
+            )
 
     def _update_proxy_fields(self):
         enabled = self.proxy_enabled.isChecked()
@@ -3022,13 +2921,209 @@ class ConfigDialog(QDialog):
             ("paths", "video_dir"): self.fields["video_dir"].text().strip(),
             ("paths", "image_dir"): self.fields["image_dir"].text().strip(),
             ("paths", "mixed_dir"): self.fields["mixed_dir"].text().strip(),
-            ("paths", "exiftool_path"): self.fields["exiftool_path"].text().strip(),
             ("staging", "enabled"): self.staging_mode.currentData() != "off",
             ("staging", "mode"): self.staging_mode.currentData() or "off",
             ("staging", "directory"): self.fields["staging_dir"].text().strip(),
             ("staging", "cleanup_on_start"): self.staging_cleanup_on_start.isChecked(),
             ("staging", "cleanup_days"): self.staging_cleanup_days.value(),
             ("staging", "cleanup_after_success"): self.staging_cleanup_after_success.isChecked(),
+            ("proxy", "enabled"): self.proxy_enabled.isChecked(),
+            ("proxy", "type"): self.proxy_type.currentData() or "socks5",
+            ("proxy", "server"): self.proxy_server.text().strip(),
+            ("proxy", "port"): self.proxy_port.value(),
+            ("proxy", "username"): self.proxy_username.text(),
+            ("proxy", "password"): self.proxy_password.text(),
+            ("proxy", "secret"): self.proxy_secret.text().strip(),
+            ("proxy", "http_only"): self.proxy_http_only.isChecked(),
+        }
+        if values[("proxy", "enabled")]:
+            if not values[("proxy", "server")]:
+                QMessageBox.critical(self, "保存失败", "启用代理时必须填写代理服务器。")
+                return
+            if values[("proxy", "type")] == "mtproto" and not values[("proxy", "secret")]:
+                QMessageBox.critical(self, "保存失败", "使用 MTProto 代理时必须填写 Secret。")
+                return
+        error = _write_config_values(values)
+        if error:
+            QMessageBox.critical(self, "保存失败", error)
+            return
+        self.accept()
+
+
+class ScanToolsDialog(QDialog):
+    """Edit scan, media-tool and external-process settings separately.
+
+    Keeping these controls in their own dialog prevents the general account,
+    directory and proxy form from becoming taller than a typical screen.  The
+    fields still write to the same config sections, so existing runtime
+    behavior and configuration comments remain unchanged.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"扫描与外部工具 · V{APP_VERSION}")
+        self.setMinimumWidth(620)
+        layout = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        content.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        self.fields = {}
+
+        def field(key: str, value, password=False):
+            widget = QLineEdit(str(value if value is not None else ""))
+            if password:
+                widget.setEchoMode(QLineEdit.EchoMode.Password)
+            self.fields[key] = widget
+            return widget
+
+        tool_box = QGroupBox("外部工具")
+        tool_form = QFormLayout(tool_box)
+        default_exiftool = "tools/exiftool.exe" if os.name == "nt" else "tools/exiftool"
+        tool_form.addRow(
+            "ExifTool 路径",
+            field("exiftool_path", _cfg("EXIFTOOL_PATH", default_exiftool)),
+        )
+        tool_hint = QLabel(
+            "ExifTool 用于读取视频内嵌日期；FFmpeg 用于视频信息、封面和必要的媒体日期回退。"
+            "路径留空时将使用配置或随包提供的默认工具。"
+        )
+        tool_hint.setObjectName("mutedLabel")
+        tool_hint.setWordWrap(True)
+        tool_form.addRow("说明", tool_hint)
+        content_layout.addWidget(tool_box)
+
+        scan_box = QGroupBox("扫描稳定性与并发")
+        scan_form = QFormLayout(scan_box)
+
+        def integer_option(value, minimum, maximum, suffix=""):
+            widget = QSpinBox()
+            widget.setRange(minimum, maximum)
+            widget.setValue(int(value))
+            if suffix:
+                widget.setSuffix(suffix)
+            return widget
+
+        def decimal_option(value, minimum, maximum, decimals=2, suffix=""):
+            widget = QDoubleSpinBox()
+            widget.setRange(minimum, maximum)
+            widget.setDecimals(decimals)
+            widget.setValue(float(value))
+            if suffix:
+                widget.setSuffix(suffix)
+            return widget
+
+        self.scan_stability_checks = integer_option(
+            _cfg("SCAN_STABILITY_CHECKS", 2), 1, 8, " 次"
+        )
+        self.scan_stability_interval = decimal_option(
+            _cfg("SCAN_STABILITY_INTERVAL_SECONDS", 0.05), 0.0, 5.0, 2, " 秒"
+        )
+        self.scan_stability_checks_local = integer_option(
+            _cfg("SCAN_STABILITY_CHECKS_LOCAL", 2), 1, 8, " 次"
+        )
+        self.scan_stability_interval_local = decimal_option(
+            _cfg("SCAN_STABILITY_INTERVAL_LOCAL_SECONDS", 0.05), 0.0, 30.0, 2, " 秒"
+        )
+        self.scan_stability_checks_network = integer_option(
+            _cfg("SCAN_STABILITY_CHECKS_NETWORK", 3), 1, 8, " 次"
+        )
+        self.scan_stability_interval_network = decimal_option(
+            _cfg("SCAN_STABILITY_INTERVAL_NETWORK_SECONDS", 0.5), 0.0, 60.0, 2, " 秒"
+        )
+        self.scan_discovery_attempts = integer_option(
+            _cfg("SCAN_DISCOVERY_ATTEMPTS", 3), 1, 8, " 次"
+        )
+        self.scan_discovery_initial_delay = decimal_option(
+            _cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15), 0.0, 10.0, 2, " 秒"
+        )
+        self.scan_discovery_max_delay = decimal_option(
+            _cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0), 0.0, 60.0, 2, " 秒"
+        )
+        self.scan_readiness_attempts = integer_option(
+            _cfg("SCAN_READINESS_ATTEMPTS", 3), 1, 8, " 次"
+        )
+        self.scan_probe_bytes = integer_option(
+            _cfg("SCAN_READ_PROBE_BYTES", 65536), 1, 4 * 1024 * 1024, " 字节"
+        )
+        self.scan_workers_local = integer_option(
+            _cfg("IO_WORKERS_LOCAL", 4), 1, 32, " 个"
+        )
+        self.scan_workers_network = integer_option(
+            _cfg("IO_WORKERS_NETWORK", 2), 1, 16, " 个"
+        )
+        scan_form.addRow("稳定性检查次数", self.scan_stability_checks)
+        scan_form.addRow("稳定性检查间隔", self.scan_stability_interval)
+        scan_form.addRow("本地稳定检查次数", self.scan_stability_checks_local)
+        scan_form.addRow("本地稳定检查间隔", self.scan_stability_interval_local)
+        scan_form.addRow("网络稳定检查次数", self.scan_stability_checks_network)
+        scan_form.addRow("网络稳定检查间隔", self.scan_stability_interval_network)
+        scan_form.addRow("目录发现重试次数", self.scan_discovery_attempts)
+        scan_form.addRow("发现首次等待", self.scan_discovery_initial_delay)
+        scan_form.addRow("发现最大等待", self.scan_discovery_max_delay)
+        scan_form.addRow("不可读重试次数", self.scan_readiness_attempts)
+        scan_form.addRow("读探针大小", self.scan_probe_bytes)
+        scan_form.addRow("本地 I/O 并发", self.scan_workers_local)
+        scan_form.addRow("网络 I/O 并发", self.scan_workers_network)
+        content_layout.addWidget(scan_box)
+
+        process_box = QGroupBox("外部进程超时与批次")
+        process_form = QFormLayout(process_box)
+        self.process_timeouts = {}
+        for key, label, config_key, default in (
+            ("exiftool_timeout_seconds", "ExifTool 超时", "EXIFTOOL_TIMEOUT_SECONDS", 120),
+            ("ffmpeg_metadata_timeout_seconds", "FFmpeg 日期超时", "FFMPEG_METADATA_TIMEOUT_SECONDS", 30),
+            ("ffmpeg_info_timeout_seconds", "FFmpeg 信息超时", "FFMPEG_INFO_TIMEOUT_SECONDS", 30),
+            ("ffmpeg_thumbnail_timeout_seconds", "FFmpeg 封面超时", "FFMPEG_THUMBNAIL_TIMEOUT_SECONDS", 45),
+            ("ffmpeg_compression_timeout_seconds", "FFmpeg 压缩超时", "FFMPEG_COMPRESSION_TIMEOUT_SECONDS", 45),
+        ):
+            widget = decimal_option(_cfg(config_key, default), 1.0, 86400.0, 1, " 秒")
+            self.process_timeouts[key] = widget
+            process_form.addRow(label, widget)
+        self.exiftool_batch_size = integer_option(
+            _cfg("EXIFTOOL_BATCH_SIZE", 256), 1, 4096, " 个文件"
+        )
+        self.exiftool_retries = integer_option(
+            _cfg("EXIFTOOL_RETRIES", 2), 0, 5, " 次"
+        )
+        process_form.addRow("ExifTool 批次大小", self.exiftool_batch_size)
+        process_form.addRow("ExifTool 重试次数", self.exiftool_retries)
+        content_layout.addWidget(process_box)
+
+        hint = QLabel(
+            "扫描设置会影响网络盘稳定性、发现重试和 I/O 并发；外部进程设置会限制单次 ExifTool/FFmpeg 调用。"
+            "修改后需要重新扫描才会应用到新的扫描任务。"
+        )
+        hint.setObjectName("mutedLabel")
+        hint.setWordWrap(True)
+        content_layout.addWidget(hint)
+        content_layout.addStretch(1)
+
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.resize(760, 700)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.setMaximumHeight(max(420, available.height() - 80))
+            self.resize(
+                min(self.width(), max(620, available.width() - 80)),
+                min(self.height(), max(420, available.height() - 80)),
+            )
+
+    def _save(self):
+        values = {
+            ("paths", "exiftool_path"): self.fields["exiftool_path"].text().strip(),
             ("scan", "stability_checks"): self.scan_stability_checks.value(),
             ("scan", "stability_interval_seconds"): self.scan_stability_interval.value(),
             ("scan", "stability_checks_local"): self.scan_stability_checks_local.value(),
@@ -3042,25 +3137,10 @@ class ConfigDialog(QDialog):
             ("scan", "read_probe_bytes"): self.scan_probe_bytes.value(),
             ("scan", "io_workers_local"): self.scan_workers_local.value(),
             ("scan", "io_workers_network"): self.scan_workers_network.value(),
-            ("proxy", "enabled"): self.proxy_enabled.isChecked(),
-            ("proxy", "type"): self.proxy_type.currentData() or "socks5",
-            ("proxy", "server"): self.proxy_server.text().strip(),
-            ("proxy", "port"): self.proxy_port.value(),
-            ("proxy", "username"): self.proxy_username.text(),
-            ("proxy", "password"): self.proxy_password.text(),
-            ("proxy", "secret"): self.proxy_secret.text().strip(),
-            ("proxy", "http_only"): self.proxy_http_only.isChecked(),
         }
         values.update({("process", key): widget.value() for key, widget in self.process_timeouts.items()})
         values[("process", "exiftool_batch_size")] = self.exiftool_batch_size.value()
         values[("process", "exiftool_retries")] = self.exiftool_retries.value()
-        if values[("proxy", "enabled")]:
-            if not values[("proxy", "server")]:
-                QMessageBox.critical(self, "保存失败", "启用代理时必须填写代理服务器。")
-                return
-            if values[("proxy", "type")] == "mtproto" and not values[("proxy", "secret")]:
-                QMessageBox.critical(self, "保存失败", "使用 MTProto 代理时必须填写 Secret。")
-                return
         error = _write_config_values(values)
         if error:
             QMessageBox.critical(self, "保存失败", error)
@@ -3209,6 +3289,7 @@ class MainWindow(QMainWindow):
         self.task_page.stop_requested.connect(self._stop_upload)
         self.inflight_page.reconciliation_requested.connect(self._reconcile_inflight)
         self.settings_page.open_editor.connect(self._edit_config)
+        self.settings_page.open_scan_tools.connect(self._edit_scan_tools)
         self.settings_page.clear_all_requested.connect(self._clear_all_cache)
         self.settings_page.clear_thumb_requested.connect(self._clear_thumb_cache)
 
@@ -3576,6 +3657,15 @@ class MainWindow(QMainWindow):
             self._invalidate_previews()
             self._refresh_pages()
             self.statusBar().showMessage("配置已保存")
+
+    def _edit_scan_tools(self):
+        if not self._can_change_configuration():
+            return
+        dialog = ScanToolsDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._invalidate_previews()
+            self._refresh_pages()
+            self.statusBar().showMessage("扫描与外部工具设置已保存")
 
     def _can_change_configuration(self):
         if (self.worker is not None and self.worker.isRunning()) or any(scanner.isRunning() for scanner in self.scanners.values()):

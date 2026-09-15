@@ -123,7 +123,8 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 
 配置保存在统一数据目录的 `data/config.toml`，首次运行从 `config.example.toml` 创建。日常通过界面编辑；完整键名、默认值和说明见 [配置模板](config.example.toml)。保存无效配置时恢复原文件。
 
-- 通用 API、目录、ExifTool 和代理：在“设置与诊断”编辑。
+- API、媒体目录、暂存和代理：在“设置与诊断 → 编辑配置”编辑。
+- 扫描稳定性、ExifTool 路径、FFmpeg/ExifTool 超时、批次大小和重试：在“设置与诊断 → 扫描与外部工具”编辑。
 - 视频/图片/混合目标、分组、标题和处理选项：在相应上传页面编辑。
 - 目标未单独配置时继承 `[telegram]`；单独目标位于 `[telegram.video]`、`[telegram.image]` 和 `[telegram.mixed]`。频道模式不使用 Topic。
 - 代理支持 SOCKS5、HTTP、MTProto，默认关闭并使用直连。SOCKS5/HTTP 可填写用户名与密码；MTProto 需要 Secret。代理由 TDLib 配置，无需额外代理库。

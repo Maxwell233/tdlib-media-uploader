@@ -47,6 +47,66 @@ class ImprovementsTest(unittest.TestCase):
             window.deleteLater()
             self.app.processEvents()
 
+    def test_scan_tools_have_a_separate_scrollable_dialog(self):
+        config = gui.ConfigDialog()
+        scan_tools = gui.ScanToolsDialog()
+        try:
+            config_boxes = {
+                box.title() for box in config.findChildren(QGroupBox)
+            }
+            scan_boxes = {
+                box.title() for box in scan_tools.findChildren(QGroupBox)
+            }
+            self.assertNotIn("扫描与外部工具", config_boxes)
+            self.assertIn("扫描稳定性与并发", scan_boxes)
+            self.assertIn("外部工具", scan_boxes)
+            self.assertTrue(config.findChildren(QScrollArea))
+            self.assertTrue(scan_tools.findChildren(QScrollArea))
+            self.assertNotIn("exiftool_path", config.fields)
+            self.assertIn("exiftool_path", scan_tools.fields)
+
+            window = gui.MainWindow()
+            try:
+                self.assertTrue(hasattr(window.settings_page, "open_scan_tools"))
+            finally:
+                window.close()
+                window.deleteLater()
+                self.app.processEvents()
+        finally:
+            config.close()
+            config.deleteLater()
+            scan_tools.close()
+            scan_tools.deleteLater()
+            self.app.processEvents()
+
+    def test_config_dialog_and_scan_tools_save_only_their_own_sections(self):
+        config = gui.ConfigDialog()
+        scan_tools = gui.ScanToolsDialog()
+        try:
+            with patch.object(gui, "_write_config_values", return_value="") as save:
+                config._save()
+                config_values = save.call_args.args[0]
+            self.assertIn(("telegram", "api_id"), config_values)
+            self.assertIn(("paths", "video_dir"), config_values)
+            self.assertIn(("proxy", "enabled"), config_values)
+            self.assertNotIn(("paths", "exiftool_path"), config_values)
+            self.assertFalse(any(section in {"scan", "process"} for section, _ in config_values))
+
+            with patch.object(gui, "_write_config_values", return_value="") as save:
+                scan_tools._save()
+                scan_values = save.call_args.args[0]
+            self.assertIn(("paths", "exiftool_path"), scan_values)
+            self.assertIn(("scan", "readiness_attempts"), scan_values)
+            self.assertIn(("process", "exiftool_timeout_seconds"), scan_values)
+            self.assertNotIn(("telegram", "api_id"), scan_values)
+            self.assertNotIn(("proxy", "enabled"), scan_values)
+        finally:
+            config.close()
+            config.deleteLater()
+            scan_tools.close()
+            scan_tools.deleteLater()
+            self.app.processEvents()
+
     def test_caption_store_reads_once_and_preserves_other_edits(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(metadata, "PROJECT_DIR", Path(directory)):
