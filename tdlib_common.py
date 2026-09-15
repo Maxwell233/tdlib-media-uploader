@@ -19,7 +19,7 @@ import tdjson
 import app_config as cfg
 from app_logging import TDLIB_LOG_PATH, write_app_log, write_exception
 from path_utils import probe_readable, snapshot_file, stable_path
-from runtime_paths import APP_DATA_DIR
+from runtime_paths import APP_DATA_DIR, TDLIB_DATABASE_DIR, TDLIB_FILES_DIR
 from upload_journal import (
     CONFIRMED,
     FAILED,
@@ -31,8 +31,6 @@ from upload_journal import (
 
 REQUIRED_TDJSON_VERSION = "1.8.64.post1"
 PROJECT_DIR = APP_DATA_DIR
-TDLIB_DATABASE_DIR = APP_DATA_DIR / "tdlib_data"
-TDLIB_FILES_DIR = APP_DATA_DIR / "tdlib_files"
 
 
 class TDLibError(RuntimeError):
@@ -48,6 +46,14 @@ class TDLibCancelled(RuntimeError):
 
 class UploadUnknownError(RuntimeError):
     """The Telegram request may have been accepted but was not confirmed."""
+
+
+class SendResultUnknown(TimeoutError):
+    """A submitted Album has known and/or unknown individual outcomes."""
+
+    def __init__(self, message: str, result: dict):
+        super().__init__(message)
+        self.result = result
 
 
 def verify_tdjson_version() -> str:
@@ -145,6 +151,33 @@ def topic_object() -> dict | None:
     }
 
 
+def build_tdlib_parameters(device_model: str) -> dict:
+    """Build the one canonical TDLib initialization payload.
+
+    Keeping this payload in a pure helper makes the writable data locations
+    inspectable by ``--self-test`` without creating a TDLib client or opening
+    a network connection.  Both paths are always below the V1.9 ``DATA_DIR``.
+    """
+
+    return {
+        "@type": "setTdlibParameters",
+        "use_test_dc": False,
+        "database_directory": str(TDLIB_DATABASE_DIR.resolve()),
+        "files_directory": str(TDLIB_FILES_DIR.resolve()),
+        "database_encryption_key": cfg.TDLIB_DATABASE_ENCRYPTION_KEY,
+        "use_file_database": cfg.TDLIB_USE_FILE_DATABASE,
+        "use_chat_info_database": cfg.TDLIB_USE_CHAT_INFO_DATABASE,
+        "use_message_database": cfg.TDLIB_USE_MESSAGE_DATABASE,
+        "use_secret_chats": False,
+        "api_id": int(cfg.API_ID),
+        "api_hash": cfg.API_HASH,
+        "system_language_code": "zh-Hans",
+        "device_model": str(device_model),
+        "system_version": "macOS" if sys.platform == "darwin" else platform.system(),
+        "application_version": cfg.APP_VERSION,
+    }
+
+
 class TDJsonClient:
     """Small synchronous wrapper around TDLib's JSON interface."""
 
@@ -194,6 +227,8 @@ class TDJsonClient:
         self.update_callbacks = []
         self.stop_event = threading.Event()
         self.cancel_event = threading.Event()
+        self.is_premium: bool | None = None
+        self.caption_length_limit: int | None = None
         self.inflight_journal = InflightJournal()
         register_client = getattr(self.ui, "register_client", None)
         if callable(register_client):
@@ -444,23 +479,7 @@ class TDJsonClient:
             state_type = state.get("@type")
             if state_type == "authorizationStateWaitTdlibParameters":
                 self.ui.info("正在初始化 TDLib…")
-                self.request({
-                    "@type": "setTdlibParameters",
-                    "use_test_dc": False,
-                    "database_directory": str(TDLIB_DATABASE_DIR.resolve()),
-                    "files_directory": str(TDLIB_FILES_DIR.resolve()),
-                    "database_encryption_key": cfg.TDLIB_DATABASE_ENCRYPTION_KEY,
-                    "use_file_database": cfg.TDLIB_USE_FILE_DATABASE,
-                    "use_chat_info_database": cfg.TDLIB_USE_CHAT_INFO_DATABASE,
-                    "use_message_database": cfg.TDLIB_USE_MESSAGE_DATABASE,
-                    "use_secret_chats": False,
-                    "api_id": int(cfg.API_ID),
-                    "api_hash": cfg.API_HASH,
-                    "system_language_code": "zh-Hans",
-                    "device_model": self.device_model,
-                    "system_version": "macOS" if sys.platform == "darwin" else platform.system(),
-                    "application_version": cfg.APP_VERSION,
-                })
+                self.request(build_tdlib_parameters(self.device_model))
                 if not proxy_configured:
                     self._configure_proxy()
                     proxy_configured = True
@@ -624,25 +643,39 @@ class TDJsonClient:
         if timeout is None:
             timeout = cfg.TDLIB_MESSAGE_SEND_TIMEOUT
         pending_ids = []
-        final_ids = []
+        succeeded_ids = []
+        failed_ids = []
         for message in messages:
             message_id = message.get("id")
             sending_state = message.get("sending_state")
             if not sending_state:
-                final_ids.append(message_id)
+                succeeded_ids.append(message_id)
                 continue
             if sending_state.get("@type") == "messageSendingStateFailed":
-                raise RuntimeError(f"消息立即进入失败状态：{message_id}")
+                failed_ids.append(message_id)
+                continue
             pending_ids.append(message_id)
 
+        def result_payload(pending=None):
+            return {
+                "succeeded": list(succeeded_ids),
+                "failed": list(failed_ids),
+                "pending": list(pending or []),
+            }
+
         if not pending_ids:
-            return final_ids
+            return result_payload()
 
         deadline = time.monotonic() + timeout
         results = {}
         with self.send_condition:
             while len(results) < len(pending_ids):
-                self._raise_if_cancelled()
+                if getattr(self, "cancel_event", threading.Event()).is_set():
+                    unknown = [value for value in pending_ids if value not in results]
+                    raise SendResultUnknown(
+                        "上传在 Telegram 状态确认前被取消",
+                        result_payload(unknown),
+                    )
                 for old_id in pending_ids:
                     if old_id in results:
                         continue
@@ -652,24 +685,27 @@ class TDJsonClient:
                     status, update = event
                     if status == "failed":
                         error_obj = update.get("error", {})
-                        raise TDLibError(
-                            error_obj.get("code", 0),
-                            error_obj.get("message", "message send failed"),
-                        )
-                    results[old_id] = update
+                        failed_ids.append(old_id)
+                        results[old_id] = update
+                    else:
+                        new_id = update.get("message", {}).get("id") or old_id
+                        succeeded_ids.append(new_id)
+                        results[old_id] = update
                 if len(results) >= len(pending_ids):
                     break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError("等待 Telegram 确认发送成功超时")
+                    unknown = [value for value in pending_ids if value not in results]
+                    raise SendResultUnknown(
+                        "等待 Telegram 确认发送成功超时",
+                        result_payload(unknown),
+                    )
                 self.send_condition.wait(min(1, remaining))
 
-        sent_ids = list(final_ids)
         for old_id in pending_ids:
-            sent_ids.append(results[old_id].get("message", {}).get("id"))
             with self.send_condition:
                 self.send_events.pop(old_id, None)
-        return sent_ids
+        return result_payload()
 
     @staticmethod
     def _item_source(item):
@@ -725,6 +761,32 @@ class TDJsonClient:
             except Exception:
                 pass
 
+    def refresh_account_limits(self) -> tuple[bool | None, int | None]:
+        """Read account Premium and caption limits from the active TDLib."""
+
+        try:
+            value = self.request({"@type": "getOption", "name": "is_premium"}, timeout=30)
+            if isinstance(value, dict) and value.get("@type") == "optionValueBoolean":
+                self.is_premium = bool(value.get("value", False))
+        except Exception:
+            # Older TDLib builds may not expose the option. Keep ``None`` so
+            # callers can make a conservative, visible decision.
+            self.is_premium = None
+        for option_name in ("message_caption_length_max", "message_caption_length_maximum"):
+            try:
+                value = self.request({"@type": "getOption", "name": option_name}, timeout=30)
+            except Exception:
+                continue
+            if isinstance(value, dict):
+                raw = value.get("value")
+                try:
+                    if raw is not None:
+                        self.caption_length_limit = int(raw)
+                        break
+                except (TypeError, ValueError):
+                    pass
+        return self.is_premium, self.caption_length_limit
+
     def _safe_diagnose_upload_failure(self, contents, items, exc) -> None:
         """Never let diagnostics hide the original upload exception."""
 
@@ -745,6 +807,7 @@ class TDJsonClient:
         *,
         album_key: str | None = None,
         kind: str | None = None,
+        journal_items=None,
     ):
         return self._send_contents(
             contents,
@@ -752,6 +815,7 @@ class TDJsonClient:
             items=items,
             album_key=album_key,
             kind=kind,
+            journal_items=journal_items,
         )
 
     @staticmethod
@@ -842,16 +906,10 @@ class TDJsonClient:
             target = self._target_identity()
         if kind == "video":
             import tdlib_video_album_uploader as module
-            if getattr(module, "STATE_DIR", None) == APP_DATA_DIR / ".state":
-                module.STATE_DIR = APP_DATA_DIR / ".video_state"
         elif kind == "image":
             import tdlib_image_album_uploader as module
-            if getattr(module, "STATE_DIR", None) is None:
-                module.STATE_DIR = APP_DATA_DIR / ".image_state"
         elif kind == "mixed":
             import tdlib_mixed_album_uploader as module
-            if getattr(module, "STATE_DIR", None) is None:
-                module.STATE_DIR = APP_DATA_DIR / ".mixed_state"
         else:
             raise ValueError(f"无法为未知媒体类型恢复上传断点：{kind}")
         return module.UploadState(target=target)
@@ -927,13 +985,23 @@ class TDJsonClient:
                 return value
         return "unknown"
 
-    def _send_contents(self, contents, progress=None, items=None, *, album_key=None, kind=None):
+    def _send_contents(
+        self,
+        contents,
+        progress=None,
+        items=None,
+        *,
+        album_key=None,
+        kind=None,
+        journal_items=None,
+    ):
         """Send media and persist PREPARED/SUBMITTED/UNKNOWN transitions."""
         journal = getattr(self, "inflight_journal", None)
         selected_kind = kind or self._infer_upload_kind(contents)
         journal_active = bool(album_key and journal is not None)
         journal_target = self._target_identity() if journal_active else None
         submitted = False
+        journal_terminal = False
         if journal_active:
             unresolved = journal.unresolved(selected_kind, album_key, target=journal_target)
             if unresolved is not None:
@@ -945,7 +1013,12 @@ class TDJsonClient:
                 if callable(warning):
                     warning(message)
                 raise UploadUnknownError(message)
-            journal.prepare(selected_kind, album_key, items, target=journal_target)
+            journal.prepare(
+                selected_kind,
+                album_key,
+                items if journal_items is None else journal_items,
+                target=journal_target,
+            )
         try:
             if len(contents) == 1:
                 message = self.request({
@@ -969,19 +1042,18 @@ class TDJsonClient:
                 })
                 messages = response.get("messages", [])
                 if len(messages) != len(contents):
+                    # TDLib accepted the request but returned an incomplete
+                    # response.  The missing message IDs make the delivery
+                    # outcome ambiguous, so keep the prepared journal in the
+                    # UNKNOWN path instead of allowing an automatic resend.
+                    submitted = journal_active
                     raise RuntimeError(
                         f"TDLib sendMessageAlbum 返回消息数量异常：{len(messages)}/{len(contents)}"
                     )
-            # A response can already carry messageSendingStateFailed.  It is
-            # an explicit Telegram rejection, not an ambiguous submission;
-            # leave ``submitted`` false so the exception path records FAILED.
-            initial_send_failed = any(
-                isinstance(message, dict)
-                and (message.get("sending_state") or {}).get("@type")
-                == "messageSendingStateFailed"
-                for message in messages
-            )
-            if journal_active and not initial_send_failed:
+            # The request has reached TDLib even when one item is already in
+            # a failed sending state. Record the whole message set so a mixed
+            # success/failure outcome can never be mistaken for a clean retry.
+            if journal_active:
                 journal.submitted(
                     selected_kind,
                     album_key,
@@ -992,15 +1064,58 @@ class TDJsonClient:
             if progress is not None and items is not None:
                 progress.register_messages(messages, items)
             result = self.wait_for_send_results(messages)
+            if not isinstance(result, dict):
+                result = {"succeeded": list(result or []), "failed": [], "pending": []}
+            succeeded = list(result.get("succeeded", []))
+            failed = list(result.get("failed", []))
+            pending = list(result.get("pending", []))
+            if failed or pending or len(succeeded) != len(messages):
+                if journal_active:
+                    status = FAILED if not succeeded and not pending and failed else UNKNOWN
+                    journal.update(
+                        selected_kind,
+                        album_key,
+                        status,
+                        message_ids=succeeded + failed + pending,
+                        succeeded_ids=succeeded,
+                        failed_ids=failed,
+                        pending_ids=pending,
+                        error="Album 内消息结果不完整" if status == UNKNOWN else "Album 内消息全部失败",
+                        target=journal_target,
+                    )
+                    journal_terminal = True
+                if not succeeded and not pending:
+                    raise RuntimeError("Album 内消息全部发送失败")
+                raise UploadUnknownError(
+                    "Album 仅部分消息确认，已标记 UNKNOWN，暂不自动重试。"
+                )
             if journal_active:
                 journal.update(
                     selected_kind,
                     album_key,
                     CONFIRMED,
-                    message_ids=result,
+                    message_ids=succeeded,
+                    succeeded_ids=succeeded,
                     target=journal_target,
                 )
-            return result
+                journal_terminal = True
+            return succeeded
+        except SendResultUnknown as exc:
+            if journal_active:
+                delivery = exc.result if isinstance(exc.result, dict) else {}
+                journal.update(
+                    selected_kind,
+                    album_key,
+                    UNKNOWN,
+                    message_ids=(delivery.get("succeeded", []) + delivery.get("failed", []) + delivery.get("pending", [])),
+                    succeeded_ids=delivery.get("succeeded", []),
+                    failed_ids=delivery.get("failed", []),
+                    pending_ids=delivery.get("pending", []),
+                    error=str(exc),
+                    target=journal_target,
+                )
+            self._safe_diagnose_upload_failure(contents, items, exc)
+            raise
         except TDLibError as exc:
             if journal_active:
                 journal.failed(selected_kind, album_key, str(exc), target=journal_target)
@@ -1021,12 +1136,16 @@ class TDJsonClient:
             raise
         except (TimeoutError, TDLibCancelled) as exc:
             if journal_active:
+                # A request that was submitted but never fully observed is
+                # always UNKNOWN, including cancellation after submission.
                 journal.unknown(selected_kind, album_key, str(exc), target=journal_target)
             self._safe_diagnose_upload_failure(contents, items, exc)
             raise
         except Exception as exc:
             if journal_active:
-                if submitted:
+                if journal_terminal:
+                    pass
+                elif submitted:
                     journal.unknown(selected_kind, album_key, str(exc), target=journal_target)
                 else:
                     journal.failed(selected_kind, album_key, str(exc), target=journal_target)

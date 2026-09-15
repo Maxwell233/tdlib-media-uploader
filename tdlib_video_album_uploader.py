@@ -28,6 +28,8 @@ if not hasattr(imageio_ffmpeg, "get_ffmpeg_exe"):
     imageio_ffmpeg.get_ffmpeg_exe = lambda: shutil.which("ffmpeg") or "ffmpeg"
 
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
+from media_identity import media_file_signature
+from upload_state import UploadState as SharedUploadState
 from path_utils import (
     cancelable_sleep,
     display_path,
@@ -50,15 +52,16 @@ from path_utils import (
 )
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
-from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
+from runtime_paths import APP_DATA_DIR, RESOURCE_DIR, VIDEO_STATE_DIR, THUMBNAIL_CACHE_DIR
 from staging import cleanup_staging, remove_staged_file, should_stage, stage_file
 
 PROJECT_DIR = RESOURCE_DIR
-STATE_DIR = APP_DATA_DIR / ".state"
-THUMB_CACHE_DIR = APP_DATA_DIR / ".thumb_cache"
+STATE_DIR = VIDEO_STATE_DIR
+THUMB_CACHE_DIR = THUMBNAIL_CACHE_DIR
 LAST_SCAN_ERRORS: list[str] = []
 LAST_SCAN_WARNINGS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
+LAST_SCAN_PREMIUM_REQUIRED: list[dict] = []
 LAST_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
 STAGED_UPLOAD_PATHS: dict[str, Path] = {}
 DEFERRED_STATUS = "DEFERRED"
@@ -184,16 +187,16 @@ def normalize_path(path) -> str:
 
 
 def _snapshot_for_path(path: Path):
-    return file_snapshot(path) or LAST_SCAN_SNAPSHOTS.get(normalize_path(path))
+    # Prefer the immutable snapshot captured by the scanner.  A late stat is
+    # only a fallback for direct API callers that did not scan first.
+    return LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or file_snapshot(path)
 
 
 def file_signature(path: Path, snapshot=None) -> str:
     snapshot = snapshot or _snapshot_for_path(path)
     if snapshot is None:
         raise OSError(f"文件暂时不可读取：{path}")
-    size, mtime_ns = snapshot
-    raw = f"{relative_name(path).lower()}|{size}|{mtime_ns}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return media_file_signature(path, root=cfg.VIDEO_DIR, snapshot=snapshot)
 
 
 FORCED_GROUP_KEY = "__all_videos__"
@@ -264,7 +267,7 @@ def month_caption(month_key: str) -> str:
 
 
 def scan_videos(cancel_event=None) -> list[Path]:
-    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_SNAPSHOTS
+    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_PREMIUM_REQUIRED, LAST_SCAN_SNAPSHOTS
     try:
         root = validate_scan_root(
             cfg.VIDEO_DIR,
@@ -277,6 +280,7 @@ def scan_videos(cancel_event=None) -> list[Path]:
         LAST_SCAN_ERRORS = []
         LAST_SCAN_WARNINGS = ["目录扫描已取消"]
         LAST_SCAN_SIZE_SKIPS = []
+        LAST_SCAN_PREMIUM_REQUIRED = []
         LAST_SCAN_SNAPSHOTS = {}
         return []
     scan_result = iter_files(
@@ -293,6 +297,7 @@ def scan_videos(cancel_event=None) -> list[Path]:
     if scan_result.cancelled:
         LAST_SCAN_WARNINGS.append("目录扫描已取消")
     LAST_SCAN_SIZE_SKIPS = []
+    LAST_SCAN_PREMIUM_REQUIRED = []
     LAST_SCAN_SNAPSHOTS = {
         key: snapshot.as_tuple()
         for key, snapshot in getattr(scan_result, "snapshots", {}).items()
@@ -316,6 +321,13 @@ def scan_videos(cancel_event=None) -> list[Path]:
                 ),
             })
             continue
+        if size > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 2 * 1024 ** 3):
+            LAST_SCAN_PREMIUM_REQUIRED.append({
+                "path": path,
+                "size": size,
+                "category": "premium",
+                "reason": "视频超过 2 GiB，需要 Telegram Premium 才能上传",
+            })
         LAST_SCAN_SNAPSHOTS[normalize_path(path)] = (int(size), int(mtime_ns))
         accepted.append(path)
     videos = accepted
@@ -995,6 +1007,10 @@ def build_items(videos, metadata_index, progress_callback=None, cancel_event=Non
                 "month_key": FORCED_GROUP_KEY,
                 "date_tag": "未读取日期",
                 "fallback": False,
+                "requires_premium": (
+                    int((LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or (0, 0))[0])
+                    > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 2 * 1024 ** 3)
+                ),
             }
             snapshot = LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or file_snapshot(path)
             if snapshot is not None:
@@ -1066,18 +1082,18 @@ def build_items(videos, metadata_index, progress_callback=None, cancel_event=Non
             "month_key": dt.strftime("%Y-%m"),
             "date_tag": selected["tag"],
             "fallback": selected["fallback"],
+            "requires_premium": (
+                int((LAST_SCAN_SNAPSHOTS.get(key) or (0, 0))[0])
+                > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 2 * 1024 ** 3)
+            ),
         }
         snapshot = LAST_SCAN_SNAPSHOTS.get(key) or file_snapshot(path)
         if snapshot is not None:
             item["scan_size"], item["scan_mtime_ns"] = snapshot
         items.append(item)
-    if not force_ten_per_album():
-        # ``videos`` was already ordered by the shared media path sorter.
-        # Keep that order as the stable tie-breaker when capture dates match;
-        # do not re-sort by basename or lexical path here.
-        items.sort(
-            key=lambda item: item["capture_time"].replace(tzinfo=None)
-        )
+    # ``scan_videos`` already applied the selected shared path/mtime order.
+    # Capture metadata only determines month membership; it must never
+    # override that order inside a month.
     return items, missing
 
 
@@ -1433,14 +1449,17 @@ def report_skipped_videos(skipped, ui=None, *, final=False) -> None:
     target = ui or UI
     prefix = "本次任务结束" if final else "视频预检完成"
     size_count = sum(record.get("category") == "size" for record in skipped)
+    premium_count = sum(record.get("category") == "premium" for record in skipped)
     deferred_count = sum(record.get("category") == "deferred" for record in skipped)
     cancelled_count = sum(record.get("category") == "cancelled" for record in skipped)
-    unreadable_count = len(skipped) - size_count - deferred_count - cancelled_count
+    unreadable_count = len(skipped) - size_count - premium_count - deferred_count - cancelled_count
     parts = []
     if unreadable_count:
         parts.append(f"{unreadable_count} 个无法读取的视频")
     if size_count:
         parts.append(f"{size_count} 个超过 4 GiB 上限的视频")
+    if premium_count:
+        parts.append(f"{premium_count} 个需要 Telegram Premium 的视频")
     if deferred_count:
         parts.append(f"{deferred_count} 个暂时不可读的视频（DEFERRED）")
     if cancelled_count:
@@ -1540,104 +1559,19 @@ def input_video(item, caption: str, cancel_event=None):
     }
 
 
-class UploadState:
-    VERSION = 1
+class UploadState(SharedUploadState):
+    """Video-specific facade over the shared V1.9 checkpoint format."""
 
     def __init__(self, target=None):
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        target = target if isinstance(target, dict) else {}
-        target_mode = str(target.get("target_mode", getattr(cfg, "TARGET_MODE", "forum_topic")))
-        chat_id = int(target.get("chat_id", getattr(cfg, "CHAT_ID", 0)) or 0)
-        forum_topic_id = int(target.get("forum_topic_id", getattr(cfg, "FORUM_TOPIC_ID", 0)) or 0)
-        channel_chat_id = int(target.get("channel_chat_id", getattr(cfg, "CHANNEL_CHAT_ID", 0)) or 0)
-        identity_suffix = (
-            "tdlib-video-v5"
-            if target_mode == "forum_topic"
-            else "tdlib-video-v5-channel"
+        super().__init__(
+            kind="video",
+            source_root=cfg.VIDEO_DIR,
+            target=target or getattr(cfg, "target_for", lambda _kind: {}) ("video"),
+            state_dir=STATE_DIR,
+            reset=getattr(cfg, "VIDEO_RESET_STATE", False),
+            filename_prefix="video_upload_state",
+            snapshot_provider=_snapshot_for_path,
         )
-        identity = f"{stable_path(cfg.VIDEO_DIR)}|{chat_id}|{forum_topic_id}|{identity_suffix}"
-        task_hash = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
-        self.path = STATE_DIR / f"upload_state_{task_hash}.json"
-        self._target_mode = target_mode
-        self._chat_id = chat_id
-        self._forum_topic_id = forum_topic_id
-        self._channel_chat_id = channel_chat_id
-        self.lock = threading.Lock()
-        if cfg.VIDEO_RESET_STATE and self.path.exists():
-            self.path.unlink()
-        self.data = self._load()
-
-    def _new(self):
-        return {
-            "version": self.VERSION,
-            "video_dir": stable_path(cfg.VIDEO_DIR),
-            "chat_id": self._chat_id,
-            "target_mode": self._target_mode,
-            "channel_chat_id": self._channel_chat_id,
-            "forum_topic_id": self._forum_topic_id,
-            "completed": {},
-        }
-
-    def _load(self):
-        if not self.path.exists():
-            data = self._new()
-            self._save(data)
-            return data
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise RuntimeError(f"断点文件读取失败：{self.path}\n{exc}") from exc
-        if data.get("version") != self.VERSION:
-            raise RuntimeError(f"断点文件版本不兼容：{self.path}")
-        return data
-
-    def _save(self, data):
-        data["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        temp = self.path.with_suffix(self.path.suffix + ".tmp")
-        with temp.open("w", encoding="utf-8") as file:
-            json.dump(data, file, ensure_ascii=False, indent=2)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temp, self.path)
-
-    def is_completed(self, path: Path):
-        try:
-            return file_signature(path) in self.data["completed"]
-        except OSError:
-            return False
-
-    def mark_album_completed(self, items, message_ids):
-        with self.lock:
-            for index, item in enumerate(items):
-                path = item["path"]
-                snapshot = None
-                if item.get("_journal_snapshot") and item.get("size") is not None and item.get("mtime_ns") is not None:
-                    snapshot = (int(item["size"]), int(item["mtime_ns"]))
-                if snapshot is None:
-                    snapshot = _snapshot_for_path(path)
-                if snapshot is None:
-                    expected_size = item.get("scan_size")
-                    expected_mtime_ns = item.get("scan_mtime_ns")
-                    if expected_size is not None and expected_mtime_ns is not None:
-                        snapshot = (int(expected_size), int(expected_mtime_ns))
-                if snapshot is None:
-                    raise RuntimeError(f"上传完成但无法记录视频断点：{path}")
-                size, mtime_ns = snapshot
-                self.data["completed"][file_signature(path, snapshot)] = {
-                    "relative_path": relative_name(path),
-                    "size": size,
-                    "mtime_ns": mtime_ns,
-                    "capture_time": (
-                        item["capture_time"].isoformat()
-                        if hasattr(item.get("capture_time"), "isoformat")
-                        else item.get("capture_time")
-                    ),
-                    "month_key": item.get("month_key", ""),
-                    "date_tag": item.get("date_tag", ""),
-                    "message_id": message_ids[index] if index < len(message_ids) else None,
-                    "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                }
-            self._save(self.data)
 
 
 class VideoUploadProgress:
@@ -1786,6 +1720,16 @@ def build_album_plans(items, state=None) -> list[dict]:
     regardless of each video's capture month.
     """
     store = CaptionStore("video")
+    # ``scan_videos`` normally supplies immutable snapshots for every item.
+    # Materialize a missing snapshot once for direct API callers so the shared
+    # Album key remains snapshot-only and never stats a file while hashing.
+    for raw_item in items:
+        path = Path(raw_item.get("path") if isinstance(raw_item, dict) else raw_item)
+        key = normalize_path(path)
+        if key not in LAST_SCAN_SNAPSHOTS:
+            snapshot = file_snapshot(path)
+            if snapshot is not None:
+                LAST_SCAN_SNAPSHOTS[key] = (int(snapshot[0]), int(snapshot[1]))
     plans = []
     groups = make_groups(items)
     album_size = cfg.VIDEO_ALBUM_SIZE
@@ -1803,10 +1747,16 @@ def build_album_plans(items, state=None) -> list[dict]:
                 )
             pending = [
                 item for item in album_items
-                if state is None or not state.is_completed(item["path"])
+                if state is None or not state.is_completed(item)
             ]
             key_group = f"{month_key}:{album_number}" if month_key == FORCED_GROUP_KEY else month_key
-            key = album_key("video", key_group, album_items)
+            key = album_key(
+                "video",
+                key_group,
+                album_items,
+                root=cfg.VIDEO_DIR,
+                snapshot_provider=lambda path: LAST_SCAN_SNAPSHOTS.get(normalize_path(path)),
+            )
             record = store.get(key, default_label)
             base_label = record["base_label"] if include_group_title() else ""
             if include_group_title() and not base_label:
@@ -1847,7 +1797,7 @@ def print_plan(items, state):
     print("=" * 104)
     for month_key in sorted(groups):
         month_items = groups[month_key]
-        pending = [item for item in month_items if not state.is_completed(item["path"])]
+        pending = [item for item in month_items if not state.is_completed(item)]
         group_label = group_display_name(month_key)
         caption = (
             "Album 1、Album 2…"
@@ -1857,7 +1807,7 @@ def print_plan(items, state):
         print(f"\n[{group_label}] Caption={caption} | 共 {len(month_items)} | 待上传 {len(pending)}")
         for index, item in enumerate(month_items, 1):
             path = item["path"]
-            status = "已完成" if state.is_completed(path) else "待上传"
+            status = "已完成" if state.is_completed(item) else "待上传"
             fallback = " [mtime兜底]" if item["fallback"] else ""
             capture_time = item.get("capture_time")
             capture_text = (
@@ -1951,8 +1901,8 @@ def main():
         return
 
     state = UploadState()
-    completed_items = [item for item in items if state.is_completed(item["path"])]
-    pending_items = [item for item in items if not state.is_completed(item["path"])]
+    completed_items = [item for item in items if state.is_completed(item)]
+    pending_items = [item for item in items if not state.is_completed(item)]
     skipped_items = []
     # Build all Album boundaries from the complete scan before preflight.  A
     # temporarily unavailable file is deferred for this run; removing it
@@ -2016,6 +1966,26 @@ def main():
 
     try:
         client.login()
+        client.refresh_account_limits()
+        caption_limit = int(getattr(client, "caption_length_limit", None) or 1024)
+        if client.is_premium is not True:
+            premium_items = [
+                item for item in pending_items
+                if item.get("requires_premium")
+            ]
+            if premium_items:
+                UI.warning(
+                    f"已跳过 {len(premium_items)} 个超过 2 GiB 的视频：Telegram Premium 才允许上传。"
+                )
+                for item in premium_items:
+                    preflight_skipped_paths.add(stable_path(item["path"]))
+                    skipped_items.append({
+                        "path": item["path"],
+                        "item": item,
+                        "category": "premium",
+                        "reason": "视频超过 2 GiB，需要 Telegram Premium 才能上传",
+                    })
+                progress.skip_items(premium_items)
         client.set_fast_options()
         client.validate_target()
         album_global = 0
@@ -2046,6 +2016,7 @@ def main():
                     album_items,
                     getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False),
                     include_filename_numbers(),
+                    max_chars=caption_limit,
                 )
                 if cancel_event is None:
                     contents, ready_items, runtime_skipped = build_video_contents(
@@ -2076,6 +2047,7 @@ def main():
                         ready_items,
                         True,
                         include_filename_numbers(),
+                        max_chars=caption_limit,
                     )
                     if contents:
                         contents[0]["caption"] = formatted_text(label)

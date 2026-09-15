@@ -10,17 +10,96 @@ enabling staging does not invalidate existing checkpoints.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 import time
 from pathlib import Path
 
 from path_utils import (
     FileSnapshot,
+    is_link_or_junction,
     is_network_path,
     probe_readable,
     snapshot_file,
     stable_path,
 )
+
+
+MARKER_NAME = ".marker.json"
+MARKER_SCHEMA = 1
+MARKER_APP = "tdlib-media-uploader"
+_ARTIFACT_RE = re.compile(r"^[0-9a-f]{64}(?:\.[A-Za-z0-9._+-]+)?$")
+# ``stage_file`` writes a temporary copy by appending ``.tmp`` to the same
+# hash-based artifact name.  Keep this pattern just as strict as the final
+# artifact pattern so an arbitrary user-created ``notes.tmp`` inside the
+# managed directory is never treated as application-owned data.
+_TEMP_ARTIFACT_RE = re.compile(r"^[0-9a-f]{64}(?:\.[A-Za-z0-9._+-]+)?\.tmp$")
+_SHARD_RE = re.compile(r"^[0-9a-f]{2}$")
+
+
+def ensure_managed_staging_dir(staging_dir: Path) -> Path:
+    """Create/validate the private staging root used by this application."""
+
+    root = Path(staging_dir)
+    if root.exists() and is_link_or_junction(root):
+        raise RuntimeError(f"暂存目录不能是符号链接或 junction：{root}")
+    root.mkdir(parents=True, exist_ok=True)
+    if is_link_or_junction(root):
+        raise RuntimeError(f"暂存目录不能是符号链接或 junction：{root}")
+    marker = root / MARKER_NAME
+    if marker.exists():
+        try:
+            if is_link_or_junction(marker):
+                raise RuntimeError(f"暂存目录标记不能是符号链接或 junction：{marker}")
+            value = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise RuntimeError(f"暂存目录标记无效：{marker}") from exc
+        if not isinstance(value, dict) or value.get("application") != MARKER_APP or int(value.get("schema", 0)) != MARKER_SCHEMA:
+            raise RuntimeError(f"暂存目录不是本程序管理的目录：{root}")
+        return root
+    payload = {"application": MARKER_APP, "schema": MARKER_SCHEMA, "created_at": time.time()}
+    temporary = marker.with_suffix(marker.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, marker)
+    return root
+
+
+def _is_managed_staging_dir(root: Path) -> bool:
+    if is_link_or_junction(root):
+        return False
+    marker = Path(root) / MARKER_NAME
+    try:
+        if is_link_or_junction(marker) or not marker.is_file():
+            return False
+        value = json.loads(marker.read_text(encoding="utf-8"))
+        return (
+            isinstance(value, dict)
+            and value.get("application") == MARKER_APP
+            and int(value.get("schema", 0)) == MARKER_SCHEMA
+        )
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _safe_child(root: Path, candidate: Path) -> bool:
+    """Return true only for a direct managed artifact beneath ``root``."""
+
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return False
+    if len(relative.parts) != 2:
+        return False
+    parent, name = relative.parts
+    # The generated layout is root/<two-hex-shard>/<64-hex-artifact>.
+    # Reject ``..`` and every other parent spelling before touching the path;
+    # this keeps remove_staged_file safe even when handed an untrusted path.
+    if not _SHARD_RE.fullmatch(parent) or name == MARKER_NAME:
+        return False
+    if is_link_or_junction(root / parent) or is_link_or_junction(candidate):
+        return False
+    return bool(_ARTIFACT_RE.fullmatch(name))
 
 
 def should_stage(path, mode: str = "off") -> bool:
@@ -62,10 +141,11 @@ def stage_file(
     """Copy a source file atomically into the local staging cache."""
 
     source = Path(path)
+    root = ensure_managed_staging_dir(Path(staging_dir))
     source_snapshot = snapshot_file(source) if snapshot is None else snapshot
     if source_snapshot is None:
         raise OSError(f"文件暂时不可读取或已被删除：{source}")
-    target = _stage_target(source, source_snapshot, Path(staging_dir))
+    target = _stage_target(source, source_snapshot, root)
     if target.is_file():
         try:
             if target.stat().st_size == _snapshot_values(source_snapshot)[0]:
@@ -122,37 +202,47 @@ def cleanup_staging(
     """
 
     root = Path(staging_dir)
-    if not root.exists():
+    if not root.exists() or not _is_managed_staging_dir(root):
         return
-    for item in root.rglob("*.tmp"):
+    # Only inspect the two-level artifact layout created by stage_file. Never
+    # recurse through arbitrary user directories, symlinks or junctions.
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return
+    for directory in children:
         try:
-            item.unlink()
+            if (
+                directory.name == MARKER_NAME
+                or is_link_or_junction(directory)
+                or not directory.is_dir()
+            ):
+                continue
+            for item in directory.iterdir():
+                if is_link_or_junction(item) or not item.is_file():
+                    continue
+                if not (
+                    _TEMP_ARTIFACT_RE.fullmatch(item.name)
+                    or _ARTIFACT_RE.fullmatch(item.name)
+                ):
+                    continue
+                try:
+                    if (
+                        _TEMP_ARTIFACT_RE.fullmatch(item.name)
+                        or max_age_seconds is None
+                        or item.stat().st_mtime
+                        < time.time() - max(0.0, float(max_age_seconds))
+                    ):
+                        item.unlink()
+                except OSError:
+                    continue
+            if remove_empty:
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
         except OSError:
             continue
-    if max_age_seconds is not None:
-        try:
-            age = max(0.0, float(max_age_seconds))
-        except (TypeError, ValueError):
-            age = 0.0
-        cutoff = time.time() - age
-        for item in root.rglob("*"):
-            if not item.is_file() or item.name.endswith(".tmp"):
-                continue
-            try:
-                if item.stat().st_mtime < cutoff:
-                    item.unlink()
-            except OSError:
-                continue
-    if remove_empty:
-        for directory in sorted((p for p in root.rglob("*") if p.is_dir()), reverse=True):
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
-        try:
-            root.rmdir()
-        except OSError:
-            pass
 
 
 def remove_staged_file(path) -> bool:
@@ -160,11 +250,20 @@ def remove_staged_file(path) -> bool:
 
     if not path:
         return False
+    candidate = Path(path)
+    # A staged path is only removable when its parent carries our marker and
+    # its filename matches the generated SHA-256 artifact format.
+    root = candidate.parent.parent
+    if not _is_managed_staging_dir(root) or not _safe_child(root, candidate):
+        return False
     try:
-        Path(path).unlink(missing_ok=True)
+        candidate.unlink(missing_ok=True)
         return True
     except OSError:
         return False
 
 
-__all__ = ["stage_file", "cleanup_staging", "remove_staged_file", "should_stage"]
+__all__ = [
+    "stage_file", "cleanup_staging", "remove_staged_file", "should_stage",
+    "ensure_managed_staging_dir", "MARKER_NAME",
+]

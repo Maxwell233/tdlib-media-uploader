@@ -933,7 +933,11 @@ def iter_directory_entries_with_retry(
 
     seen: set[str] = set()
     limit = max(1, int(attempts))
-    consecutive_failures = 0
+    # Count reopen attempts for this directory, rather than resetting the
+    # budget after every successfully yielded entry.  A share that repeatedly
+    # drops after one item must still terminate after a bounded number of
+    # retries instead of looping forever.
+    reopen_attempts = 0
     while True:
         if _cancelled(cancel_event):
             raise TimeoutError("目录扫描已取消")
@@ -956,12 +960,12 @@ def iter_directory_entries_with_retry(
                     except StopIteration:
                         return
                     except OSError as exc:
-                        if not is_transient_fs_error(exc) or consecutive_failures >= limit - 1:
+                        if not is_transient_fs_error(exc) or reopen_attempts >= limit:
                             raise
-                        consecutive_failures += 1
+                        reopen_attempts += 1
                         if not cancelable_sleep(
                             min(max(0.0, float(max_delay)),
-                                max(0.0, float(initial_delay)) * (2 ** (consecutive_failures - 1))),
+                                max(0.0, float(initial_delay)) * (2 ** (reopen_attempts - 1))),
                             cancel_event,
                         ):
                             raise TimeoutError("目录扫描已取消") from exc
@@ -974,7 +978,6 @@ def iter_directory_entries_with_retry(
                     if identity in seen:
                         continue
                     seen.add(identity)
-                    consecutive_failures = 0
                     yield entry
         finally:
             # ``with`` closes a normal scandir iterator; this guard also

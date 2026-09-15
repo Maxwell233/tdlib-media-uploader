@@ -16,7 +16,7 @@ macOS 首次打开若出现“无法验证开发者”等提示，请先确认�
 4. 扫描目录，核对待上传文件；选中媒体组点击“编辑标题”，或双击该组/文件进行编辑。
 5. 点击“开始上传”并确认。在“任务中心”查看进度、速度、剩余时间和日志。
 
-首次上传可能要求手机号、验证码、两步验证密码或其他已登录设备确认。Windows 和源码运行时，登录数据保存在项目目录；macOS 发布版保存在 `~/Library/Application Support/TDLib Media Uploader/`，下次可继续使用。
+首次上传可能要求手机号、验证码、两步验证密码或其他已登录设备确认。登录数据和其他用户数据都保存在统一的 `data/` 目录，升级程序时保留该目录即可继续使用。
 
 ## 预览与编辑
 
@@ -48,7 +48,7 @@ macOS 首次打开若出现“无法验证开发者”等提示，请先确认�
 
 每组仅第一条消息显示统一标题。最后不足一组也会发送；只有一个文件时发送单条消息。
 
-Telegram 限制在扫描阶段生效：大于 4 GiB 的视频会直接跳过；大于 10 MiB 的图片默认跳过。两类跳过都会立即显示在扫描提示和任务日志中，不会写入上传断点。图片配置中可开启“超限图片使用 FFmpeg 压缩”：扫描和预检只提示，确认上传并实际处理该图片时才生成不超过约 9.5 MiB 的临时 JPEG；原文件不会被修改。若 FFmpeg 不可用或压缩失败，该图片会记录原因并跳过。
+Telegram 限制在扫描阶段生效：普通账号视频单文件最多 2 GiB，Premium 账号最多 4 GiB；超过 2 GiB 的视频会在登录后、发送前按账号状态跳过并明确提示，超过 4 GiB 的视频直接跳过。大于 10 MiB 的图片默认跳过。图片配置中可开启“超限图片使用 FFmpeg 压缩”：扫描和预检只提示，确认上传并实际处理该图片时才生成不超过约 9.5 MiB 的临时 JPEG；原文件不会被修改。
 
 视频选择“按扫描顺序固定分组”后会忽略月份，按照设置的 1–10 个连续分组。组标题、文件名列表和文件名序号可以分别开关，仍可逐组编辑标题。
 
@@ -78,54 +78,50 @@ Telegram 限制在扫描阶段生效：大于 4 GiB 的视频会直接跳过；�
 
 “安全停止”会取消当前上传，并保留已写入的断点。只有整组消息确认发送成功后才记录完成状态。重新扫描时，已完成的组自动跳过；尚未完整完成的组会重新处理，其中已发送的部分可能重复。
 
-文件路径、大小或修改时间变化后，会被视为新文件。视频、图片和混合上传分别使用 `.video_state`、`.image_state`、`.mixed_state`；旧版视频状态可能在 `.state`。
+文件路径、大小或修改时间变化后，会被视为新文件。V1.9 将状态、标题、登录数据库、缓存、历史和日志统一保存到 `data/`，三种模式分别使用 `data/state/video`、`data/state/image`、`data/state/mixed`。
 
 “设置与诊断”提供两类清理：
 
-- **仅清理视频封面**：删除 `.thumb_cache` 的生成文件，之后需要时重新生成。
-- **清理所有**：清空视频/图片/混合断点、旧版断点、封面、媒体组标题、本地任务历史和运行日志。保留缓存目录、`config.toml` 及 Telegram 登录数据。清理断点后重新上传可能产生重复消息。
+- **仅清理视频封面**：删除 `data/cache/thumbnails` 的生成文件，之后需要时重新生成。
+- **清理所有**：清空状态、标题、封面、任务历史、未确认记录、暂存副本和运行日志。保留 `data/config.toml` 及 Telegram 登录数据库。清理断点后重新上传可能产生重复消息。
 
 也可在相应媒体配置中临时设置 `reset_state = true`；运行一次后务必改回 `false`。
 
-历史记录保留最近 100 次任务。Telegram 登录数据位于 `tdlib_data` 和 `tdlib_files`；标题修改存放在 `.video_album_captions.json`、`.image_album_captions.json` 和 `.mixed_album_captions.json`，独立于上传断点。macOS 发布版会将这些可写数据放到上面的 Application Support 目录，避免写入只读的 `.app` 包。
+历史记录保留最近 100 次任务。所有用户数据都位于 `data/`：`telegram/database` 和 `telegram/files` 保存 TDLib 登录数据库及文件缓存，`captions` 保存标题，`state` 保存断点，`upload_inflight` 保存未确认记录，`cache` 保存封面、压缩和暂存副本，`logs` 保存日志，`history.json` 保存任务历史。V1.9 按全量更新处理，不读取 V1.8.x 或旧开发版的散落状态文件。
 
-### 从旧版本迁移本地数据
+### 迁移与备份 data
 
-升级时先退出旧版和新版程序，并确认任务中心没有正在运行的上传。程序版本本身不携带个人数据；只要把旧版的应用数据目录移到新版使用的同一位置，就可以保留登录状态、任务历史和上传断点。建议先复制一份旧目录作为备份，确认新版能正常登录和读取断点后再删除旧目录。
+升级或更换电脑时，先**完全退出** TDLib Media Uploader，再直接复制整个 `data/` 目录即可保留 V1.9 的登录数据、任务历史、标题、断点和未确认记录。不要在上传、登录或 TDLib 数据库仍在写入时复制；`data/telegram/database` 是登录状态的关键数据，不建议只复制其中部分文件。Windows 便携版使用程序目录下的 `data/`；源码运行使用仓库下的 `data/`；macOS 发布版使用 `~/Library/Application Support/TDLib Media Uploader/data/`。安装或解压新版本后，把完整的 `data/` 放到对应位置即可。复制时不要套多一层 `data/data`，并先保留一份备份。最简单可靠的迁移方式是整体复制 `data/`，不需要分别寻找配置、登录数据库、断点、标题、历史或日志文件。V1.9 不承诺读取 V1.8.x 或旧开发版的状态格式。
 
-应用数据目录按运行方式确定：
+V1.9 的目录职责固定如下；程序资源和 PyInstaller `_internal` 目录只读，不会用作登录或其他用户数据目录：
 
-| 运行方式 | 应用数据目录 |
-| --- | --- |
-| Windows x64 便携 ZIP | ZIP 解压后的 `TDLib Media Uploader` 文件夹中的资源目录；当前 one-folder 包通常是 `_internal`（以“设置与诊断”显示的配置文件路径为准） |
-| Windows 源码运行 | 仓库目录，即与 `config.toml` 同一目录 |
-| macOS arm64 发布版 | `~/Library/Application Support/TDLib Media Uploader/` |
-| macOS 源码运行 | 仓库目录，即与 `config.toml` 同一目录 |
+```text
+data/
+├── config.toml
+├── telegram/
+│   ├── database/   # TDLib database_directory，包含登录状态
+│   └── files/      # TDLib files_directory
+├── state/video/    # 视频断点
+├── state/image/    # 图片断点
+├── state/mixed/    # 混合断点
+├── captions/      # Album 标题
+├── upload_inflight/
+├── cache/          # 封面、压缩和暂存副本
+├── logs/
+└── history.json
+```
 
-将旧目录中的下列内容复制到新版的**应用数据目录根部**，不要再套一层同名文件夹：
-
-| 文件或文件夹 | 保存内容 |
-| --- | --- |
-| `tdlib_data/`、`tdlib_files/` | Telegram 登录会话、TDLib 数据库和已下载文件；必须一起迁移 |
-| `.gui_history.json` | “任务中心”和历史记录中的最近 100 次任务 |
-| `.video_state/`、`.image_state/`、`.mixed_state/` | 视频、图片、混合上传断点 |
-| `.state/` | 更早版本使用的视频断点；当前版本仍会识别它 |
-| `config.toml` | API、代理、上传目标、媒体目录和各项选项；复制后请检查目录和目标是否正确 |
-| `.video_album_captions.json`、`.image_album_captions.json`、`.mixed_album_captions.json` | 已编辑的媒体组标题（可选） |
-
-Windows 便携包如果要更换安装位置，只移动上表中的个人数据文件和文件夹，保留新版包自带的 EXE、`_internal` 依赖、`tools` 和资源文件。若旧版和新版使用的是同一个 Windows 目录，或 macOS 仍使用上面的 Application Support 目录，则无需移动数据，直接替换程序文件并保留该目录即可。文件名以点号开头的状态文件属于正常数据，复制时不要遗漏。
-
-迁移后启动新版，先在“设置与诊断”确认配置文件路径，再检查账号、任务历史和各上传页面的已完成组。媒体目录的路径、文件大小或修改时间改变后，程序会将文件视为新文件；如果同时移动了媒体目录，请在 `config.toml` 更新路径并重新扫描，旧断点不一定能够继续匹配。不要把包含登录数据、API Hash、代理密码或断点的目录发给他人。
+Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结版是 `~/Library/Application Support/TDLib Media Uploader/data/telegram/`；源码运行是 `仓库目录/data/telegram/`。复制整个 `data/` 后，TDLib 会继续使用其中的 `telegram/database` 和 `telegram/files`。
 
 视频、图片或混合媒体无法被 FFmpeg/Pillow 读取时，程序会在预检阶段跳过该文件，继续上传其他文件；暂时不可读的项目会标记为 deferred，网络恢复后重新扫描即可重试。预检生成的 Album 计划会保留完整成员，deferred 文件不会让后面的文件向前补位。上传前还会再次检查文件存在、可读且大小/修改时间没有变化。坏文件不会写入断点，跳过文件的完整路径和原因会显示在任务日志中，并保存到应用数据目录的 `logs/app.log`。TDLib 原生诊断写入同目录的 `logs/tdlib.log`，可用于排查上传失败。
 
-每个待发送 Album 在请求前会写入 `.upload_inflight/<hash>.json`。状态依次记录为 `PREPARED`、`SUBMITTED`、`CONFIRMED`，正常断点写入后才删除；超时、断线或取消会记录为 `UNKNOWN`，下一次不会自动重发可能已经提交的 Album。日志会保存 Album 文件的路径、大小、修改时间和 Telegram 目标，因此切换到其他 Topic 或频道不会互相阻塞。请打开侧栏的“未确认上传”，先在 Telegram 中核对对应目标，再选择“我已确认 Telegram 中存在”或“我已确认 Telegram 中不存在”；选择“已存在”时程序会先写入对应上传断点，保存成功后才删除日志，保存失败则继续保留记录。集成调用仍可使用 `reconcile_inflight(..., sent=True/False)`。点击“清理所有缓存”会同时删除断点、暂存副本和运行日志，请先处理这些未知状态记录。
+每个待发送 Album 在请求前会写入 `data/upload_inflight/<hash>.json`。状态依次记录为 `PREPARED`、`SUBMITTED`、`CONFIRMED`，正常断点写入后才删除；超时、断线、取消或部分成功会记录为 `UNKNOWN`，下一次不会自动重发可能已经提交的 Album。请打开侧栏的“未确认上传”，先在 Telegram 中核对对应目标，再手动处理。
 
-如果源文件位于 SMB/NAS，可在“设置与诊断”中选择本地暂存模式，或在配置中设置 `[staging] mode`：`off` 直接读取源文件，`network` 只暂存网络盘，`always` 暂存所有文件。旧版 `enabled = true/false` 仍可使用，未填写 `mode` 时会映射为 `always/off`。程序会在发送前把已验证的文件复制到本地暂存目录，再交给 TDLib 读取；断点、标题和文件名仍以原始路径为准。`cleanup_on_start` 控制启动时清理过期文件，`cleanup_days` 控制保留时间，`cleanup_after_success` 控制 Album 已确认且断点写入后是否立即删除对应副本；失败、取消或发送状态未知时会保留副本供诊断和重试。暂存目录可以从缓存列表单独清理。
+如果源文件位于 SMB/NAS，可在“设置与诊断”中选择本地暂存模式，或在配置中设置 `[staging] mode`：`off` 直接读取源文件，`network` 只暂存网络盘，`always` 暂存所有文件。程序会在 `data/cache/staging` 或你指定的受管目录中创建带 marker 的暂存副本，只清理自己创建的文件，不会递归删除 base directory 中的其他用户文件。
 
 ## 配置与代理
 
-配置保存在应用目录的 `config.toml`，首次运行从 `config.example.toml` 创建。日常通过界面编辑；完整键名、默认值和说明见 [配置模板](config.example.toml)。保存无效配置时恢复原文件。
+配置保存在统一数据目录的 `data/config.toml`，首次运行从 `config.example.toml` 创建。日常通过界面编辑；完整键名、默认值和说明见 [配置模板](config.example.toml)。保存无效配置时恢复原文件。
 
 - 通用 API、目录、ExifTool 和代理：在“设置与诊断”编辑。
 - 视频/图片/混合目标、分组、标题和处理选项：在相应上传页面编辑。
@@ -150,7 +146,7 @@ cd tdlib-media-uploader
 
 安装脚本创建 `.venv`、安装依赖并创建本地配置。也可用 `setup.ps1` / `run.ps1`；若执行策略阻止脚本，可在当前 PowerShell 进程运行 `Set-ExecutionPolicy -Scope Process Bypass`。自动安装可用 `.\setup.ps1 -NoPause`。
 
-依赖为 `tdjson==1.8.64.post1`、Pillow、imageio-ffmpeg、PySide6。固定 TDLib 版本是为了兼容现有上传实现，请勿随意升级。源码和便携包都使用图形界面。
+依赖由 `requirements-lock.txt` 和 `requirements-build-lock.txt` 固定版本，其中包含 `tdjson==1.8.64.post1`、Pillow、imageio-ffmpeg、PySide6 和 PyInstaller。固定 TDLib 版本是为了兼容现有上传实现，请勿随意升级。源码和便携包都使用图形界面。
 
 macOS 源码运行（Apple Silicon、Python 3.13）：
 
@@ -199,10 +195,10 @@ Windows 和 macOS 构建使用各自平台的原生 runner，并行执行离线�
 
 macOS v1.9.0 包未配置 Apple Developer 签名和公证，所以 Gatekeeper 可能显示“无法验证开发者”。请不要绕过来源核验后直接运行未知文件；确认仓库地址、标签和 SHA-256 后再按系统提示打开。Windows 版也不应被视为经过独立安全机构认证的程序。应用会调用随包提供或系统中的 FFmpeg/ExifTool 处理媒体；请确认这些工具来源和许可，并注意压缩失败、网络中断、Telegram 限制以及重复上传等运行风险。
 
-程序需要 Telegram API ID/API Hash，并会在本机保存 Telegram 登录数据库、代理设置、上传断点和用户输入的标题；这些数据不会随发布包提供。不要把 `config.toml`、API Hash、登录数据库、代理密码或缓存发给他人。上传目标、代理、媒体内容和 Telegram 账号权限均由使用者自行确认；请遵守 Telegram 使用条款、版权要求和目标群组/频道规则。若使用 ExifTool 或自行替换 FFmpeg，还需遵守对应上游许可证。
+程序需要 Telegram API ID/API Hash，并会在本机 `data/` 保存 Telegram 登录数据库、代理设置、上传断点和用户输入的标题；这些数据不会随发布包提供。不要把 `data/config.toml`、API Hash、登录数据库、代理密码或缓存发给他人。上传目标、代理、媒体内容和 Telegram 账号权限均由使用者自行确认；请遵守 Telegram 使用条款、版权要求和目标群组/频道规则。若使用 ExifTool 或自行替换 FFmpeg，还需遵守对应上游许可证。
 
 ## 项目许可与署名
 
 本项目的原创代码、文档和界面资源采用 [GNU General Public License v3.0 only（GPL-3.0-only）](LICENSE) 发布。使用、修改和再分发时请遵守 `LICENSE` 中的版权与许可要求。
 
-完整许可文本见根目录的 `LICENSE`，作者署名见 `ATTRIBUTION`，第三方组件清单见 `THIRD_PARTY_LICENSES.md`。本项目为独立社区项目，与 Telegram 官方无隶属关系；TDLib、PySide6、Pillow、imageio-ffmpeg、FFmpeg、PyInstaller、Python 及其他第三方组件分别遵循各自许可证。源码包和编译包均包含上述三个许可/署名文件，请勿将 `config.toml`、Telegram API 凭据、登录数据或本地断点状态随包分发。
+完整许可文本见根目录的 `LICENSE`，作者署名见 `ATTRIBUTION`，第三方组件清单见 `THIRD_PARTY_LICENSES.md`。本项目为独立社区项目，与 Telegram 官方无隶属关系；TDLib、PySide6、Pillow、imageio-ffmpeg、FFmpeg、PyInstaller、Python 及其他第三方组件分别遵循各自许可证。源码包和编译包均包含上述三个许可/署名文件，请勿将 `data/config.toml`、Telegram API 凭据、登录数据或本地断点状态随包分发。

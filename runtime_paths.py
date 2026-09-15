@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Resolve bundled resources separately from writable application data."""
+"""Resolve immutable resources and the single writable data directory.
+
+V1.9 keeps the application bundle read-only and puts every piece of user
+data below ``DATA_DIR``.  The path rules are intentionally small and free of
+configuration imports so they can also be used by the frozen self-test.
+"""
 
 from __future__ import annotations
 
@@ -10,15 +15,82 @@ from pathlib import Path
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 if IS_FROZEN:
     RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    APP_ROOT = Path(sys.executable).resolve().parent
 else:
     RESOURCE_DIR = Path(__file__).resolve().parent
+    APP_ROOT = RESOURCE_DIR
 
 # Windows remains a portable folder build, and source runs keep their existing
 # layout.  A frozen macOS app must not write into its read-only .app bundle.
 if sys.platform == "darwin" and IS_FROZEN:
-    APP_DATA_DIR = Path.home() / "Library" / "Application Support" / "TDLib Media Uploader"
+    DATA_BASE_DIR = Path.home() / "Library" / "Application Support" / "TDLib Media Uploader"
 else:
-    APP_DATA_DIR = RESOURCE_DIR
+    DATA_BASE_DIR = APP_ROOT
 
-CONFIG_PATH = APP_DATA_DIR / "config.toml"
+# All mutable files live below this directory.  APP_DATA_DIR remains as a
+# source-compatible alias for integrations written before the V1.9 layout.
+DATA_DIR = DATA_BASE_DIR / "data"
+APP_DATA_DIR = DATA_DIR
+
+STATE_DIR = DATA_DIR / "state"
+VIDEO_STATE_DIR = STATE_DIR / "video"
+IMAGE_STATE_DIR = STATE_DIR / "image"
+MIXED_STATE_DIR = STATE_DIR / "mixed"
+TELEGRAM_DIR = DATA_DIR / "telegram"
+TDLIB_DATABASE_DIR = TELEGRAM_DIR / "database"
+TDLIB_FILES_DIR = TELEGRAM_DIR / "files"
+CAPTIONS_DIR = DATA_DIR / "captions"
+UPLOAD_INFLIGHT_DIR = DATA_DIR / "upload_inflight"
+CACHE_DIR = DATA_DIR / "cache"
+THUMBNAIL_CACHE_DIR = CACHE_DIR / "thumbnails"
+IMAGE_COMPRESSION_CACHE_DIR = CACHE_DIR / "image_compression"
+STAGING_CACHE_DIR = CACHE_DIR / "staging"
+LOG_DIR = DATA_DIR / "logs"
+HISTORY_PATH = DATA_DIR / "history.json"
+
+CONFIG_PATH = DATA_DIR / "config.toml"
 TEMPLATE_CONFIG_PATH = RESOURCE_DIR / "config.example.toml"
+VERSION_PATH = RESOURCE_DIR / "VERSION"
+
+
+def read_version(default: str = "0.0.0") -> str:
+    """Read the packaged VERSION file without ever failing application boot."""
+
+    try:
+        value = VERSION_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        value = ""
+    return value or str(default)
+
+
+def ensure_data_dirs() -> Path:
+    """Create the standard writable directories and return ``DATA_DIR``."""
+
+    for directory in (
+        DATA_DIR,
+        VIDEO_STATE_DIR,
+        IMAGE_STATE_DIR,
+        MIXED_STATE_DIR,
+        TELEGRAM_DIR,
+        TDLIB_DATABASE_DIR,
+        TDLIB_FILES_DIR,
+        CAPTIONS_DIR,
+        UPLOAD_INFLIGHT_DIR,
+        THUMBNAIL_CACHE_DIR,
+        IMAGE_COMPRESSION_CACHE_DIR,
+        STAGING_CACHE_DIR,
+        LOG_DIR,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    return DATA_DIR
+
+
+__all__ = [
+    "IS_FROZEN", "RESOURCE_DIR", "APP_ROOT", "DATA_BASE_DIR", "DATA_DIR",
+    "APP_DATA_DIR", "CONFIG_PATH", "TEMPLATE_CONFIG_PATH", "VERSION_PATH",
+    "STATE_DIR", "VIDEO_STATE_DIR", "IMAGE_STATE_DIR", "MIXED_STATE_DIR",
+    "TELEGRAM_DIR", "TDLIB_DATABASE_DIR", "TDLIB_FILES_DIR",
+    "CAPTIONS_DIR", "UPLOAD_INFLIGHT_DIR", "CACHE_DIR", "THUMBNAIL_CACHE_DIR",
+    "IMAGE_COMPRESSION_CACHE_DIR", "STAGING_CACHE_DIR", "LOG_DIR",
+    "HISTORY_PATH", "read_version", "ensure_data_dirs",
+]

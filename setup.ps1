@@ -51,7 +51,7 @@ try {
 
     Write-Host "→ 安装项目依赖" -ForegroundColor Yellow
     Write-Host "  tdjson 1.8.64.post1 / Pillow / imageio-ffmpeg / PySide6" -ForegroundColor DarkGray
-    Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--upgrade", "--force-reinstall", "--no-binary", "imageio-ffmpeg", "-r", "requirements.txt")
+    Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--upgrade", "--force-reinstall", "--no-binary", "imageio-ffmpeg", "-r", "requirements-lock.txt")
 
     Write-Host "→ 检查 tdjson 固定版本" -ForegroundColor Yellow
     $tdjsonVersion = & $python -c "import importlib.metadata; print(importlib.metadata.version('tdjson'))"
@@ -70,22 +70,25 @@ try {
         Write-Host "✓ tdjson 版本正确：1.8.64.post1" -ForegroundColor Green
     }
 
-    if (-not (Test-Path ".\config.toml")) {
+    $dataDirectory = Join-Path $PSScriptRoot "data"
+    $dataConfig = Join-Path $dataDirectory "config.toml"
+    if (-not (Test-Path -LiteralPath $dataConfig)) {
         if (-not (Test-Path ".\config.example.toml")) {
             throw "找不到 config.example.toml，无法创建配置文件。"
         }
 
-        Copy-Item ".\config.example.toml" ".\config.toml"
-        Write-Host "✓ 已创建 config.toml。" -ForegroundColor Green
+        New-Item -ItemType Directory -Force -Path $dataDirectory | Out-Null
+        Copy-Item ".\config.example.toml" $dataConfig
+        Write-Host "✓ 已创建 data\config.toml。" -ForegroundColor Green
     }
     else {
-        Write-Host "✓ 保留现有 config.toml，不会覆盖你的配置。" -ForegroundColor Green
+        Write-Host "✓ 保留现有 data\config.toml，不会覆盖你的配置。" -ForegroundColor Green
     }
 
     Write-Host ""
     Write-Host ("─" * 64) -ForegroundColor Green
     Write-Host "安装完成" -ForegroundColor Green
-    Write-Host "  1. 编辑 config.toml"
+    Write-Host "  1. 编辑 data\config.toml（或在 GUI 中编辑配置）"
     Write-Host "  2. 如需读取 EXIF/QuickTime，可安装 tools\exiftool.exe"
     Write-Host "  3. 源码运行视频功能需准备 LGPL FFmpeg：放入 tools\ffmpeg\ffmpeg.exe 或加入 PATH"
     Write-Host "  4. 双击 run.cmd，或运行 .\run.ps1"
@@ -93,7 +96,7 @@ try {
     Write-Host ("─" * 64) -ForegroundColor Green
     Write-Host ""
     Write-Host "提示：默认 missing_date_policy = `"mtime`"，没有 ExifTool 也可上传视频。" -ForegroundColor DarkGray
-    Write-Host "提示：视频封面默认开启，如需关闭请在 config.toml 设置 generate_thumbnail = false。" -ForegroundColor DarkGray
+    Write-Host "提示：视频封面默认开启，如需关闭请在 data\config.toml 设置 generate_thumbnail = false。" -ForegroundColor DarkGray
 }
 catch {
     $setupFailed = $true

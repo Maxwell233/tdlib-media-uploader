@@ -74,7 +74,12 @@ if ffmpeg_build_info.is_file():
 hiddenimports = [
     "app_config",
     "album_metadata",
+    "runtime_paths",
     "path_utils",
+    "media_identity",
+    "upload_state",
+    "instance_lock",
+    "self_test",
     "tdlib_common",
     "upload_journal",
     "tdlib_image_album_uploader",

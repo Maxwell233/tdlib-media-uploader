@@ -2,10 +2,10 @@
 # TDLib Media Uploader V1.9.0
 #
 # 首次使用：
-#   1. 复制本文件为 config.toml
+#   1. 复制本文件为 data/config.toml
 #   2. 填写 Telegram API、目标群/Topic 或频道和本地目录
 #
-# 各平台 setup / run 脚本在发现 config.toml 不存在时也会自动创建。
+# 各平台 setup / run 脚本在发现 data/config.toml 不存在时也会自动创建。
 #
 # 路径支持绝对路径和 ~；Windows 也可以使用单引号保存反斜杠。
 # ============================================================
@@ -74,7 +74,7 @@ http_only = false
 
 [paths]
 
-# 会递归扫描所有子文件夹
+# 会递归扫描所有子文件夹；相对路径以 data/ 为基准
 video_dir = '~/Movies/TDLib Media Uploader/Videos'
 image_dir = '~/Pictures/TDLib Media Uploader/Images'
 # 混合上传目录；其下的一级子文件夹分别作为独立组
@@ -165,11 +165,11 @@ reset_state = false
 
 [staging]
 
-# 可选：先把源文件复制到本地缓存，再交给 TDLib 读取，适合不稳定的 SMB/NAS。
+# 可选：先把源文件复制到本地缓存，再交给 TDLib 读取，适合不稳定的 SMB/NAS。程序只清理自己的受管暂存文件。
 # 断点仍以原始媒体路径为准；关闭时直接读取源文件。
 enabled = false
 mode = "off" # off=直接读取；network=仅网络盘暂存；always=所有文件暂存
-directory = ".staging"
+directory = "cache/staging"
 cleanup_on_start = true
 cleanup_days = 7
 cleanup_after_success = true
@@ -243,7 +243,8 @@ reset_state = false
 
 [tdlib]
 
-# 一般无需修改
+# 登录数据库和文件缓存固定写入 data/telegram/database 与 data/telegram/files，
+# 不会写入程序目录、资源目录或 PyInstaller _internal；复制整个 data/ 即可迁移登录状态。
 log_verbosity = 1
 request_timeout_seconds = 120
 message_send_timeout_seconds = 86400

@@ -17,6 +17,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from media_identity import canonical_target
 from path_utils import file_snapshot, stable_path
 from runtime_paths import APP_DATA_DIR
 
@@ -34,64 +35,14 @@ def _now() -> str:
 
 
 def normalize_target(target=None) -> dict:
-    """Return the canonical identity for the effective Telegram target.
+    """Return the shared canonical Telegram target identity.
 
-    Target configuration contains fields for both destination modes, but the
-    inactive fields are not part of the actual Telegram destination.  Keeping
-    them in the journal hash would make an unrelated config edit turn an
-    ``UNKNOWN`` send into a second submission opportunity.  Canonicalize the
-    two modes separately and retain an empty mapping for target-less/invalid
-    legacy records so their conservative matching behavior is unchanged.
+    The journal keeps this public name for existing callers, while the actual
+    mode-specific normalization lives in :mod:`media_identity` so UploadState,
+    journals and GUI reconciliation cannot drift apart.
     """
 
-    if not isinstance(target, dict):
-        return {}
-    mode = str(target.get("target_mode", "")).strip().lower()
-    if mode not in {"forum_topic", "channel"}:
-        return {}
-
-    def _as_int(value, default=0):
-        if value is None or value == "":
-            return default
-        try:
-            return int(value)
-        except (TypeError, ValueError, OverflowError):
-            return None
-
-    if mode == "forum_topic":
-        # ``group_chat_id`` was present in some config-shaped target mappings;
-        # prefer the canonical ``chat_id`` while retaining that compatibility
-        # alias as a fallback.  Channel-only fields are deliberately never
-        # parsed in this branch.
-        chat_value = target.get("chat_id", target.get("group_chat_id", 0))
-        chat_id = _as_int(chat_value)
-        topic_id = _as_int(target.get("forum_topic_id", 0))
-        if chat_id is None or topic_id is None:
-            return {}
-        return {
-            "target_mode": "forum_topic",
-            "chat_id": chat_id,
-            "forum_topic_id": topic_id,
-            "channel_chat_id": 0,
-        }
-
-    # A valid channel id is sufficient even when a stale/invalid forum chat
-    # id remains in the config.  Parse the fallback chat id only when the
-    # channel-specific value is absent or zero.
-    channel_value = target.get("channel_chat_id", 0)
-    channel_id = _as_int(channel_value)
-    if not channel_id:
-        chat_value = target.get("chat_id", target.get("group_chat_id", 0))
-        channel_id = _as_int(chat_value)
-        if channel_id is None:
-            return {}
-    effective_channel_id = channel_id
-    return {
-        "target_mode": "channel",
-        "chat_id": effective_channel_id,
-        "forum_topic_id": 0,
-        "channel_chat_id": effective_channel_id,
-    }
+    return canonical_target(target)
 
 
 def _record_target(record: dict) -> dict:
@@ -142,10 +93,13 @@ def _target_matches(record: dict, target=None) -> bool:
 
 
 class InflightJournal:
-    """One JSON record per Album, written atomically under ``.upload_inflight``."""
+    """One JSON record per Album, written atomically under ``data/upload_inflight``."""
 
     def __init__(self, root: Path | None = None):
-        self.root = Path(root) if root is not None else APP_DATA_DIR / ".upload_inflight"
+        # Resolve the default from APP_DATA_DIR at construction time so
+        # embedders/tests can redirect the data root without re-importing the
+        # module.  V1.9's APP_DATA_DIR is already DATA_DIR.
+        self.root = Path(root) if root is not None else APP_DATA_DIR / "upload_inflight"
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
 
@@ -293,6 +247,9 @@ class InflightJournal:
         *,
         message_ids=None,
         error: str = "",
+        succeeded_ids=None,
+        failed_ids=None,
+        pending_ids=None,
         target=None,
     ) -> dict:
         normalized = str(status).strip().upper()
@@ -313,6 +270,12 @@ class InflightJournal:
             record["updated_at"] = _now()
             if message_ids is not None:
                 record["message_ids"] = list(message_ids)
+            if succeeded_ids is not None:
+                record["succeeded_ids"] = list(succeeded_ids)
+            if failed_ids is not None:
+                record["failed_ids"] = list(failed_ids)
+            if pending_ids is not None:
+                record["pending_ids"] = list(pending_ids)
             if error:
                 record["error"] = str(error)
             self._write(path, record)

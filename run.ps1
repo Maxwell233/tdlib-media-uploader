@@ -21,13 +21,14 @@ try {
         throw "运行环境不存在：.venv\Scripts\python.exe"
     }
 
-    if (-not (Test-Path ".\config.toml")) {
+    if (-not (Test-Path ".\data\config.toml")) {
         if (-not (Test-Path ".\config.example.toml")) {
             throw "找不到 config.example.toml，项目文件不完整。"
         }
 
-        Copy-Item ".\config.example.toml" ".\config.toml"
-        Write-Host "✓ 已根据 config.example.toml 创建 config.toml" -ForegroundColor Green
+        New-Item -ItemType Directory -Force -Path ".\data" | Out-Null
+        Copy-Item ".\config.example.toml" ".\data\config.toml"
+        Write-Host "✓ 已根据 config.example.toml 创建 data\config.toml" -ForegroundColor Green
         Write-Host "  首次运行请在 GUI 的设置页填写 Telegram API、群组、Topic 和目录。" -ForegroundColor DarkGray
     }
 

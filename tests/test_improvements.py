@@ -49,6 +49,28 @@ class ImprovementsTest(unittest.TestCase):
         )
         self.assertEqual(names.splitlines(), ["clip", "archive.tar", ".hidden"])
 
+    def test_album_key_uses_scan_snapshot_without_late_stat(self):
+        root = Path("snapshot-root")
+        path = root / "Day2" / "clip10.mp4"
+        item = {
+            "path": path,
+            "scan_size": 123,
+            "scan_mtime_ns": 456,
+        }
+        with patch.object(metadata, "file_snapshot", create=True, side_effect=AssertionError("late stat")):
+            key = metadata.album_key(
+                "video",
+                "2026-09",
+                [item],
+                root=root,
+            )
+        self.assertEqual(len(key), 24)
+
+    def test_album_key_rejects_path_without_scan_snapshot(self):
+        path = Path("clip.mp4")
+        with self.assertRaisesRegex(ValueError, "缺少扫描快照"):
+            metadata.album_key("video", "2026-09", [path], root=Path("."))
+
     def test_natural_filename_sort_uses_ascending_numeric_runs(self):
         names = [
             "x.1",
@@ -773,7 +795,7 @@ class ImprovementsTest(unittest.TestCase):
         from upload_journal import InflightJournal
 
         with tempfile.TemporaryDirectory() as directory:
-            journal = InflightJournal(Path(directory) / ".upload_inflight")
+            journal = InflightJournal(Path(directory) / "upload_inflight")
             journal.prepare("image", "gui-album", [{"path": "photo.jpg"}])
             journal.unknown("image", "gui-album", "timeout")
             with patch.object(gui, "APP_DATA_DIR", Path(directory)):
@@ -789,7 +811,7 @@ class ImprovementsTest(unittest.TestCase):
         from upload_journal import InflightJournal
 
         with tempfile.TemporaryDirectory() as directory:
-            journal = InflightJournal(Path(directory) / ".upload_inflight")
+            journal = InflightJournal(Path(directory) / "upload_inflight")
             journal.prepare("image", "legacy-gui-album", [{"path": "photo.jpg"}])
             journal.unknown("image", "legacy-gui-album", "timeout")
             with patch.object(gui, "APP_DATA_DIR", Path(directory)), \
@@ -1196,23 +1218,27 @@ class ImprovementsTest(unittest.TestCase):
             self.assertTrue(path_utils.is_network_path("/Volumes/Camera Share/clip.mp4"))
 
     def test_staging_cleanup_removes_only_stale_files(self):
-        from staging import cleanup_staging
+        from staging import cleanup_staging, ensure_managed_staging_dir
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "staging"
-            root.mkdir()
-            stale = root / "stale.bin"
-            fresh = root / "fresh.bin"
-            temporary = root / "partial.tmp"
+            root = ensure_managed_staging_dir(Path(directory) / "staging")
+            shard = root / "ab"
+            shard.mkdir()
+            stale = shard / ("a" * 64 + ".bin")
+            fresh = shard / ("b" * 64 + ".bin")
+            temporary = shard / ("c" * 64 + ".tmp")
+            unrelated_tmp = shard / "notes.tmp"
             stale.write_bytes(b"stale")
             fresh.write_bytes(b"fresh")
             temporary.write_bytes(b"partial")
+            unrelated_tmp.write_bytes(b"keep me")
             old = __import__("time").time() - 3600
             os.utime(stale, (old, old))
             cleanup_staging(root, max_age_seconds=60)
             self.assertFalse(stale.exists())
             self.assertTrue(fresh.exists())
             self.assertFalse(temporary.exists())
+            self.assertTrue(unrelated_tmp.exists())
 
     def test_mixed_extension_conflicts_are_rejected(self):
         import tdlib_mixed_album_uploader as core
@@ -1504,6 +1530,26 @@ class ImprovementsTest(unittest.TestCase):
             self.assertNotEqual(target, source)
             # A second call reuses the same snapshot-specific local copy.
             self.assertEqual(stage_file(source, snapshot, staging_dir=staging), target)
+
+    def test_staging_cleanup_never_enters_linked_shard_directory(self):
+        from staging import cleanup_staging, ensure_managed_staging_dir
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            staging = root / "staging"
+            external = root / "external"
+            external.mkdir()
+            external_file = external / ("a" * 64 + ".mp4")
+            external_file.write_bytes(b"must survive")
+            ensure_managed_staging_dir(staging)
+            linked_shard = staging / "ab"
+            try:
+                os.symlink(external, linked_shard, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("当前系统不允许创建目录符号链接")
+            cleanup_staging(staging, max_age_seconds=0)
+            self.assertTrue(external_file.exists())
+            self.assertTrue(linked_shard.is_symlink())
 
     def test_exiftool_date_query_keeps_full_time_batch(self):
         import subprocess

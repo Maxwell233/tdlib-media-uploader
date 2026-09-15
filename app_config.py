@@ -7,26 +7,66 @@ import tomllib
 import os
 from pathlib import Path
 
-from runtime_paths import APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR
+from runtime_paths import (
+    APP_DATA_DIR,
+    CONFIG_PATH,
+    DATA_DIR,
+    RESOURCE_DIR,
+    TDLIB_DATABASE_DIR,
+    TDLIB_FILES_DIR,
+    read_version,
+)
 
-APP_VERSION = "1.9.0"
+APP_VERSION = read_version()
 PROJECT_DIR = RESOURCE_DIR
 
 # Telegram's current upload limits used by this application.  Keep these
 # checks local so an oversized file is reported during scanning instead of
 # failing later inside TDLib.
-VIDEO_MAX_BYTES = 4 * 1024 ** 3
+# Telegram allows ordinary accounts up to 2 GiB and Premium accounts up to
+# 4 GiB.  Scanners keep the broader ceiling so Premium-required files remain
+# visible and can be reported before sending.
+VIDEO_STANDARD_MAX_BYTES = 2 * 1024 ** 3
+VIDEO_PREMIUM_MAX_BYTES = 4 * 1024 ** 3
+VIDEO_MAX_BYTES = VIDEO_PREMIUM_MAX_BYTES
 IMAGE_MAX_BYTES = 10 * 1024 ** 2
 IMAGE_COMPRESSION_TARGET_BYTES = int(9.5 * 1024 ** 2)
 
 
+def video_size_status(size: int, *, is_premium: bool | None = None) -> str:
+    """Classify a video without changing the complete Album plan.
+
+    ``requires_premium`` is intentionally returned for 2–4 GiB files while
+    the scanner still includes them.  The upload worker filters them only
+    after TDLib reports the account status.
+    """
+
+    value = int(size)
+    if value > VIDEO_PREMIUM_MAX_BYTES:
+        return "oversize"
+    if value > VIDEO_STANDARD_MAX_BYTES and is_premium is not True:
+        return "requires_premium"
+    return "allowed"
+
+
 def _load():
     if not CONFIG_PATH.exists():
-        raise RuntimeError(
-            "找不到配置文件：\n"
-            f"{CONFIG_PATH}\n\n"
-            "请先复制 config.example.toml 为 config.toml，或运行对应平台的 setup 脚本自动创建。"
-        )
+        # A fresh V1.9 installation starts with a writable data directory.
+        # Never look for or import a config from the old application root.
+        try:
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            template = RESOURCE_DIR / "config.example.toml"
+            if template.exists():
+                import shutil
+                shutil.copyfile(template, CONFIG_PATH)
+        except OSError:
+            pass
+        if not CONFIG_PATH.exists():
+            raise RuntimeError(
+                "找不到配置模板：\n"
+                f"{CONFIG_PATH}\n\n"
+                "请确认 config.example.toml 已随程序一起安装。"
+            )
 
     try:
         with CONFIG_PATH.open("rb") as file:
@@ -69,7 +109,7 @@ def _required(section, key):
     return section[key]
 
 
-def _resolve_path(value):
+def _resolve_path(value, *, base=None):
     text = str(value).strip()
 
     if not text:
@@ -82,7 +122,22 @@ def _resolve_path(value):
     if path.is_absolute():
         return path
 
-    return PROJECT_DIR / path
+    return Path(base or DATA_DIR) / path
+
+
+def _resolve_resource_path(value):
+    """Resolve a bundled tool before falling back to the writable data root."""
+
+    text = str(value).strip()
+    if not text:
+        raise RuntimeError("config.toml 中存在空路径。")
+    path = Path(os.path.expandvars(os.path.expanduser(text)))
+    if path.is_absolute():
+        return path
+    bundled = RESOURCE_DIR / path
+    if bundled.exists():
+        return bundled
+    return DATA_DIR / path
 
 
 def _extensions(values):
@@ -245,7 +300,7 @@ IMAGE_DIR = _resolve_path(
     )
 )
 
-EXIFTOOL_PATH = _resolve_path(
+EXIFTOOL_PATH = _resolve_resource_path(
     _required(
         paths,
         "exiftool_path"
@@ -570,11 +625,9 @@ EXIFTOOL_BATCH_SIZE = _bounded_int(process, "exiftool_batch_size", 256, 1, 4096)
 EXIFTOOL_RETRIES = _bounded_int(process, "exiftool_retries", 2, 0, 5)
 
 
-# 混合上传：旧版配置没有 [mixed] 时使用兼容默认值。混合目录下的一级
+# 混合上传：未填写 [mixed] 时使用公共目标和默认设置。混合目录下的一级
 # 子目录是独立组，图片和视频直接继承 [image]/[video] 的扩展名与上限。
-MIXED_DIR = _resolve_path(
-    paths.get("mixed_dir", str(PROJECT_DIR / "Mixed"))
-)
+MIXED_DIR = _resolve_path(paths.get("mixed_dir", "Mixed"))
 # Keep these public names for older integrations, but deliberately derive them
 # from the primary media settings so mixed uploads cannot drift from the image
 # and video pages. Legacy mixed.image_extensions/video_extensions keys are
@@ -620,17 +673,42 @@ STAGING_MODE = str(
 if STAGING_MODE not in {"off", "network", "always"}:
     raise RuntimeError('[staging].mode 只能是 "off"、"network" 或 "always"。')
 STAGING_ENABLED = STAGING_MODE != "off"
-_staging_value = str(staging.get("directory", ".staging")).strip()
+_staging_value = str(staging.get("directory", "cache/staging")).strip()
 if not _staging_value:
     raise RuntimeError("config.toml 中的 staging.directory 不能为空。")
 STAGING_DIR = Path(os.path.expandvars(os.path.expanduser(_staging_value)))
 if not STAGING_DIR.is_absolute():
-    # Application data is writable in frozen one-folder/one-file builds,
-    # whereas RESOURCE_DIR can live inside a read-only bundle.
-    STAGING_DIR = APP_DATA_DIR / STAGING_DIR
+    STAGING_DIR = DATA_DIR / STAGING_DIR
+# A user supplied value is a base directory.  Only this managed child is ever
+# touched by cleanup; arbitrary files in the base remain safe.
+STAGING_BASE_DIR = STAGING_DIR
+if STAGING_DIR != DATA_DIR / "cache" / "staging" and STAGING_DIR.name != ".tdlib-media-uploader-staging":
+    STAGING_DIR = STAGING_DIR / ".tdlib-media-uploader-staging"
 STAGING_CLEANUP_ON_START = bool(staging.get("cleanup_on_start", True))
 STAGING_CLEANUP_DAYS = _bounded_int(staging, "cleanup_days", 7, 0, 3650)
 STAGING_CLEANUP_AFTER_SUCCESS = bool(staging.get("cleanup_after_success", True))
+
+
+def _path_contains(parent: Path, child: Path) -> bool:
+    """Lexically compare paths without resolving network mounts or links."""
+
+    try:
+        parent_parts = tuple(os.path.normcase(os.path.abspath(str(parent))).split(os.sep))
+        child_parts = tuple(os.path.normcase(os.path.abspath(str(child))).split(os.sep))
+        return len(child_parts) >= len(parent_parts) and child_parts[:len(parent_parts)] == parent_parts
+    except (OSError, ValueError):
+        return False
+
+
+for _source_root_name, _source_root in (
+    ("video_dir", VIDEO_DIR),
+    ("image_dir", IMAGE_DIR),
+    ("mixed_dir", MIXED_DIR),
+):
+    if _path_contains(_source_root, STAGING_DIR) or _path_contains(STAGING_DIR, _source_root):
+        raise RuntimeError(
+            f"staging.directory 不能与 {_source_root_name} 重叠，请选择独立的本地缓存目录。"
+        )
 
 
 # [image] 与 [video] 的扩展名必须互斥，否则 mixed 无法确定媒体类型。

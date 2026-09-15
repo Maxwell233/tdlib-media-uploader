@@ -18,6 +18,8 @@ from pathlib import Path
 from PIL import Image
 
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
+from media_identity import media_file_signature
+from upload_state import UploadState as SharedUploadState
 from path_utils import (
     display_path,
     FileReadinessError,
@@ -37,11 +39,11 @@ from path_utils import (
 )
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
-from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
+from runtime_paths import APP_DATA_DIR, RESOURCE_DIR, IMAGE_STATE_DIR, IMAGE_COMPRESSION_CACHE_DIR
 from staging import cleanup_staging, remove_staged_file, should_stage, stage_file
 
 PROJECT_DIR = RESOURCE_DIR
-STATE_DIR = APP_DATA_DIR / ".image_state"
+STATE_DIR = IMAGE_STATE_DIR
 LAST_SCAN_ERRORS: list[str] = []
 LAST_SCAN_WARNINGS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
@@ -49,7 +51,7 @@ DEFERRED_STATUS = "DEFERRED"
 IMAGE_UPLOAD_PATHS: dict[str, Path] = {}
 STAGED_UPLOAD_PATHS: dict[str, Path] = {}
 IMAGE_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
-COMPRESSED_IMAGE_DIR = APP_DATA_DIR / ".image_compression"
+COMPRESSED_IMAGE_DIR = IMAGE_COMPRESSION_CACHE_DIR
 FFMPEG_COMPRESS_TIMEOUT_SECONDS = float(
     getattr(cfg, "FFMPEG_COMPRESSION_TIMEOUT_SECONDS", 45)
 )
@@ -149,16 +151,16 @@ def cleanup_confirmed_staging(paths) -> None:
 
 
 def _snapshot_for_path(path: Path):
-    return file_snapshot(path) or IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
+    # Prefer the immutable snapshot captured by the scanner.  A late stat is
+    # only a fallback for direct API callers that did not scan first.
+    return IMAGE_SCAN_SNAPSHOTS.get(stable_path(path)) or file_snapshot(path)
 
 
 def file_signature(path: Path, snapshot=None) -> str:
     snapshot = snapshot or _snapshot_for_path(path)
     if snapshot is None:
         raise OSError(f"文件暂时不可读取：{path}")
-    size, mtime_ns = snapshot
-    raw = f"{relative_name(path).lower()}|{size}|{mtime_ns}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return media_file_signature(path, root=cfg.IMAGE_DIR, snapshot=snapshot)
 
 
 def scan_images(cancel_event=None) -> list[Path]:
@@ -651,97 +653,19 @@ def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
     return contents, valid_paths, skipped
 
 
-class UploadState:
-    VERSION = 1
+class UploadState(SharedUploadState):
+    """Image-specific facade over the shared V1.9 checkpoint format."""
 
     def __init__(self, target=None):
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        target = target if isinstance(target, dict) else {}
-        target_mode = str(target.get("target_mode", getattr(cfg, "TARGET_MODE", "forum_topic")))
-        chat_id = int(target.get("chat_id", getattr(cfg, "CHAT_ID", 0)) or 0)
-        forum_topic_id = int(target.get("forum_topic_id", getattr(cfg, "FORUM_TOPIC_ID", 0)) or 0)
-        channel_chat_id = int(target.get("channel_chat_id", getattr(cfg, "CHANNEL_CHAT_ID", 0)) or 0)
-        identity_suffix = (
-            "tdlib-image-v5"
-            if target_mode == "forum_topic"
-            else "tdlib-image-v5-channel"
+        super().__init__(
+            kind="image",
+            source_root=cfg.IMAGE_DIR,
+            target=target or getattr(cfg, "target_for", lambda _kind: {}) ("image"),
+            state_dir=STATE_DIR,
+            reset=getattr(cfg, "IMAGE_RESET_STATE", False),
+            filename_prefix="image_upload_state",
+            snapshot_provider=_snapshot_for_path,
         )
-        identity = f"{stable_path(cfg.IMAGE_DIR)}|{chat_id}|{forum_topic_id}|{identity_suffix}"
-        task_hash = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
-        self.path = STATE_DIR / f"image_upload_state_{task_hash}.json"
-        self._target_mode = target_mode
-        self._chat_id = chat_id
-        self._forum_topic_id = forum_topic_id
-        self._channel_chat_id = channel_chat_id
-        self.lock = threading.Lock()
-        if cfg.IMAGE_RESET_STATE and self.path.exists():
-            self.path.unlink()
-        self.data = self._load()
-
-    def _new(self):
-        return {
-            "version": self.VERSION,
-            "image_dir": stable_path(cfg.IMAGE_DIR),
-            "chat_id": self._chat_id,
-            "target_mode": self._target_mode,
-            "channel_chat_id": self._channel_chat_id,
-            "forum_topic_id": self._forum_topic_id,
-            "completed": {},
-        }
-
-    def _load(self):
-        if not self.path.exists():
-            data = self._new()
-            self._save(data)
-            return data
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise RuntimeError(f"图片断点文件读取失败：{self.path}\n{exc}") from exc
-        if data.get("version") != self.VERSION:
-            raise RuntimeError(f"图片断点文件版本不兼容：{self.path}")
-        return data
-
-    def _save(self, data):
-        data["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        temp = self.path.with_suffix(self.path.suffix + ".tmp")
-        with temp.open("w", encoding="utf-8") as file:
-            json.dump(data, file, ensure_ascii=False, indent=2)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temp, self.path)
-
-    def is_completed(self, path: Path) -> bool:
-        try:
-            return file_signature(path) in self.data["completed"]
-        except OSError:
-            return False
-
-    def mark_album_completed(self, paths: list[Path], message_ids: list[int]):
-        with self.lock:
-            for index, raw_item in enumerate(paths):
-                item = raw_item if isinstance(raw_item, dict) else {"path": raw_item}
-                path = Path(item["path"])
-                snapshot = None
-                if item.get("_journal_snapshot") and item.get("size") is not None and item.get("mtime_ns") is not None:
-                    snapshot = (int(item["size"]), int(item["mtime_ns"]))
-                if snapshot is None:
-                    snapshot = _snapshot_for_path(path)
-                if snapshot is None and item.get("size") is not None and item.get("mtime_ns") is not None:
-                    snapshot = (int(item["size"]), int(item["mtime_ns"]))
-                if snapshot is None and item.get("scan_size") is not None and item.get("scan_mtime_ns") is not None:
-                    snapshot = (int(item["scan_size"]), int(item["scan_mtime_ns"]))
-                if snapshot is None:
-                    raise RuntimeError(f"上传完成但无法记录图片断点：{path}")
-                size, mtime_ns = snapshot
-                self.data["completed"][file_signature(path, snapshot)] = {
-                    "relative_path": relative_name(path),
-                    "size": size,
-                    "mtime_ns": mtime_ns,
-                    "message_id": message_ids[index] if index < len(message_ids) else None,
-                    "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                }
-            self._save(self.data)
 
 
 class ImageUploadProgress:
@@ -947,11 +871,28 @@ def validate_config():
 def build_album_plans(images: list[Path], state=None) -> list[dict]:
     """Build stable image Albums from the complete scan, not pending-only files."""
     store = CaptionStore("image")
+    # Normal scans populate ``IMAGE_SCAN_SNAPSHOTS`` before planning.  Keep
+    # direct callers (including integrations that provide a list of Paths)
+    # deterministic as well by materializing each missing snapshot once at
+    # the planning boundary.  ``album_key`` itself never performs a late stat;
+    # it only consumes this immutable map.
+    for path in images:
+        key = stable_path(path)
+        if key not in IMAGE_SCAN_SNAPSHOTS:
+            snapshot = file_snapshot(path)
+            if snapshot is not None:
+                IMAGE_SCAN_SNAPSHOTS[key] = (int(snapshot[0]), int(snapshot[1]))
     plans = []
     for start in range(0, len(images), cfg.IMAGE_ALBUM_SIZE):
         album_paths = list(images[start:start + cfg.IMAGE_ALBUM_SIZE])
         number = start // cfg.IMAGE_ALBUM_SIZE + cfg.IMAGE_ALBUM_NUMBER_START
-        key = album_key("image", f"Album {number}", album_paths)
+        key = album_key(
+            "image",
+            f"Album {number}",
+            album_paths,
+            root=cfg.IMAGE_DIR,
+            snapshot_provider=lambda path: IMAGE_SCAN_SNAPSHOTS.get(stable_path(path)),
+        )
         pending = [
             path for path in album_paths
             if state is None or not state.is_completed(path)
@@ -1069,6 +1010,8 @@ def main():
 
     try:
         client.login()
+        client.refresh_account_limits()
+        caption_limit = int(getattr(client, "caption_length_limit", None) or 1024)
         client.set_fast_options()
         client.validate_target()
 
@@ -1086,6 +1029,7 @@ def main():
                 caption,
                 album_paths,
                 getattr(cfg, "IMAGE_CAPTION_INCLUDE_FILENAMES", False),
+                max_chars=caption_limit,
             )
             if cancel_event is None:
                 contents, ready_paths, runtime_skipped = build_image_contents(
@@ -1114,6 +1058,7 @@ def main():
                     plan["caption"]["text"],
                     ready_paths,
                     True,
+                    max_chars=caption_limit,
                 )
                 if contents:
                     contents[0]["caption"] = formatted_text(caption)
@@ -1129,12 +1074,24 @@ def main():
                 ],
             )
             try:
+                # Keep the scanner-owned snapshot in the in-flight journal;
+                # ``ready_paths`` is intentionally kept as Paths for the
+                # progress adapter, while journal identity must not depend
+                # on another network stat at send time.
+                journal_items = []
+                for path in ready_paths:
+                    journal_item = {"path": path}
+                    snapshot = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
+                    if snapshot is not None:
+                        journal_item["scan_size"], journal_item["scan_mtime_ns"] = snapshot
+                    journal_items.append(journal_item)
                 message_ids = client.send_contents(
                     contents,
                     progress,
                     ready_paths,
                     album_key=plan["key"],
                     kind="image",
+                    journal_items=journal_items,
                 )
             except Exception:
                 UI.finish()

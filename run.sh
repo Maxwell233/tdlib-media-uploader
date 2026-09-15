@@ -10,9 +10,10 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
     exit 1
 fi
 
-if [[ ! -f config.toml ]]; then
-    cp config.example.toml config.toml
-    echo "已根据 config.example.toml 创建 config.toml；请在 GUI 设置页填写信息。"
+mkdir -p data
+if [[ ! -f data/config.toml ]]; then
+    cp config.example.toml data/config.toml
+    echo "已根据 config.example.toml 创建 data/config.toml；请在 GUI 设置页填写信息。"
 fi
 
 exec "$VENV_PYTHON" "$PROJECT_DIR/gui_app.py"

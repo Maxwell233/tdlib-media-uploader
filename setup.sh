@@ -28,13 +28,14 @@ fi
 echo "→ 更新 pip 并安装项目依赖"
 "$VENV_PYTHON" -m pip install --upgrade pip
 "$VENV_PYTHON" -m pip install --no-cache-dir --upgrade --force-reinstall \
-    --no-binary imageio-ffmpeg -r requirements.txt
+    --no-binary imageio-ffmpeg -r requirements-lock.txt
 
-if [[ ! -f config.toml ]]; then
-    cp config.example.toml config.toml
-    echo "✓ 已从 config.example.toml 创建 config.toml。"
+mkdir -p data
+if [[ ! -f data/config.toml ]]; then
+    cp config.example.toml data/config.toml
+    echo "✓ 已从 config.example.toml 创建 data/config.toml。"
 else
-    echo "✓ 保留现有 config.toml，不会覆盖你的配置。"
+    echo "✓ 保留现有 data/config.toml，不会覆盖你的配置。"
 fi
 
 cat <<'EOF'

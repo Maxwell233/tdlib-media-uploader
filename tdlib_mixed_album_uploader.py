@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
+from media_identity import media_file_signature
+from upload_state import UploadState as SharedUploadState
 from path_utils import (
     display_path,
     CHANGED,
@@ -46,7 +48,7 @@ from path_utils import (
 )
 import app_config as cfg
 from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
-from runtime_paths import APP_DATA_DIR, RESOURCE_DIR
+from runtime_paths import APP_DATA_DIR, RESOURCE_DIR, MIXED_STATE_DIR
 from staging import cleanup_staging, remove_staged_file, should_stage, stage_file
 
 import tdlib_image_album_uploader as image_core
@@ -54,7 +56,7 @@ import tdlib_video_album_uploader as video_core
 
 
 PROJECT_DIR = RESOURCE_DIR
-STATE_DIR = APP_DATA_DIR / ".mixed_state"
+STATE_DIR = MIXED_STATE_DIR
 LAST_SCAN_ERRORS: list[str] = []
 LAST_SCAN_WARNINGS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
@@ -161,9 +163,7 @@ def file_signature(path: Path, snapshot=None) -> str:
         snapshot = file_snapshot(path)
     if snapshot is None:
         raise OSError(f"文件暂时不可读取：{path}")
-    size, mtime_ns = snapshot
-    raw = f"{relative_name(path).lower()}|{size}|{mtime_ns}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return media_file_signature(path, root=cfg.MIXED_DIR, snapshot=snapshot)
 
 
 def _kind_for(path: Path) -> str | None:
@@ -209,6 +209,10 @@ def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
         "group_name": group_name,
         "scan_size": size,
         "scan_mtime_ns": mtime_ns,
+        "requires_premium": (
+            media_kind == "video"
+            and size > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 2 * 1024 ** 3)
+        ),
     }
 
 
@@ -327,103 +331,18 @@ def flatten_items(groups) -> list[dict]:
     return [item for group in groups for item in group.get("items", [])]
 
 
-class UploadState:
-    VERSION = 1
+class UploadState(SharedUploadState):
+    """Mixed-specific facade over the shared V1.9 checkpoint format."""
 
     def __init__(self, target=None):
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        target = target if isinstance(target, dict) else {}
-        target_mode = str(target.get("target_mode", getattr(cfg, "TARGET_MODE", "forum_topic")))
-        chat_id = int(target.get("chat_id", getattr(cfg, "CHAT_ID", 0)) or 0)
-        forum_topic_id = int(target.get("forum_topic_id", getattr(cfg, "FORUM_TOPIC_ID", 0)) or 0)
-        channel_chat_id = int(target.get("channel_chat_id", getattr(cfg, "CHANNEL_CHAT_ID", 0)) or 0)
-        suffix = "tdlib-mixed-v1" if target_mode == "forum_topic" else "tdlib-mixed-v1-channel"
-        identity = f"{stable_path(cfg.MIXED_DIR)}|{chat_id}|{forum_topic_id}|{suffix}"
-        digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
-        self.path = STATE_DIR / f"mixed_upload_state_{digest}.json"
-        self._target_mode = target_mode
-        self._chat_id = chat_id
-        self._forum_topic_id = forum_topic_id
-        self._channel_chat_id = channel_chat_id
-        self.lock = threading.Lock()
-        if getattr(cfg, "MIXED_RESET_STATE", False) and self.path.exists():
-            self.path.unlink()
-        self.data = self._load()
-
-    def _new(self):
-        return {
-            "version": self.VERSION,
-            "mixed_dir": stable_path(cfg.MIXED_DIR),
-            "chat_id": self._chat_id,
-            "target_mode": self._target_mode,
-            "channel_chat_id": self._channel_chat_id,
-            "forum_topic_id": self._forum_topic_id,
-            "completed": {},
-        }
-
-    def _load(self):
-        if not self.path.exists():
-            data = self._new()
-            self._save(data)
-            return data
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise RuntimeError(f"混合上传断点读取失败：{self.path}\n{exc}") from exc
-        if data.get("version") != self.VERSION:
-            raise RuntimeError(f"混合上传断点版本不兼容：{self.path}")
-        data.setdefault("completed", {})
-        return data
-
-    def _save(self, data):
-        data["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        temp = self.path.with_suffix(self.path.suffix + ".tmp")
-        with temp.open("w", encoding="utf-8") as file:
-            json.dump(data, file, ensure_ascii=False, indent=2)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temp, self.path)
-
-    def is_completed(self, path: Path) -> bool:
-        try:
-            return file_signature(path) in self.data["completed"]
-        except OSError:
-            return False
-
-    def mark_album_completed(self, items, message_ids):
-        with self.lock:
-            for index, item in enumerate(items):
-                path = item["path"]
-                snapshot = None
-                if item.get("_journal_snapshot") and item.get("size") is not None and item.get("mtime_ns") is not None:
-                    snapshot = (int(item["size"]), int(item["mtime_ns"]))
-                if snapshot is None:
-                    snapshot = file_snapshot(path)
-                if snapshot is None:
-                    # The source can disappear from a network share after a
-                    # successful Telegram send.  The scan snapshot is the
-                    # identity that was revalidated before upload, so keep
-                    # the completion record instead of losing the checkpoint.
-                    expected_size = item.get("scan_size")
-                    expected_mtime_ns = item.get("scan_mtime_ns")
-                    if expected_size is not None and expected_mtime_ns is not None:
-                        snapshot = (int(expected_size), int(expected_mtime_ns))
-                if snapshot is None:
-                    # A legacy caller may omit snapshots.  Preserve the
-                    # historical failure semantics for that exceptional case
-                    # rather than writing an unverifiable checkpoint.
-                    raise RuntimeError(f"上传完成但无法记录混合媒体断点：{path}")
-                size, mtime_ns = snapshot
-                self.data["completed"][file_signature(path, snapshot)] = {
-                    "relative_path": relative_name(path),
-                    "media_kind": item.get("media_kind"),
-                    "group_name": item.get("group_name"),
-                    "size": size,
-                    "mtime_ns": mtime_ns,
-                    "message_id": message_ids[index] if index < len(message_ids) else None,
-                    "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                }
-            self._save(self.data)
+        super().__init__(
+            kind="mixed",
+            source_root=cfg.MIXED_DIR,
+            target=target or getattr(cfg, "target_for", lambda _kind: {}) ("mixed"),
+            state_dir=STATE_DIR,
+            reset=getattr(cfg, "MIXED_RESET_STATE", False),
+            filename_prefix="mixed_upload_state",
+        )
 
 
 def build_album_plans(groups, state=None) -> list[dict]:
@@ -435,8 +354,8 @@ def build_album_plans(groups, state=None) -> list[dict]:
         for offset in range(0, len(items), cfg.MIXED_ALBUM_SIZE):
             album_items = items[offset:offset + cfg.MIXED_ALBUM_SIZE]
             number = offset // cfg.MIXED_ALBUM_SIZE + 1
-            key = album_key("mixed", f"{group_name}:{number}", album_items)
-            pending = [item for item in album_items if state is None or not state.is_completed(item["path"])]
+            key = album_key("mixed", f"{group_name}:{number}", album_items, root=cfg.MIXED_DIR)
+            pending = [item for item in album_items if state is None or not state.is_completed(item)]
             record = store.get(key, group_name)
             base_label = record["base_label"] if cfg.MIXED_CAPTION_INCLUDE_GROUP_TITLE else ""
             if cfg.MIXED_CAPTION_INCLUDE_GROUP_TITLE and not base_label:
@@ -535,13 +454,16 @@ def report_skipped_mixed(skipped, ui=None):
     target = ui or UI
     deferred = sum(record.get("category") == "deferred" for record in skipped)
     size = sum(record.get("category") == "size" for record in skipped)
+    premium = sum(record.get("category") == "premium" for record in skipped)
     cancelled = sum(record.get("category") == "cancelled" for record in skipped)
-    unreadable = len(skipped) - deferred - size - cancelled
+    unreadable = len(skipped) - deferred - size - premium - cancelled
     parts = []
     if unreadable:
         parts.append(f"{unreadable} 个无法读取的混合媒体")
     if size:
         parts.append(f"{size} 个超限媒体")
+    if premium:
+        parts.append(f"{premium} 个需要 Telegram Premium 的视频")
     if deferred:
         parts.append(f"{deferred} 个暂时不可读媒体（DEFERRED）")
     if cancelled:
@@ -886,8 +808,8 @@ def main():
         UI.warning("没有找到支持的图片或视频。")
         return
     state = UploadState()
-    completed = [item for item in items if state.is_completed(item["path"])]
-    pending = [item for item in items if not state.is_completed(item["path"])]
+    completed = [item for item in items if state.is_completed(item)]
+    pending = [item for item in items if not state.is_completed(item)]
     skipped = [record for record in LAST_SCAN_SIZE_SKIPS if record.get("action") == "skip"]
     # Build the complete plans before any preflight.  The plan's ``items``
     # list is the sole Album boundary; deferred files are filtered only from
@@ -930,6 +852,23 @@ def main():
     client.add_update_callback(progress.handle_update)
     try:
         client.login()
+        client.refresh_account_limits()
+        caption_limit = int(getattr(client, "caption_length_limit", None) or 1024)
+        if client.is_premium is not True:
+            premium_items = [item for item in pending if item.get("requires_premium")]
+            if premium_items:
+                UI.warning(
+                    f"已跳过 {len(premium_items)} 个超过 2 GiB 的视频：Telegram Premium 才允许上传。"
+                )
+                for item in premium_items:
+                    preflight_skipped_paths.add(stable_path(item["path"]))
+                    skipped.append({
+                        "path": item["path"],
+                        "item": item,
+                        "category": "premium",
+                        "reason": "视频超过 2 GiB，需要 Telegram Premium 才能上传",
+                    })
+                progress.skip_items(premium_items)
         client.set_fast_options()
         client.validate_target()
         for index, plan in enumerate(pending_plans, 1):
@@ -946,6 +885,7 @@ def main():
                 album_items,
                 cfg.MIXED_CAPTION_INCLUDE_FILENAMES,
                 cfg.MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS,
+                max_chars=caption_limit,
             )
             if cancel_event is None:
                 contents, ready, runtime_skipped = build_mixed_contents(
@@ -974,6 +914,7 @@ def main():
                     ready,
                     True,
                     cfg.MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS,
+                    max_chars=caption_limit,
                 )
                 contents[0]["caption"] = formatted_text(label)
             progress.begin_album(ready, plan["group_name"], index, len(pending_plans))

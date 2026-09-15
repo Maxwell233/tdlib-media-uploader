@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 import threading
 import traceback
+import os
 
 from runtime_paths import APP_DATA_DIR
 
@@ -15,6 +16,27 @@ APP_LOG_PATH = LOG_DIR / "app.log"
 TDLIB_LOG_PATH = LOG_DIR / "tdlib.log"
 
 _LOCK = threading.RLock()
+MAX_APP_LOG_BYTES = 10 * 1024 * 1024
+APP_LOG_BACKUPS = 3
+
+
+def _rotate_app_log() -> None:
+    """Keep a bounded set of UTF-8 application logs."""
+
+    try:
+        if not APP_LOG_PATH.exists() or APP_LOG_PATH.stat().st_size < MAX_APP_LOG_BYTES:
+            return
+        oldest = LOG_DIR / f"app.log.{APP_LOG_BACKUPS}"
+        if oldest.exists():
+            oldest.unlink()
+        for index in range(APP_LOG_BACKUPS - 1, 0, -1):
+            source = LOG_DIR / f"app.log.{index}"
+            if source.exists():
+                os.replace(source, LOG_DIR / f"app.log.{index + 1}")
+        os.replace(APP_LOG_PATH, LOG_DIR / "app.log.1")
+    except OSError:
+        # Logging must never interfere with a scan or upload.
+        return
 
 
 def _lines(message) -> list[str]:
@@ -35,6 +57,7 @@ def write_app_log(level: str, message, *, source: str = "app") -> None:
     try:
         with _LOCK:
             LOG_DIR.mkdir(parents=True, exist_ok=True)
+            _rotate_app_log()
             with APP_LOG_PATH.open("a", encoding="utf-8", newline="\n") as file:
                 for line in _lines(message):
                     file.write(f"{timestamp} [{label}] [{origin}] {line}\n")

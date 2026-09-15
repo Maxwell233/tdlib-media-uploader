@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """Stable Album captions shared by the CLI and PySide6 preview.
 
-The metadata files intentionally live beside the application and contain only
-local file fingerprints plus user-entered caption text.  They are separate
-from TDLib upload state so editing a caption never invalidates resumable
-uploads.
+The metadata files live under ``DATA_DIR/captions`` and contain only local
+file fingerprints plus user-entered caption text.  They are separate from
+TDLib upload state so editing a caption never invalidates resumable uploads.
 """
 
 from __future__ import annotations
@@ -16,21 +15,36 @@ import threading
 from pathlib import Path
 
 from path_utils import stable_path
-from runtime_paths import APP_DATA_DIR
+from media_identity import media_file_identity
+from runtime_paths import APP_DATA_DIR, CAPTIONS_DIR
 
 
-PROJECT_DIR = APP_DATA_DIR
+PROJECT_DIR = CAPTIONS_DIR
+
+
+class CaptionLimitError(ValueError):
+    """A user-authored caption cannot fit Telegram's current limit."""
 
 
 def path_for(kind: str) -> Path:
     names = {
-        "video": ".video_album_captions.json",
-        "image": ".image_album_captions.json",
-        "mixed": ".mixed_album_captions.json",
+        "video": "video.json",
+        "image": "image.json",
+        "mixed": "mixed.json",
     }
     normalized = str(kind).strip().lower()
     if normalized not in names:
         raise ValueError(f"未知媒体类型：{kind}")
+    # A patched CaptionStore project directory is an explicit integration
+    # override (used by tools/tests); retain its requested filename. The
+    # normal V1.9 path is always DATA_DIR/captions/<kind>.json.
+    if PROJECT_DIR != CAPTIONS_DIR:
+        legacy_names = {
+            "video": ".video_album_captions.json",
+            "image": ".image_album_captions.json",
+            "mixed": ".mixed_album_captions.json",
+        }
+        return PROJECT_DIR / legacy_names[normalized]
     return PROJECT_DIR / names[normalized]
 
 
@@ -38,19 +52,38 @@ def _item_path(item):
     return item["path"] if isinstance(item, dict) else item
 
 
-def _item_signature(item) -> str:
+def _item_signature(item, *, root=None, snapshot_provider=None) -> str:
     path = Path(_item_path(item))
-    try:
-        stat = path.stat()
-        return f"{stable_path(path)}|{stat.st_size}|{stat.st_mtime_ns}"
-    except OSError:
-        return stable_path(path)
+    if isinstance(item, dict):
+        size = item.get("scan_size", item.get("size"))
+        mtime_ns = item.get("scan_mtime_ns", item.get("mtime_ns"))
+        if size is not None and mtime_ns is not None:
+            identity_root = item.get("source_root") or root or item.get("group_path") or path.parent
+            return media_file_identity(path, root=identity_root, size=size, mtime_ns=mtime_ns)
+    if snapshot_provider is not None:
+        snapshot = snapshot_provider(path)
+        if snapshot is not None:
+            identity_root = root or path.parent
+            return media_file_identity(path, root=identity_root, snapshot=snapshot)
+    # Album identity is deliberately snapshot-only.  A late stat here would
+    # make the key depend on whether an SMB/NAS share happens to be online
+    # after the scan, which could change the Album boundary or caption key.
+    raise ValueError(
+        f"Album key 缺少扫描快照：{path}；请传入 scan_size/scan_mtime_ns 或 snapshot_provider"
+    )
 
 
-def album_key(kind: str, group_label: str, items) -> str:
+def album_key(kind: str, group_label: str, items, *, root=None, snapshot_provider=None) -> str:
     """Return a stable key for a complete (not pending-only) Album plan."""
     raw = "\n".join(
-        [kind, str(group_label), *(_item_signature(item) for item in items)]
+        [
+            kind,
+            str(group_label),
+            *(
+                _item_signature(item, root=root, snapshot_provider=snapshot_provider)
+                for item in items
+            ),
+        ]
     )
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
 
@@ -90,16 +123,34 @@ def with_filename_description(
     items,
     enabled: bool,
     numbered: bool = True,
+    max_chars: int = 1024,
 ) -> str:
+    limit = max(1, int(max_chars))
+    caption = str(caption or "")
+    if len(caption) > limit:
+        raise CaptionLimitError(
+            f"用户标题超过 Telegram Caption 限制（{len(caption)}/{limit} 字符）"
+        )
     if not enabled:
         return caption
-    description = filename_description(items, numbered=numbered)
+    remaining = max(1, limit - len(caption) - (1 if caption else 0))
+    description = filename_description(items, numbered=numbered, max_chars=remaining)
     if not description:
         return caption
     result = f"{caption}\n{description}" if caption else description
-    # Telegram media captions are limited; keep the generated description
-    # useful even when an Album contains long Windows filenames.
-    return result[:1024].rstrip() if len(result) > 1024 else result
+    return result[:limit].rstrip() if len(result) > limit else result
+
+
+def validate_caption(caption: str, limit: int = 1024) -> str:
+    """Validate a final caption without silently truncating user text."""
+
+    value = str(caption or "")
+    maximum = max(1, int(limit))
+    if len(value) > maximum:
+        raise CaptionLimitError(
+            f"标题超过 Telegram Caption 限制（{len(value)}/{maximum} 字符）"
+        )
+    return value
 
 
 class CaptionStore:
@@ -146,7 +197,16 @@ class CaptionStore:
             self._snapshot = data
 
 
-def make_plan(kind: str, group_label: str, items: list, album_size: int, state=None) -> list[dict]:
+def make_plan(
+    kind: str,
+    group_label: str,
+    items: list,
+    album_size: int,
+    state=None,
+    *,
+    root=None,
+    snapshot_provider=None,
+) -> list[dict]:
     """Split complete groups into stable Albums and annotate pending files."""
     store = CaptionStore(kind)
     result = []
@@ -154,9 +214,15 @@ def make_plan(kind: str, group_label: str, items: list, album_size: int, state=N
         full_items = list(items[offset:offset + int(album_size)])
         pending_items = [
             item for item in full_items
-            if state is None or not state.is_completed(_item_path(item))
+            if state is None or not state.is_completed(item)
         ]
-        key = album_key(kind, group_label, full_items)
+        key = album_key(
+            kind,
+            group_label,
+            full_items,
+            root=root,
+            snapshot_provider=snapshot_provider,
+        )
         result.append({
             "key": key,
             "group_label": str(group_label),

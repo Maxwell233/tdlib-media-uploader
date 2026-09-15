@@ -22,7 +22,14 @@ import tomllib
 from collections import defaultdict
 from pathlib import Path
 
-from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
+from album_metadata import (
+    CaptionLimitError,
+    CaptionStore,
+    album_key,
+    compose_caption,
+    validate_caption,
+    with_filename_description,
+)
 from app_logging import APP_LOG_PATH, LOG_DIR, TDLIB_LOG_PATH, write_app_log, write_exception
 from path_utils import (
     file_mtime,
@@ -34,7 +41,7 @@ from path_utils import (
     iter_directory_entries_with_retry,
     validate_scan_root,
 )
-from PySide6.QtCore import QLibraryInfo, QObject, QThread, QTimer, Signal, Slot, Qt
+from PySide6.QtCore import QLibraryInfo, QObject, QThread, QTimer, Signal, Slot, Qt, QLockFile
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -70,16 +77,30 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from runtime_paths import APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH
+from runtime_paths import (
+    APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH,
+    DATA_DIR, VIDEO_STATE_DIR, IMAGE_STATE_DIR, MIXED_STATE_DIR,
+    CAPTIONS_DIR, UPLOAD_INFLIGHT_DIR, THUMBNAIL_CACHE_DIR,
+    IMAGE_COMPRESSION_CACHE_DIR, STAGING_CACHE_DIR,
+    HISTORY_PATH as RUNTIME_HISTORY_PATH,
+    TDLIB_DATABASE_DIR as RUNTIME_TDLIB_DATABASE_DIR,
+    TDLIB_FILES_DIR as RUNTIME_TDLIB_FILES_DIR,
+    read_version, ensure_data_dirs,
+)
+from instance_lock import InstanceLock
+from self_test import run_self_test
 
 
 PROJECT_DIR = RESOURCE_DIR
-HISTORY_PATH = APP_DATA_DIR / ".gui_history.json"
-APP_VERSION = "1.9.0"
+APP_VERSION = read_version()
 MEDIA_KINDS = ("video", "image", "mixed")
 KIND_LABELS = {"video": "视频", "image": "图片", "mixed": "混合"}
 KIND_PATH_KEYS = {"video": "VIDEO_DIR", "image": "IMAGE_DIR", "mixed": "MIXED_DIR"}
 KIND_PATH_CONFIG_KEYS = {"video": "video_dir", "image": "image_dir", "mixed": "mixed_dir"}
+# The dependency-free preview path still keeps the scanner's one-stat
+# snapshots so its Album keys cannot drift if a network share changes before
+# the preview is rendered.
+BASIC_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
 
 
 def _require_kind(kind: str) -> str:
@@ -244,6 +265,7 @@ def _basic_paths(kind: str, cancel_event=None) -> list[Path]:
     }[kind]
     root = Path(_cfg(path_key, PROJECT_DIR))
     extensions = set(_cfg(extension_key, set()))
+    BASIC_SCAN_SNAPSHOTS.clear()
     try:
         root = validate_scan_root(
             root,
@@ -268,6 +290,10 @@ def _basic_paths(kind: str, cancel_event=None) -> list[Path]:
         discovery_max_delay=_cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
     )
     paths = scan_result.paths
+    BASIC_SCAN_SNAPSHOTS.update({
+        key: snapshot.as_tuple()
+        for key, snapshot in getattr(scan_result, "snapshots", {}).items()
+    })
     if kind == "image":
         mode = "mtime" if _cfg("IMAGE_SORT_MODE", "mtime") == "mtime" else "name"
     else:
@@ -314,7 +340,8 @@ def _apply_size_limits(paths: list[Path], kind: str) -> tuple[list[Path], list[d
         limit = int(_cfg(limit_key, default_limit))
         compress_images = media_kind == "image" and bool(_cfg("IMAGE_COMPRESS_OVERSIZE", False))
         media_label = "视频" if media_kind == "video" else "Photo"
-        size = _path_size(str(path))
+        snapshot = BASIC_SCAN_SNAPSHOTS.get(stable_path(path))
+        size = int(snapshot[0]) if snapshot is not None else _path_size(str(path))
         if size > limit:
             action = "compress" if compress_images else "skip"
             skipped.append({
@@ -406,6 +433,10 @@ def _basic_mixed_scan(
         warnings.extend(scan_result.warnings)
         if scan_result.cancelled:
             warnings.append("目录扫描已取消")
+        BASIC_SCAN_SNAPSHOTS.update({
+            key: snapshot.as_tuple()
+            for key, snapshot in getattr(scan_result, "snapshots", {}).items()
+        })
         accepted, skipped = _apply_size_limits(scan_result.paths, "mixed")
         size_skips.extend(skipped)
         media_items = []
@@ -416,6 +447,14 @@ def _basic_mixed_scan(
                 "path": path,
                 "media_kind": media_kind,
                 "group_name": group_path.name,
+                **(
+                    {
+                        "scan_size": BASIC_SCAN_SNAPSHOTS[stable_path(path)][0],
+                        "scan_mtime_ns": BASIC_SCAN_SNAPSHOTS[stable_path(path)][1],
+                    }
+                    if stable_path(path) in BASIC_SCAN_SNAPSHOTS
+                    else {}
+                ),
             })
         sort_mode = str(_cfg("MIXED_SORT_MODE", "name")).strip().lower()
         media_items = media_path_sort(
@@ -516,27 +555,36 @@ def _save_history(records: list[dict]) -> None:
         pass
 
 
+HISTORY_PATH = RUNTIME_HISTORY_PATH
 CACHE_TARGETS = {
-    "video_state": ("视频上传状态", APP_DATA_DIR / ".video_state"),
-    "legacy_video_state": ("旧版视频状态", APP_DATA_DIR / ".state"),
-    "image_state": ("图片上传状态", APP_DATA_DIR / ".image_state"),
-    "mixed_state": ("混合上传状态", APP_DATA_DIR / ".mixed_state"),
-    "thumb_cache": ("视频封面缓存", APP_DATA_DIR / ".thumb_cache"),
-    "video_album_captions": ("视频 Album 标题", APP_DATA_DIR / ".video_album_captions.json"),
-    "image_album_captions": ("图片 Album 标题", APP_DATA_DIR / ".image_album_captions.json"),
-    "mixed_album_captions": ("混合 Album 标题", APP_DATA_DIR / ".mixed_album_captions.json"),
-    "upload_inflight": ("未确认上传记录", APP_DATA_DIR / ".upload_inflight"),
-    "staging": ("本地暂存文件", APP_DATA_DIR / ".staging"),
+    "video_state": ("视频上传状态", VIDEO_STATE_DIR),
+    "image_state": ("图片上传状态", IMAGE_STATE_DIR),
+    "mixed_state": ("混合上传状态", MIXED_STATE_DIR),
+    "thumb_cache": ("视频封面缓存", THUMBNAIL_CACHE_DIR),
+    "image_compression": ("图片压缩缓存", IMAGE_COMPRESSION_CACHE_DIR),
+    "video_album_captions": ("视频 Album 标题", CAPTIONS_DIR / "video.json"),
+    "image_album_captions": ("图片 Album 标题", CAPTIONS_DIR / "image.json"),
+    "mixed_album_captions": ("混合 Album 标题", CAPTIONS_DIR / "mixed.json"),
+    "upload_inflight": ("未确认上传记录", UPLOAD_INFLIGHT_DIR),
+    "staging": ("本地暂存文件", STAGING_CACHE_DIR),
     "gui_history": ("GUI 历史记录", HISTORY_PATH),
     "logs": ("运行日志", LOG_DIR),
 }
 ALL_CACHE_KEYS = tuple(CACHE_TARGETS)
 
 
+def _current_cache_targets() -> dict:
+    """Resolve dynamic cache locations, especially configured staging."""
+
+    targets = dict(CACHE_TARGETS)
+    targets["staging"] = ("本地暂存文件", Path(getattr(cfg, "STAGING_DIR", STAGING_CACHE_DIR)))
+    return targets
+
+
 def _cache_usage(path: Path) -> tuple[int, int]:
     """Return file count and byte size without following a directory symlink."""
     try:
-        if path.is_symlink():
+        if is_link_or_junction(path):
             return (1, path.lstat().st_size)
         if path.is_file():
             return (1, path.stat().st_size)
@@ -552,6 +600,11 @@ def _cache_usage(path: Path) -> tuple[int, int]:
                 with os.scandir(current_dir) as it:
                     for entry in it:
                         try:
+                            # Managed staging markers are bookkeeping, not
+                            # user cache artifacts; keep the status count
+                            # focused on files that can actually be uploaded.
+                            if entry.name == ".marker.json":
+                                continue
                             is_junction = getattr(entry, "is_junction", None)
                             if entry.is_symlink() or (
                                 callable(is_junction) and is_junction()
@@ -575,7 +628,7 @@ def _cache_usage(path: Path) -> tuple[int, int]:
 
 def _cache_status_text() -> str:
     rows = []
-    for label, path in CACHE_TARGETS.values():
+    for label, path in _current_cache_targets().values():
         if not (path.exists() or path.is_symlink()):
             continue
         count, total = _cache_usage(path)
@@ -585,21 +638,46 @@ def _cache_status_text() -> str:
 
 def _remove_cache_path(path: Path) -> None:
     """Clear a known cache path while keeping its directory structure."""
-    if path.is_symlink() or path.is_file():
+    path = Path(path)
+    if is_link_or_junction(path):
+        # A Windows junction is a directory reparse point, so rmdir removes
+        # the link itself without traversing its target. POSIX symlinks use
+        # unlink; neither operation touches the external directory.
+        if path.is_dir() and not path.is_symlink():
+            path.rmdir()
+        else:
+            path.unlink()
+    elif path.is_file():
         path.unlink()
     elif path.is_dir():
-        for child in path.iterdir():
-            if child.is_symlink() or child.is_file():
-                child.unlink()
-            elif child.is_dir():
-                _remove_cache_path(child)
+        try:
+            entries = list(os.scandir(path))
+        except OSError:
+            raise
+        for entry in entries:
+            child = Path(entry.path)
+            try:
+                junction = getattr(entry, "is_junction", None)
+                if entry.is_symlink() or (callable(junction) and junction()):
+                    # Remove the link itself, never its target.
+                    if entry.is_dir(follow_symlinks=False) and not entry.is_symlink():
+                        child.rmdir()
+                    else:
+                        child.unlink(missing_ok=True)
+                elif entry.is_file(follow_symlinks=False):
+                    child.unlink(missing_ok=True)
+                elif entry.is_dir(follow_symlinks=False):
+                    _remove_cache_path(child)
+                    child.rmdir()
+            except OSError:
+                raise
 
 
 def _clear_cache(keys: tuple[str, ...]) -> tuple[list[str], list[str]]:
     removed = []
     errors = []
     for key in keys:
-        label, path = CACHE_TARGETS[key]
+        label, path = _current_cache_targets()[key]
         if not (path.exists() or path.is_symlink()):
             continue
         try:
@@ -645,7 +723,7 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
     state = None
     if kind == "video":
         if core is not None:
-            core.STATE_DIR = APP_DATA_DIR / ".video_state"
+            core.STATE_DIR = VIDEO_STATE_DIR
             paths = (
                 core.scan_videos()
                 if cancel_event is None
@@ -718,6 +796,14 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
                         "month_key": "__all_videos__",
                         "date_tag": "未读取日期",
                         "fallback": False,
+                        **(
+                            {
+                                "scan_size": BASIC_SCAN_SNAPSHOTS[stable_path(path)][0],
+                                "scan_mtime_ns": BASIC_SCAN_SNAPSHOTS[stable_path(path)][1],
+                            }
+                            if stable_path(path) in BASIC_SCAN_SNAPSHOTS
+                            else {}
+                        ),
                     }
                     for path in paths
                 ]
@@ -732,11 +818,19 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
                             "month_key": capture_time.strftime("%Y-%m"),
                             "date_tag": "FileSystem:ModifyTime",
                             "fallback": True,
+                            **(
+                                {
+                                    "scan_size": BASIC_SCAN_SNAPSHOTS[stable_path(path)][0],
+                                    "scan_mtime_ns": BASIC_SCAN_SNAPSHOTS[stable_path(path)][1],
+                                }
+                                if stable_path(path) in BASIC_SCAN_SNAPSHOTS
+                                else {}
+                            ),
                         }
                     )
     elif kind == "mixed":
         if core is not None:
-            core.STATE_DIR = APP_DATA_DIR / ".mixed_state"
+            core.STATE_DIR = MIXED_STATE_DIR
             mixed_groups = (
                 core.scan_mixed_groups()
                 if cancel_event is None
@@ -784,7 +878,7 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
         path = item["path"] if isinstance(item, dict) else item
         key = str(path)
         if key not in completion_cache:
-            completion_cache[key] = bool(state is not None and state.is_completed(path))
+            completion_cache[key] = bool(state is not None and state.is_completed(item))
         return completion_cache[key]
 
     caption_store = CaptionStore(kind)
@@ -832,7 +926,13 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
                             else month[2:].lstrip("0")
                         )
                     key_group = f"{month}:{offset // album_size + 1}" if force_ten else month
-                    key = album_key("video", key_group, album_items)
+                    key = album_key(
+                        "video",
+                        key_group,
+                        album_items,
+                        root=Path(_cfg("VIDEO_DIR", PROJECT_DIR)),
+                        snapshot_provider=lambda path: BASIC_SCAN_SNAPSHOTS.get(stable_path(path)),
+                    )
                     record = caption_store.get(key, default_caption)
                     base_label = record["base_label"] if include_group_title else ""
                     plans.append({
@@ -877,7 +977,13 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
                 for offset in range(0, len(mixed_group["items"]), album_size):
                     album_items = list(mixed_group["items"][offset:offset + album_size])
                     number = offset // album_size + 1
-                    key = album_key("mixed", f"{group_name}:{number}", album_items)
+                    key = album_key(
+                        "mixed",
+                        f"{group_name}:{number}",
+                        album_items,
+                        root=root,
+                        snapshot_provider=lambda path: BASIC_SCAN_SNAPSHOTS.get(stable_path(path)),
+                    )
                     record = caption_store.get(key, group_name)
                     base_label = record["base_label"] if include_title else ""
                     plans.append({
@@ -924,7 +1030,13 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
             for offset in range(0, len(items), album_size):
                 album_items = list(items[offset:offset + album_size])
                 number = offset // album_size + int(_cfg("IMAGE_ALBUM_NUMBER_START", 1))
-                key = album_key("image", f"Album {number}", album_items)
+                key = album_key(
+                    "image",
+                    f"Album {number}",
+                    album_items,
+                    root=Path(_cfg("IMAGE_DIR", PROJECT_DIR)),
+                    snapshot_provider=lambda path: BASIC_SCAN_SNAPSHOTS.get(stable_path(path)),
+                )
                 record = caption_store.get(key, str(number))
                 plans.append({
                     "key": key,
@@ -1261,7 +1373,7 @@ class UploadWorker(QThread):
                 import tdlib_video_album_uploader as core
                 import tdlib_video_app as entry
 
-                core.STATE_DIR = APP_DATA_DIR / ".video_state"
+                core.STATE_DIR = VIDEO_STATE_DIR
                 core.UI = self.ui
                 entry.UI = self.ui
                 entry.main()
@@ -1273,7 +1385,7 @@ class UploadWorker(QThread):
             elif self.kind == "mixed":
                 import tdlib_mixed_album_uploader as core
 
-                core.STATE_DIR = APP_DATA_DIR / ".mixed_state"
+                core.STATE_DIR = MIXED_STATE_DIR
                 core.UI = self.ui
                 core.main()
             else:
@@ -1676,6 +1788,9 @@ class UploadPage(QWidget):
         custom_edit.setPlaceholderText("可输入多行；留空表示不追加")
         preview = QPlainTextEdit()
         preview.setReadOnly(True)
+        caption_limit = 1024
+        caption_count = QLabel()
+        caption_count.setObjectName("mutedLabel")
         include_base = (
             self.kind == "video"
             or self.kind == "mixed" and _cfg("MIXED_CAPTION_INCLUDE_GROUP_TITLE", True)
@@ -1683,31 +1798,41 @@ class UploadPage(QWidget):
         )
         def update_preview():
             caption = compose_caption(base_edit.text() if include_base else "", custom_edit.toPlainText(), separator)
-            preview.setPlainText(with_filename_description(
-                caption,
-                plan.get("items", []),
-                bool(_cfg(
-                    "VIDEO_CAPTION_INCLUDE_FILENAMES"
-                    if self.kind == "video"
-                    else "MIXED_CAPTION_INCLUDE_FILENAMES"
-                    if self.kind == "mixed"
-                    else "IMAGE_CAPTION_INCLUDE_FILENAMES",
-                    False,
-                )),
-                bool(_cfg(
-                    "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS"
-                    if self.kind == "video"
-                    else "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS"
-                    if self.kind == "mixed"
-                    else "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
-                    True,
-                )),
-            ))
+            try:
+                rendered = with_filename_description(
+                    caption,
+                    plan.get("items", []),
+                    bool(_cfg(
+                        "VIDEO_CAPTION_INCLUDE_FILENAMES"
+                        if self.kind == "video"
+                        else "MIXED_CAPTION_INCLUDE_FILENAMES"
+                        if self.kind == "mixed"
+                        else "IMAGE_CAPTION_INCLUDE_FILENAMES",
+                        False,
+                    )),
+                    bool(_cfg(
+                        "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS"
+                        if self.kind == "video"
+                        else "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS"
+                        if self.kind == "mixed"
+                        else "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
+                        True,
+                    )),
+                    max_chars=caption_limit,
+                )
+                preview.setPlainText(rendered)
+                caption_count.setText(f"用户标题 {len(caption)}/{caption_limit} · 发送预览 {len(rendered)}/{caption_limit}")
+                caption_count.setStyleSheet("color: #91a2b5")
+            except CaptionLimitError as exc:
+                preview.setPlainText(str(exc))
+                caption_count.setText(f"用户标题 {len(caption)}/{caption_limit}，超过限制")
+                caption_count.setStyleSheet("color: #ff7b72")
         base_edit.textChanged.connect(update_preview)
         custom_edit.textChanged.connect(update_preview)
         update_preview()
         form.addRow("基础标题" if self.kind in {"video", "mixed"} else "媒体组编号", base_edit)
         form.addRow("追加文字", custom_edit)
+        form.addRow("字符数", caption_count)
         form.addRow("标题预览", preview)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -1717,6 +1842,14 @@ class UploadPage(QWidget):
             return
         base_label = base_edit.text().strip()
         custom_text = custom_edit.toPlainText().strip()
+        try:
+            validate_caption(
+                compose_caption(base_label if include_base else "", custom_text, separator),
+                caption_limit,
+            )
+        except CaptionLimitError as exc:
+            QMessageBox.warning(self, "标题过长", str(exc))
+            return
         store = CaptionStore(self.kind)
         if self.kind in {"video", "mixed"} and _cfg(
             "VIDEO_CAPTION_INCLUDE_GROUP_TITLE" if self.kind == "video" else "MIXED_CAPTION_INCLUDE_GROUP_TITLE",
@@ -2087,6 +2220,19 @@ class SettingsPage(QWidget):
         config_layout.addStretch(1)
         layout.addWidget(config_box)
 
+        data_box = QGroupBox("用户数据目录")
+        data_layout = QVBoxLayout(data_box)
+        data_hint = QLabel(
+            f"DATA_DIR：{DATA_DIR}\n"
+            f"TDLib 登录数据库：{RUNTIME_TDLIB_DATABASE_DIR}\n"
+            f"TDLib 文件缓存：{RUNTIME_TDLIB_FILES_DIR}"
+        )
+        data_hint.setObjectName("mutedLabel")
+        data_hint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        data_hint.setWordWrap(True)
+        data_layout.addWidget(data_hint)
+        layout.addWidget(data_box)
+
         log_box = QGroupBox("运行日志")
         log_layout = QVBoxLayout(log_box)
         log_hint = QLabel(
@@ -2118,14 +2264,14 @@ class SettingsPage(QWidget):
         self.cache_status.setWordWrap(True)
         cache_layout.addWidget(self.cache_status)
         cache_hint = QLabel(
-            "清理所有会清空视频/图片/混合上传状态、旧版状态、视频封面和 GUI 历史记录；"
-            "同时删除未确认上传记录和运行日志，但不会删除 config.toml 或 Telegram 登录数据库。"
+            "清理所有会清空视频/图片/混合上传状态、标题、视频封面、历史记录、"
+            "未确认上传记录、暂存副本和运行日志；不会删除 config.toml 或 Telegram 登录数据库。"
         )
         cache_hint.setObjectName("mutedLabel")
         cache_hint.setWordWrap(True)
         cache_layout.addWidget(cache_hint)
         cache_buttons = QHBoxLayout()
-        clear_thumb = QPushButton("仅清理视频封面 .thumb_cache")
+        clear_thumb = QPushButton("仅清理视频封面")
         clear_thumb.setObjectName("secondaryButton")
         clear_thumb.clicked.connect(lambda: self.clear_thumb_requested.emit())
         clear_all = QPushButton("清理所有缓存")
@@ -2561,7 +2707,7 @@ class ConfigDialog(QDialog):
         mode_index = self.staging_mode.findData(configured_staging_mode)
         self.staging_mode.setCurrentIndex(mode_index if mode_index >= 0 else 0)
         form.addRow("暂存模式", self.staging_mode)
-        form.addRow("暂存目录", field("staging_dir", _cfg("STAGING_DIR", PROJECT_DIR / ".staging")))
+        form.addRow("暂存目录", field("staging_dir", _cfg("STAGING_DIR", STAGING_CACHE_DIR)))
         self.staging_cleanup_on_start = QCheckBox("启动时清理过期暂存文件")
         self.staging_cleanup_on_start.setChecked(
             bool(_cfg("STAGING_CLEANUP_ON_START", True))
@@ -3262,6 +3408,16 @@ class MainWindow(QMainWindow):
 
         if not isinstance(record, dict):
             return
+        if (
+            self.worker is not None
+            and self.worker.isRunning()
+        ) or any(scanner.isRunning() for scanner in self.scanners.values()):
+            QMessageBox.warning(
+                self,
+                "任务运行中",
+                "扫描或上传任务运行时不能处理未确认记录，请等待任务完成或安全停止后再试。",
+            )
+            return
         kind = str(record.get("kind", "")).strip().lower()
         album_key = str(record.get("album_key", ""))
         if kind not in MEDIA_KINDS or not album_key:
@@ -3331,7 +3487,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.warning(
             self,
             "确认清理所有缓存",
-            "将清空视频/图片/混合上传状态、旧版状态、视频封面缓存、GUI 历史记录、未确认上传记录和运行日志，保留目录本身。\n\n"
+            "将清空视频/图片/混合上传状态、标题、视频封面缓存、历史记录、未确认上传记录、暂存副本和运行日志，保留目录本身。\n\n"
             "config.toml 和 Telegram 登录数据库不会被删除。是否继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -3345,7 +3501,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "确认清理视频封面",
-            "只清空 .thumb_cache 中的视频封面文件，保留目录本身，不影响上传状态和历史记录。是否继续？",
+            "只清空视频封面缓存，保留目录本身，不影响上传状态和历史记录。是否继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -3416,19 +3572,34 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    if "--self-test" in sys.argv[1:]:
+        return run_self_test()
+    try:
+        ensure_data_dirs()
+    except OSError as exc:
+        print(f"无法初始化数据目录：{exc}", file=sys.stderr)
+        return 1
     _prepare_windows_app_identity()
     _prepare_qt_plugins()
-    write_app_log("INFO", f"启动 TDLib Media Uploader V{APP_VERSION}", source="startup")
     app = QApplication(sys.argv)
-    app.setApplicationName("TDLib Media Uploader")
-    app.setApplicationVersion(APP_VERSION)
-    app.setWindowIcon(_application_icon())
-    app.setStyle("Fusion")
-    app.setStyleSheet(APP_STYLE)
-    window = MainWindow()
-    window.setWindowIcon(app.windowIcon())
-    window.show()
-    return app.exec()
+    instance_lock = InstanceLock(DATA_DIR / "app.lock")
+    if not instance_lock.acquire():
+        QMessageBox.warning(app.activeWindow(), "程序已在运行", "TDLib Media Uploader 已在运行。")
+        app.quit()
+        return 1
+    try:
+        write_app_log("INFO", f"启动 TDLib Media Uploader V{APP_VERSION}", source="startup")
+        app.setApplicationName("TDLib Media Uploader")
+        app.setApplicationVersion(APP_VERSION)
+        app.setWindowIcon(_application_icon())
+        app.setStyle("Fusion")
+        app.setStyleSheet(APP_STYLE)
+        window = MainWindow()
+        window.setWindowIcon(app.windowIcon())
+        window.show()
+        return app.exec()
+    finally:
+        instance_lock.release()
 
 
 if __name__ == "__main__":

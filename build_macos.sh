@@ -49,7 +49,7 @@ if [[ "$skip_install" != true ]]; then
     echo "→ 安装运行与构建依赖"
     "$BUILD_PYTHON" -m pip install --upgrade pip
     "$BUILD_PYTHON" -m pip install --no-cache-dir --upgrade --force-reinstall \
-        --no-binary imageio-ffmpeg -r requirements-build.txt
+        --no-binary imageio-ffmpeg -r requirements-build-lock.txt
 fi
 
 ensure_lgpl_ffmpeg() {

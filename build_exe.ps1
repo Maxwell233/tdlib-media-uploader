@@ -134,7 +134,7 @@ try {
     if (-not $SkipInstall) {
         Write-Host "→ 安装运行与构建依赖" -ForegroundColor Yellow
         Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--upgrade", "pip")
-        Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--upgrade", "--force-reinstall", "--no-binary", "imageio-ffmpeg", "-r", "requirements-build.txt")
+        Invoke-NativeCommand -FilePath $python -Arguments @("-m", "pip", "install", "--no-cache-dir", "--upgrade", "--force-reinstall", "--no-binary", "imageio-ffmpeg", "-r", "requirements-build-lock.txt")
     }
 
     $ffmpegPath = Ensure-LgplFfmpeg

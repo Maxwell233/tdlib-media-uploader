@@ -16,6 +16,9 @@ __pycache__/
 /tdlib_data/
 /tdlib_files/
 
+# V1.9 writable user data (config, login, state, captions, cache, logs)
+/data/
+
 # Upload state / cache
 /.video_state/
 /.state/
