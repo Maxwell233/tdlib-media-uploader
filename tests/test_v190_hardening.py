@@ -216,6 +216,23 @@ class V190HardeningTest(unittest.TestCase):
             workflow,
         )
 
+    def test_workflow_uses_node24_official_actions(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "build-platforms.yml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(workflow.count("uses: actions/checkout@v6"), 3)
+        self.assertEqual(workflow.count("uses: actions/setup-python@v6"), 2)
+        self.assertEqual(workflow.count("uses: actions/upload-artifact@v7"), 2)
+        self.assertEqual(workflow.count("uses: actions/download-artifact@v8"), 1)
+        self.assertNotIn("actions/download-artifact@v4", workflow)
+        self.assertNotIn("ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION", workflow)
+        self.assertNotIn("FORCE_JAVASCRIPT_ACTIONS_TO_NODE24", workflow)
+        self.assertIn("pattern: tdlib-media-uploader-${{ github.ref_name }}-*", workflow)
+        self.assertIn("merge-multiple: true", workflow)
+
     def test_direct_entrypoint_uses_shared_instance_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             lock_path = Path(directory) / "data" / "app.lock"
