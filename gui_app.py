@@ -537,7 +537,7 @@ def _write_config_values(values: dict[tuple[str, str], object]) -> str:
     try:
         if not CONFIG_PATH.exists():
             if not TEMPLATE_CONFIG_PATH.exists():
-                return "找不到 config.toml 和 config.example.toml。"
+                return "找不到 config.toml 和默认配置资源。"
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(TEMPLATE_CONFIG_PATH, CONFIG_PATH)
         text = CONFIG_PATH.read_text(encoding="utf-8")

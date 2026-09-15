@@ -13,6 +13,7 @@ from runtime_paths import (
     CONFIG_PATH,
     DATA_DIR,
     RESOURCE_DIR,
+    TEMPLATE_CONFIG_PATH,
     TDLIB_DATABASE_DIR,
     TDLIB_FILES_DIR,
     read_version,
@@ -57,7 +58,7 @@ def _load():
     # (including a partially written or invalid one).  Read the immutable
     # bundled template in memory and never create or modify ``data/config``.
     if "--self-test" in sys.argv[1:]:
-        template = RESOURCE_DIR / "config.example.toml"
+        template = TEMPLATE_CONFIG_PATH
         if template.exists():
             try:
                 with template.open("rb") as file:
@@ -68,7 +69,7 @@ def _load():
         # A fresh V1.9 installation starts with a writable data directory.
         # Normal startup copies the bundled template into the writable data
         # directory on first launch.
-        template = RESOURCE_DIR / "config.example.toml"
+        template = TEMPLATE_CONFIG_PATH
         # Never look for or import a config from the old application root.
         try:
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -81,7 +82,7 @@ def _load():
             raise RuntimeError(
                 "找不到配置模板：\n"
                 f"{CONFIG_PATH}\n\n"
-                "请确认 config.example.toml 已随程序一起安装。"
+                "请确认默认配置资源已随程序一起安装。"
             )
 
     try:
