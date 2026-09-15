@@ -23,7 +23,7 @@ def _path_size(path):
     return int(snapshot[0]) if snapshot is not None else 0
 
 
-def read_metadata(videos=None, cancel_event=None):
+def read_metadata(videos=None, cancel_event=None, progress_callback=None):
     """读取批量日期元数据；没有 ExifTool 时保留 FFmpeg 媒体日期回退。"""
     if not core.video_dates_enabled():
         return {}, False
@@ -49,9 +49,11 @@ def read_metadata(videos=None, cancel_event=None):
     try:
         # Pass the Python scanner's accepted paths so the upload entry point
         # does not walk the source directory a second time.
-        if cancel_event is None:
-            return core.read_exif_metadata(videos), True
-        return core.read_exif_metadata(videos, cancel_event=cancel_event), True
+        return core.read_exif_metadata(
+            videos,
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
+        ), True
     except Exception as exc:
         # A transient network share or malformed ExifTool response must not
         # prevent the normal media-date/mtime fallback from running.
@@ -110,11 +112,7 @@ def show_file_list(items, state):
             path = item["path"]
             completed = state.is_completed(path)
             capture_time = item.get("capture_time")
-            capture_text = (
-                capture_time.strftime("%m-%d %H:%M:%S")
-                if capture_time is not None
-                else "未读取日期"
-            )
+            capture_text = core.format_capture_time(capture_time, "%m-%d %H:%M:%S")
 
             rows.append(
                 (
@@ -279,6 +277,10 @@ def _main_impl():
         else core.scan_videos(cancel_event=cancel_event)
     )
 
+    if cancel_event is not None and cancel_event.is_set():
+        UI.cancelled()
+        return
+
     if not videos:
         UI.warning("没有找到支持的视频文件。")
         return
@@ -290,6 +292,10 @@ def _main_impl():
         UI.info("已关闭日期读取，将按文件名处理…")
         metadata_index, exiftool_used = {}, False
 
+    if cancel_event is not None and cancel_event.is_set():
+        UI.cancelled()
+        return
+
     if cancel_event is None:
         items, missing = core.build_items(videos, metadata_index)
     else:
@@ -298,6 +304,9 @@ def _main_impl():
             metadata_index,
             cancel_event=cancel_event,
         )
+    if cancel_event is not None and cancel_event.is_set():
+        UI.cancelled()
+        return
 
     if (
         missing
@@ -540,7 +549,7 @@ def _main_impl():
                     ),
                     rows=[
                         (
-                            f"{item['capture_time'].strftime('%Y-%m-%d %H:%M:%S')}  "
+                            f"{core.format_capture_time(item.get('capture_time'))}  "
                             f"{core.format_size(_path_size(item['path'])):>10}  "
                             f"{core.relative_name(item['path'])}"
                         )

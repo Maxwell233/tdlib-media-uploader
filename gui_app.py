@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import threading
 import tomllib
@@ -39,6 +40,7 @@ from path_utils import (
     retry_fs_operation,
     stable_path,
     iter_directory_entries_with_retry,
+    run_cancellable_process,
     validate_scan_root,
 )
 from PySide6.QtCore import QLibraryInfo, QObject, QThread, QTimer, Signal, Slot, Qt, QLockFile
@@ -251,11 +253,12 @@ def _fmt_eta(seconds: float | int | None) -> str:
     return f"{hours:02}:{minutes:02}:{seconds:02}" if hours else f"{minutes:02}:{seconds:02}"
 
 
-def _fmt_date(value) -> str:
+def _fmt_date(value, fmt: str = "%Y-%m-%d %H:%M:%S", missing: str = "—") -> str:
     if value is None:
-        return "—"
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
+        return missing
+    formatter = getattr(value, "strftime", None)
+    if callable(formatter):
+        return formatter(fmt)
     return str(value)
 
 
@@ -708,6 +711,47 @@ def _clear_cache(keys: tuple[str, ...]) -> tuple[list[str], list[str]]:
     return removed, errors
 
 
+def _cancelled_scan_result(
+    kind: str,
+    *,
+    core_available: bool,
+    warning: str = "扫描已取消",
+    ignored_root_media=None,
+    scan_errors=None,
+    scan_warnings=None,
+    scan_size_skips=None,
+) -> dict:
+    """Build an explicit cancellation result instead of a fake empty scan."""
+
+    kind = _require_kind(kind)
+    return {
+        "kind": kind,
+        "status": "cancelled",
+        "cancelled": True,
+        "items": [],
+        "missing": [],
+        "groups": [],
+        "total_files": 0,
+        "completed_files": 0,
+        "pending_files": 0,
+        "total_bytes": 0,
+        "pending_bytes": 0,
+        "album_count": 0,
+        "completed_paths": [],
+        "source_dir": str(_cfg(KIND_PATH_KEYS[kind], "")),
+        "state_path": "",
+        "core_available": core_available,
+        "warning": warning,
+        "scan_errors": list(scan_errors or []),
+        "scan_warnings": list(scan_warnings or []),
+        "scan_size_skips": list(scan_size_skips or []),
+        "scan_skipped_files": 0,
+        "scan_compress_files": 0,
+        "ignored_root_media": [str(path) for path in (ignored_root_media or [])],
+        "target": _target_for(kind),
+    }
+
+
 def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
     """Scan using the existing core when available, with a preview fallback."""
     kind = str(kind).strip().lower()
@@ -765,10 +809,10 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
                 warning = "已关闭日期读取，将按文件名扫描并按固定数量分组。"
             elif exiftool.exists():
                 try:
-                    metadata = (
-                        core.read_exif_metadata(paths)
-                        if cancel_event is None
-                        else core.read_exif_metadata(paths, cancel_event=cancel_event)
+                    metadata = core.read_exif_metadata(
+                        paths,
+                        cancel_event=cancel_event,
+                        progress_callback=progress_callback,
                     )
                 except Exception as exc:
                     # A transient network share/tool failure should not make a
@@ -787,6 +831,12 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
                 warning = (
                     "未找到 ExifTool，无法读取 EXIF；"
                     "当前未启用媒体日期回退，缺失日期的视频会被标记。"
+                )
+            if cancel_event is not None and cancel_event.is_set():
+                return _cancelled_scan_result(
+                    kind,
+                    core_available=core is not None,
+                    warning="扫描已取消",
                 )
             if cancel_event is None:
                 items, missing = core.build_items(
@@ -835,7 +885,11 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
                         {
                             "path": path,
                             "capture_time": capture_time,
-                            "month_key": capture_time.strftime("%Y-%m"),
+                            "month_key": _fmt_date(
+                                capture_time,
+                                "%Y-%m",
+                                "__all_videos__",
+                            ),
                             "date_tag": "FileSystem:ModifyTime",
                             "fallback": True,
                             **(
@@ -892,6 +946,17 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
             )
         items = paths
         missing = []
+
+    if cancel_event is not None and cancel_event.is_set():
+        return _cancelled_scan_result(
+            kind,
+            core_available=core is not None,
+            warning="扫描已取消",
+            ignored_root_media=ignored_root_media,
+            scan_errors=scan_errors,
+            scan_warnings=scan_warnings,
+            scan_size_skips=scan_size_skips,
+        )
 
     completion_cache = {}
     def completed(item) -> bool:
@@ -1187,6 +1252,7 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
 
 class ScanWorker(QThread):
     completed = Signal(object)
+    cancelled = Signal(object)
     failed = Signal(str)
     progress_changed = Signal(str, object)
 
@@ -1205,13 +1271,15 @@ class ScanWorker(QThread):
 
     def run(self):
         try:
-            self.completed.emit(
-                _scan_result(
-                    self.kind,
-                    progress_callback=self._report_progress,
-                    cancel_event=self.cancel_event,
-                )
+            result = _scan_result(
+                self.kind,
+                progress_callback=self._report_progress,
+                cancel_event=self.cancel_event,
             )
+            if result.get("cancelled"):
+                self.cancelled.emit(result)
+            else:
+                self.completed.emit(result)
         except Exception as exc:
             write_exception(f"{self.kind} 扫描失败", exc, source=f"scan/{self.kind}")
             self.failed.emit(f"扫描失败：{type(exc).__name__}: {exc}")
@@ -1782,6 +1850,16 @@ class UploadPage(QWidget):
                 and not self._running
             )
         )
+
+    def set_cancelled(self, result: dict | None = None):
+        """Show cancellation explicitly and keep it out of normal counts."""
+
+        self.result = result
+        self.tree.clear()
+        self.summary_label.setText("扫描已取消；请重新扫描以获取完整列表")
+        self.status_label.setText("扫描已取消")
+        self.start_button.setEnabled(False)
+        self._update_edit_button()
 
     def _edit_album(self, item, _column=0):
         if item is None or self._running or self._scanning:
@@ -2950,6 +3028,65 @@ class ConfigDialog(QDialog):
         self.accept()
 
 
+def _hidden_subprocess_kwargs() -> dict:
+    """Prevent a console window when validating tools on Windows."""
+
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "startupinfo": startupinfo,
+    }
+
+
+def _validate_exiftool_path(value: str) -> str:
+    """Return a user-facing error when ExifTool cannot answer ``-ver`` quickly."""
+
+    text = str(value or "").strip().strip('"')
+    if not text:
+        # An empty value keeps the existing automatic/default tool lookup.
+        return ""
+    candidate = Path(os.path.expandvars(os.path.expanduser(text)))
+    if not candidate.is_absolute():
+        for base in (RESOURCE_DIR, DATA_DIR, PROJECT_DIR):
+            possible = base / candidate
+            if possible.is_file():
+                candidate = possible
+                break
+    if os.name == "nt" and candidate.name.casefold() == "exiftool(-k).exe":
+        return "请使用 exiftool.exe。exiftool(-k).exe 会等待按键，不适合后台扫描，请先重命名后再保存。"
+    if not candidate.is_file():
+        return f"找不到 ExifTool：{candidate}"
+    try:
+        result = run_cancellable_process(
+            [str(candidate), "-ver"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5.0,
+            check=False,
+            **_hidden_subprocess_kwargs(),
+        )
+    except subprocess.TimeoutExpired:
+        return "ExifTool 版本检查超时（5 秒）。请确认使用的是可直接运行的 exiftool.exe。"
+    except (OSError, UnicodeError, subprocess.SubprocessError, TimeoutError) as exc:
+        return f"ExifTool 无法运行：{exc}"
+    if result.returncode != 0:
+        detail = str(result.stderr or result.stdout or "").strip()
+        return f"ExifTool 版本检查失败（退出码 {result.returncode}）" + (
+            f"：{detail}" if detail else "。"
+        )
+    if not str(result.stdout or "").strip():
+        return "ExifTool 未返回版本号，请确认路径指向可执行文件。"
+    return ""
+
+
 class ScanToolsDialog(QDialog):
     """Edit scan, media-tool and external-process settings separately.
 
@@ -3122,8 +3259,13 @@ class ScanToolsDialog(QDialog):
             )
 
     def _save(self):
+        exiftool_path = self.fields["exiftool_path"].text().strip()
+        validation_error = _validate_exiftool_path(exiftool_path)
+        if validation_error:
+            QMessageBox.warning(self, "ExifTool 路径不可用", validation_error)
+            return
         values = {
-            ("paths", "exiftool_path"): self.fields["exiftool_path"].text().strip(),
+            ("paths", "exiftool_path"): exiftool_path,
             ("scan", "stability_checks"): self.scan_stability_checks.value(),
             ("scan", "stability_interval_seconds"): self.scan_stability_interval.value(),
             ("scan", "stability_checks_local"): self.scan_stability_checks_local.value(),
@@ -3326,6 +3468,7 @@ class MainWindow(QMainWindow):
         page = self._upload_page(kind)
         page.set_scanning(True)
         worker.completed.connect(lambda result, k=kind: self._scan_done(k, result))
+        worker.cancelled.connect(lambda result, k=kind: self._scan_done(k, result))
         worker.failed.connect(lambda message, k=kind: self._scan_failed(k, message))
         worker.progress_changed.connect(self._scan_progress)
         worker.finished.connect(worker.deleteLater)
@@ -3352,7 +3495,7 @@ class MainWindow(QMainWindow):
         completed = max(0, int(payload.get("completed", 0) or 0))
         total = max(0, int(payload.get("total", 0) or 0))
         if phase == "exif":
-            message = f"正在读取 EXIF 日期… {completed}/{total}"
+            message = f"正在读取 ExifTool 日期… {completed}/{total}"
         elif phase == "media_date":
             message = f"正在读取媒体创建日期… {completed}/{total}"
         elif phase == "date_disabled":
@@ -3367,13 +3510,16 @@ class MainWindow(QMainWindow):
         scanner = self.scanners.pop(kind, None)
         page = self._upload_page(kind)
         page.set_scanning(False)
-        page.set_result(result)
-        self.home.update_scan(result)
-        if result.get("cancelled") or (scanner is not None and scanner.cancel_event.is_set()):
-            page.status_label.setText("扫描已取消；请重新扫描以获取完整列表")
-            page.start_button.setEnabled(False)
+        cancelled = bool(
+            result.get("cancelled")
+            or (scanner is not None and scanner.cancel_event.is_set())
+        )
+        if cancelled:
+            page.set_cancelled(result)
             self.statusBar().showMessage(f"{_kind_label(kind)}扫描已取消")
         else:
+            page.set_result(result)
+            self.home.update_scan(result)
             self.statusBar().showMessage(f"{_kind_label(kind)}扫描完成")
 
     def _scan_failed(self, kind: str, message: str):

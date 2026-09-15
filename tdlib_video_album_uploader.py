@@ -378,6 +378,17 @@ def parse_exif_datetime(value):
     return None
 
 
+def format_capture_time(value, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    """Format an optional capture time without inventing a fallback date."""
+
+    if value is None:
+        return "未读取日期"
+    formatter = getattr(value, "strftime", None)
+    if callable(formatter):
+        return formatter(fmt)
+    return str(value)
+
+
 EXIFTOOL_BATCH_SIZE = int(getattr(cfg, "EXIFTOOL_BATCH_SIZE", 256))
 EXIFTOOL_MAX_RETRIES = int(getattr(cfg, "EXIFTOOL_RETRIES", 2))
 # Keep module-level names for integrations that patch them, while taking the
@@ -533,27 +544,34 @@ def _exiftool_rows_detailed(
                 cancelable_sleep(min(0.25 * (2 ** attempt), 2.0), cancel_event)
             continue
         clean_rows = [row for row in rows if isinstance(row, dict)]
-        complete = result.returncode == 0 and not stderr
-        if complete and batch is not None:
-            requested_paths = {normalize_path(path) for path in batch}
-            returned_paths = {
-                normalize_path(row["SourceFile"])
-                for row in clean_rows
-                if row.get("SourceFile")
-            }
-            missing = requested_paths - returned_paths
-            if missing:
-                complete = False
-                last_error = (
-                    f"ExifTool 输出不完整：批次中有 {len(missing)} 个文件未返回结果"
-                )
-        if complete:
-            return clean_rows, None, True
-        last_error = last_error or stderr or f"退出码 {result.returncode}"
-        # Keep the parsed rows for a one-file batch so a warning attached to a
-        # valid file does not discard otherwise useful metadata. Multi-file
-        # batches are marked incomplete and isolated by ``read_exif_metadata``.
-        if batch is not None and len(batch) <= 1:
+        requested_paths = {normalize_path(path) for path in batch}
+        returned_paths = {
+            normalize_path(row["SourceFile"])
+            for row in clean_rows
+            if row.get("SourceFile")
+        }
+        missing = requested_paths - returned_paths
+
+        # ExifTool commonly writes warnings to stderr while still returning a
+        # valid row for every requested file.  The SourceFile set, rather than
+        # stderr or the exit code alone, is the completeness contract.  Keep
+        # the warning as a diagnostic but accept the complete rows immediately.
+        diagnostic = stderr or (
+            f"退出码 {result.returncode}" if result.returncode not in (0, 1) else ""
+        )
+        if not missing:
+            return clean_rows, diagnostic or None, True
+
+        last_error = (
+            f"ExifTool 输出不完整：批次中有 {len(missing)} 个文件未返回结果"
+        )
+        if diagnostic:
+            last_error = f"{last_error}；{diagnostic}"
+
+        # Preserve valid rows from a partial batch.  The caller retries only
+        # the missing paths, so a single bad MP4 cannot make hundreds of good
+        # files run through ExifTool again.
+        if clean_rows:
             return clean_rows, last_error, False
         if attempt < EXIFTOOL_MAX_RETRIES:
             cancelable_sleep(min(0.25 * (2 ** attempt), 2.0), cancel_event)
@@ -570,14 +588,18 @@ def _exiftool_rows(batch, *, recursive: bool) -> tuple[list[dict], str | None]:
     return rows, diagnostic
 
 
-def read_exif_metadata(paths=None, cancel_event=None) -> dict[str, dict]:
+def read_exif_metadata(
+    paths=None,
+    cancel_event=None,
+    progress_callback=None,
+) -> dict[str, dict]:
     """Read EXIF metadata without letting one bad network file abort a scan.
 
     ``paths=None`` is retained as a convenience for CLI callers, but it now
     performs the same Python discovery as the GUI and always supplies explicit
     file paths to ExifTool.  ExifTool itself never recursively scans a root.
     """
-    global LAST_SCAN_ERRORS
+    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS
     if not video_dates_enabled():
         return {}
     if paths is None:
@@ -597,6 +619,22 @@ def read_exif_metadata(paths=None, cancel_event=None) -> dict[str, dict]:
             f"找不到 ExifTool：{cfg.EXIFTOOL_PATH}\n"
             "请把对应平台的 ExifTool 可执行文件放入 tools 目录，或在设置中指定路径。"
         )
+    requested_keys = {normalize_path(path) for path in requested}
+    reported_keys: set[str] = set()
+
+    def emit_progress(path=None):
+        _emit_scan_progress(
+            progress_callback,
+            {
+                "phase": "exif",
+                "completed": min(len(reported_keys), len(requested)),
+                "total": len(requested),
+                **({"path": relative_name(path)} if path is not None else {}),
+            },
+        )
+
+    emit_progress()
+
     batches = [
         (requested[offset:offset + EXIFTOOL_BATCH_SIZE], False)
         for offset in range(0, len(requested), EXIFTOOL_BATCH_SIZE)
@@ -612,18 +650,64 @@ def read_exif_metadata(paths=None, cancel_event=None) -> dict[str, dict]:
             recursive=recursive,
             cancel_event=cancel_event,
         )
-        if (not complete or diagnostic) and batch is not None and len(batch) > 1:
-            midpoint = max(1, len(batch) // 2)
-            collect(batch[:midpoint], False)
-            collect(batch[midpoint:], False)
-            return
-        if diagnostic and not rows:
-            label = str(batch[0]) if batch else str(cfg.VIDEO_DIR)
-            diagnostics.append(f"{label}: {diagnostic}")
+        returned = set()
         for row in rows:
             source = row.get("SourceFile")
             if source:
-                index[normalize_path(source)] = row
+                key = normalize_path(source)
+                if key in requested_keys:
+                    index[key] = row
+                    returned.add(key)
+                    if key not in reported_keys:
+                        reported_keys.add(key)
+                        emit_progress(source)
+
+        # A warning on a complete batch is useful for the log, but it must not
+        # trigger another ExifTool invocation.  Only unresolved SourceFile
+        # entries are retried or bisected.
+        if diagnostic:
+            label = str(batch[0]) if batch else str(cfg.VIDEO_DIR)
+            LAST_SCAN_WARNINGS.append(f"ExifTool：{label}: {diagnostic}")
+
+        missing = [
+            path for path in batch
+            if normalize_path(path) not in returned
+        ]
+        if not missing:
+            if diagnostic and not complete:
+                label = str(batch[0]) if batch else str(cfg.VIDEO_DIR)
+                diagnostics.append(f"{label}: {diagnostic}")
+            return
+
+        if diagnostic and not rows:
+            label = str(batch[0]) if batch else str(cfg.VIDEO_DIR)
+            diagnostics.append(f"{label}: {diagnostic}")
+        if _cancel_requested(cancel_event):
+            return
+        if len(missing) == 1:
+            if len(batch) <= 1:
+                label = str(batch[0]) if batch else str(cfg.VIDEO_DIR)
+                diagnostics.append(
+                    f"{label}: {diagnostic or 'ExifTool 未返回该文件的结果'}"
+                )
+                # A file that was isolated and exhausted its retries is still
+                # completed work for the progress display.  Count it once so
+                # a single broken media file does not leave the GUI parked at
+                # (total - 1) forever; it remains absent from ``index`` and
+                # follows the normal missing-date fallback path.
+                path = missing[0]
+                key = normalize_path(path)
+                if key not in reported_keys:
+                    reported_keys.add(key)
+                    emit_progress(path)
+                return
+            # The one-file retry is deliberately isolated from all rows that
+            # were already accepted above.
+            collect(missing, False)
+            return
+        midpoint = max(1, len(missing) // 2)
+        collect(missing[:midpoint], False)
+        collect(missing[midpoint:], False)
 
     for batch, recursive in batches:
         if _cancel_requested(cancel_event):
@@ -631,6 +715,8 @@ def read_exif_metadata(paths=None, cancel_event=None) -> dict[str, dict]:
         collect(batch, recursive)
     if diagnostics:
         LAST_SCAN_ERRORS.extend(f"ExifTool：{message}" for message in diagnostics)
+    if not _cancel_requested(cancel_event):
+        emit_progress()
     return index
 
 
@@ -1092,7 +1178,7 @@ def build_items(videos, metadata_index, progress_callback=None, cancel_event=Non
         item = {
             "path": path,
             "capture_time": dt,
-            "month_key": dt.strftime("%Y-%m"),
+            "month_key": format_capture_time(dt, "%Y-%m"),
             "date_tag": selected["tag"],
             "fallback": selected["fallback"],
             "requires_premium": (
@@ -1824,11 +1910,7 @@ def print_plan(items, state):
             status = "已完成" if state.is_completed(item) else "待上传"
             fallback = " [mtime兜底]" if item["fallback"] else ""
             capture_time = item.get("capture_time")
-            capture_text = (
-                capture_time.strftime("%Y-%m-%d %H:%M:%S")
-                if capture_time is not None
-                else "未读取日期"
-            )
+            capture_text = format_capture_time(capture_time)
             print(
                 f"  {index:>3}. [{status}] {capture_text}  "
                 f"{format_size((_snapshot_for_path(path) or (0, 0))[0]):>10}  {relative_name(path)}  <{item['date_tag']}>{fallback}"
@@ -2075,11 +2157,7 @@ def _main_impl():
                 for item in ready_items:
                     path = item["path"]
                     capture_time = item.get("capture_time")
-                    capture_text = (
-                        capture_time.strftime("%Y-%m-%d %H:%M:%S")
-                        if capture_time is not None
-                        else "未读取日期"
-                    )
+                    capture_text = format_capture_time(capture_time)
                     UI.log(
                         f"  {capture_text}  "
                         f"{format_size((_snapshot_for_path(path) or (0, 0))[0]):>10}  {relative_name(path)}"

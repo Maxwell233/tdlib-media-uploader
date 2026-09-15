@@ -83,7 +83,8 @@ class ImprovementsTest(unittest.TestCase):
         config = gui.ConfigDialog()
         scan_tools = gui.ScanToolsDialog()
         try:
-            with patch.object(gui, "_write_config_values", return_value="") as save:
+            with patch.object(gui, "_write_config_values", return_value="") as save, \
+                    patch.object(gui, "_validate_exiftool_path", return_value=""):
                 config._save()
                 config_values = save.call_args.args[0]
             self.assertIn(("telegram", "api_id"), config_values)
@@ -93,7 +94,8 @@ class ImprovementsTest(unittest.TestCase):
             self.assertFalse(any(section in {"scan", "process"} for section, _ in config_values))
 
             with patch.object(gui, "_write_config_values", return_value="") as save:
-                scan_tools._save()
+                with patch.object(gui, "_validate_exiftool_path", return_value=""):
+                    scan_tools._save()
                 scan_values = save.call_args.args[0]
             self.assertIn(("paths", "exiftool_path"), scan_values)
             self.assertIn(("scan", "readiness_attempts"), scan_values)
@@ -106,6 +108,23 @@ class ImprovementsTest(unittest.TestCase):
             scan_tools.close()
             scan_tools.deleteLater()
             self.app.processEvents()
+
+    def test_exiftool_path_validation_runs_short_version_probe(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "exiftool"
+            executable.write_bytes(b"tool")
+            completed = subprocess.CompletedProcess([], 0, "12.95\n", "")
+            with patch.object(gui, "run_cancellable_process", return_value=completed) as run:
+                self.assertEqual(gui._validate_exiftool_path(str(executable)), "")
+            self.assertEqual(run.call_args.args[0], [str(executable), "-ver"])
+            self.assertEqual(run.call_args.kwargs["timeout"], 5.0)
+
+    def test_exiftool_k_variant_is_rejected_on_windows(self):
+        with patch.object(gui.os, "name", "nt"):
+            message = gui._validate_exiftool_path("exiftool(-k).exe")
+        self.assertIn("exiftool.exe", message)
 
     def test_caption_store_reads_once_and_preserves_other_edits(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1158,6 +1177,104 @@ class ImprovementsTest(unittest.TestCase):
                     patch.object(core.subprocess, "run", return_value=completed):
                 self.assertEqual(core.read_exif_metadata(), {})
 
+    def test_exiftool_progress_is_monotonic_for_large_scan(self):
+        import subprocess
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "exiftool"
+            executable.write_bytes(b"tool")
+            paths = [root / f"clip-{index}.mp4" for index in range(623)]
+            events = []
+
+            def run(_command, **kwargs):
+                batch = [Path(value) for value in kwargs["input"].splitlines()]
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    json.dumps([{"SourceFile": str(path)} for path in batch]),
+                    "",
+                )
+
+            with patch.object(core.cfg, "EXIFTOOL_PATH", executable), \
+                    patch.object(core.cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True), \
+                    patch.object(core.cfg, "VIDEO_DIR", root), \
+                    patch.object(core, "EXIFTOOL_BATCH_SIZE", 256), \
+                    patch.object(core, "EXIFTOOL_MAX_RETRIES", 0), \
+                    patch.object(core.subprocess, "run", side_effect=run):
+                result = core.read_exif_metadata(paths, progress_callback=events.append)
+
+            progress = [event for event in events if event.get("phase") == "exif"]
+            completed = [event["completed"] for event in progress]
+            self.assertEqual(len(result), 623)
+            self.assertEqual(completed[0], 0)
+            self.assertEqual(completed[-1], 623)
+            self.assertEqual(completed, sorted(completed))
+            self.assertTrue(all(0 <= value <= 623 for value in completed))
+
+    def test_exiftool_warning_accepts_complete_rows_without_bisection(self):
+        import subprocess
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "exiftool"
+            executable.write_bytes(b"tool")
+            paths = [root / f"clip-{index}.mp4" for index in range(4)]
+            output = json.dumps([{"SourceFile": str(path)} for path in paths])
+            completed = subprocess.CompletedProcess([], 0, output, "Warning: metadata was incomplete")
+            with patch.object(core.cfg, "EXIFTOOL_PATH", executable), \
+                    patch.object(core.cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True), \
+                    patch.object(core.cfg, "VIDEO_DIR", root), \
+                    patch.object(core, "EXIFTOOL_BATCH_SIZE", 256), \
+                    patch.object(core, "EXIFTOOL_MAX_RETRIES", 0), \
+                    patch.object(core, "LAST_SCAN_WARNINGS", []) as warnings, \
+                    patch.object(core.subprocess, "run", return_value=completed) as run:
+                result = core.read_exif_metadata(paths)
+                self.assertTrue(any("metadata was incomplete" in warning for warning in warnings))
+
+            self.assertEqual(len(result), len(paths))
+            self.assertEqual(run.call_count, 1)
+
+    def test_exiftool_retries_only_missing_source_files(self):
+        import subprocess
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "exiftool"
+            executable.write_bytes(b"tool")
+            paths = [root / f"clip-{index}.mp4" for index in range(5)]
+            calls = []
+            events = []
+
+            def run(_command, **kwargs):
+                batch = [Path(value) for value in kwargs["input"].splitlines()]
+                calls.append(batch)
+                rows = batch if len(calls) == 1 else batch
+                if len(calls) == 1:
+                    rows = batch[:-1]
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    json.dumps([{"SourceFile": str(path)} for path in rows]),
+                    "Warning: one source was unavailable" if len(calls) == 1 else "",
+                )
+
+            with patch.object(core.cfg, "EXIFTOOL_PATH", executable), \
+                    patch.object(core.cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True), \
+                    patch.object(core.cfg, "VIDEO_DIR", root), \
+                    patch.object(core, "EXIFTOOL_BATCH_SIZE", 256), \
+                    patch.object(core, "EXIFTOOL_MAX_RETRIES", 0), \
+                    patch.object(core.subprocess, "run", side_effect=run):
+                result = core.read_exif_metadata(paths, progress_callback=events.append)
+
+            self.assertEqual(len(result), len(paths))
+            self.assertEqual([len(batch) for batch in calls], [5, 1])
+            self.assertEqual(calls[1], [paths[-1]])
+            self.assertEqual(events[-1]["completed"], len(paths))
+
     def test_invalid_config_rolls_back(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.toml"
@@ -1503,6 +1620,23 @@ class ImprovementsTest(unittest.TestCase):
                 self.assertEqual(fallback["tag"], "FileSystem:ModifyTime")
                 self.assertEqual(fallback["datetime"].timestamp(), path.stat().st_mtime)
 
+    def test_mtime_fallback_does_not_probe_ffmpeg_when_media_dates_disabled(self):
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "clip.mp4"
+            path.write_bytes(b"video")
+            with patch.object(core.cfg, "VIDEO_READ_DATES", True), \
+                    patch.object(core.cfg, "VIDEO_READ_MEDIA_CREATION_DATE", False), \
+                    patch.object(core.cfg, "VIDEO_MISSING_DATE_POLICY", "mtime"), \
+                    patch.object(core, "read_media_creation_time") as probe:
+                items, missing = core.build_items([path], {})
+
+            self.assertFalse(missing)
+            self.assertEqual(items[0]["date_tag"], "FileSystem:ModifyTime")
+            self.assertIsNotNone(items[0]["capture_time"])
+            probe.assert_not_called()
+
     def test_disabled_video_dates_uses_filename_only(self):
         import tdlib_video_album_uploader as core
 
@@ -1573,6 +1707,162 @@ class ImprovementsTest(unittest.TestCase):
             with patch.object(core.cfg, "VIDEO_READ_DATES", False), patch.object(entry, "UI", ui):
                 entry.show_file_list([item], State())
             self.assertTrue(any("未读取日期" in message for message in ui.messages))
+
+    def test_cancelled_video_scan_is_not_reported_as_normal_empty_result(self):
+        import tdlib_video_album_uploader as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [root / "first.mp4", root / "second.mp4"]
+            for path in paths:
+                path.write_bytes(b"video")
+            executable = root / "exiftool"
+            executable.write_bytes(b"tool")
+            cancel_event = threading.Event()
+
+            def read_metadata(_paths, **_kwargs):
+                cancel_event.set()
+                return {}
+
+            with patch.object(core.cfg, "VIDEO_DIR", root), \
+                    patch.object(core.cfg, "EXIFTOOL_PATH", executable), \
+                    patch.object(core.cfg, "VIDEO_READ_DATES", True), \
+                    patch.object(core, "scan_videos", return_value=paths), \
+                    patch.object(core, "read_exif_metadata", side_effect=read_metadata):
+                result = gui._scan_result("video", cancel_event=cancel_event)
+
+            self.assertTrue(result["cancelled"])
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(result["groups"], [])
+            self.assertEqual(result["total_files"], 0)
+
+    def test_no_date_upload_path_reaches_all_63_album_preparations(self):
+        import builtins
+        import tdlib_video_album_uploader as core
+        import tdlib_video_app as entry
+
+        class FakeUI:
+            cancel_event = None
+
+            def __init__(self):
+                self.album_rows = []
+
+            def __getattr__(self, _name):
+                return lambda *args, **kwargs: None
+
+            def confirm_upload(self):
+                return True
+
+            def album(self, *args, **kwargs):
+                self.album_rows.append(kwargs)
+
+        class FakeState:
+            path = Path("state.json")
+
+            @staticmethod
+            def is_completed(_item):
+                return False
+
+            @staticmethod
+            def mark_album_completed(_items, _message_ids):
+                return None
+
+        class FakeProgress:
+            def __init__(self, *_args):
+                pass
+
+            def skip_items(self, *_args):
+                return None
+
+            def begin_album(self, *_args):
+                return None
+
+            def finish_album(self, *_args):
+                return None
+
+            def handle_update(self, *_args):
+                return None
+
+        class FakeClient:
+            is_premium = True
+            caption_length_limit = 4096
+
+            def __init__(self, *_args):
+                self.sent = []
+
+            def add_update_callback(self, *_args):
+                return None
+
+            def remove_update_callback(self, *_args):
+                return None
+
+            def login(self):
+                return None
+
+            def refresh_account_limits(self):
+                return None
+
+            def set_fast_options(self):
+                return None
+
+            def validate_target(self):
+                return None
+
+            def send_contents(self, _contents, _progress, items, **_kwargs):
+                self.sent.append(list(items))
+                return list(range(len(items)))
+
+            def finalize_inflight(self, *_args, **_kwargs):
+                return None
+
+            def close(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = []
+            for index in range(623):
+                path = root / f"clip-{index}.mp4"
+                path.write_bytes(b"v")
+                paths.append(path)
+            ui = FakeUI()
+            client_instances = []
+
+            def make_client(*args):
+                client = FakeClient(*args)
+                client_instances.append(client)
+                return client
+
+            def fake_contents(items, *_args, **_kwargs):
+                return ([{"@type": "inputMessageVideo"} for _ in items], list(items), [])
+
+            with patch.object(entry, "UI", ui), \
+                    patch.object(core, "UI", ui), \
+                    patch.object(core.cfg, "VIDEO_DIR", root), \
+                    patch.object(core.cfg, "VIDEO_READ_DATES", False), \
+                    patch.object(core.cfg, "VIDEO_ALBUM_SIZE", 10), \
+                    patch.object(core.cfg, "VIDEO_SHOW_FILE_LIST", False), \
+                    patch.object(core.cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False), \
+                    patch.object(core.cfg, "VIDEO_MISSING_DATE_POLICY", "mtime"), \
+                    patch.object(core, "scan_videos", return_value=paths), \
+                    patch.object(core, "cleanup_staging_cache"), \
+                    patch.object(core, "validate_config"), \
+                    patch.object(core, "verify_tdjson_version", return_value="test"), \
+                    patch.object(core, "UploadState", FakeState), \
+                    patch.object(core, "preflight_videos", return_value=[]), \
+                    patch.object(core, "build_video_contents", side_effect=fake_contents), \
+                    patch.object(core, "VideoUploadProgress", FakeProgress), \
+                    patch.object(core, "TDJsonClient", side_effect=make_client), \
+                    patch.object(core, "cleanup_confirmed_staging"), \
+                    patch.object(core, "report_skipped_videos"), \
+                    patch.object(builtins, "input", return_value="y"):
+                entry._main_impl()
+
+            self.assertEqual(len(client_instances), 1)
+            self.assertEqual(len(client_instances[0].sent), 63)
+            self.assertEqual([len(album) for album in client_instances[0].sent[:-1]], [10] * 62)
+            self.assertEqual(len(client_instances[0].sent[-1]), 3)
+            self.assertEqual(sum(len(album) for album in client_instances[0].sent), 623)
 
     def test_jit_revalidation_detects_video_changes_after_scan(self):
         import tdlib_video_album_uploader as core
