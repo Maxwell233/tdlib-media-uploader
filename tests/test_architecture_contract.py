@@ -22,6 +22,30 @@ def _imported_names(path: Path) -> set[str]:
 
 
 class ArchitectureContractTest(unittest.TestCase):
+    def test_first_wave_modules_use_the_declared_package_layout(self):
+        expected = {
+            "core/sorting.py",
+            "core/filesystem.py",
+            "core/readiness.py",
+            "core/concurrency.py",
+            "processes/runner.py",
+            "telegram/client.py",
+            "telegram/auth.py",
+            "telegram/target.py",
+            "telegram/limits.py",
+            "telegram/send_result.py",
+        }
+        for relative_path in expected:
+            self.assertTrue(
+                (PACKAGE_ROOT / relative_path).is_file(),
+                f"missing declared V2 module: {relative_path}",
+            )
+        for module_name in ("sorting", "filesystem", "readiness", "concurrency"):
+            self.assertFalse(
+                (PACKAGE_ROOT / f"{module_name}.py").exists(),
+                f"filesystem module escaped core/: {module_name}.py",
+            )
+
     def test_lower_layers_never_import_gui(self):
         for layer in LOWER_LAYERS:
             root = PACKAGE_ROOT / layer
