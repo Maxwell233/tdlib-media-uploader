@@ -58,17 +58,15 @@ def normalize_target(target=None) -> dict:
         except (TypeError, ValueError, OverflowError):
             return None
 
-    # ``group_chat_id`` was present in some config-shaped target mappings;
-    # prefer the canonical ``chat_id`` while retaining that compatibility
-    # alias as a fallback.  Inactive fields are deliberately never parsed.
-    chat_value = target.get("chat_id", target.get("group_chat_id", 0))
-    chat_id = _as_int(chat_value)
-    if chat_id is None:
-        return {}
-
     if mode == "forum_topic":
+        # ``group_chat_id`` was present in some config-shaped target mappings;
+        # prefer the canonical ``chat_id`` while retaining that compatibility
+        # alias as a fallback.  Channel-only fields are deliberately never
+        # parsed in this branch.
+        chat_value = target.get("chat_id", target.get("group_chat_id", 0))
+        chat_id = _as_int(chat_value)
         topic_id = _as_int(target.get("forum_topic_id", 0))
-        if topic_id is None:
+        if chat_id is None or topic_id is None:
             return {}
         return {
             "target_mode": "forum_topic",
@@ -77,11 +75,17 @@ def normalize_target(target=None) -> dict:
             "channel_chat_id": 0,
         }
 
+    # A valid channel id is sufficient even when a stale/invalid forum chat
+    # id remains in the config.  Parse the fallback chat id only when the
+    # channel-specific value is absent or zero.
     channel_value = target.get("channel_chat_id", 0)
     channel_id = _as_int(channel_value)
-    if channel_id is None:
-        return {}
-    effective_channel_id = channel_id or chat_id
+    if not channel_id:
+        chat_value = target.get("chat_id", target.get("group_chat_id", 0))
+        channel_id = _as_int(chat_value)
+        if channel_id is None:
+            return {}
+    effective_channel_id = channel_id
     return {
         "target_mode": "channel",
         "chat_id": effective_channel_id,

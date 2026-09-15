@@ -455,6 +455,153 @@ class ImprovementsTest(unittest.TestCase):
             },
         )
 
+    def test_target_normalization_parses_only_mode_relevant_fields(self):
+        from upload_journal import normalize_target
+
+        self.assertEqual(
+            normalize_target(
+                {
+                    "target_mode": "channel",
+                    "channel_chat_id": 200,
+                    "chat_id": "invalid",
+                }
+            ),
+            {
+                "target_mode": "channel",
+                "chat_id": 200,
+                "forum_topic_id": 0,
+                "channel_chat_id": 200,
+            },
+        )
+        self.assertEqual(
+            normalize_target(
+                {
+                    "target_mode": "channel",
+                    "channel_chat_id": 0,
+                    "chat_id": 200,
+                }
+            )["chat_id"],
+            200,
+        )
+        self.assertEqual(
+            normalize_target(
+                {
+                    "target_mode": "forum_topic",
+                    "chat_id": 100,
+                    "forum_topic_id": 10,
+                    "channel_chat_id": "invalid",
+                }
+            )["forum_topic_id"],
+            10,
+        )
+        self.assertEqual(
+            normalize_target(
+                {
+                    "target_mode": "channel",
+                    "channel_chat_id": 200,
+                    "forum_topic_id": "invalid",
+                }
+            )["channel_chat_id"],
+            200,
+        )
+
+    def test_legacy_reconciliation_uses_kind_target_instead_of_global_target(self):
+        import tdlib_common
+        import tdlib_image_album_uploader as image_core
+        import tdlib_mixed_album_uploader as mixed_core
+        import tdlib_video_album_uploader as video_core
+        from upload_journal import InflightJournal
+
+        modules = {
+            "video": (video_core, "VIDEO_DIR", "VIDEO_RESET_STATE", "video_file.mp4"),
+            "image": (image_core, "IMAGE_DIR", "IMAGE_RESET_STATE", "image_file.jpg"),
+            "mixed": (mixed_core, "MIXED_DIR", "MIXED_RESET_STATE", "mixed_file.jpg"),
+        }
+        target_a = {
+            "target_mode": "forum_topic",
+            "chat_id": 100,
+            "forum_topic_id": 10,
+            "channel_chat_id": 0,
+        }
+        target_b = {
+            "target_mode": "forum_topic",
+            "chat_id": 200,
+            "forum_topic_id": 20,
+            "channel_chat_id": 0,
+        }
+
+        for kind, (module, config_dir, reset_name, filename) in modules.items():
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "media"
+                root.mkdir()
+                path = root / filename
+                path.write_bytes(b"media")
+                snapshot = path.stat()
+                journal = InflightJournal(Path(directory) / "journal")
+                journal.prepare(
+                    kind,
+                    "legacy-kind-album",
+                    [{
+                        "path": path,
+                        "scan_size": snapshot.st_size,
+                        "scan_mtime_ns": snapshot.st_mtime_ns,
+                    }],
+                )
+                journal.unknown(kind, "legacy-kind-album", "timeout")
+                client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
+                client.inflight_journal = journal
+                target_for = lambda requested_kind: target_a if requested_kind == kind else target_b
+                patches = [
+                    patch.object(tdlib_common.cfg, "target_for", side_effect=target_for),
+                    patch.object(tdlib_common.cfg, "TARGET_MODE", target_b["target_mode"]),
+                    patch.object(tdlib_common.cfg, "CHAT_ID", target_b["chat_id"]),
+                    patch.object(tdlib_common.cfg, "FORUM_TOPIC_ID", target_b["forum_topic_id"]),
+                    patch.object(tdlib_common.cfg, "CHANNEL_CHAT_ID", 0),
+                    patch.object(tdlib_common.cfg, config_dir, root),
+                    patch.object(tdlib_common.cfg, reset_name, False),
+                    patch.object(module, "STATE_DIR", Path(directory) / "state"),
+                ]
+                with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+                    client.reconcile_inflight("legacy-kind-album", sent=True, kind=kind)
+                    state_a = module.UploadState(target=target_a)
+                    state_b = module.UploadState(target=target_b)
+                    signature = module.file_signature(path, (snapshot.st_size, snapshot.st_mtime_ns))
+                    self.assertIn(signature, state_a.data["completed"])
+                    self.assertNotIn(signature, state_b.data["completed"])
+                self.assertIsNone(journal.unresolved(kind, "legacy-kind-album"))
+
+    def test_journal_target_takes_precedence_over_state_fallback_target(self):
+        import tdlib_common
+        import tdlib_image_album_uploader as image_core
+        from upload_journal import normalize_target
+
+        target_a = normalize_target(
+            {"target_mode": "forum_topic", "chat_id": 100, "forum_topic_id": 10}
+        )
+        target_b = normalize_target(
+            {"target_mode": "forum_topic", "chat_id": 200, "forum_topic_id": 20}
+        )
+        target_c = normalize_target(
+            {"target_mode": "forum_topic", "chat_id": 300, "forum_topic_id": 30}
+        )
+        client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(image_core, "STATE_DIR", Path(directory) / "state"), \
+                    patch.object(image_core.cfg, "IMAGE_DIR", Path(directory) / "images"), \
+                    patch.object(image_core.cfg, "IMAGE_RESET_STATE", False), \
+                    patch.object(tdlib_common.cfg, "target_for", return_value=target_c), \
+                    patch.object(tdlib_common.cfg, "TARGET_MODE", "forum_topic"), \
+                    patch.object(tdlib_common.cfg, "CHAT_ID", target_c["chat_id"]), \
+                    patch.object(tdlib_common.cfg, "FORUM_TOPIC_ID", target_c["forum_topic_id"]), \
+                    patch.object(tdlib_common.cfg, "CHANNEL_CHAT_ID", 0):
+                state = client._state_for_journal(
+                    "image",
+                    {"target": target_a},
+                    fallback_target=target_b,
+                )
+                self.assertEqual(state._chat_id, target_a["chat_id"])
+                self.assertEqual(state._forum_topic_id, target_a["forum_topic_id"])
+
     def test_target_identity_changes_for_topic_channel_or_mode(self):
         from upload_journal import normalize_target
 

@@ -819,10 +819,27 @@ class TDJsonClient:
             values.append(item)
         return values
 
-    def _state_for_journal(self, kind: str, record: dict):
-        """Create the matching uploader state without touching source files."""
+    def _state_for_journal(self, kind: str, record: dict, *, fallback_target=None):
+        """Create the matching uploader state without touching source files.
 
-        target = self._journal_target(record) or self._target_identity()
+        A target recorded with the send attempt is authoritative.  Legacy
+        target-less records use an explicitly supplied fallback, then the
+        media-kind-specific configured target, and only lastly the historical
+        mutable global target values.
+        """
+
+        target = self._journal_target(record)
+        if not target and fallback_target is not None:
+            target = normalize_target(fallback_target)
+        if not target:
+            target_for = getattr(cfg, "target_for", None)
+            if callable(target_for):
+                try:
+                    target = normalize_target(target_for(kind))
+                except Exception:
+                    target = {}
+        if not target:
+            target = self._target_identity()
         if kind == "video":
             import tdlib_video_album_uploader as module
             if getattr(module, "STATE_DIR", None) == APP_DATA_DIR / ".state":
@@ -869,7 +886,8 @@ class TDJsonClient:
     ) -> None:
         """Manually resolve an UNKNOWN send without querying Telegram history."""
 
-        effective_target = normalize_target(target) or self._target_identity()
+        requested_target = normalize_target(target)
+        effective_target = requested_target or self._target_identity()
         selected_kind = kind or self._journal_kind_for(album_key, target=effective_target)
         _path, record = self.inflight_journal.get_entry(selected_kind, album_key, effective_target)
         if record is None:
@@ -884,7 +902,11 @@ class TDJsonClient:
             # the user is never allowed to accidentally create duplicates.
             raise RuntimeError("上传日志缺少可恢复的文件快照，已保留记录以避免重复上传。")
         ids = list(message_ids if message_ids is not None else record.get("message_ids", []))
-        state = self._state_for_journal(selected_kind, record)
+        state = self._state_for_journal(
+            selected_kind,
+            record,
+            fallback_target=requested_target or None,
+        )
         # ``mark_album_completed`` performs an atomic fsync-backed save.  Do
         # not touch the journal until it returns; a save failure therefore
         # leaves the UNKNOWN/SUBMITTED record blocking automatic resends.
