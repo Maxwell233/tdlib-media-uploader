@@ -78,6 +78,11 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
         self.assertIn('run: ./build_macos.sh --clean --skip-install', source)
         self.assertIn('run: |\n          $exe = (Resolve-Path -LiteralPath "dist\\TDLib Media Uploader\\TDLib Media Uploader.exe").Path', source)
         self.assertIn('"$EXECUTABLE" --self-test', source)
+        self.assertIn(
+            "github.event.pull_request.number || github.ref_name",
+            source,
+            "PR artifact names must not inherit the pull_request merge ref slash",
+        )
 
     def test_package_paths_facade_is_present_and_keeps_one_path_contract(self):
         package_path = PROJECT_ROOT / "src" / "tdlib_media_uploader" / "config" / "paths.py"
