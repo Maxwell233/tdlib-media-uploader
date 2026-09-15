@@ -12,12 +12,35 @@ import sys
 from pathlib import Path
 
 
+def _source_resource_dir() -> Path:
+    """Find the repository resource root from any source package location.
+
+    ``runtime_paths.py`` is currently a root compatibility module.  During
+    the staged migration it may be relocated below ``src/tdlib_media_uploader``
+    without moving the source-level ``config.example.toml`` and ``VERSION``
+    files.  Walking parents by those stable markers preserves source-run
+    behavior in both layouts.
+    """
+
+    module_dir = Path(__file__).resolve().parent
+    for candidate in (module_dir, *module_dir.parents):
+        has_template = (
+            (candidate / "resources" / "default_config.toml").is_file()
+            or (candidate / "config.example.toml").is_file()
+        )
+        if (candidate / "VERSION").is_file() and has_template:
+            return candidate
+    return module_dir
+
+
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 if IS_FROZEN:
-    RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    RESOURCE_DIR = Path(
+        getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)
+    ).resolve()
     APP_ROOT = Path(sys.executable).resolve().parent
 else:
-    RESOURCE_DIR = Path(__file__).resolve().parent
+    RESOURCE_DIR = _source_resource_dir()
     APP_ROOT = RESOURCE_DIR
 
 # Windows remains a portable folder build, and source runs keep their existing
@@ -49,8 +72,17 @@ LOG_DIR = DATA_DIR / "logs"
 HISTORY_PATH = DATA_DIR / "history.json"
 
 CONFIG_PATH = DATA_DIR / "config.toml"
-TEMPLATE_CONFIG_PATH = RESOURCE_DIR / "config.example.toml"
+PACKAGE_TEMPLATE_CONFIG_PATH = RESOURCE_DIR / "resources" / "default_config.toml"
+LEGACY_TEMPLATE_CONFIG_PATH = RESOURCE_DIR / "config.example.toml"
+TEMPLATE_CONFIG_PATH = (
+    PACKAGE_TEMPLATE_CONFIG_PATH
+    if PACKAGE_TEMPLATE_CONFIG_PATH.is_file()
+    else LEGACY_TEMPLATE_CONFIG_PATH
+)
 VERSION_PATH = RESOURCE_DIR / "VERSION"
+ASSETS_DIR = RESOURCE_DIR / "assets"
+TOOLS_DIR = RESOURCE_DIR / "tools"
+FFMPEG_DIR = TOOLS_DIR / "ffmpeg"
 
 
 def read_version(default: str = "0.0.0") -> str:
@@ -87,7 +119,9 @@ def ensure_data_dirs() -> Path:
 
 __all__ = [
     "IS_FROZEN", "RESOURCE_DIR", "APP_ROOT", "DATA_BASE_DIR", "DATA_DIR",
-    "APP_DATA_DIR", "CONFIG_PATH", "TEMPLATE_CONFIG_PATH", "VERSION_PATH",
+    "APP_DATA_DIR", "CONFIG_PATH", "TEMPLATE_CONFIG_PATH",
+    "PACKAGE_TEMPLATE_CONFIG_PATH", "LEGACY_TEMPLATE_CONFIG_PATH", "VERSION_PATH",
+    "ASSETS_DIR", "TOOLS_DIR", "FFMPEG_DIR",
     "STATE_DIR", "VIDEO_STATE_DIR", "IMAGE_STATE_DIR", "MIXED_STATE_DIR",
     "TELEGRAM_DIR", "TDLIB_DATABASE_DIR", "TDLIB_FILES_DIR",
     "CAPTIONS_DIR", "UPLOAD_INFLIGHT_DIR", "CACHE_DIR", "THUMBNAIL_CACHE_DIR",
