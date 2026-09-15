@@ -3567,7 +3567,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "无需上传", "当前没有待上传项目。")
             return
         if not result.get("core_available"):
-            QMessageBox.warning(self, "依赖不完整", "当前环境只能预览，无法启动 TDLib 上传。请先运行 setup.ps1。")
+            QMessageBox.warning(
+                self,
+                "依赖不完整",
+                "当前环境只能预览，无法启动 TDLib 上传。请先按 README 的“从源码运行”说明安装依赖。",
+            )
             return
         if _cfg("API_ID", 12345678) == 12345678 or _cfg("API_HASH", "YOUR_API_HASH") == "YOUR_API_HASH":
             QMessageBox.warning(self, "尚未配置", "请先在设置中填写 Telegram API ID 和 API Hash。")
