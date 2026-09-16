@@ -68,8 +68,9 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
         source = BUILD_WORKFLOW_PATH.read_text(encoding="utf-8")
         self.assertIn("  pull_request:", source)
         self.assertIn('run: python -m unittest discover -s tests -v', source)
-        self.assertIn('run: .\\build_exe.ps1 -SkipInstall -Clean -PythonPath "python"', source)
-        self.assertIn('run: ./build_macos.sh --clean --skip-install', source)
+        self.assertNotIn("build_exe.ps1", source)
+        self.assertNotIn("build_macos.sh", source)
+        self.assertIn("python -m PyInstaller", source)
         self.assertIn('run: |\n          $exe = (Resolve-Path -LiteralPath "dist\\TDLib Media Uploader\\TDLib Media Uploader.exe").Path', source)
         self.assertIn('"$EXECUTABLE" --self-test', source)
         self.assertIn(

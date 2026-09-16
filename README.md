@@ -152,29 +152,17 @@ python -m unittest discover -s tests -v
 
 ## 构建 Windows 和 macOS 包
 
-Windows：
-
-```powershell
-.\build_exe.ps1 -Clean
-```
-
-macOS Apple Silicon：
-
-```bash
-./build_macos.sh --clean
-```
-
-Windows 和 macOS 构建使用各自平台的原生 runner，并行执行离线回归测试。Windows 脚本下载固定的 BtbN LGPL FFmpeg；macOS 脚本从 FFmpeg 7.1.1 官方源码构建 arm64 FFmpeg，使用 `--disable-gpl --disable-nonfree`，并检查二进制架构、构建标志和许可文件。两条构建路径都会在 PyInstaller 前排除 `imageio-ffmpeg` wheel 自带的 FFmpeg 二进制。
+仓库不再提供本地源码构建脚本。GitHub Actions 在 Windows x64 和 macOS arm64 原生 runner 上直接读取 `tdlib_media_uploader.spec`，先执行离线回归测试，再构建并校验发布包。构建流程会排除 `imageio-ffmpeg` wheel 自带的 FFmpeg 二进制，分别准备经过许可和构建标志检查的 LGPL FFmpeg，并验证应用架构、图标、许可文件、DMG/ZIP 和打包后自测结果。
 
 输出为 Windows 的 `dist/TDLib Media Uploader/TDLib Media Uploader.exe` 及 Windows x64 ZIP，和 macOS 的 `dist/TDLib Media Uploader.app` 及带版本号的 macOS arm64 DMG。DMG 根目录包含应用和指向系统 `/Applications` 的 `Applications` 文件夹别名，便于拖放安装。Windows 构建同时校验 EXE 嵌入图标、Qt 图标资源和稳定的 AppUserModelID，避免打包后任务栏图标缺失或归组异常。构建包不包含个人配置、断点、封面缓存、媒体文件或登录数据；macOS 包另附 FFmpeg 构建信息。
 
-核心文件位于 `src/tdlib_media_uploader/`：`app.py`（打包入口）、`gui/application.py`（GUI 启动与自检边界）、`gui/events.py` 与 `gui/workers.py`（GUI 事件和线程边界）、`gui/models.py`（预览模型适配）、`gui/main_window.py`（界面与生命周期）、`config/loader.py` 与 `config/paths.py`（配置和路径）、`media/legacy_video.py`、`media/legacy_image.py`、`media/legacy_mixed.py`（由 V2 策略调用的媒体实现）以及 `telegram/tdlib_common.py`（TDLib）。上传流程入口也会复用 `data/app.lock`；内部模块不提供独立启动入口。
+核心文件位于 `src/tdlib_media_uploader/`：`app.py`（打包入口）、`gui/application.py`（GUI 启动与自检边界）、`gui/events.py` 与 `gui/workers.py`（GUI 事件和线程边界）、`gui/models.py`（预览模型适配）、`gui/main_window.py`（界面与生命周期）、`config/loader.py` 与 `config/paths.py`（配置和路径）、`media/legacy_video.py`、`media/legacy_image.py`、`media/legacy_mixed.py`（由 V2 策略调用的媒体实现）以及 `telegram/tdlib_common.py`（TDLib）。上传流程入口也会复用 `data/app.lock`；内部模块不提供独立启动入口。构建配置集中在根目录 `tdlib_media_uploader.spec`，平台构建只在 GitHub Actions 中执行。
 
-版本使用“主版本.功能版本.修订版本”：日常优化增加最后一位，较大功能更新增加中间一位。版本号唯一存放在根目录 `VERSION`，程序、界面和构建脚本会从该文件读取。此次修改见 [CHANGELOG.md](CHANGELOG.md)。
+版本使用“主版本.功能版本.修订版本”：日常优化增加最后一位，较大功能更新增加中间一位。版本号唯一存放在根目录 `VERSION`，程序、界面和平台构建 workflow 会从该文件读取。此次修改见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 信任与风险
 
-建议只从本仓库的 [GitHub Releases](https://github.com/Maxwell233/tdlib-media-uploader/releases) 下载，并在运行前核对 `SHA256SUMS`。构建脚本、平台构建 workflow、项目许可、作者署名和第三方依赖清单都公开在仓库中；发布 ZIP 也包含许可/署名文件，便于检查来源和再分发条件。SHA-256 只能证明文件与发布者提供的摘要一致，不能替代代码审查或操作系统安全认证。
+建议只从本仓库的 [GitHub Releases](https://github.com/Maxwell233/tdlib-media-uploader/releases) 下载，并在运行前核对 `SHA256SUMS`。平台构建 workflow、项目许可、作者署名和第三方依赖清单都公开在仓库中；发布 ZIP 也包含许可/署名文件，便于检查来源和再分发条件。SHA-256 只能证明文件与发布者提供的摘要一致，不能替代代码审查或操作系统安全认证。
 
 macOS v1.9.1 包未配置 Apple Developer 签名和公证，所以 Gatekeeper 可能显示“无法验证开发者”。请不要绕过来源核验后直接运行未知文件；确认仓库地址、标签和 SHA-256 后再按系统提示打开。Windows 版也不应被视为经过独立安全机构认证的程序。应用会调用随包提供或系统中的 FFmpeg/ExifTool 处理媒体；请确认这些工具来源和许可，并注意压缩失败、网络中断、Telegram 限制以及重复上传等运行风险。
 

@@ -32,7 +32,8 @@ def is_embedded_ffmpeg(item) -> bool:
 
     The Python wrapper remains useful, but the wheel's bundled executable is
     not trusted for redistribution because its codec build flags can enable
-    GPL components.  build_exe.ps1 stages a separately verified LGPL build.
+    GPL components.  The platform workflow stages a separately verified LGPL
+    build before invoking this spec.
     """
 
     for value in item[:2]:
