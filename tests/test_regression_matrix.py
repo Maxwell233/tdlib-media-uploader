@@ -14,10 +14,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import album_metadata as metadata
-import app_logging
-import gui_app as gui
-import path_utils
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from tdlib_media_uploader.core import album as metadata
+from tdlib_media_uploader.core import logging as app_logging
+from tdlib_media_uploader.gui import main_window as gui
+from tdlib_media_uploader.core import filesystem_legacy as path_utils
 from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
 
 
@@ -368,7 +373,7 @@ class ImprovementsTest(unittest.TestCase):
         self.assertIn("目录扫描已取消", legacy_errors)
 
     def test_inflight_journal_blocks_unknown_until_manual_reconciliation(self):
-        from upload_journal import InflightJournal, UNKNOWN
+        from tdlib_media_uploader.core.upload_journal import InflightJournal, UNKNOWN
 
         with tempfile.TemporaryDirectory() as directory:
             journal = InflightJournal(Path(directory))
@@ -384,7 +389,7 @@ class ImprovementsTest(unittest.TestCase):
             self.assertIsNone(journal.get("mixed", "album-key"))
 
     def test_confirmed_inflight_record_blocks_until_finalization(self):
-        from upload_journal import CONFIRMED, InflightJournal
+        from tdlib_media_uploader.core.upload_journal import CONFIRMED, InflightJournal
 
         with tempfile.TemporaryDirectory() as directory:
             journal = InflightJournal(Path(directory))
@@ -398,8 +403,8 @@ class ImprovementsTest(unittest.TestCase):
             self.assertIsNone(journal.unresolved("image", "album-key"))
 
     def test_immediate_tdlib_send_failure_is_recorded_as_failed(self):
-        import tdlib_common
-        from upload_journal import FAILED, InflightJournal
+        from tdlib_media_uploader.telegram import tdlib_common
+        from tdlib_media_uploader.core.upload_journal import FAILED, InflightJournal
 
         class UI:
             def warning(self, _text):
@@ -430,10 +435,13 @@ class ImprovementsTest(unittest.TestCase):
             self.assertEqual(record["status"], FAILED)
 
     def test_inflight_kind_can_be_inferred_for_manual_reconciliation(self):
-        import tdlib_common
+        from tdlib_media_uploader.telegram import tdlib_common
 
         with tempfile.TemporaryDirectory() as directory:
-            journal = __import__("upload_journal").InflightJournal(Path(directory))
+            journal = __import__(
+                "tdlib_media_uploader.core.upload_journal",
+                fromlist=["InflightJournal"],
+            ).InflightJournal(Path(directory))
             journal.prepare("mixed", "album-key", [{"path": "clip.jpg"}])
             journal.unknown("mixed", "album-key", "connection lost")
             client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
@@ -442,9 +450,9 @@ class ImprovementsTest(unittest.TestCase):
             self.assertIsNone(journal.get("mixed", "album-key"))
 
     def test_manual_sent_reconciliation_writes_checkpoint_before_removing_journal(self):
-        import tdlib_common
-        import tdlib_image_album_uploader as image_core
-        from upload_journal import InflightJournal
+        from tdlib_media_uploader.telegram import tdlib_common
+        from tdlib_media_uploader.media import legacy_image as image_core
+        from tdlib_media_uploader.core.upload_journal import InflightJournal
 
         target = {
             "target_mode": "forum_topic",
@@ -481,9 +489,9 @@ class ImprovementsTest(unittest.TestCase):
             self.assertIsNone(journal.unresolved("image", "album-key", target=target))
 
     def test_manual_sent_state_failure_keeps_journal(self):
-        import tdlib_common
-        import tdlib_image_album_uploader as image_core
-        from upload_journal import InflightJournal
+        from tdlib_media_uploader.telegram import tdlib_common
+        from tdlib_media_uploader.media import legacy_image as image_core
+        from tdlib_media_uploader.core.upload_journal import InflightJournal
 
         target = {"target_mode": "forum_topic", "chat_id": -1001, "forum_topic_id": 7}
         with tempfile.TemporaryDirectory() as directory:
@@ -507,7 +515,7 @@ class ImprovementsTest(unittest.TestCase):
             self.assertIsNotNone(journal.unresolved("image", "album-key", target=target))
 
     def test_inflight_journal_is_scoped_to_target_and_legacy_records_are_conservative(self):
-        from upload_journal import InflightJournal
+        from tdlib_media_uploader.core.upload_journal import InflightJournal
 
         first = {"target_mode": "forum_topic", "chat_id": -1001, "forum_topic_id": 1}
         second = {"target_mode": "forum_topic", "chat_id": -1001, "forum_topic_id": 2}
@@ -523,7 +531,7 @@ class ImprovementsTest(unittest.TestCase):
             self.assertIsNotNone(journal.unresolved("image", "legacy", target=second))
 
     def test_forum_target_identity_ignores_irrelevant_channel_id(self):
-        from upload_journal import normalize_target
+        from tdlib_media_uploader.core.upload_journal import normalize_target
 
         first = normalize_target(
             {
@@ -553,7 +561,7 @@ class ImprovementsTest(unittest.TestCase):
         )
 
     def test_channel_target_identity_ignores_irrelevant_forum_topic_id(self):
-        from upload_journal import normalize_target
+        from tdlib_media_uploader.core.upload_journal import normalize_target
 
         first = normalize_target(
             {
@@ -581,7 +589,7 @@ class ImprovementsTest(unittest.TestCase):
         )
 
     def test_target_normalization_parses_only_mode_relevant_fields(self):
-        from upload_journal import normalize_target
+        from tdlib_media_uploader.core.upload_journal import normalize_target
 
         self.assertEqual(
             normalize_target(
@@ -631,11 +639,11 @@ class ImprovementsTest(unittest.TestCase):
         )
 
     def test_legacy_reconciliation_uses_kind_target_instead_of_global_target(self):
-        import tdlib_common
-        import tdlib_image_album_uploader as image_core
-        import tdlib_mixed_album_uploader as mixed_core
-        import tdlib_video_album_uploader as video_core
-        from upload_journal import InflightJournal
+        from tdlib_media_uploader.telegram import tdlib_common
+        from tdlib_media_uploader.media import legacy_image as image_core
+        from tdlib_media_uploader.media import legacy_mixed as mixed_core
+        from tdlib_media_uploader.media import legacy_video as video_core
+        from tdlib_media_uploader.core.upload_journal import InflightJournal
 
         modules = {
             "video": (video_core, "VIDEO_DIR", "VIDEO_RESET_STATE", "video_file.mp4"),
@@ -696,9 +704,9 @@ class ImprovementsTest(unittest.TestCase):
                 self.assertIsNone(journal.unresolved(kind, "legacy-kind-album"))
 
     def test_journal_target_takes_precedence_over_state_fallback_target(self):
-        import tdlib_common
-        import tdlib_image_album_uploader as image_core
-        from upload_journal import normalize_target
+        from tdlib_media_uploader.telegram import tdlib_common
+        from tdlib_media_uploader.media import legacy_image as image_core
+        from tdlib_media_uploader.core.upload_journal import normalize_target
 
         target_a = normalize_target(
             {"target_mode": "forum_topic", "chat_id": 100, "forum_topic_id": 10}
@@ -728,7 +736,7 @@ class ImprovementsTest(unittest.TestCase):
                 self.assertEqual(state._forum_topic_id, target_a["forum_topic_id"])
 
     def test_target_identity_changes_for_topic_channel_or_mode(self):
-        from upload_journal import normalize_target
+        from tdlib_media_uploader.core.upload_journal import normalize_target
 
         forum_topic_10 = normalize_target(
             {"target_mode": "forum_topic", "chat_id": 100, "forum_topic_id": 10}
@@ -747,7 +755,7 @@ class ImprovementsTest(unittest.TestCase):
         self.assertNotEqual(forum_topic_10, channel_200)
 
     def test_forum_unknown_journal_matches_after_irrelevant_channel_change(self):
-        from upload_journal import InflightJournal
+        from tdlib_media_uploader.core.upload_journal import InflightJournal
 
         first = {
             "target_mode": "forum_topic",
@@ -763,7 +771,7 @@ class ImprovementsTest(unittest.TestCase):
             self.assertIsNotNone(journal.unresolved("image", "forum-album", target=second))
 
     def test_channel_unknown_journal_matches_after_irrelevant_topic_change(self):
-        from upload_journal import InflightJournal
+        from tdlib_media_uploader.core.upload_journal import InflightJournal
 
         first = {
             "target_mode": "channel",
@@ -780,7 +788,7 @@ class ImprovementsTest(unittest.TestCase):
     def test_version_two_target_record_is_read_with_canonical_identity(self):
         from hashlib import sha256
 
-        from upload_journal import InflightJournal, UNKNOWN
+        from tdlib_media_uploader.core.upload_journal import InflightJournal, UNKNOWN
 
         target = {
             "target_mode": "forum_topic",
@@ -895,7 +903,7 @@ class ImprovementsTest(unittest.TestCase):
         self.assertTrue(path_utils.is_transient_fs_error(OSError("provider reset")))
 
     def test_gui_inflight_page_loads_unresolved_records(self):
-        from upload_journal import InflightJournal
+        from tdlib_media_uploader.core.upload_journal import InflightJournal
 
         with tempfile.TemporaryDirectory() as directory:
             journal = InflightJournal(Path(directory) / "upload_inflight")
@@ -905,20 +913,20 @@ class ImprovementsTest(unittest.TestCase):
                 # The page resolves its journal root through runtime_paths at
                 # import time; replace the class-level path explicitly for a
                 # deterministic, offline smoke test.
-                with patch("upload_journal.APP_DATA_DIR", Path(directory)):
+                with patch("tdlib_media_uploader.core.upload_journal.APP_DATA_DIR", Path(directory)):
                     page = gui.InflightPage()
                     self.assertEqual(page.table.rowCount(), 1)
                     page.deleteLater()
 
     def test_gui_marks_legacy_target_unknown_and_warns_before_sent_confirmation(self):
-        from upload_journal import InflightJournal
+        from tdlib_media_uploader.core.upload_journal import InflightJournal
 
         with tempfile.TemporaryDirectory() as directory:
             journal = InflightJournal(Path(directory) / "upload_inflight")
             journal.prepare("image", "legacy-gui-album", [{"path": "photo.jpg"}])
             journal.unknown("image", "legacy-gui-album", "timeout")
             with patch.object(gui, "APP_DATA_DIR", Path(directory)), \
-                    patch("upload_journal.APP_DATA_DIR", Path(directory)):
+                    patch("tdlib_media_uploader.core.upload_journal.APP_DATA_DIR", Path(directory)):
                 page = gui.InflightPage()
                 self.assertEqual(page.table.item(0, 5).text(), "⚠ 旧版记录：目标未知")
                 page.table.selectRow(0)
@@ -1000,7 +1008,7 @@ class ImprovementsTest(unittest.TestCase):
         )
 
     def test_image_filename_scan_uses_natural_numeric_order(self):
-        import tdlib_image_album_uploader as core
+        from tdlib_media_uploader.media import legacy_image as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1018,7 +1026,7 @@ class ImprovementsTest(unittest.TestCase):
             )
 
     def test_video_filename_scan_uses_natural_numeric_order(self):
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1037,9 +1045,9 @@ class ImprovementsTest(unittest.TestCase):
             )
 
     def test_all_media_scanners_keep_directory_order_before_basename_order(self):
-        import tdlib_image_album_uploader as image_core
-        import tdlib_mixed_album_uploader as mixed_core
-        import tdlib_video_album_uploader as video_core
+        from tdlib_media_uploader.media import legacy_image as image_core
+        from tdlib_media_uploader.media import legacy_mixed as mixed_core
+        from tdlib_media_uploader.media import legacy_video as video_core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1107,7 +1115,7 @@ class ImprovementsTest(unittest.TestCase):
             gui._target_for("audio")
 
     def test_mixed_scan_groups_and_splits_albums(self):
-        import tdlib_mixed_album_uploader as core
+        from tdlib_media_uploader.media import legacy_mixed as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "mixed"
@@ -1143,7 +1151,7 @@ class ImprovementsTest(unittest.TestCase):
             self.assertTrue(all(plan["group_name"] in {"工作", "旅行"} for plan in plans))
 
     def test_mixed_contents_keep_photo_video_order(self):
-        import tdlib_mixed_album_uploader as core
+        from tdlib_media_uploader.media import legacy_mixed as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1166,7 +1174,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_exiftool_empty_output_is_a_nonfatal_empty_result(self):
         import subprocess
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1182,7 +1190,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_exiftool_progress_is_monotonic_for_large_scan(self):
         import subprocess
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1218,7 +1226,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_exiftool_warning_accepts_complete_rows_without_bisection(self):
         import subprocess
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1242,7 +1250,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_exiftool_retries_only_missing_source_files(self):
         import subprocess
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1327,7 +1335,7 @@ class ImprovementsTest(unittest.TestCase):
             page.deleteLater()
 
     def test_image_plan_preserves_complete_groups_and_custom_titles(self):
-        import tdlib_image_album_uploader as core
+        from tdlib_media_uploader.media import legacy_image as core
         with tempfile.TemporaryDirectory() as directory:
             files = [Path(directory) / f"{i}.jpg" for i in range(23)]
             for file in files:
@@ -1414,12 +1422,12 @@ class ImprovementsTest(unittest.TestCase):
         )
         with patch.object(path_utils.sys, "platform", "darwin"), \
                 patch.object(path_utils, "_MAC_MOUNT_CACHE", None), \
-                patch.object(path_utils, "run_cancellable_process", return_value=completed):
+                    patch.object(path_utils, "run_cancellable_process", return_value=completed):
             self.assertFalse(path_utils.is_network_path("/Volumes/Local/clip.mp4"))
             self.assertTrue(path_utils.is_network_path("/Volumes/Camera Share/clip.mp4"))
 
     def test_staging_cleanup_removes_only_stale_files(self):
-        from staging import cleanup_staging, ensure_managed_staging_dir
+        from tdlib_media_uploader.upload.staging import cleanup_staging, ensure_managed_staging_dir
 
         with tempfile.TemporaryDirectory() as directory:
             root = ensure_managed_staging_dir(Path(directory) / "staging")
@@ -1442,7 +1450,7 @@ class ImprovementsTest(unittest.TestCase):
             self.assertTrue(unrelated_tmp.exists())
 
     def test_mixed_extension_conflicts_are_rejected(self):
-        import tdlib_mixed_album_uploader as core
+        from tdlib_media_uploader.media import legacy_mixed as core
 
         with patch.object(core.cfg, "MIXED_IMAGE_EXTENSIONS", {".jpg"}), \
                 patch.object(core.cfg, "MIXED_VIDEO_EXTENSIONS", {".jpg"}):
@@ -1450,7 +1458,7 @@ class ImprovementsTest(unittest.TestCase):
                 core._validate_extensions()
 
     def test_tdlib_upload_failure_logs_source_diagnosis(self):
-        import tdlib_common
+        from tdlib_media_uploader.telegram import tdlib_common
 
         class UI:
             def __init__(self):
@@ -1498,8 +1506,8 @@ class ImprovementsTest(unittest.TestCase):
         self.assertEqual(path_utils._entry_suffix("photo.jpg"), ".jpg")
 
     def test_media_scan_applies_telegram_size_limits(self):
-        import tdlib_image_album_uploader as image_core
-        import tdlib_video_album_uploader as video_core
+        from tdlib_media_uploader.media import legacy_image as image_core
+        from tdlib_media_uploader.media import legacy_video as video_core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1537,7 +1545,7 @@ class ImprovementsTest(unittest.TestCase):
                 self.assertEqual(len(video_core.LAST_SCAN_SIZE_SKIPS), 1)
 
     def test_oversize_image_compression_is_deferred_until_upload(self):
-        import tdlib_image_album_uploader as core
+        from tdlib_media_uploader.media import legacy_image as core
         from PIL import Image
 
         class UI:
@@ -1577,7 +1585,7 @@ class ImprovementsTest(unittest.TestCase):
             core.cleanup_compressed_images()
 
     def test_video_monthly_and_forced_grouping(self):
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
         import datetime
         with tempfile.TemporaryDirectory() as directory:
             items = []
@@ -1595,7 +1603,7 @@ class ImprovementsTest(unittest.TestCase):
                     self.assertEqual([p["caption"]["text"] for p in forced], ["Album 1", "Album 2", "Album 3"])
 
     def test_video_date_priority_and_optional_media_date(self):
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "clip.mp4"
@@ -1629,7 +1637,7 @@ class ImprovementsTest(unittest.TestCase):
                 self.assertEqual(fallback["datetime"].timestamp(), path.stat().st_mtime)
 
     def test_mtime_fallback_does_not_probe_ffmpeg_when_media_dates_disabled(self):
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "clip.mp4"
@@ -1646,7 +1654,7 @@ class ImprovementsTest(unittest.TestCase):
             probe.assert_not_called()
 
     def test_disabled_video_dates_uses_filename_only(self):
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1682,42 +1690,8 @@ class ImprovementsTest(unittest.TestCase):
                 saved = json.loads(state.path.read_text(encoding="utf-8"))
             self.assertTrue(all(record["capture_time"] is None for record in saved["completed"].values()))
 
-    def test_filename_only_video_list_handles_missing_dates(self):
-        import tdlib_video_app as entry
-        import tdlib_video_album_uploader as core
-
-        class State:
-            @staticmethod
-            def is_completed(_path):
-                return False
-
-        class UI:
-            def __init__(self):
-                self.messages = []
-
-            def info(self, text):
-                self.messages.append(str(text))
-
-            def files(self, *args, **kwargs):
-                self.messages.append(kwargs.get("caption", ""))
-
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "clip.mp4"
-            path.write_bytes(b"video")
-            item = {
-                "path": path,
-                "capture_time": None,
-                "month_key": core.FORCED_GROUP_KEY,
-                "date_tag": "未读取日期",
-                "fallback": False,
-            }
-            ui = UI()
-            with patch.object(core.cfg, "VIDEO_READ_DATES", False), patch.object(entry, "UI", ui):
-                entry.show_file_list([item], State())
-            self.assertTrue(any("未读取日期" in message for message in ui.messages))
-
     def test_cancelled_video_scan_is_not_reported_as_normal_empty_result(self):
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1744,136 +1718,8 @@ class ImprovementsTest(unittest.TestCase):
             self.assertEqual(result["groups"], [])
             self.assertEqual(result["total_files"], 0)
 
-    def test_no_date_upload_path_reaches_all_63_album_preparations(self):
-        import builtins
-        import tdlib_video_album_uploader as core
-        import tdlib_video_app as entry
-
-        class FakeUI:
-            cancel_event = None
-
-            def __init__(self):
-                self.album_rows = []
-
-            def __getattr__(self, _name):
-                return lambda *args, **kwargs: None
-
-            def confirm_upload(self):
-                return True
-
-            def album(self, *args, **kwargs):
-                self.album_rows.append(kwargs)
-
-        class FakeState:
-            path = Path("state.json")
-
-            @staticmethod
-            def is_completed(_item):
-                return False
-
-            @staticmethod
-            def mark_album_completed(_items, _message_ids):
-                return None
-
-        class FakeProgress:
-            def __init__(self, *_args):
-                pass
-
-            def skip_items(self, *_args):
-                return None
-
-            def begin_album(self, *_args):
-                return None
-
-            def finish_album(self, *_args):
-                return None
-
-            def handle_update(self, *_args):
-                return None
-
-        class FakeClient:
-            is_premium = True
-            caption_length_limit = 4096
-
-            def __init__(self, *_args):
-                self.sent = []
-
-            def add_update_callback(self, *_args):
-                return None
-
-            def remove_update_callback(self, *_args):
-                return None
-
-            def login(self):
-                return None
-
-            def refresh_account_limits(self):
-                return None
-
-            def set_fast_options(self):
-                return None
-
-            def validate_target(self):
-                return None
-
-            def send_contents(self, _contents, _progress, items, **_kwargs):
-                self.sent.append(list(items))
-                return list(range(len(items)))
-
-            def finalize_inflight(self, *_args, **_kwargs):
-                return None
-
-            def close(self):
-                return None
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            paths = []
-            for index in range(623):
-                path = root / f"clip-{index}.mp4"
-                path.write_bytes(b"v")
-                paths.append(path)
-            ui = FakeUI()
-            client_instances = []
-
-            def make_client(*args):
-                client = FakeClient(*args)
-                client_instances.append(client)
-                return client
-
-            def fake_contents(items, *_args, **_kwargs):
-                return ([{"@type": "inputMessageVideo"} for _ in items], list(items), [])
-
-            with patch.object(entry, "UI", ui), \
-                    patch.object(core, "UI", ui), \
-                    patch.object(core.cfg, "VIDEO_DIR", root), \
-                    patch.object(core.cfg, "VIDEO_READ_DATES", False), \
-                    patch.object(core.cfg, "VIDEO_ALBUM_SIZE", 10), \
-                    patch.object(core.cfg, "VIDEO_SHOW_FILE_LIST", False), \
-                    patch.object(core.cfg, "VIDEO_CAPTION_INCLUDE_FILENAMES", False), \
-                    patch.object(core.cfg, "VIDEO_MISSING_DATE_POLICY", "mtime"), \
-                    patch.object(core, "scan_videos", return_value=paths), \
-                    patch.object(core, "cleanup_staging_cache"), \
-                    patch.object(core, "validate_config"), \
-                    patch.object(core, "verify_tdjson_version", return_value="test"), \
-                    patch.object(core, "UploadState", FakeState), \
-                    patch.object(core, "preflight_videos", return_value=[]), \
-                    patch.object(core, "build_video_contents", side_effect=fake_contents), \
-                    patch.object(core, "VideoUploadProgress", FakeProgress), \
-                    patch.object(core, "TDJsonClient", side_effect=make_client), \
-                    patch.object(core, "cleanup_confirmed_staging"), \
-                    patch.object(core, "report_skipped_videos"), \
-                    patch.object(builtins, "input", return_value="y"):
-                entry._main_impl()
-
-            self.assertEqual(len(client_instances), 1)
-            self.assertEqual(len(client_instances[0].sent), 63)
-            self.assertEqual([len(album) for album in client_instances[0].sent[:-1]], [10] * 62)
-            self.assertEqual(len(client_instances[0].sent[-1]), 3)
-            self.assertEqual(sum(len(album) for album in client_instances[0].sent), 623)
-
     def test_jit_revalidation_detects_video_changes_after_scan(self):
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         class UI:
             def warning(self, _text):
@@ -1895,7 +1741,7 @@ class ImprovementsTest(unittest.TestCase):
             self.assertEqual(skipped[0]["category"], "deferred")
 
     def test_local_staging_copies_a_validated_snapshot(self):
-        from staging import stage_file
+        from tdlib_media_uploader.upload.staging import stage_file
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1911,7 +1757,7 @@ class ImprovementsTest(unittest.TestCase):
             self.assertEqual(stage_file(source, snapshot, staging_dir=staging), target)
 
     def test_staging_cleanup_never_enters_linked_shard_directory(self):
-        from staging import cleanup_staging, ensure_managed_staging_dir
+        from tdlib_media_uploader.upload.staging import cleanup_staging, ensure_managed_staging_dir
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1932,7 +1778,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_exiftool_date_query_keeps_full_time_batch(self):
         import subprocess
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1971,7 +1817,7 @@ class ImprovementsTest(unittest.TestCase):
         import datetime
         import threading
         import time
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2013,7 +1859,7 @@ class ImprovementsTest(unittest.TestCase):
             self.assertEqual(progress[-1]["completed"], len(paths))
 
     def test_embedded_date_does_not_probe_ffmpeg(self):
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "clip.mp4"
@@ -2030,7 +1876,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_media_date_reader_uses_one_ffmpeg_invocation(self):
         import subprocess
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "clip.mp4"
@@ -2054,7 +1900,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_media_date_failure_is_not_negative_cached(self):
         import datetime
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         core._media_creation_metadata.cache_clear()
         successful = (
@@ -2107,7 +1953,7 @@ class ImprovementsTest(unittest.TestCase):
             dialog.deleteLater()
 
     def test_video_scan_builds_all_months_once(self):
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
         import datetime
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2128,7 +1974,7 @@ class ImprovementsTest(unittest.TestCase):
                 self.assertEqual(result["album_count"], 2)
 
     def test_unreadable_videos_are_isolated_before_upload(self):
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         class UI:
             def __init__(self):
@@ -2166,7 +2012,7 @@ class ImprovementsTest(unittest.TestCase):
             self.assertTrue(any("坏视频" in message for level, message in ui.messages if level == "log"))
 
     def test_unreadable_video_does_not_abort_album_content_build(self):
-        import tdlib_video_album_uploader as core
+        from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

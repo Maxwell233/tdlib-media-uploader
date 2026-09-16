@@ -16,7 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-import gui_app  # noqa: E402
+from tdlib_media_uploader.gui import main_window as gui_app  # noqa: E402
 from tdlib_media_uploader.gui.pages import HomePage, TaskPage  # noqa: E402
 
 
@@ -42,8 +42,8 @@ class Phase10GuiPagesTest(unittest.TestCase):
             self.assertTrue((pages_root / relative).is_file(), relative)
         for path in (pages_root / "__init__.py", pages_root / "home.py", pages_root / "task.py"):
             imports = _imported_names(path)
-            self.assertNotIn("gui_app", imports)
-            self.assertFalse(any(name.startswith("gui_app.") for name in imports))
+            self.assertNotIn("main_window", imports)
+            self.assertFalse(any(name.startswith("main_window.") for name in imports))
 
     def test_root_gui_keeps_compatibility_exports(self):
         self.assertIs(gui_app.HomePage, HomePage)

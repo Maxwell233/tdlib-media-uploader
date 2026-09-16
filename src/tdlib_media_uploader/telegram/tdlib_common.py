@@ -16,11 +16,11 @@ from pathlib import Path
 
 import tdjson
 
-import app_config as cfg
-from app_logging import TDLIB_LOG_PATH, write_app_log, write_exception
-from path_utils import probe_readable, snapshot_file, stable_path
-from runtime_paths import APP_DATA_DIR, TDLIB_DATABASE_DIR, TDLIB_FILES_DIR
-from upload_journal import (
+from ..config import loader as cfg
+from ..core.logging import TDLIB_LOG_PATH, write_app_log, write_exception
+from ..core.filesystem_legacy import probe_readable, snapshot_file, stable_path
+from ..config.paths import APP_DATA_DIR, TDLIB_DATABASE_DIR, TDLIB_FILES_DIR
+from ..core.upload_journal import (
     CONFIRMED,
     FAILED,
     InflightJournal,
@@ -64,12 +64,12 @@ def verify_tdjson_version() -> str:
     try:
         installed = importlib.metadata.version("tdjson")
     except importlib.metadata.PackageNotFoundError as exc:
-        raise RuntimeError("未安装 tdjson，请先运行对应平台的 setup 脚本。") from exc
+        raise RuntimeError("未安装 tdjson，请使用完整发布包，或按构建文档重新构建应用。") from exc
     if installed != REQUIRED_TDJSON_VERSION:
         raise RuntimeError(
             "tdjson 版本不符合要求。\n\n"
             f"当前：{installed}\n要求：{REQUIRED_TDJSON_VERSION}\n\n"
-            "请运行对应平台的 setup 脚本重新安装固定版本。"
+            "请使用匹配的发布包，或按构建文档重新构建固定版本。"
         )
     return installed
 
@@ -1356,11 +1356,11 @@ class TDJsonClient:
         if not target:
             target = self._target_identity()
         if kind == "video":
-            import tdlib_video_album_uploader as module
+            module = importlib.import_module("tdlib_media_uploader.media.legacy_video")
         elif kind == "image":
-            import tdlib_image_album_uploader as module
+            module = importlib.import_module("tdlib_media_uploader.media.legacy_image")
         elif kind == "mixed":
-            import tdlib_mixed_album_uploader as module
+            module = importlib.import_module("tdlib_media_uploader.media.legacy_mixed")
         else:
             raise ValueError(f"无法为未知媒体类型恢复上传断点：{kind}")
         return module.UploadState(target=target)

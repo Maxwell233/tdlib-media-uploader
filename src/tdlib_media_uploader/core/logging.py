@@ -8,7 +8,7 @@ import threading
 import traceback
 import os
 
-from runtime_paths import APP_DATA_DIR
+from ..config.paths import APP_DATA_DIR
 
 
 LOG_DIR = APP_DATA_DIR / "logs"

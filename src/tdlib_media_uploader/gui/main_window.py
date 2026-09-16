@@ -24,13 +24,14 @@ from collections import defaultdict
 from pathlib import Path
 
 
-_PACKAGE_SOURCE_ROOT = Path(__file__).resolve().parent / "src"
-if _PACKAGE_SOURCE_ROOT.is_dir() and str(_PACKAGE_SOURCE_ROOT) not in sys.path:
-    # Keep direct ``python gui_app.py`` launches compatible with the package
-    # worker boundary while the project is not installed as a wheel yet.
-    sys.path.insert(0, str(_PACKAGE_SOURCE_ROOT))
+if __name__ == "__main__" and not getattr(sys, "frozen", False):
+    print(
+        "此应用仅支持从发布包运行，请从 GitHub Releases 下载对应平台的程序包。",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 
-from album_metadata import (
+from ..core.album import (
     CaptionLimitError,
     CaptionStore,
     album_key,
@@ -38,8 +39,8 @@ from album_metadata import (
     validate_caption,
     with_filename_description,
 )
-from app_logging import APP_LOG_PATH, LOG_DIR, TDLIB_LOG_PATH, write_app_log
-from path_utils import (
+from ..core.logging import APP_LOG_PATH, LOG_DIR, TDLIB_LOG_PATH, write_app_log
+from ..core.filesystem_legacy import (
     file_mtime,
     is_link_or_junction,
     iter_files,
@@ -87,7 +88,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from runtime_paths import (
+from ..config.paths import (
     APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH,
     DATA_DIR, VIDEO_STATE_DIR, IMAGE_STATE_DIR, MIXED_STATE_DIR,
     CAPTIONS_DIR, UPLOAD_INFLIGHT_DIR, THUMBNAIL_CACHE_DIR,
@@ -97,10 +98,10 @@ from runtime_paths import (
     TDLIB_FILES_DIR as RUNTIME_TDLIB_FILES_DIR,
     read_version, ensure_data_dirs,
 )
-from instance_lock import InstanceLock
-from self_test import run_self_test
-from tdlib_media_uploader.gui.events import AuthBridge, GuiConsoleUI
-from tdlib_media_uploader.gui.models import (
+from ..core.instance_lock import InstanceLock
+from ..core.self_test import run_self_test
+from .events import AuthBridge, GuiConsoleUI
+from .models import (
     caption_payload as _v2_caption_payload,
     group_key as _v2_group_key,
     item_dict as _v2_item_dict,
@@ -108,7 +109,7 @@ from tdlib_media_uploader.gui.models import (
     plan_dict as _v2_plan_dict,
     scan_result as _translate_v2_scan_result,
 )
-from tdlib_media_uploader.gui.pages import (
+from .pages import (
     HomePage,
     ImagePage as _PackageImagePage,
     MixedPage as _PackageMixedPage,
@@ -117,7 +118,7 @@ from tdlib_media_uploader.gui.pages import (
     UploadPageServices,
     VideoPage as _PackageVideoPage,
 )
-from tdlib_media_uploader.gui.workers import ScanWorker, UploadWorker
+from .workers import ScanWorker, UploadWorker
 
 
 PROJECT_DIR = RESOURCE_DIR
@@ -209,7 +210,7 @@ _prepare_qt_plugins()
 
 def _ensure_config_file() -> bool:
     # The packaged health check must work on a clean install without writing
-    # a user config.  ``app_config`` loads the bundled template in memory for
+    # a user config.  The config loader loads the bundled template in memory for
     # this command-line mode.
     if "--self-test" in sys.argv[1:]:
         return False
@@ -223,7 +224,7 @@ def _ensure_config_file() -> bool:
 _CONFIG_CREATED = _ensure_config_file()
 _CONFIG_ERROR = ""
 try:
-    import app_config as cfg
+    from ..config import loader as cfg
 except Exception as exc:  # The settings page can still explain the problem.
     cfg = None
     _CONFIG_ERROR = str(exc)
@@ -232,10 +233,10 @@ except Exception as exc:  # The settings page can still explain the problem.
 def _reload_config() -> str:
     global cfg, _CONFIG_ERROR
     try:
-        if "app_config" in sys.modules:
-            cfg = importlib.reload(sys.modules["app_config"])
+        if "tdlib_media_uploader.config.loader" in sys.modules:
+            cfg = importlib.reload(sys.modules["tdlib_media_uploader.config.loader"])
         else:
-            cfg = importlib.import_module("app_config")
+            cfg = importlib.import_module("tdlib_media_uploader.config.loader")
         _CONFIG_ERROR = ""
         return ""
     except Exception as exc:
@@ -806,11 +807,11 @@ def _legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) ->
     scan_size_skips: list[dict] = []
     try:
         if kind == "video":
-            import tdlib_video_album_uploader as core_module
+            from . import legacy_video as core_module
         elif kind == "image":
-            import tdlib_image_album_uploader as core_module
+            from . import legacy_image as core_module
         elif kind == "mixed":
-            import tdlib_mixed_album_uploader as core_module
+            from . import legacy_mixed as core_module
         else:
             raise ValueError(f"未知媒体类型：{kind}")
         core = core_module
@@ -1284,23 +1285,13 @@ def _legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) ->
 
 
 def _load_v2_gui_integration():
-    """Load the package GUI boundary in both source and installed layouts."""
+    """Load the package GUI boundary from the bundled application."""
 
-    try:
-        from tdlib_media_uploader.gui.integration import (  # noqa: PLC0415
-            V2IntegrationUnavailable,
-            run_v2_upload,
-            scan_v2,
-        )
-    except ModuleNotFoundError:
-        source_root = Path(__file__).resolve().parent / "src"
-        if source_root.is_dir() and str(source_root) not in sys.path:
-            sys.path.insert(0, str(source_root))
-        from tdlib_media_uploader.gui.integration import (  # noqa: PLC0415
-            V2IntegrationUnavailable,
-            run_v2_upload,
-            scan_v2,
-        )
+    from .integration import (  # noqa: PLC0415
+        V2IntegrationUnavailable,
+        run_v2_upload,
+        scan_v2,
+    )
     return V2IntegrationUnavailable, run_v2_upload, scan_v2
 
 
@@ -1325,7 +1316,7 @@ def _scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
         raise RuntimeError(_CONFIG_ERROR or "配置不可用。")
     try:
         unavailable, _run_v2_upload, scan_v2 = _load_v2_gui_integration()
-        import runtime_paths as _runtime_paths  # noqa: PLC0415
+        from ..config import paths as _runtime_paths  # noqa: PLC0415
 
         bundle = scan_v2(
             kind,
@@ -1872,7 +1863,7 @@ class InflightPage(QWidget):
         if not isinstance(record, dict):
             return
         action = "标记为已发送" if sent else "允许下次重新发送"
-        from upload_journal import _record_target
+        from ..core.upload_journal import _record_target
 
         target = _record_target(record)
         has_target = bool(target)
@@ -1900,7 +1891,7 @@ class InflightPage(QWidget):
 
     def reload_records(self):
         try:
-            from upload_journal import InflightJournal, UNRESOLVED, _record_target
+            from ..core.upload_journal import InflightJournal, UNRESOLVED, _record_target
 
             records = [
                 record for record in InflightJournal().list_unresolved()
@@ -3256,7 +3247,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "依赖不完整",
-                "当前环境只能预览，无法启动 TDLib 上传。请先按 README 的“从源码运行”说明安装依赖。",
+                "当前环境只能预览，无法启动 TDLib 上传。请从 GitHub Releases 下载完整发布包。",
             )
             return
         if _cfg("API_ID", 12345678) == 12345678 or _cfg("API_HASH", "YOUR_API_HASH") == "YOUR_API_HASH":
@@ -3395,10 +3386,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "记录无效", "这条未确认记录缺少媒体类型或 Album 标识。")
             return
         try:
-            from tdlib_common import TDJsonClient
+            from ..telegram.tdlib_common import TDJsonClient
 
             client = TDJsonClient.__new__(TDJsonClient)
-            from upload_journal import InflightJournal
+            from ..core.upload_journal import InflightJournal
 
             client.inflight_journal = InflightJournal()
             target = record.get("target") if isinstance(record.get("target"), dict) else {
@@ -3552,6 +3543,12 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    if not getattr(sys, "frozen", False):
+        print(
+            "此应用仅支持从发布包运行，请从 GitHub Releases 下载对应平台的程序包。",
+            file=sys.stderr,
+        )
+        return 2
     if "--self-test" in sys.argv[1:]:
         return run_self_test()
     try:

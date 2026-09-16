@@ -56,16 +56,11 @@ macOS:  exiftool_path = 'tools/exiftool'
 - caption_include_group_title、caption_include_filenames、caption_include_filename_numbers
   控制文件夹标题、文件名和序号。
 
-FFmpeg（源码运行视频功能）
-============================
+FFmpeg（发布包内置）
+====================
 
-发布的 Windows ZIP 和 macOS DMG 已内置经过许可检查的 LGPL FFmpeg。若直接运行源码，
-请使用 LGPL 构建并任选一种方式提供：
-
-1. 放置在：
-   Windows: tools/ffmpeg/ffmpeg.exe
-   macOS:  tools/ffmpeg/ffmpeg
-2. 或将 ffmpeg 可执行文件所在目录加入 PATH。
+发布的 Windows ZIP 和 macOS DMG 已内置经过许可检查的 LGPL FFmpeg。应用仅支持从发布包
+运行，不提供源码启动方式，也不需要用户自行准备 FFmpeg。
 
 Windows 构建脚本会从 BtbN/FFmpeg-Builds 固定版本下载 Windows x64 LGPL 构建，校验
 SHA-256；macOS 构建脚本从 FFmpeg 7.1.1 官方源码编译 arm64 LGPL 构建。两者都会把

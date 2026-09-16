@@ -14,8 +14,8 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 
-from media_identity import canonical_target, media_file_signature, relative_media_path, target_identity
-from path_utils import file_snapshot, stable_path
+from .identity import canonical_target, media_file_signature, relative_media_path, target_identity
+from .filesystem_legacy import file_snapshot, stable_path
 
 
 def _snapshot_for_item(item, path, snapshot_provider=None):

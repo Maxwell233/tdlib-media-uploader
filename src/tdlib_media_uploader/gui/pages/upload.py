@@ -36,15 +36,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from album_metadata import (
+from ...core.album import (
     CaptionLimitError,
     CaptionStore,
     compose_caption,
     validate_caption,
     with_filename_description,
 )
-from path_utils import stable_path
-from runtime_paths import RESOURCE_DIR
+from ...core.filesystem_legacy import stable_path
+from ...config.paths import RESOURCE_DIR
 
 
 MEDIA_KINDS = ("video", "image", "mixed")
@@ -74,7 +74,7 @@ def _format_size(value: float | int | None) -> str:
 
 def _config_getter(name: str, default=None):
     try:
-        config = importlib.import_module("app_config")
+        config = importlib.import_module("tdlib_media_uploader.config.loader")
     except Exception:
         return default
     return getattr(config, name, default)
@@ -82,7 +82,7 @@ def _config_getter(name: str, default=None):
 
 def _target_getter(kind: str) -> dict[str, Any]:
     try:
-        config = importlib.import_module("app_config")
+        config = importlib.import_module("tdlib_media_uploader.config.loader")
     except Exception:
         config = None
     target_for = getattr(config, "target_for", None)
@@ -125,7 +125,7 @@ def _item_size(value: Any) -> int:
 
 @dataclass
 class UploadPageServices:
-    """Dependencies needed to keep the upload page independent of ``gui_app``."""
+    """Dependencies needed to keep the upload page independent of the window."""
 
     require_kind: Callable[[str], str] = _require_kind
     kind_label: Callable[[str], str] = _kind_label

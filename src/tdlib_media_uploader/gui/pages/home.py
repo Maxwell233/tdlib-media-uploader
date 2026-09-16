@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from runtime_paths import read_version
+from ...config.paths import read_version
 
 
 def format_size(value: float | int | None) -> str:

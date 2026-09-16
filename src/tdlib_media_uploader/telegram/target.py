@@ -67,7 +67,7 @@ class TelegramTarget:
 def canonical_target(target: Any = None) -> dict[str, int | str]:
     """Return the mode-aware canonical target, or ``{}`` when malformed.
 
-    This intentionally mirrors V1.9 ``media_identity.canonical_target``:
+    This intentionally mirrors V1.9 ``core.identity.canonical_target``:
     irrelevant fields are ignored and invalid values do not leak into state or
     journal identities.
     """

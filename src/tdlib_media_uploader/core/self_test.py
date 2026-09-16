@@ -9,7 +9,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from runtime_paths import (
+from ..config.paths import (
     DATA_DIR,
     IS_FROZEN,
     RESOURCE_DIR,
@@ -73,8 +73,8 @@ def run_self_test(*, emit=print) -> int:
             failures.append(f"TDLib files_directory 路径错误：{TDLIB_FILES_DIR}")
         if not _is_within(TDLIB_DATABASE_DIR, DATA_DIR) or not _is_within(TDLIB_FILES_DIR, DATA_DIR):
             failures.append("TDLib 登录数据目录必须位于 DATA_DIR 内。")
-        # Source runs intentionally place ``data`` below the repository, so
-        # RESOURCE_DIR is an ancestor there.  A frozen bundle must keep its
+        # Developer/CI checks intentionally place ``data`` below the
+        # repository, so RESOURCE_DIR is an ancestor there. A frozen bundle must keep its
         # writable data beside the executable (Windows) or in Application
         # Support (macOS), never inside the read-only _internal/resource tree.
         if IS_FROZEN and (
@@ -85,7 +85,7 @@ def run_self_test(*, emit=print) -> int:
         # Validate the payload that login actually sends, rather than only
         # checking the exported constants above.  Importing this pure helper
         # does not create a client or connect to Telegram.
-        from tdlib_common import build_tdlib_parameters
+        from ..telegram.tdlib_common import build_tdlib_parameters
 
         parameters = build_tdlib_parameters("self-test")
         if parameters.get("database_directory") != str(TDLIB_DATABASE_DIR.resolve()):
@@ -104,9 +104,9 @@ def run_self_test(*, emit=print) -> int:
     if not TEMPLATE_CONFIG_PATH.is_file():
         failures.append(f"缺少配置模板：{TEMPLATE_CONFIG_PATH}")
     for module_name in (
-        "tdjson", "PySide6", "PIL", "tdlib_common",
-        "tdlib_video_album_uploader", "tdlib_image_album_uploader",
-        "tdlib_mixed_album_uploader",
+        "tdjson", "PySide6", "PIL", "tdlib_media_uploader.telegram.tdlib_common",
+        "tdlib_media_uploader.media.legacy_video", "tdlib_media_uploader.media.legacy_image",
+        "tdlib_media_uploader.media.legacy_mixed",
     ):
         try:
             importlib.import_module(module_name)
@@ -124,7 +124,7 @@ def run_self_test(*, emit=print) -> int:
     if ffmpeg:
         try:
             import subprocess
-            from path_utils import run_cancellable_process
+            from .filesystem_legacy import run_cancellable_process
 
             run_cancellable_process(
                 [ffmpeg, "-version"],

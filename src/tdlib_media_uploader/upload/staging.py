@@ -16,7 +16,7 @@ import re
 import time
 from pathlib import Path
 
-from path_utils import (
+from ..core.filesystem_legacy import (
     FileSnapshot,
     is_link_or_junction,
     is_network_path,
@@ -77,7 +77,7 @@ def _log_staging_warning(message: str) -> None:
     """Record a link/reparse refusal without making logging a dependency."""
 
     try:
-        from app_logging import write_app_log
+        from ..core.logging import write_app_log
 
         write_app_log("WARNING", message, source="staging")
     except Exception:

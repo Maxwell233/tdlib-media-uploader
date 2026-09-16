@@ -15,9 +15,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-SRC = Path(__file__).resolve().parents[1] / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 from tdlib_media_uploader.core import concurrency, filesystem, readiness, sorting  # noqa: E402
 from tdlib_media_uploader.core.models import FileSnapshot  # noqa: E402

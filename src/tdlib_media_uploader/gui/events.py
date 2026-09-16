@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable
 
-from app_logging import write_app_log
+from ..core.logging import write_app_log
 from PySide6.QtCore import QObject, Signal
 
 

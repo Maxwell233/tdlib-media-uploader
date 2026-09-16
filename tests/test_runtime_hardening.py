@@ -10,12 +10,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import album_metadata
-import app_config
-import gui_app
-import path_utils
-import self_test
-from instance_lock import InstanceLock, run_with_instance_lock
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from tdlib_media_uploader.core import album as album_metadata
+from tdlib_media_uploader.config import loader as app_config
+from tdlib_media_uploader.gui import main_window as gui_app
+from tdlib_media_uploader.core import filesystem_legacy as path_utils
+from tdlib_media_uploader.core import self_test
+from tdlib_media_uploader.core.instance_lock import InstanceLock, run_with_instance_lock
 
 
 class V190HardeningTest(unittest.TestCase):
@@ -34,8 +39,8 @@ class V190HardeningTest(unittest.TestCase):
         self.assertEqual(app_config.video_size_status(premium + 1, is_premium=True), "oversize")
 
     def test_video_and_mixed_scanners_apply_the_same_video_limits(self):
-        import tdlib_mixed_album_uploader as mixed_core
-        import tdlib_video_album_uploader as video_core
+        from tdlib_media_uploader.media import legacy_mixed as mixed_core
+        from tdlib_media_uploader.media import legacy_video as video_core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -97,7 +102,7 @@ class V190HardeningTest(unittest.TestCase):
             album_metadata.validate_caption("x" * 1501, 1024)
 
     def test_runtime_caption_limit_blocks_before_tdlib_request(self):
-        from tdlib_common import TDJsonClient
+        from tdlib_media_uploader.telegram.tdlib_common import TDJsonClient
 
         client = TDJsonClient.__new__(TDJsonClient)
         client.caption_length_limit = 1024
@@ -117,7 +122,7 @@ class V190HardeningTest(unittest.TestCase):
         self.assertEqual(requests, [])
 
     def test_runtime_caption_limit_above_legacy_1024_is_allowed(self):
-        from tdlib_common import TDJsonClient
+        from tdlib_media_uploader.telegram.tdlib_common import TDJsonClient
 
         client = TDJsonClient.__new__(TDJsonClient)
         client.caption_length_limit = 2048
@@ -148,16 +153,16 @@ class V190HardeningTest(unittest.TestCase):
         self.assertLessEqual(len(value), 20)
 
     def test_clean_self_test_does_not_create_config(self):
-        template = Path(app_config.RESOURCE_DIR) / "config.example.toml"
+        template = Path(app_config.TEMPLATE_CONFIG_PATH)
         with tempfile.TemporaryDirectory() as directory:
             missing = Path(directory) / "data" / "config.toml"
             with patch.object(gui_app, "CONFIG_PATH", missing), \
                     patch.object(gui_app, "TEMPLATE_CONFIG_PATH", template), \
-                    patch.object(sys, "argv", ["gui_app.py", "--self-test"]):
+                    patch.object(sys, "argv", ["main_window.py", "--self-test"]):
                 self.assertFalse(gui_app._ensure_config_file())
                 self.assertFalse(missing.exists())
             with patch.object(app_config, "CONFIG_PATH", missing), \
-                    patch.object(sys, "argv", ["gui_app.py", "--self-test"]):
+                    patch.object(sys, "argv", ["main_window.py", "--self-test"]):
                 loaded = app_config._load()
             self.assertIn("telegram", loaded)
             self.assertFalse(missing.exists())
@@ -165,7 +170,7 @@ class V190HardeningTest(unittest.TestCase):
             existing.parent.mkdir(parents=True, exist_ok=True)
             existing.write_text("this is not valid toml =", encoding="utf-8")
             with patch.object(app_config, "CONFIG_PATH", existing), \
-                    patch.object(sys, "argv", ["gui_app.py", "--self-test"]):
+                    patch.object(sys, "argv", ["main_window.py", "--self-test"]):
                 loaded = app_config._load()
             self.assertIn("telegram", loaded)
             self.assertEqual(existing.read_text(encoding="utf-8"), "this is not valid toml =")
@@ -251,7 +256,7 @@ class V190HardeningTest(unittest.TestCase):
             )
 
     def test_staging_rejects_linked_parent(self):
-        from staging import ensure_managed_staging_dir
+        from tdlib_media_uploader.upload.staging import ensure_managed_staging_dir
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -266,7 +271,7 @@ class V190HardeningTest(unittest.TestCase):
                 ensure_managed_staging_dir(linked_base / "managed")
 
     def test_staging_rejects_linked_configured_base(self):
-        from staging import ensure_managed_staging_dir
+        from tdlib_media_uploader.upload.staging import ensure_managed_staging_dir
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

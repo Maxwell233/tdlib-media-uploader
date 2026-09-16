@@ -62,15 +62,15 @@ def run_with_instance_lock(callback, *args, lock_held: bool = False, lock_path=N
     """Run a supported entry point while holding the shared data lock.
 
     The GUI already owns ``DATA_DIR/app.lock`` while it invokes an uploader
-    in its worker thread.  It passes ``lock_held=True`` to avoid attempting a
-    non-reentrant second lock.  Direct Python entry points acquire the exact
-    same lock, preventing concurrent TDLib database/state writers.
+    in its worker thread. It passes ``lock_held=True`` to avoid attempting a
+    non-reentrant second lock. Other internal upload callbacks acquire the
+    exact same lock, preventing concurrent TDLib database/state writers.
     """
 
     if lock_held:
         return callback(*args, **kwargs)
     if lock_path is None:
-        from runtime_paths import DATA_DIR
+        from ..config.paths import DATA_DIR
 
         lock_path = DATA_DIR / "app.lock"
     lock = InstanceLock(lock_path)

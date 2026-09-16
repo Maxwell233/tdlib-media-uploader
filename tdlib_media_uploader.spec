@@ -12,14 +12,9 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 PROJECT_DIR = Path(SPEC).resolve().parent
-SOURCE_DIR = PROJECT_DIR / "src"
+SRC_DIR = PROJECT_DIR / "src"
 PACKAGE_NAME = "tdlib_media_uploader"
-
-# The current GUI entrypoint still lives at the repository root, while the V2
-# package is migrated incrementally below ``src``.  Make both import roots
-# explicit so a spec build and a source run resolve the same modules.
-if SOURCE_DIR.is_dir() and str(SOURCE_DIR) not in sys.path:
-    sys.path.insert(0, str(SOURCE_DIR))
+PACKAGE_DIR = SRC_DIR / PACKAGE_NAME
 
 
 def collect_package(name: str):
@@ -53,7 +48,6 @@ def is_embedded_ffmpeg(item) -> bool:
 
 
 RESOURCE_DATA = (
-    (PROJECT_DIR / "config.example.toml", "."),
     (PROJECT_DIR / "resources" / "default_config.toml", "resources"),
     (PROJECT_DIR / "VERSION", "."),
     (PROJECT_DIR / "LICENSE", "."),
@@ -82,25 +76,34 @@ ffmpeg_build_info = PROJECT_DIR / "tools" / "ffmpeg" / "BUILD_INFO.txt"
 if ffmpeg_build_info.is_file():
     datas.append((str(ffmpeg_build_info), "tools/ffmpeg"))
 
-# Keep the package's current public modules explicit for deterministic builds.
+# Keep the package's public modules explicit for deterministic builds.
 # ``collect_submodules`` below also covers packages added during the staged V2
 # migration without requiring another spec change for every new module.
 PACKAGE_HIDDENIMPORTS = [
     "tdlib_media_uploader",
     "tdlib_media_uploader.app",
     "tdlib_media_uploader.contracts",
-    "tdlib_media_uploader.core",
-    "tdlib_media_uploader.core.models",
-    "tdlib_media_uploader.core.sorting",
-    "tdlib_media_uploader.core.filesystem",
-    "tdlib_media_uploader.core.readiness",
-    "tdlib_media_uploader.core.concurrency",
     "tdlib_media_uploader.config",
     "tdlib_media_uploader.config.model",
     "tdlib_media_uploader.config.loader",
     "tdlib_media_uploader.config.paths",
+    "tdlib_media_uploader.core",
+    "tdlib_media_uploader.core.models",
+    "tdlib_media_uploader.core.sorting",
+    "tdlib_media_uploader.core.filesystem",
+    "tdlib_media_uploader.core.filesystem_legacy",
+    "tdlib_media_uploader.core.readiness",
+    "tdlib_media_uploader.core.concurrency",
+    "tdlib_media_uploader.core.album",
+    "tdlib_media_uploader.core.identity",
+    "tdlib_media_uploader.core.upload_state",
+    "tdlib_media_uploader.core.upload_journal",
+    "tdlib_media_uploader.core.logging",
+    "tdlib_media_uploader.core.instance_lock",
+    "tdlib_media_uploader.core.self_test",
     "tdlib_media_uploader.gui",
     "tdlib_media_uploader.gui.application",
+    "tdlib_media_uploader.gui.main_window",
     "tdlib_media_uploader.gui.events",
     "tdlib_media_uploader.gui.integration",
     "tdlib_media_uploader.gui.models",
@@ -116,6 +119,9 @@ PACKAGE_HIDDENIMPORTS = [
     "tdlib_media_uploader.media.image",
     "tdlib_media_uploader.media.mixed",
     "tdlib_media_uploader.media.video",
+    "tdlib_media_uploader.media.legacy_image",
+    "tdlib_media_uploader.media.legacy_mixed",
+    "tdlib_media_uploader.media.legacy_video",
     "tdlib_media_uploader.processes",
     "tdlib_media_uploader.processes.runner",
     "tdlib_media_uploader.telegram",
@@ -124,28 +130,15 @@ PACKAGE_HIDDENIMPORTS = [
     "tdlib_media_uploader.telegram.target",
     "tdlib_media_uploader.telegram.limits",
     "tdlib_media_uploader.telegram.send_result",
+    "tdlib_media_uploader.telegram.tdlib_common",
     "tdlib_media_uploader.upload",
     "tdlib_media_uploader.upload.engine",
     "tdlib_media_uploader.upload.planner",
     "tdlib_media_uploader.upload.preflight",
+    "tdlib_media_uploader.upload.staging",
 ]
 
 hiddenimports = [
-    "app_config",
-    "album_metadata",
-    "runtime_paths",
-    "path_utils",
-    "media_identity",
-    "upload_state",
-    "instance_lock",
-    "self_test",
-    "gui_app",
-    "tdlib_common",
-    "upload_journal",
-    "tdlib_image_album_uploader",
-    "tdlib_video_album_uploader",
-    "tdlib_mixed_album_uploader",
-    "tdlib_video_app",
     "tdjson",
     "PIL",
     "imageio_ffmpeg",
@@ -166,8 +159,8 @@ for package_name in ("tdjson", "imageio_ffmpeg"):
 
 
 a = Analysis(
-    [str(SOURCE_DIR / PACKAGE_NAME / "app.py")],
-    pathex=[str(PROJECT_DIR), str(SOURCE_DIR)],
+    [str(PACKAGE_DIR / "app.py")],
+    pathex=[str(SRC_DIR), str(PROJECT_DIR)],
     binaries=binaries,
     datas=datas,
     hiddenimports=sorted(set(hiddenimports)),

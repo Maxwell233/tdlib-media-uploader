@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-import sys
 import tempfile
 import unittest
+import sys
 from unittest.mock import patch
 
 

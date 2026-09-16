@@ -17,9 +17,9 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from media_identity import canonical_target
-from path_utils import file_snapshot, stable_path
-from runtime_paths import APP_DATA_DIR
+from .identity import canonical_target
+from .filesystem_legacy import file_snapshot, stable_path
+from ..config.paths import APP_DATA_DIR
 
 
 PREPARED = "PREPARED"
@@ -38,7 +38,7 @@ def normalize_target(target=None) -> dict:
     """Return the shared canonical Telegram target identity.
 
     The journal keeps this public name for existing callers, while the actual
-    mode-specific normalization lives in :mod:`media_identity` so UploadState,
+    mode-specific normalization lives in :mod:`.identity` so UploadState,
     journals and GUI reconciliation cannot drift apart.
     """
 

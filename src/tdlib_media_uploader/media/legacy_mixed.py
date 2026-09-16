@@ -21,10 +21,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
-from media_identity import media_file_signature
-from upload_state import UploadState as SharedUploadState
-from path_utils import (
+from ..core.album import CaptionStore, album_key, compose_caption, with_filename_description
+from ..core.identity import media_file_signature
+from ..core.upload_state import UploadState as SharedUploadState
+from ..core.filesystem_legacy import (
     display_path,
     CHANGED,
     DEFERRED,
@@ -46,14 +46,13 @@ from path_utils import (
     validate_scan_root,
     wait_for_file_ready,
 )
-import app_config as cfg
-from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
-from runtime_paths import APP_DATA_DIR, RESOURCE_DIR, MIXED_STATE_DIR
-from staging import cleanup_staging, remove_staged_file, should_stage, stage_file
-from instance_lock import run_with_instance_lock
+from ..config import loader as cfg
+from ..telegram.tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
+from ..config.paths import APP_DATA_DIR, RESOURCE_DIR, MIXED_STATE_DIR
+from ..upload.staging import cleanup_staging, remove_staged_file, should_stage, stage_file
 
-import tdlib_image_album_uploader as image_core
-import tdlib_video_album_uploader as video_core
+from . import legacy_image as image_core
+from . import legacy_video as video_core
 
 
 PROJECT_DIR = RESOURCE_DIR
@@ -903,12 +902,3 @@ def _main_impl():
         client.close()
         cleanup_staging_cache()
         image_core.cleanup_compressed_images()
-
-
-def main():
-    """Run the mixed uploader under the shared single-instance lock."""
-
-    return run_with_instance_lock(
-        _main_impl,
-        lock_held=bool(globals().get("_INSTANCE_LOCK_HELD", False)),
-    )

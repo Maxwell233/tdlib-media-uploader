@@ -6,11 +6,17 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+import sys
 import unittest
 from unittest.mock import patch
 
-import tdlib_common
-import tdlib_mixed_album_uploader as mixed_core
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from tdlib_media_uploader.telegram import tdlib_common
+from tdlib_media_uploader.media import legacy_mixed as mixed_core
 
 
 class MixedInputFileRegressionTest(unittest.TestCase):

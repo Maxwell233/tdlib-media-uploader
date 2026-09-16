@@ -13,7 +13,7 @@ from pathlib import Path
 import threading
 from typing import Any
 
-from app_logging import write_exception
+from ..core.logging import write_exception
 from PySide6.QtCore import QThread, Signal
 
 from .events import AuthBridge, GuiConsoleUI
@@ -119,12 +119,12 @@ class UploadWorker(QThread):
     def _config(self) -> Any:
         if self.config is not None:
             return self.config
-        return importlib.import_module("app_config")
+        return importlib.import_module("tdlib_media_uploader.config.loader")
 
     def _runtime_paths(self) -> Any:
         if self.runtime_paths is not None:
             return self.runtime_paths
-        return importlib.import_module("runtime_paths")
+        return importlib.import_module("tdlib_media_uploader.config.paths")
 
     def request_stop(self):
         self.ui.request_stop()

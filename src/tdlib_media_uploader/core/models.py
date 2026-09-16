@@ -37,7 +37,8 @@ class FileSnapshot:
         return self.size, self.mtime_ns
 
     def __iter__(self):
-        # Preserve the convenient tuple-unpacking behavior of path_utils.
+        # Preserve the convenient tuple-unpacking behavior of the legacy
+        # filesystem compatibility layer.
         yield self.size
         yield self.mtime_ns
 

@@ -16,7 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-import gui_app  # noqa: E402
+from tdlib_media_uploader.gui import main_window as gui_app  # noqa: E402
 from tdlib_media_uploader.gui.pages import (  # noqa: E402
     ImagePage,
     MixedPage,
@@ -48,8 +48,8 @@ class Phase11GuiUploadPageTest(unittest.TestCase):
             path = pages_root / relative
             self.assertTrue(path.is_file(), relative)
             imports = _imported_names(path)
-            self.assertNotIn("gui_app", imports)
-            self.assertFalse(any(name.startswith("gui_app.") for name in imports))
+            self.assertNotIn("main_window", imports)
+            self.assertFalse(any(name.startswith("main_window.") for name in imports))
 
     def test_route_pages_bind_the_expected_media_kind(self):
         for page_type, kind in (

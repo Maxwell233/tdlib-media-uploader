@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-import sys
 import tempfile
 import unittest
+import sys
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

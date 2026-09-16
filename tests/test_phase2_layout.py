@@ -27,8 +27,7 @@ sys.frozen = %r
 sys.executable = %r
 sys._MEIPASS = %r
 sys.path.insert(0, %r)
-import runtime_paths as paths
-from tdlib_media_uploader.config import paths as package_paths
+from tdlib_media_uploader.config import paths
 print(json.dumps({
     "resource": str(paths.RESOURCE_DIR),
     "template": str(paths.TEMPLATE_CONFIG_PATH),
@@ -36,11 +35,6 @@ print(json.dumps({
     "assets": str(paths.ASSETS_DIR),
     "tools": str(paths.TOOLS_DIR),
     "ffmpeg": str(paths.FFMPEG_DIR),
-    "package_template": str(package_paths.TEMPLATE_CONFIG_PATH),
-    "package_version": str(package_paths.VERSION_PATH),
-    "package_assets": str(package_paths.ASSETS_DIR),
-    "package_tools": str(package_paths.TOOLS_DIR),
-    "package_ffmpeg": str(package_paths.FFMPEG_DIR),
 }, ensure_ascii=False))
 """ % (frozen, str(executable), str(meipass), str(PROJECT_ROOT / "src"))
     result = subprocess.run(
@@ -84,14 +78,13 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
             "PR artifact names must not inherit the pull_request merge ref slash",
         )
 
-    def test_package_paths_facade_is_present_and_keeps_one_path_contract(self):
+    def test_package_paths_owns_the_runtime_path_contract(self):
         package_path = PROJECT_ROOT / "src" / "tdlib_media_uploader" / "config" / "paths.py"
         self.assertTrue(package_path.is_file(), f"missing declared V2 module: {package_path}")
 
         src_root = PROJECT_ROOT / "src"
         if str(src_root) not in sys.path:
             sys.path.insert(0, str(src_root))
-        import runtime_paths
         from tdlib_media_uploader.config import paths
 
         for name in (
@@ -102,9 +95,9 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
             "TOOLS_DIR",
             "FFMPEG_DIR",
         ):
-            self.assertIs(getattr(paths, name), getattr(runtime_paths, name))
+            self.assertTrue(hasattr(paths, name))
 
-    def test_spec_declares_both_source_roots_and_package_hidden_imports(self):
+    def test_spec_declares_src_package_and_hidden_imports(self):
         source = SPEC_PATH.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(SPEC_PATH))
         package_modules = _literal_strings_in_assignment(tree, "PACKAGE_HIDDENIMPORTS")
@@ -112,18 +105,27 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
             "tdlib_media_uploader",
             "tdlib_media_uploader.app",
             "tdlib_media_uploader.contracts",
-            "tdlib_media_uploader.core",
-            "tdlib_media_uploader.core.models",
-            "tdlib_media_uploader.core.sorting",
-            "tdlib_media_uploader.core.filesystem",
-            "tdlib_media_uploader.core.readiness",
-            "tdlib_media_uploader.core.concurrency",
             "tdlib_media_uploader.config",
             "tdlib_media_uploader.config.model",
             "tdlib_media_uploader.config.loader",
             "tdlib_media_uploader.config.paths",
+            "tdlib_media_uploader.core",
+            "tdlib_media_uploader.core.models",
+            "tdlib_media_uploader.core.sorting",
+            "tdlib_media_uploader.core.filesystem",
+            "tdlib_media_uploader.core.filesystem_legacy",
+            "tdlib_media_uploader.core.readiness",
+            "tdlib_media_uploader.core.concurrency",
+            "tdlib_media_uploader.core.album",
+            "tdlib_media_uploader.core.identity",
+            "tdlib_media_uploader.core.upload_state",
+            "tdlib_media_uploader.core.upload_journal",
+            "tdlib_media_uploader.core.logging",
+            "tdlib_media_uploader.core.instance_lock",
+            "tdlib_media_uploader.core.self_test",
             "tdlib_media_uploader.gui",
             "tdlib_media_uploader.gui.application",
+            "tdlib_media_uploader.gui.main_window",
             "tdlib_media_uploader.gui.events",
             "tdlib_media_uploader.gui.integration",
             "tdlib_media_uploader.gui.models",
@@ -139,6 +141,9 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
             "tdlib_media_uploader.media.image",
             "tdlib_media_uploader.media.mixed",
             "tdlib_media_uploader.media.video",
+            "tdlib_media_uploader.media.legacy_image",
+            "tdlib_media_uploader.media.legacy_mixed",
+            "tdlib_media_uploader.media.legacy_video",
             "tdlib_media_uploader.processes",
             "tdlib_media_uploader.processes.runner",
             "tdlib_media_uploader.telegram",
@@ -147,23 +152,24 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
             "tdlib_media_uploader.telegram.target",
             "tdlib_media_uploader.telegram.limits",
             "tdlib_media_uploader.telegram.send_result",
+            "tdlib_media_uploader.telegram.tdlib_common",
             "tdlib_media_uploader.upload",
             "tdlib_media_uploader.upload.engine",
             "tdlib_media_uploader.upload.planner",
             "tdlib_media_uploader.upload.preflight",
+            "tdlib_media_uploader.upload.staging",
         }
         self.assertTrue(expected_modules <= package_modules)
         self.assertIn("from PyInstaller.utils.hooks import collect_all, collect_submodules", source)
         self.assertIn("collect_submodules(PACKAGE_NAME)", source)
-        self.assertIn("pathex=[str(PROJECT_DIR), str(SOURCE_DIR)]", source)
-        self.assertIn('[str(SOURCE_DIR / PACKAGE_NAME / "app.py")]', source)
+        self.assertIn("pathex=[str(SRC_DIR), str(PROJECT_DIR)]", source)
+        self.assertIn('[str(PACKAGE_DIR / "app.py")]', source)
 
     def test_spec_keeps_all_source_resource_destinations_explicit(self):
         source = SPEC_PATH.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(SPEC_PATH))
         resource_literals = _literal_strings_in_assignment(tree, "RESOURCE_DATA")
         for name in (
-            "config.example.toml",
             "default_config.toml",
             "resources",
             "VERSION",
@@ -180,7 +186,7 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
         self.assertIn('datas.append((str(ffmpeg_build_info), "tools/ffmpeg"))', source)
         self.assertIn('binaries.append((str(packaged_ffmpeg), "tools/ffmpeg"))', source)
 
-    def test_source_run_resolves_repository_resources(self):
+    def test_build_time_imports_resolve_repository_resources(self):
         result = _probe_runtime_paths(
             frozen=False,
             executable=Path(sys.executable),
@@ -193,11 +199,6 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
             "assets": PROJECT_ROOT / "assets",
             "tools": PROJECT_ROOT / "tools",
             "ffmpeg": PROJECT_ROOT / "tools" / "ffmpeg",
-            "package_template": PROJECT_ROOT / "resources" / "default_config.toml",
-            "package_version": PROJECT_ROOT / "VERSION",
-            "package_assets": PROJECT_ROOT / "assets",
-            "package_tools": PROJECT_ROOT / "tools",
-            "package_ffmpeg": PROJECT_ROOT / "tools" / "ffmpeg",
         }
         for key, path in expected.items():
             self.assertEqual(_canonical_path(result[key]), _canonical_path(path))
@@ -230,11 +231,6 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
                 "assets": meipass / "assets",
                 "tools": meipass / "tools",
                 "ffmpeg": meipass / "tools" / "ffmpeg",
-                "package_template": meipass / "resources" / "default_config.toml",
-                "package_version": meipass / "VERSION",
-                "package_assets": meipass / "assets",
-                "package_tools": meipass / "tools",
-                "package_ffmpeg": meipass / "tools" / "ffmpeg",
             }
             for key, path in expected.items():
                 self.assertEqual(_canonical_path(result[key]), _canonical_path(path))

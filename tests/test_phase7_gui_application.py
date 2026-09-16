@@ -17,11 +17,11 @@ from tdlib_media_uploader.gui import application  # noqa: E402
 
 
 class Phase7GuiApplicationTest(unittest.TestCase):
-    def test_package_import_does_not_load_root_gui(self):
+    def test_package_import_does_not_load_main_window(self):
         script = """
 import sys
 import tdlib_media_uploader.gui.application
-print('gui_app' in sys.modules)
+print('tdlib_media_uploader.gui.main_window' in sys.modules)
 """
         env = os.environ.copy()
         env["PYTHONPATH"] = str(SRC_ROOT)
@@ -37,19 +37,28 @@ print('gui_app' in sys.modules)
         self.assertEqual(result.stdout.strip(), "False")
 
     def test_self_test_dispatch_skips_root_gui(self):
-        with patch.object(application.sys, "argv", ["app.py", "--self-test"]), \
+        with patch.object(application.sys, "frozen", True, create=True), \
+                patch.object(application.sys, "argv", ["app.py", "--self-test"]), \
                 patch.object(application, "run_self_test", return_value=7) as check, \
                 patch.object(application, "_load_root_main") as load_root:
             self.assertEqual(application.main(), 7)
         check.assert_called_once_with()
         load_root.assert_not_called()
 
-    def test_normal_dispatch_loads_root_gui_only_on_demand(self):
+    def test_packaged_dispatch_loads_root_gui_only_on_demand(self):
         root_main = lambda: 11
-        with patch.object(application.sys, "argv", ["app.py"]), \
+        with patch.object(application.sys, "frozen", True, create=True), \
+                patch.object(application.sys, "argv", ["app.py"]), \
                 patch.object(application, "_load_root_main", return_value=root_main) as load_root:
             self.assertEqual(application.main(), 11)
         load_root.assert_called_once_with()
+
+    def test_source_dispatch_is_rejected(self):
+        with patch.object(application.sys, "frozen", False, create=True), \
+                patch.object(application.sys, "argv", ["app.py"]), \
+                patch.object(application, "_load_root_main") as load_root:
+            self.assertEqual(application.main(), 2)
+        load_root.assert_not_called()
 
 
 if __name__ == "__main__":

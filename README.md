@@ -72,7 +72,7 @@ Telegram 限制在扫描阶段生效：普通账号视频单文件上限约 2 GB
 
 从 [ExifTool 官网](https://exiftool.org/) 下载对应平台版本。Windows 将程序放到 `tools/exiftool.exe`；macOS 可将可执行文件放到 `tools/exiftool` 并执行 `chmod +x tools/exiftool`。若附带 `exiftool_files`，一起放入 `tools/`；也可在设置中指定工具路径。
 
-视频封面默认开启，可以在视频配置中关闭。源码运行请提供不含 GPL/nonfree 组件的 LGPL FFmpeg：Windows 放入 `tools/ffmpeg/ffmpeg.exe`，macOS 放入 `tools/ffmpeg/ffmpeg`，或加入 PATH。便携包自带构建时校验的 FFmpeg；后台调用工具时会隐藏 Windows 控制台窗口。
+视频封面默认开启，可以在视频配置中关闭。便携包自带构建时校验的 LGPL FFmpeg；后台调用工具时会隐藏 Windows 控制台窗口。
 
 ## 断点、停止与缓存
 
@@ -91,7 +91,7 @@ Telegram 限制在扫描阶段生效：普通账号视频单文件上限约 2 GB
 
 ### 迁移与备份 data
 
-升级或更换电脑时，先**完全退出** TDLib Media Uploader，再直接复制整个 `data/` 目录即可保留 V1.9 的登录数据、任务历史、标题、断点和未确认记录。不要在上传、登录或 TDLib 数据库仍在写入时复制；`data/telegram/database` 是登录状态的关键数据，不建议只复制其中部分文件。Windows 便携版使用程序目录下的 `data/`；源码运行使用仓库下的 `data/`；macOS 发布版使用 `~/Library/Application Support/TDLib Media Uploader/data/`。安装或解压新版本后，把完整的 `data/` 放到对应位置即可。复制时不要套多一层 `data/data`，并先保留一份备份。最简单可靠的迁移方式是整体复制 `data/`，不需要分别寻找配置、登录数据库、断点、标题、历史或日志文件。V1.9 不承诺读取 V1.8.x 或旧开发版的状态格式。
+升级或更换电脑时，先**完全退出** TDLib Media Uploader，再直接复制整个 `data/` 目录即可保留 V1.9 的登录数据、任务历史、标题、断点和未确认记录。不要在上传、登录或 TDLib 数据库仍在写入时复制；`data/telegram/database` 是登录状态的关键数据，不建议只复制其中部分文件。Windows 便携版使用程序目录下的 `data/`；macOS 发布版使用 `~/Library/Application Support/TDLib Media Uploader/data/`。安装或解压新版本后，把完整的 `data/` 放到对应位置即可。复制时不要套多一层 `data/data`，并先保留一份备份。最简单可靠的迁移方式是整体复制 `data/`，不需要分别寻找配置、登录数据库、断点、标题、历史或日志文件。V1.9 不承诺读取 V1.8.x 或旧开发版的状态格式。
 
 V1.9.1 的目录职责固定如下；程序资源和 PyInstaller `_internal` 目录只读，不会用作登录或其他用户数据目录：
 
@@ -111,7 +111,7 @@ data/
 └── history.json
 ```
 
-Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结版是 `~/Library/Application Support/TDLib Media Uploader/data/telegram/`；源码运行是 `仓库目录/data/telegram/`。复制整个 `data/` 后，TDLib 会继续使用其中的 `telegram/database` 和 `telegram/files`。
+Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结版是 `~/Library/Application Support/TDLib Media Uploader/data/telegram/`。复制整个 `data/` 后，TDLib 会继续使用其中的 `telegram/database` 和 `telegram/files`。
 
 视频、图片或混合媒体无法被 FFmpeg/Pillow 读取时，程序会在预检阶段跳过该文件，继续上传其他文件；暂时不可读的项目会标记为 deferred，网络恢复后重新扫描即可重试。预检生成的 Album 计划会保留完整成员，deferred 文件不会让后面的文件向前补位。上传前还会再次检查文件存在、可读且大小/修改时间没有变化。坏文件不会写入断点，跳过文件的完整路径和原因会显示在任务日志中，并保存到应用数据目录的 `logs/app.log`。TDLib 原生诊断写入同目录的 `logs/tdlib.log`，可用于排查上传失败。
 
@@ -123,7 +123,7 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 
 ## 配置与代理
 
-配置保存在统一数据目录的 `data/config.toml`，首次运行从包内的 `resources/default_config.toml` 创建；源码仓库中的 [config.example.toml](config.example.toml) 继续作为可读配置模板。日常通过界面编辑；保存无效配置时恢复原文件。
+配置保存在统一数据目录的 `data/config.toml`，首次运行从包内的 `resources/default_config.toml` 创建。日常通过界面编辑；保存无效配置时恢复原文件。
 
 - API、媒体目录、暂存和代理：在“设置与诊断 → 编辑配置”编辑。
 - 扫描稳定性、ExifTool 路径、FFmpeg/ExifTool 超时、批次大小和重试：在“设置与诊断 → 扫描与外部工具”编辑。
@@ -136,36 +136,11 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 
 支持本地目录及 `\\server\share\...` 网络目录。扫描时不可读取的项目会跳过并提示；网络恢复后可重新扫描。扫描结果中的暂时不可读文件会标记为可重试的 deferred 项目；上传前会再次检查文件仍存在、可读且未在扫描后发生变化。
 
-## 从源码运行
+## 使用限制
 
-Windows 源码运行（Windows 10/11 x64、Python 3.13 x64、PowerShell）：
+应用仅支持从 [GitHub Releases](https://github.com/Maxwell233/tdlib-media-uploader/releases) 下载 Windows 便携包或 macOS arm64 DMG 后运行；仓库不再提供源码启动方式。源码仅用于开发和 CI 的离线回归验证，不作为用户运行入口。
 
-```powershell
-git clone https://github.com/Maxwell233/tdlib-media-uploader.git
-cd tdlib-media-uploader
-py -3.13 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install --no-cache-dir --upgrade --force-reinstall --no-binary imageio-ffmpeg -r requirements-lock.txt
-$env:PYTHONPATH = "src"
-.\.venv\Scripts\python.exe -m tdlib_media_uploader.app
-```
-
-源码运行不再依赖单独的安装或启动脚本；上述命令会创建 `.venv`、安装固定版本依赖，并通过 V2 package 入口启动 GUI。首次启动会在统一数据目录中创建配置模板。
-
-依赖由 `requirements-lock.txt` 和 `requirements-build-lock.txt` 固定版本，其中包含 `tdjson==1.8.64.post1`、Pillow、imageio-ffmpeg、PySide6 和 PyInstaller。固定 TDLib 版本是为了兼容现有上传实现，请勿随意升级。源码和便携包都使用图形界面。
-
-macOS 源码运行（Apple Silicon、Python 3.13）：
-
-```bash
-git clone https://github.com/Maxwell233/tdlib-media-uploader.git
-cd tdlib-media-uploader
-python3.13 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install --no-cache-dir --upgrade --force-reinstall --no-binary imageio-ffmpeg -r requirements-lock.txt
-PYTHONPATH=src .venv/bin/python -m tdlib_media_uploader.app
-```
-
-源码运行的视频封面需要自行准备 LGPL FFmpeg；发布包已在构建阶段准备并检查。
+依赖由 `requirements-build-lock.txt` 固定版本，其中包含 `tdjson==1.8.64.post1`、Pillow、imageio-ffmpeg、PySide6 和 PyInstaller。固定 TDLib 版本是为了兼容现有上传实现，请勿随意升级。
 
 离线回归测试（安装依赖后运行）：
 
@@ -174,8 +149,6 @@ python -m unittest discover -s tests -v
 ```
 
 便携包支持 `--self-test` 离线检查。全新包即使还没有 `data/config.toml` 也可以直接运行；检查只验证资源、可写数据目录、TDLib 路径和可选 FFmpeg，不会连接 Telegram 或修改正式配置。
-
-如 `.venv` 损坏，可删除项目中的 `.venv`，然后按上面的平台命令重新创建并安装依赖。
 
 ## 构建 Windows 和 macOS 包
 
@@ -195,7 +168,7 @@ Windows 和 macOS 构建使用各自平台的原生 runner，并行执行离线�
 
 输出为 Windows 的 `dist/TDLib Media Uploader/TDLib Media Uploader.exe` 及 Windows x64 ZIP，和 macOS 的 `dist/TDLib Media Uploader.app` 及带版本号的 macOS arm64 DMG。DMG 根目录包含应用和指向系统 `/Applications` 的 `Applications` 文件夹别名，便于拖放安装。Windows 构建同时校验 EXE 嵌入图标、Qt 图标资源和稳定的 AppUserModelID，避免打包后任务栏图标缺失或归组异常。构建包不包含个人配置、断点、封面缓存、媒体文件或登录数据；macOS 包另附 FFmpeg 构建信息。
 
-核心文件：`src/tdlib_media_uploader/app.py`（V2 package 入口）、`src/tdlib_media_uploader/gui/application.py`（GUI 启动与自检边界）、`src/tdlib_media_uploader/gui/events.py` 与 `src/tdlib_media_uploader/gui/workers.py`（GUI 事件和线程边界）、`src/tdlib_media_uploader/gui/models.py`（预览模型适配）、`gui_app.py`（迁移期间的 GUI 页面实现）、`app_config.py`（配置兼容层）、`tdlib_video_app.py`、`tdlib_video_album_uploader.py`、`tdlib_image_album_uploader.py`、`tdlib_mixed_album_uploader.py`（由界面调用的媒体上传流程）、`tdlib_common.py`（TDLib）。上传流程入口也会复用 `data/app.lock`；通常不需要单独启动这些内部模块。
+核心文件位于 `src/tdlib_media_uploader/`：`app.py`（打包入口）、`gui/application.py`（GUI 启动与自检边界）、`gui/events.py` 与 `gui/workers.py`（GUI 事件和线程边界）、`gui/models.py`（预览模型适配）、`gui/main_window.py`（界面与生命周期）、`config/loader.py` 与 `config/paths.py`（配置和路径）、`media/legacy_video.py`、`media/legacy_image.py`、`media/legacy_mixed.py`（由 V2 策略调用的媒体实现）以及 `telegram/tdlib_common.py`（TDLib）。上传流程入口也会复用 `data/app.lock`；内部模块不提供独立启动入口。
 
 版本使用“主版本.功能版本.修订版本”：日常优化增加最后一位，较大功能更新增加中间一位。版本号唯一存放在根目录 `VERSION`，程序、界面和构建脚本会从该文件读取。此次修改见 [CHANGELOG.md](CHANGELOG.md)。
 

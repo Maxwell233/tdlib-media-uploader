@@ -17,7 +17,6 @@ from datetime import datetime
 import importlib
 import inspect
 from pathlib import Path
-import sys
 import threading
 from typing import Any
 
@@ -38,12 +37,9 @@ _MISSING = object()
 
 
 def _load_legacy_module() -> Any:
-    """Load the V1.9 video module in source and frozen layouts."""
+    """Load the bundled video compatibility module."""
 
-    project_root = Path(__file__).resolve().parents[3]
-    if project_root.is_dir() and str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-    return importlib.import_module("tdlib_video_album_uploader")
+    return importlib.import_module("tdlib_media_uploader.media.legacy_video")
 
 
 class _StrategyCancelled(RuntimeError):
@@ -208,7 +204,7 @@ class VideoStrategy:
 
     ``legacy`` is injectable so the boundary can be tested without starting
     FFmpeg, ExifTool or TDLib.  In production it defaults to the existing
-    ``tdlib_video_album_uploader`` module.  The optional ``source_root``
+    bundled legacy video implementation.  The optional ``source_root``
     constructor value is only a default; the V2 method argument remains the
     source of truth for each scan and plan.
     """

@@ -29,7 +29,7 @@ class RegressionRef:
 
 TELEGRAM_UNIT_REGRESSIONS = (
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_forum_target_identity_ignores_irrelevant_channel_id",
         "telegram/target",
@@ -37,7 +37,7 @@ TELEGRAM_UNIT_REGRESSIONS = (
         "Forum-topic identity ignores channel-only fields.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_channel_target_identity_ignores_irrelevant_forum_topic_id",
         "telegram/target",
@@ -45,7 +45,7 @@ TELEGRAM_UNIT_REGRESSIONS = (
         "Channel identity ignores forum-topic-only fields.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_target_normalization_parses_only_mode_relevant_fields",
         "telegram/target",
@@ -53,7 +53,7 @@ TELEGRAM_UNIT_REGRESSIONS = (
         "Canonical target normalization is mode-aware.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_target_identity_changes_for_topic_channel_or_mode",
         "telegram/target",
@@ -61,7 +61,7 @@ TELEGRAM_UNIT_REGRESSIONS = (
         "Relevant target changes produce a different identity.",
     ),
     RegressionRef(
-        "tests/test_v190_hardening.py",
+        "tests/test_runtime_hardening.py",
         "V190HardeningTest",
         "test_telegram_video_boundaries_are_exact_and_shared",
         "telegram/limits",
@@ -69,7 +69,7 @@ TELEGRAM_UNIT_REGRESSIONS = (
         "Standard and Premium byte boundaries are exact.",
     ),
     RegressionRef(
-        "tests/test_v190_hardening.py",
+        "tests/test_runtime_hardening.py",
         "V190HardeningTest",
         "test_runtime_caption_limit_blocks_before_tdlib_request",
         "telegram/limits + send_result",
@@ -77,7 +77,7 @@ TELEGRAM_UNIT_REGRESSIONS = (
         "Runtime caption validation prevents an invalid request.",
     ),
     RegressionRef(
-        "tests/test_v190_hardening.py",
+        "tests/test_runtime_hardening.py",
         "V190HardeningTest",
         "test_runtime_caption_limit_above_legacy_1024_is_allowed",
         "telegram/limits + send_result",
@@ -89,7 +89,7 @@ TELEGRAM_UNIT_REGRESSIONS = (
 
 CROSS_BOUNDARY_REGRESSIONS = (
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_inflight_journal_blocks_unknown_until_manual_reconciliation",
         "upload/journal + telegram/send_result",
@@ -97,7 +97,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Durable UNKNOWN recovery belongs to the upload lifecycle.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_confirmed_inflight_record_blocks_until_finalization",
         "upload/journal + telegram/send_result",
@@ -105,7 +105,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Journal finalization is not transport-only behavior.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_immediate_tdlib_send_failure_is_recorded_as_failed",
         "telegram/send_result + upload/journal",
@@ -113,7 +113,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Failure classification and durable journal writes are coupled.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_inflight_kind_can_be_inferred_for_manual_reconciliation",
         "upload/journal + telegram/send_result",
@@ -121,7 +121,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Legacy kind inference is part of durable recovery, not transport-only behavior.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_manual_sent_reconciliation_writes_checkpoint_before_removing_journal",
         "upload/state + upload/journal",
@@ -129,7 +129,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Manual reconciliation crosses state and journal ownership.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_manual_sent_state_failure_keeps_journal",
         "upload/state + upload/journal",
@@ -137,7 +137,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Recovery ordering must stay with the upload lifecycle.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_inflight_journal_is_scoped_to_target_and_legacy_records_are_conservative",
         "upload/journal + telegram/target",
@@ -145,7 +145,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Target scope is exercised through durable journal lookup.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_legacy_reconciliation_uses_kind_target_instead_of_global_target",
         "upload/journal + telegram/target",
@@ -153,7 +153,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Legacy reconciliation spans all media kinds and target selection.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_journal_target_takes_precedence_over_state_fallback_target",
         "upload/journal + telegram/target",
@@ -161,7 +161,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Journal and state fallback precedence is an integration rule.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_forum_unknown_journal_matches_after_irrelevant_channel_change",
         "upload/journal + telegram/target",
@@ -169,7 +169,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Canonical target matching is verified through journal recovery.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_channel_unknown_journal_matches_after_irrelevant_topic_change",
         "upload/journal + telegram/target",
@@ -177,7 +177,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Canonical target matching is verified through journal recovery.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_version_two_target_record_is_read_with_canonical_identity",
         "upload/journal + telegram/target",
@@ -185,7 +185,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Versioned journal compatibility remains with journal migration.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_tdlib_upload_failure_logs_source_diagnosis",
         "telegram/send_result + processes/runner",
@@ -193,7 +193,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Transport failure diagnosis also reads the local source file.",
     ),
     RegressionRef(
-        "tests/test_v190_hardening.py",
+        "tests/test_runtime_hardening.py",
         "V190HardeningTest",
         "test_video_and_mixed_scanners_apply_the_same_video_limits",
         "media/video + media/mixed + telegram/limits",
@@ -201,7 +201,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
         "Scanner policy and Telegram limits are intentionally cross-boundary.",
     ),
     RegressionRef(
-        "tests/test_improvements.py",
+        "tests/test_regression_matrix.py",
         "ImprovementsTest",
         "test_media_scan_applies_telegram_size_limits",
         "media/image + media/video + telegram/limits",
@@ -213,7 +213,7 @@ CROSS_BOUNDARY_REGRESSIONS = (
 
 REVIEWED_NOT_TELEGRAM = (
     RegressionRef(
-        "tests/test_v190_hardening.py",
+        "tests/test_runtime_hardening.py",
         "V190HardeningTest",
         "test_caption_editor_uses_soft_limit_but_runtime_validation_stays_authoritative",
         "gui + album_metadata",
@@ -221,7 +221,7 @@ REVIEWED_NOT_TELEGRAM = (
         "The editor is GUI-owned; only runtime validation is Telegram-owned.",
     ),
     RegressionRef(
-        "tests/test_v190_hardening.py",
+        "tests/test_runtime_hardening.py",
         "V190HardeningTest",
         "test_filename_description_is_capped_by_runtime_limit",
         "album_metadata + media",

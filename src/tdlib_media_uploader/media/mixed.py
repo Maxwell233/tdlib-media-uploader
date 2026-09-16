@@ -14,7 +14,6 @@ from contextlib import contextmanager
 import importlib
 import inspect
 from pathlib import Path
-import sys
 import threading
 from typing import Any
 
@@ -35,12 +34,9 @@ _MISSING = object()
 
 
 def _load_legacy_module() -> Any:
-    """Load the V1.9 compatibility module in source and frozen layouts."""
+    """Load the bundled mixed-media compatibility module."""
 
-    project_root = Path(__file__).resolve().parents[3]
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-    return importlib.import_module("tdlib_mixed_album_uploader")
+    return importlib.import_module("tdlib_media_uploader.media.legacy_mixed")
 
 
 def _call_compatible(function: Any, args: Sequence[Any] = (), **kwargs: Any) -> Any:
@@ -216,7 +212,7 @@ class _LegacyStateBridge:
 
 
 class MixedMediaStrategy:
-    """Concrete V2 strategy backed by ``tdlib_mixed_album_uploader``."""
+    """Concrete V2 strategy backed by the bundled mixed-media implementation."""
 
     kind = "mixed"
 

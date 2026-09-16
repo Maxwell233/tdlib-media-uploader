@@ -27,10 +27,10 @@ from PIL import Image
 if not hasattr(imageio_ffmpeg, "get_ffmpeg_exe"):
     imageio_ffmpeg.get_ffmpeg_exe = lambda: shutil.which("ffmpeg") or "ffmpeg"
 
-from album_metadata import CaptionStore, album_key, compose_caption, with_filename_description
-from media_identity import media_file_signature
-from upload_state import UploadState as SharedUploadState
-from path_utils import (
+from ..core.album import CaptionStore, album_key, compose_caption, with_filename_description
+from ..core.identity import media_file_signature
+from ..core.upload_state import UploadState as SharedUploadState
+from ..core.filesystem_legacy import (
     cancelable_sleep,
     display_path,
     file_mtime,
@@ -50,11 +50,10 @@ from path_utils import (
     validate_scan_root,
     wait_for_file_ready,
 )
-import app_config as cfg
-from tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
-from runtime_paths import APP_DATA_DIR, RESOURCE_DIR, VIDEO_STATE_DIR, THUMBNAIL_CACHE_DIR
-from staging import cleanup_staging, remove_staged_file, should_stage, stage_file
-from instance_lock import run_with_instance_lock
+from ..config import loader as cfg
+from ..telegram.tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
+from ..config.paths import APP_DATA_DIR, RESOURCE_DIR, VIDEO_STATE_DIR, THUMBNAIL_CACHE_DIR
+from ..upload.staging import cleanup_staging, remove_staged_file, should_stage, stage_file
 
 PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = VIDEO_STATE_DIR
@@ -2199,12 +2198,3 @@ def _main_impl():
         client.remove_update_callback(progress.handle_update)
         client.close()
         cleanup_staging_cache()
-
-
-def main():
-    """Run the video uploader under the shared single-instance lock."""
-
-    return run_with_instance_lock(
-        _main_impl,
-        lock_held=bool(globals().get("_INSTANCE_LOCK_HELD", False)),
-    )

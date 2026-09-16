@@ -1,9 +1,4 @@
-"""V2 public contracts for the TDLib Media Uploader refactor.
-
-The existing V1.9 modules remain the executable implementation during the
-incremental migration.  This package contains only the main-Agent-owned
-contracts established in Phase 0.
-"""
+"""Public V2 contracts for TDLib Media Uploader."""
 
 from .contracts import (
     CancelToken,

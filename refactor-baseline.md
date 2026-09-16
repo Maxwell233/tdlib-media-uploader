@@ -122,29 +122,30 @@ tests.
   lightweight offline/architecture gate.  Windows and macOS packaging remains
   the full gate on the existing platform workflow.
 
-## Current architecture map
+## Compatibility architecture map
 
-The baseline is a flat-module V1.9 application.  The following are the
-responsibilities to preserve while moving them behind V2 boundaries.
+The original V1.9 behavior was implemented as flat top-level modules. That
+behavior now lives under the package boundary below `src/`; this map records
+the compatibility owners that remain intentionally visible to the V2
+adapters.
 
 | Current module | Responsibility | Current callers / coupling |
 | --- | --- | --- |
-| gui_app.py | Qt application lifecycle, pages/dialogs/workers, preview fallback, config editing, history/cache UI and dynamic upload dispatch | Imports most shared modules and directly mutates uploader globals |
-| path_utils.py | FileSnapshot/FileReadiness, discovery, retry, readiness, natural/mtime sorting, bounded concurrency and cancellable subprocesses | Imported by GUI, state, journal, staging and all uploaders |
-| app_config.py | TOML loading, defaults, path resolution, target activation, media/process/scan settings | Imported by GUI, TDLib and all uploaders |
-| runtime_paths.py | Resource, executable and writable data roots plus state/cache/log paths | Imported by config, GUI, self-test, uploaders and logging |
-| tdlib_common.py | TDLib JSON client, auth/update handling, send result classification, caption/runtime limits and headless UI | Imported by all uploaders and the video CLI-style entry |
-| tdlib_video_album_uploader.py | Video discovery/date probes, grouping, thumbnails, preflight, TDLib input and video upload lifecycle | Imported by tdlib_video_app, GUI and tests |
-| tdlib_image_album_uploader.py | Image discovery/compression, preflight, photo content, grouping and upload lifecycle | Imported by GUI and tests |
-| tdlib_mixed_album_uploader.py | First-level folder grouping, mixed photo/video content and upload lifecycle | Imports image and video uploader internals |
-| tdlib_video_app.py | Video-facing orchestration and legacy command-line presentation | Imports video uploader and is invoked by GUI worker |
-| album_metadata.py | Caption store, caption composition/validation, filenames and Album keys/plans | Imported by GUI, state and all media uploaders |
-| media_identity.py | Snapshot-based media signatures and canonical target identity | Imported by state and journal, with path_utils dependency |
-| upload_state.py | Atomic shared checkpoint format for all media kinds | Imports media identity and filesystem helpers |
-| upload_journal.py | Atomic per-Album PREPARED/SUBMITTED/CONFIRMED/UNKNOWN records and reconciliation | Imports media identity and filesystem/runtime paths |
-| staging.py | Managed network/local staging, marker validation and safe cleanup | Imported by all media uploaders |
-| instance_lock.py | One-process lock around upload entrypoints | Imported by GUI and all uploaders |
-| app_logging.py / self_test.py | Persistent diagnostics and offline health check | Used by GUI, TDLib and CI/package entrypoints |
+| `src/tdlib_media_uploader/gui/main_window.py` | Qt application lifecycle, compatibility pages/dialogs/workers, preview fallback, configuration editing, history/cache UI and upload dispatch | Composition host for the GUI; delegates scans/uploads to package workers and integration services |
+| `src/tdlib_media_uploader/core/filesystem_legacy.py` | FileSnapshot/FileReadiness, discovery, retry, readiness, natural/mtime sorting, bounded concurrency and cancellable subprocesses | Compatibility implementation used by the legacy media builders and GUI helpers |
+| `src/tdlib_media_uploader/config/loader.py` | TOML loading, defaults, target activation and media/process/scan settings | Imported by GUI, TDLib compatibility code and media builders |
+| `src/tdlib_media_uploader/config/paths.py` | Resource, executable and writable data roots plus state/cache/log paths | Imported by config, GUI, self-test, upload adapters and logging |
+| `src/tdlib_media_uploader/telegram/tdlib_common.py` | TDLib JSON client, auth/update handling, send-result classification, caption/runtime limits, diagnostics and headless UI | Compatibility transport used by the media builders and GUI upload bridge |
+| `src/tdlib_media_uploader/media/legacy_video.py` | Video discovery/date probes, grouping, thumbnails, preflight and TDLib input construction | Called by `media/video.py` and the GUI integration bridge |
+| `src/tdlib_media_uploader/media/legacy_image.py` | Image discovery/compression, preflight, photo content and grouping | Called by `media/image.py` and the GUI integration bridge |
+| `src/tdlib_media_uploader/media/legacy_mixed.py` | First-level folder grouping, mixed photo/video content and input construction | Called by `media/mixed.py`; shares the video/image compatibility builders |
+| `src/tdlib_media_uploader/core/album.py` | Caption store, caption composition/validation, filenames and Album keys/plans | Imported by GUI, state, journal and media compatibility code |
+| `src/tdlib_media_uploader/core/identity.py` | Snapshot-based media signatures and canonical target identity | Imported by state and journal |
+| `src/tdlib_media_uploader/core/upload_state.py` | Atomic shared checkpoint format for all media kinds | Imports identity and filesystem helpers |
+| `src/tdlib_media_uploader/core/upload_journal.py` | Atomic per-Album PREPARED/SUBMITTED/CONFIRMED/UNKNOWN records and reconciliation | Imports identity and package path services |
+| `src/tdlib_media_uploader/upload/staging.py` | Managed network/local staging, marker validation and safe cleanup | Imported by media compatibility builders and upload integration |
+| `src/tdlib_media_uploader/core/instance_lock.py` | One-process lock around the packaged upload entrypoint | Imported by the GUI composition host and upload compatibility code |
+| `src/tdlib_media_uploader/core/logging.py` / `core/self_test.py` | Persistent diagnostics and offline health check | Used by GUI, TDLib compatibility code and CI/package entrypoints |
 | .github/workflows/* | Fast offline/architecture gate and full Windows/macOS packaging gate | Main-Agent-owned CI boundary |
 
 The V2-integrated high-level flow is:
@@ -152,13 +153,14 @@ The V2-integrated high-level flow is:
 GUI MainWindow -> ScanWorker -> gui.integration.scan_v2 -> media strategy
 -> preview result -> UploadWorker -> gui.integration.run_v2_upload
 -> UploadEngine -> TDLibSender/tdlib_common -> upload_state/upload_journal/
-staging/app_logging.
+upload/staging and core/logging.
 
-The migration-period widgets still render the established dictionary-shaped
-preview contract, but the scan and upload workers now cross one explicit V2
-GUI boundary.  The legacy modules remain behind the strategy and sender
-adapters for media-specific probing and TDLib input construction; they no
-longer own the GUI upload lifecycle.
+The package GUI still renders the established dictionary-shaped preview
+contract, but the scan and upload workers cross one explicit V2 GUI boundary.
+The compatibility modules remain behind the strategy and sender adapters for
+media-specific probing and TDLib input construction; they no longer own the
+GUI upload lifecycle. The old root-level Python launchers and wrappers are no
+longer part of the repository.
 
 ## Target package layout and dependency direction
 
@@ -167,55 +169,76 @@ mechanical migration.
 
 ~~~
 src/tdlib_media_uploader/
-├── app.py                         # main-owned application bootstrap
-├── contracts.py                   # main-owned service protocols
+├── __init__.py                    # public package exports
+├── app.py                         # packaged application bootstrap
+├── contracts.py                   # shared service protocols
+├── config/
+│   ├── __init__.py
+│   ├── model.py
+│   ├── loader.py
+│   └── paths.py
 ├── core/
-│   ├── models.py                  # main-owned shared data models
-│   ├── sorting.py                 # filesystem Agent
-│   ├── filesystem.py              # filesystem Agent
-│   ├── readiness.py               # filesystem Agent
-│   └── concurrency.py             # filesystem Agent
+│   ├── __init__.py
+│   ├── models.py                  # shared data models
+│   ├── sorting.py                 # deterministic path ordering
+│   ├── filesystem.py              # V2 filesystem services
+│   ├── filesystem_legacy.py       # compatibility filesystem services
+│   ├── readiness.py
+│   ├── concurrency.py
+│   ├── album.py
+│   ├── identity.py
+│   ├── upload_state.py
+│   ├── upload_journal.py
+│   ├── instance_lock.py
+│   ├── logging.py
+│   ├── self_test.py
 ├── processes/
-│   ├── runner.py                  # filesystem/process Agent
-│   ├── exiftool.py                # ExifTool Agent
-│   └── ffmpeg.py                  # FFmpeg Agent
+│   ├── __init__.py
+│   └── runner.py                  # bounded external-process execution
 ├── telegram/
+│   ├── __init__.py
 │   ├── client.py
 │   ├── auth.py
 │   ├── target.py
 │   ├── limits.py
-│   └── send_result.py             # Telegram Agent
+│   ├── send_result.py
+│   └── tdlib_common.py             # compatibility TDLib transport
 ├── upload/
+│   ├── __init__.py
 │   ├── engine.py                  # main-owned first, then integration
 │   ├── planner.py                 # main-owned first, then integration
-│   └── preflight.py               # main-owned first, then integration
+│   ├── preflight.py                # main-owned first, then integration
+│   └── staging.py                  # managed local/network staging
 ├── media/
-│   ├── image.py                   # ImageStrategy Agent
-│   ├── mixed.py                   # MixedStrategy Agent
-│   └── video.py                   # VideoStrategy Agent
+│   ├── __init__.py
+│   ├── image.py                   # ImageStrategy adapter
+│   ├── mixed.py                   # MixedStrategy adapter
+│   ├── video.py                   # VideoStrategy adapter
+│   └── legacy_*.py                # media-specific compatibility owners
 ├── gui/
+│   ├── __init__.py
 │   ├── application.py             # main-owned lazy GUI bootstrap
-│   ├── events.py                   # main-owned Qt signal and auth bridges
-│   ├── integration.py             # main-owned Qt-free V2 workflow bridge
-│   ├── models.py                  # main-owned V2 preview translation
-│   ├── workers.py                  # main-owned scan/upload thread lifecycle
-│   ├── main_window.py             # main-owned application lifecycle
+│   ├── events.py                   # Qt signal and auth bridges
+│   ├── integration.py             # Qt-free V2 workflow bridge
+│   ├── models.py                  # V2 preview translation
+│   ├── workers.py                  # scan/upload thread lifecycle
+│   ├── main_window.py             # application composition and lifecycle
 │   ├── pages/
+│   │   ├── __init__.py
 │   │   ├── home.py
 │   │   ├── task.py
+│   │   ├── upload.py
 │   │   ├── video.py
 │   │   ├── image.py
 │   │   ├── mixed.py
-│   │   ├── settings.py
-│   │   └── inflight.py
-│   └── dialogs/
-└── config/
-    ├── model.py
-    ├── loader.py
-    └── paths.py
+│   └── (settings, history, inflight and dialogs remain composed by main_window.py)
 resources/
 └── default_config.toml
 ~~~
+
+The current GUI keeps those compatibility surfaces together in
+`gui/main_window.py` because they share the established page and dialog
+contracts. They are still GUI-only code; no lower-level service imports them.
 
 Allowed dependency direction:
 
@@ -293,46 +316,43 @@ for all three strategies.  `scan_v2()` returns immutable V2 scan/planning
 models, while `run_v2_upload()` injects the durable legacy state and inflight
 journal into `UploadEngine`, adapts TDLib sends without enabling the legacy
 client journal, and translates progress/events back to the existing task
-center.  A confirmed engine checkpoint is the only path that removes staged
-media.  The root GUI keeps the dependency-free preview fallback for
+center. A confirmed engine checkpoint is the only path that removes staged
+media. `gui/main_window.py` keeps the dependency-free preview fallback for
 environments where the V2 strategy dependencies cannot be imported.
 
 ## Phase 7 GUI bootstrap checkpoint
 
 `src/tdlib_media_uploader/gui/application.py` now owns the package-facing
-`main()` and `run_self_test()` entrypoints.  The self-test path loads only the
+`main()` and `run_self_test()` entrypoints. The self-test path loads only the
 offline checker, so it does not require Qt; a normal launch lazily delegates
-to the migration-period widget module.  `src/tdlib_media_uploader/app.py` and
-the PyInstaller spec both point at this package boundary, leaving the existing
-GUI pages behaviorally unchanged while the next page migration remains
-reversible.
+to `gui/main_window.py`. `src/tdlib_media_uploader/app.py` and the PyInstaller
+spec both point at this package boundary, while the existing GUI pages remain
+behaviorally compatible under `gui/pages/`.
 
 ## Phase 8 GUI worker checkpoint
 
 `src/tdlib_media_uploader/gui/events.py` now owns the authentication and task
 center signal bridges, and `gui/workers.py` owns the scan/upload `QThread`
-lifecycles.  The compatibility GUI supplies explicit scan, target, source-root
-and configuration callbacks; the package workers never import `gui_app.py`.
-This keeps cancellation and result mapping in one place without changing the
-existing page signals or preview dictionary contract.
+lifecycles. The package GUI supplies explicit scan, target, source-root and
+configuration callbacks; the workers never import the window composition
+module. This keeps cancellation and result mapping in one place without
+changing the existing page signals or preview dictionary contract.
 
 ## Phase 9 GUI preview-model checkpoint
 
 `src/tdlib_media_uploader/gui/models.py` now owns the V2 preview translation:
 item identity, immutable plan projection, group aggregation, byte totals and
-scan warning projection.  `gui_app.py` keeps only a thin compatibility wrapper
-for its existing private helper names, so the pages continue to receive the
-same dictionary shape while the model boundary remains Qt-free.
+scan warning projection. `gui/main_window.py` retains the compatibility
+helpers needed by the existing dictionary-shaped page contract, so the model
+boundary remains Qt-free.
 
 ## Phase 10 GUI page checkpoint
 
-The package now owns the overview and task-center widgets in
-`gui/pages/home.py` and `gui/pages/task.py`. Both pages keep their existing
-signals and public update methods, while their formatting and version lookup
-are local to the package boundary. `gui_app.py` imports these classes as
-compatibility exports; it no longer defines duplicate copies of either page.
-The media upload, settings, inflight and dialog widgets remain in the root
-module for the next page migration slice.
+The package owns the overview and task-center widgets in `gui/pages/home.py`
+and `gui/pages/task.py`. Both pages keep their existing signals and public
+update methods, while their formatting and version lookup are local to the
+package boundary. `gui/main_window.py` composes these classes and preserves
+the remaining settings, inflight, history and dialog compatibility surfaces.
 
 ## Phase 11 GUI upload-page checkpoint
 
@@ -340,7 +360,7 @@ The shared media upload widget now lives in `gui/pages/upload.py`, with
 explicit `VideoPage`, `ImagePage` and `MixedPage` route classes.  The page
 consumes the existing preview dictionary and signal contracts, while its
 configuration, caption persistence and dialog hooks are supplied through
-`UploadPageServices`.  `gui_app.py` keeps the old `UploadPage(kind)`
+`UploadPageServices`. `gui/main_window.py` keeps the old `UploadPage(kind)`
 constructor as a compatibility shell and injects the legacy patch points;
 `MainWindow` instantiates the package-owned route classes.
 

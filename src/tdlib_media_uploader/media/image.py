@@ -13,7 +13,6 @@ from contextlib import contextmanager
 import importlib
 import inspect
 from pathlib import Path
-import sys
 import threading
 from typing import Any, Callable
 
@@ -35,12 +34,9 @@ _LEGACY_SCOPE_LOCK = threading.RLock()
 
 
 def _load_legacy_module() -> Any:
-    """Load the V1.9 image module in source and frozen layouts."""
+    """Load the bundled image compatibility module."""
 
-    project_root = Path(__file__).resolve().parents[3]
-    if project_root.is_dir() and str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-    return importlib.import_module("tdlib_image_album_uploader")
+    return importlib.import_module("tdlib_media_uploader.media.legacy_image")
 
 
 class _StrategyCancelled(RuntimeError):

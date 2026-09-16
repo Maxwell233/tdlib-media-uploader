@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
 
 
 def _canonical_path(value) -> str:
@@ -56,15 +57,17 @@ sys.platform = %r
 sys.frozen = %r
 sys.executable = %r
 sys._MEIPASS = %r
-import runtime_paths as paths
+sys.path.insert(0, %r)
+from tdlib_media_uploader.config import paths
 print(json.dumps({
     "resource": str(paths.RESOURCE_DIR),
     "data": str(paths.DATA_DIR),
     "database": str(paths.TDLIB_DATABASE_DIR),
     "files": str(paths.TDLIB_FILES_DIR),
 }, ensure_ascii=False))
-""" % (platform, frozen, str(executable), str(meipass))
+""" % (platform, frozen, str(executable), str(meipass), str(SRC_ROOT))
     env = os.environ.copy()
+    env["PYTHONPATH"] = str(SRC_ROOT)
     if home is not None:
         # Path.home() uses USERPROFILE on Windows even when sys.platform is
         # overridden for this isolated probe.
@@ -128,7 +131,7 @@ class DataLayoutTest(unittest.TestCase):
             self.assertEqual(_canonical_path(result["files"]), _canonical_path(data / "telegram" / "files"))
 
     def test_self_test_reports_tdlib_paths_under_data_dir(self):
-        from self_test import run_self_test
+        from tdlib_media_uploader.core.self_test import run_self_test
 
         output = []
         self.assertEqual(run_self_test(emit=output.append), 0)
@@ -137,7 +140,7 @@ class DataLayoutTest(unittest.TestCase):
         self.assertEqual(output[-1], "SELF-TEST OK")
 
     def test_tdlib_parameter_payload_uses_data_telegram_paths(self):
-        from tdlib_common import build_tdlib_parameters
+        from tdlib_media_uploader.telegram.tdlib_common import build_tdlib_parameters
 
         payload = build_tdlib_parameters("test")
         data = Path(__file__).resolve().parents[1] / "data"

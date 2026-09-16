@@ -14,9 +14,9 @@ import os
 from pathlib import Path
 from typing import Any
 
-from album_metadata import CaptionStore
-from app_logging import write_app_log
-from path_utils import stable_path
+from ..core.album import CaptionStore
+from ..core.logging import write_app_log
+from ..core.filesystem_legacy import stable_path
 
 from ..core.models import MediaItem
 

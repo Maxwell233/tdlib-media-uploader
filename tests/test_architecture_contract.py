@@ -44,19 +44,13 @@ class ArchitectureContractTest(unittest.TestCase):
 
         app_source = (PACKAGE_ROOT / "app.py").read_text(encoding="utf-8")
         self.assertIn(
-            "from tdlib_media_uploader.gui.application import main, run_self_test",
+            "from .gui.application import main, run_self_test",
             app_source,
         )
-        self.assertIn('if "--self-test" in sys.argv[1:]', (PROJECT_ROOT / "gui_app.py").read_text(encoding="utf-8"))
+        self.assertIn('if "--self-test" in sys.argv[1:]', (PACKAGE_ROOT / "gui" / "main_window.py").read_text(encoding="utf-8"))
 
         default_config = PROJECT_ROOT / "resources" / "default_config.toml"
-        legacy_template = PROJECT_ROOT / "config.example.toml"
         self.assertTrue(default_config.is_file(), "missing immutable default config resource")
-        self.assertEqual(
-            default_config.read_bytes(),
-            legacy_template.read_bytes(),
-            "package resource and documented config template have drifted",
-        )
 
     def test_first_wave_modules_use_the_declared_package_layout(self):
         expected = {
@@ -142,8 +136,10 @@ class ArchitectureContractTest(unittest.TestCase):
         source = application.read_text(encoding="utf-8")
         self.assertIn("def run_self_test", source)
         self.assertIn("def main", source)
-        self.assertIn("from gui_app import main as root_main", source)
-        self.assertIn("from self_test import run_self_test as check", source)
+        self.assertIn("from .main_window import main as root_main", source)
+        self.assertIn("from ..core.self_test import run_self_test as check", source)
+        self.assertIn("getattr(sys, \"frozen\", False)", source)
+        self.assertIn("仅支持从发布包运行", source)
 
     def test_phase8_gui_workers_are_package_owned_and_root_free(self):
         expected = {
@@ -159,8 +155,8 @@ class ArchitectureContractTest(unittest.TestCase):
         events = (PACKAGE_ROOT / "gui" / "events.py").read_text(encoding="utf-8")
         workers_path = PACKAGE_ROOT / "gui" / "workers.py"
         workers = workers_path.read_text(encoding="utf-8")
-        self.assertNotIn("gui_app", events)
-        self.assertNotIn("gui_app", workers)
+        self.assertNotIn("main_window", events)
+        self.assertNotIn("main_window", workers)
         self.assertIn("class AuthBridge", events)
         self.assertIn("class GuiConsoleUI", events)
         self.assertIn("class ScanWorker", workers)
@@ -175,7 +171,7 @@ class ArchitectureContractTest(unittest.TestCase):
             "preview model translation must remain Qt-free",
         )
         source = models_path.read_text(encoding="utf-8")
-        self.assertNotIn("gui_app", source)
+        self.assertNotIn("main_window", source)
         for name in (
             "def item_identity",
             "def item_dict",
@@ -194,9 +190,9 @@ class ArchitectureContractTest(unittest.TestCase):
             )
         for relative_path in ("__init__.py", "home.py", "task.py"):
             source = (pages_root / relative_path).read_text(encoding="utf-8")
-            self.assertNotIn("gui_app", source)
-        root_source = (PROJECT_ROOT / "gui_app.py").read_text(encoding="utf-8")
-        self.assertIn("from tdlib_media_uploader.gui.pages import (", root_source)
+            self.assertNotIn("main_window", source)
+        root_source = (PACKAGE_ROOT / "gui" / "main_window.py").read_text(encoding="utf-8")
+        self.assertIn("from .pages import (", root_source)
         self.assertIn("    HomePage,", root_source)
         self.assertIn("    TaskPage,", root_source)
 
@@ -213,11 +209,11 @@ class ArchitectureContractTest(unittest.TestCase):
             self.assertTrue(path.is_file(), f"missing Phase 11 GUI page: {relative_path}")
             source = path.read_text(encoding="utf-8")
             imports = _imported_names(path)
-            self.assertNotIn("gui_app", imports)
-            self.assertFalse(any(name.startswith("gui_app.") for name in imports))
+            self.assertNotIn("main_window", imports)
+            self.assertFalse(any(name.startswith("main_window.") for name in imports))
             for marker in markers:
                 self.assertIn(marker, source)
-        root_source = (PROJECT_ROOT / "gui_app.py").read_text(encoding="utf-8")
+        root_source = (PACKAGE_ROOT / "gui" / "main_window.py").read_text(encoding="utf-8")
         self.assertIn("UploadPage as _PackageUploadPage", root_source)
         self.assertIn("_PackageVideoPage(services=page_services)", root_source)
         self.assertIn("_PackageImagePage(services=page_services)", root_source)

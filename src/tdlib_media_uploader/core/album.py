@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Stable Album captions shared by the CLI and PySide6 preview.
+"""Stable Album captions shared by the packaged GUI and media services.
 
 The metadata files live under ``DATA_DIR/captions`` and contain only local
 file fingerprints plus user-entered caption text.  They are separate from
@@ -14,9 +14,9 @@ import os
 import threading
 from pathlib import Path
 
-from path_utils import stable_path
-from media_identity import media_file_identity
-from runtime_paths import APP_DATA_DIR, CAPTIONS_DIR
+from .filesystem_legacy import stable_path
+from .identity import media_file_identity
+from ..config.paths import APP_DATA_DIR, CAPTIONS_DIR
 
 
 PROJECT_DIR = CAPTIONS_DIR

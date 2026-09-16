@@ -1,10 +1,9 @@
-"""Phase 6 adapters between the Qt GUI and the V2 upload lifecycle.
+"""Qt-free adapters between the GUI window and the V2 upload lifecycle.
 
-The widgets remain in the migration-period ``gui_app`` module.  This module
-keeps the integration logic independent of Qt while connecting the three V2
-media strategies to the durable V1.9 state, journal and TDLib helpers.  The
-legacy modules still own media-specific probing and input construction; the
-V2 engine owns plan traversal, send state transitions and checkpoints.
+This module connects the three V2 media strategies to the durable V1.9 state,
+journal and TDLib helpers. Legacy media modules still own media-specific
+probing and input construction; the V2 engine owns plan traversal, send state
+transitions and checkpoints.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from path_utils import stable_path
+from ..core.filesystem_legacy import stable_path
 
 from ..contracts import UploadContext
 from ..core.models import (
@@ -42,9 +41,9 @@ from ..upload.engine import (
 
 
 _LEGACY_MODULES = {
-    "image": "tdlib_image_album_uploader",
-    "mixed": "tdlib_mixed_album_uploader",
-    "video": "tdlib_video_album_uploader",
+    "image": "tdlib_media_uploader.media.legacy_image",
+    "mixed": "tdlib_media_uploader.media.legacy_mixed",
+    "video": "tdlib_media_uploader.media.legacy_video",
 }
 _STRATEGIES = {
     "image": ImageStrategy,
@@ -269,7 +268,7 @@ def scan_v2(
 
     normalized = _normalize_kind(kind)
     if config is None:
-        config = importlib.import_module("app_config")
+        config = importlib.import_module("tdlib_media_uploader.config.loader")
     activate = getattr(config, "activate_target", None)
     if callable(activate):
         activate(normalized)
@@ -738,7 +737,7 @@ def run_v2_upload(
 
     normalized = _normalize_kind(kind)
     if config is None:
-        config = importlib.import_module("app_config")
+        config = importlib.import_module("tdlib_media_uploader.config.loader")
     activate = getattr(config, "activate_target", None)
     if callable(activate):
         activate(normalized)
@@ -756,7 +755,7 @@ def run_v2_upload(
     progress = GuiUploadProgress(normalized, raw_items, completed_paths, ui)
 
     if client_factory is None:
-        from tdlib_common import TDJsonClient  # noqa: PLC0415
+        from ..telegram.tdlib_common import TDJsonClient  # noqa: PLC0415
 
         client_factory = TDJsonClient
     client = _call_supported(
@@ -789,7 +788,7 @@ def run_v2_upload(
             state,
             _cleanup_for(legacy, normalized),
         )
-        from upload_journal import InflightJournal  # noqa: PLC0415
+        from ..core.upload_journal import InflightJournal  # noqa: PLC0415
 
         journal_root = getattr(runtime_paths, "UPLOAD_INFLIGHT_DIR", None) if runtime_paths is not None else None
         journal = InflightJournal(Path(journal_root) if journal_root is not None else None)
@@ -848,7 +847,7 @@ def run_v2_upload(
                     pass
         if normalized == "mixed":
             try:
-                image_legacy = importlib.import_module("tdlib_image_album_uploader")
+                image_legacy = importlib.import_module("tdlib_media_uploader.media.legacy_image")
                 cleanup_compressed = getattr(image_legacy, "cleanup_compressed_images", None)
                 if callable(cleanup_compressed):
                     cleanup_compressed()
