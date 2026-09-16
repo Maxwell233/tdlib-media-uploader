@@ -44,7 +44,7 @@ class ArchitectureContractTest(unittest.TestCase):
 
         app_source = (PACKAGE_ROOT / "app.py").read_text(encoding="utf-8")
         self.assertIn(
-            "from .gui.application import main, run_self_test",
+            "from tdlib_media_uploader.gui.application import main, run_self_test",
             app_source,
         )
         self.assertIn('if "--self-test" in sys.argv[1:]', (PACKAGE_ROOT / "gui" / "main_window.py").read_text(encoding="utf-8"))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import unittest
@@ -74,7 +75,15 @@ class Phase1CliRemovalTest(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertEqual(result.returncode, 2)
-        self.assertIn("仅支持从发布包运行", result.stderr)
+        # Windows may use backslash escapes for non-ASCII stderr when the
+        # child process is captured without a UTF-8 console. Normalize those
+        # escapes while preserving the same user-visible contract.
+        stderr = re.sub(
+            r"\\u([0-9a-fA-F]{4})",
+            lambda match: chr(int(match.group(1), 16)),
+            result.stderr,
+        )
+        self.assertIn("仅支持从发布包运行", stderr)
 
 
 if __name__ == "__main__":

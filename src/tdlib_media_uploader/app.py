@@ -6,7 +6,7 @@ The offline self-test remains available from that packaged entry point.
 
 from __future__ import annotations
 
-from .gui.application import main, run_self_test  # noqa: E402
+from tdlib_media_uploader.gui.application import main, run_self_test  # noqa: E402
 
 
 __all__ = ["main", "run_self_test"]
