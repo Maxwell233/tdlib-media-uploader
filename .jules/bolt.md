@@ -1,3 +1,3 @@
-## $(date +%Y-%m-%d) - [Sorting Optimization]
+## 2026-09-17 - [Sorting Optimization]
 Learning: `functools.cmp_to_key` is extremely slow when wrapping complex string/part comparison functions (like natural sort which separates strings into digit vs text parts), imposing an O(N log N) callback penalty.
 Action: Prefer deriving a custom comparable `__lt__` class (or purely native tuples if they fully align with sorting rules) when sorting large data. For `natural_sort`, caching the parsed string parts on the object before sorting provided a ~7x speedup for 10k items. Be extremely mindful to ensure that Python's native tuple and string comparison fallbacks match the original comparison rules exactly.
