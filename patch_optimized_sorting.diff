@@ -1,0 +1,41 @@
+<<<<<<< SEARCH
+    decorated = [
+        (key_func(value), index, value) for index, value in enumerate(values)
+    ]
+
+    def compare(left, right) -> int:
+        result = natural_compare(left[0], right[0])
+        return result or (left[1] - right[1])
+
+    return [value for _, _, value in sorted(decorated, key=cmp_to_key(compare))]
+=======
+    class NaturalSortKey:
+        __slots__ = ("parts", "length", "index", "original")
+        def __init__(self, value, index, original):
+            self.parts = tuple((t, v, len(r) if t == 1 else 0, r) for t, v, r in _natural_parts(value))
+            self.length = len(self.parts)
+            self.index = index
+            self.original = original
+
+        def __lt__(self, other):
+            for (at, av, ar_len, ar), (bt, bv, br_len, br) in zip(self.parts, other.parts):
+                if at != bt:
+                    return at < bt
+                if av == bv:
+                    if at == 1 and ar_len != br_len:
+                        return ar_len < br_len
+                    if ar != br:
+                        return ar < br
+                    continue
+                return av < bv
+
+            if self.length != other.length:
+                return self.length < other.length
+            return self.index < other.index
+
+    return [
+        item.original for item in sorted(
+            (NaturalSortKey(key_func(value), index, value) for index, value in enumerate(values))
+        )
+    ]
+>>>>>>> REPLACE

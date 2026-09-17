@@ -1,0 +1,29 @@
+<<<<<<< SEARCH
+    class NaturalSortKey:
+        __slots__ = ("parts", "length", "index", "original")
+        def __init__(self, value, index, original):
+            self.parts = tuple((t, v, len(r) if t == 1 else 0, r) for t, v, r in _natural_parts(value))
+            self.length = len(self.parts)
+            self.index = index
+            self.original = original
+
+        def __lt__(self, other):
+            for (at, av, ar_len, ar), (bt, bv, br_len, br) in zip(self.parts, other.parts):
+=======
+    class NaturalSortKey:
+        __slots__ = ("parts", "length", "index", "original")
+
+        def __init__(self, value, index, original):
+            self.parts = tuple(
+                (t, v, len(r) if t == 1 else 0, r)
+                for t, v, r in _natural_parts(value)
+            )
+            self.length = len(self.parts)
+            self.index = index
+            self.original = original
+
+        def __lt__(self, other):
+            for (at, av, ar_len, ar), (bt, bv, br_len, br) in zip(
+                self.parts, other.parts
+            ):
+>>>>>>> REPLACE
