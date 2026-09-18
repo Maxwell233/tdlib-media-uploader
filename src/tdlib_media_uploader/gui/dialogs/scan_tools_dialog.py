@@ -24,24 +24,24 @@ from PySide6.QtWidgets import (
 )
 
 from ...config.paths import read_version
-
-
-def _cfg(name: str, default=None):
-    from ..main_window import _cfg as get_cfg
-
-    return get_cfg(name, default)
+from ..config_service import get_cfg as _cfg, write_config_values as _default_write_config_values
+from ..tools import validate_exiftool_path as _default_validate_exiftool_path
 
 
 def _write_config_values(values: dict[tuple[str, str], object]) -> str:
-    from ..main_window import _write_config_values as write_vals
-
-    return write_vals(values)
+    import sys
+    main_mod = sys.modules.get("tdlib_media_uploader.gui.main_window")
+    if main_mod is not None and hasattr(main_mod, "_write_config_values"):
+        return main_mod._write_config_values(values)
+    return _default_write_config_values(values)
 
 
 def _validate_exiftool_path(value: str) -> str:
-    from ..main_window import _validate_exiftool_path as val_exif
-
-    return val_exif(value)
+    import sys
+    main_mod = sys.modules.get("tdlib_media_uploader.gui.main_window")
+    if main_mod is not None and hasattr(main_mod, "_validate_exiftool_path"):
+        return main_mod._validate_exiftool_path(value)
+    return _default_validate_exiftool_path(value)
 
 
 class ScanToolsDialog(QDialog):

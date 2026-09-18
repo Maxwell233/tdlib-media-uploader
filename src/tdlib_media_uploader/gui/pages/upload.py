@@ -558,11 +558,11 @@ class UploadPage(QWidget):
                 caption_count.setText(
                     f"用户标题 {len(caption)}/{caption_limit} · 发送预览 {len(rendered)}/{caption_limit}"
                 )
-                caption_count.setStyleSheet("color: #91a2b5")
+                caption_count.setStyleSheet(f"color: {THEME.text_muted};")
             except CaptionLimitError as exc:
                 preview.setPlainText(str(exc))
                 caption_count.setText(f"超出字数限制：{len(caption)}/{caption_limit}")
-                caption_count.setStyleSheet("color: #ff7b72")
+                caption_count.setStyleSheet(f"color: {THEME.danger};")
 
         base_edit.textChanged.connect(update_preview)
         custom_edit.textChanged.connect(update_preview)

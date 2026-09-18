@@ -24,18 +24,15 @@ from PySide6.QtWidgets import (
 )
 
 from ...config.paths import STAGING_CACHE_DIR, read_version
-
-
-def _cfg(name: str, default=None):
-    from ..main_window import _cfg as get_cfg
-
-    return get_cfg(name, default)
+from ..config_service import get_cfg as _cfg, write_config_values as _default_write_config_values
 
 
 def _write_config_values(values: dict[tuple[str, str], object]) -> str:
-    from ..main_window import _write_config_values as write_vals
-
-    return write_vals(values)
+    import sys
+    main_mod = sys.modules.get("tdlib_media_uploader.gui.main_window")
+    if main_mod is not None and hasattr(main_mod, "_write_config_values"):
+        return main_mod._write_config_values(values)
+    return _default_write_config_values(values)
 
 
 class ConfigDialog(QDialog):

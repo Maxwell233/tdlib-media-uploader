@@ -51,7 +51,17 @@ from tdlib_media_uploader.gui.pages import (  # noqa: E402
     UploadPage,
     VideoPage,
 )
-from tdlib_media_uploader.gui.theme import APP_STYLE, THEME, Palette, build_stylesheet  # noqa: E402
+from tdlib_media_uploader.gui.theme import (  # noqa: E402
+    APP_STYLE,
+    DARK_PALETTE,
+    LIGHT_PALETTE,
+    THEME,
+    Palette,
+    build_stylesheet,
+    get_current_theme_mode,
+    set_theme_mode,
+    toggle_theme,
+)
 
 
 class Beta3ThemeAndComponentsTest(unittest.TestCase):
@@ -74,6 +84,46 @@ class Beta3ThemeAndComponentsTest(unittest.TestCase):
         self.assertIn("QProgressBar", css)
         self.assertIn("QGroupBox", css)
         self.assertTrue(len(APP_STYLE) > 500)
+
+    def test_light_dark_theme_toggle(self):
+        # Ensure initial state is dark
+        set_theme_mode("dark")
+        self.assertEqual(get_current_theme_mode(), "dark")
+        self.assertEqual(THEME.bg_base, DARK_PALETTE.bg_base)
+        self.assertEqual(THEME.text_primary, DARK_PALETTE.text_primary)
+
+        dark_css = build_stylesheet(THEME)
+        self.assertIn(DARK_PALETTE.bg_base, dark_css)
+
+        # Toggle to light
+        new_mode = toggle_theme()
+        self.assertEqual(new_mode, "light")
+        self.assertEqual(get_current_theme_mode(), "light")
+        self.assertEqual(THEME.bg_base, LIGHT_PALETTE.bg_base)
+        self.assertEqual(THEME.text_primary, LIGHT_PALETTE.text_primary)
+
+        light_css = build_stylesheet(THEME)
+        self.assertIn(LIGHT_PALETTE.bg_base, light_css)
+        self.assertNotEqual(dark_css, light_css)
+
+        # Toggle back to dark
+        back_mode = toggle_theme()
+        self.assertEqual(back_mode, "dark")
+        self.assertEqual(get_current_theme_mode(), "dark")
+        self.assertEqual(THEME.bg_base, DARK_PALETTE.bg_base)
+
+        # Test sidebar button integration
+        sidebar = NavigationSidebar()
+        try:
+            self.assertEqual(sidebar.theme_btn.text(), "🌙")
+            sidebar.theme_btn.click()
+            self.assertEqual(sidebar.theme_btn.text(), "☀️")
+            self.assertEqual(get_current_theme_mode(), "light")
+            sidebar.theme_btn.click()
+            self.assertEqual(sidebar.theme_btn.text(), "🌙")
+            self.assertEqual(get_current_theme_mode(), "dark")
+        finally:
+            sidebar.deleteLater()
 
     def test_status_pill_variants_and_text(self):
         pill = StatusPill("运行中", status="info")
@@ -306,6 +356,68 @@ class Beta3MainWindowAndArchitectureTest(unittest.TestCase):
                             node.module.split("."),
                             f"Forbidden GUI import in lower layer: {py_file} -> {node.module}",
                         )
+
+    def test_architecture_boundary_gui_subpackages_never_reverse_import_main_window(self):
+        gui_path = SRC_ROOT / "tdlib_media_uploader" / "gui"
+        for subpkg in ("pages", "dialogs", "components"):
+            pkg_dir = gui_path / subpkg
+            if not pkg_dir.is_dir():
+                continue
+            for py_file in pkg_dir.rglob("*.py"):
+                tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            self.assertNotIn(
+                                "main_window",
+                                alias.name.split("."),
+                                f"Forbidden reverse import to main_window in {py_file} -> {alias.name}",
+                            )
+                    elif isinstance(node, ast.ImportFrom) and node.module:
+                        self.assertNotIn(
+                            "main_window",
+                            node.module.split("."),
+                            f"Forbidden reverse import to main_window in {py_file} -> {node.module}",
+                        )
+
+    def test_main_window_scanner_cancellation_on_close(self):
+        from unittest.mock import MagicMock
+        window = gui_app.MainWindow()
+        try:
+            mock_scanner = MagicMock()
+            mock_scanner.isRunning.return_value = True
+            window.scanners["video"] = mock_scanner
+
+            window.close()
+            mock_scanner.cancel.assert_called_once()
+            mock_scanner.wait.assert_called_once()
+        finally:
+            window.deleteLater()
+            self.app.processEvents()
+
+    def test_upload_finished_safely_handles_empty_active_kind(self):
+        window = gui_app.MainWindow()
+        try:
+            window.active_kind = ""
+            # Must not raise ValueError or crash when active_kind is empty
+            window._upload_finished(False, "任务异常中止")
+            self.assertEqual(window.statusBar().currentMessage(), "任务异常中止")
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+    def test_spec_hiddenimports_contain_new_service_modules(self):
+        spec_text = (PROJECT_ROOT / "tdlib_media_uploader.spec").read_text(encoding="utf-8")
+        expected_modules = [
+            "tdlib_media_uploader.gui.tools",
+            "tdlib_media_uploader.gui.config_service",
+            "tdlib_media_uploader.gui.history_service",
+            "tdlib_media_uploader.gui.cache_service",
+            "tdlib_media_uploader.gui.scanner",
+        ]
+        for mod in expected_modules:
+            self.assertIn(f'"{mod}"', spec_text, f"Missing {mod} in tdlib_media_uploader.spec")
 
 
 if __name__ == "__main__":

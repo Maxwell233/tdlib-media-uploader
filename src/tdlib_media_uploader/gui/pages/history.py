@@ -22,31 +22,15 @@ from PySide6.QtWidgets import (
 )
 
 from ..components.cards import StatCard
+from ..history_service import clear_history, load_history, save_history
 from ..theme import THEME
+from ..tools import format_size, kind_label
 
 
-def _kind_label(kind: str) -> str:
-    from ..main_window import _kind_label as get_label
-
-    return get_label(kind)
-
-
-def _load_history() -> list[dict]:
-    from ..main_window import _load_history as load_hist
-
-    return load_hist()
-
-
-def _save_history(records: list[dict]) -> None:
-    from ..main_window import _save_history as save_hist
-
-    return save_hist(records)
-
-
-def _fmt_size(value: float | int | None) -> str:
-    from ..main_window import _fmt_size as fmt_s
-
-    return fmt_s(value)
+_kind_label = kind_label
+_load_history = load_history
+_save_history = save_history
+_fmt_size = format_size
 
 
 class HistoryPage(QWidget):

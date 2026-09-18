@@ -25,12 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..theme import THEME
-
-
-def _kind_label(kind: str) -> str:
-    from ..main_window import _kind_label as get_label
-
-    return get_label(kind)
+from ..tools import kind_label as _kind_label
 
 
 class InflightPage(QWidget):

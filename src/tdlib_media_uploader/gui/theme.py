@@ -52,7 +52,121 @@ class Palette(NamedTuple):
     info_bg: str = "#312e81"
 
 
-THEME = Palette()
+DARK_PALETTE = Palette()
+
+LIGHT_PALETTE = Palette(
+    # Backgrounds
+    bg_base="#f8fafc",
+    bg_sidebar="#f1f5f9",
+    bg_surface="#ffffff",
+    bg_card="#ffffff",
+    bg_card_hover="#f8fafc",
+    bg_input="#ffffff",
+    bg_selection="#e0f2fe",
+    bg_alt_row="#f8fafc",
+
+    # Borders
+    border_subtle="#e2e8f0",
+    border_card="#cbd5e1",
+    border_hover="#94a3b8",
+    border_focus="#0284c7",
+
+    # Text
+    text_primary="#0f172a",
+    text_secondary="#334155",
+    text_muted="#64748b",
+    text_dim="#94a3b8",
+
+    # Accents & Semantics
+    accent="#0284c7",
+    accent_hover="#0ea5e9",
+    accent_active="#0369a1",
+
+    success="#10b981",
+    success_hover="#059669",
+    success_bg="#dcfce7",
+
+    warning="#f59e0b",
+    warning_hover="#d97706",
+    warning_bg="#fef3c7",
+
+    danger="#ef4444",
+    danger_hover="#dc2626",
+    danger_bg="#fee2e2",
+
+    info="#6366f1",
+    info_hover="#4f46e5",
+    info_bg="#e0e7ff",
+)
+
+
+class DynamicTheme(Palette):
+    """Dynamic theme proxy that allows runtime light/dark switching while remaining a Palette instance."""
+
+    def __init__(self, default_mode: str = "dark"):
+        super().__init__()
+        object.__setattr__(self, "_mode", "dark")
+        object.__setattr__(self, "_palette", DARK_PALETTE)
+        if default_mode != "dark":
+            self.set_mode(default_mode)
+
+    @property
+    def mode(self) -> str:
+        return object.__getattribute__(self, "_mode")
+
+    @property
+    def current(self) -> Palette:
+        return object.__getattribute__(self, "_palette")
+
+    def set_mode(self, mode: str) -> str:
+        norm = "light" if str(mode).lower() in ("light", "white", "亮色", "浅色") else "dark"
+        object.__setattr__(self, "_mode", norm)
+        object.__setattr__(self, "_palette", LIGHT_PALETTE if norm == "light" else DARK_PALETTE)
+        return norm
+
+    def toggle(self) -> str:
+        new_mode = "light" if self.mode == "dark" else "dark"
+        return self.set_mode(new_mode)
+
+    def __getattribute__(self, name: str):
+        if name in (
+            "_mode",
+            "_palette",
+            "mode",
+            "current",
+            "set_mode",
+            "toggle",
+            "__class__",
+            "__dict__",
+            "__repr__",
+        ):
+            return object.__getattribute__(self, name)
+        curr = object.__getattribute__(self, "_palette")
+        if hasattr(curr, name):
+            return getattr(curr, name)
+        return object.__getattribute__(self, name)
+
+    def __repr__(self) -> str:
+        return f"<DynamicTheme mode={self.mode!r}>"
+
+
+THEME = DynamicTheme()
+
+
+def get_current_theme_mode() -> str:
+    """Return the current theme mode string ('dark' or 'light')."""
+    return THEME.mode
+
+
+def set_theme_mode(mode: str) -> str:
+    """Set the theme mode ('dark' or 'light') and return normalized mode."""
+    return THEME.set_mode(mode)
+
+
+def toggle_theme() -> str:
+    """Toggle between dark and light theme modes and return the new mode."""
+    return THEME.toggle()
+
 
 FONT_FAMILY = (
     '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif'
@@ -505,9 +619,39 @@ QTabBar::tab:hover:!selected {{
     background-color: {palette.bg_card_hover};
     color: {palette.text_secondary};
 }}
+
+/* Theme toggle button (Sun / Moon) */
+QPushButton#themeToggleBtn {{
+    min-height: 28px;
+    max-height: 28px;
+    min-width: 28px;
+    max-width: 28px;
+    padding: 0;
+    border-radius: 14px;
+    background-color: {palette.bg_card};
+    border: 1px solid {palette.border_card};
+    font-size: 14px;
+}}
+
+QPushButton#themeToggleBtn:hover {{
+    background-color: {palette.bg_card_hover};
+    border-color: {palette.border_hover};
+}}
 """
 
 
 APP_STYLE = build_stylesheet()
 
-__all__ = ["THEME", "Palette", "APP_STYLE", "build_stylesheet", "FONT_FAMILY"]
+__all__ = [
+    "THEME",
+    "Palette",
+    "DARK_PALETTE",
+    "LIGHT_PALETTE",
+    "DynamicTheme",
+    "get_current_theme_mode",
+    "set_theme_mode",
+    "toggle_theme",
+    "APP_STYLE",
+    "build_stylesheet",
+    "FONT_FAMILY",
+]

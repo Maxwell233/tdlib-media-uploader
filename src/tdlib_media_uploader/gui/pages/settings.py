@@ -29,20 +29,14 @@ from ...config.paths import (
     read_version,
 )
 from ...core.logging import APP_LOG_PATH, TDLIB_LOG_PATH
+from ..cache_service import cache_status_text
 from ..components.status_pill import StatusPill
+from ..config_service import _CONFIG_ERROR, cfg, get_cfg
 from ..theme import THEME
 
 
-def _cfg(name: str, default=None):
-    from ..main_window import _cfg as get_cfg
-
-    return get_cfg(name, default)
-
-
-def _cache_status_text() -> str:
-    from ..main_window import _cache_status_text as get_cache_status
-
-    return get_cache_status()
+_cfg = get_cfg
+_cache_status_text = cache_status_text
 
 
 class SettingsPage(QWidget):
@@ -234,7 +228,7 @@ class SettingsPage(QWidget):
         self.refresh()
 
     def refresh(self):
-        from ..main_window import _CONFIG_ERROR, cfg
+        from ..config_service import _CONFIG_ERROR, cfg
 
         if _CONFIG_ERROR:
             self.config_status.setText(f"配置不可用：{_CONFIG_ERROR}")

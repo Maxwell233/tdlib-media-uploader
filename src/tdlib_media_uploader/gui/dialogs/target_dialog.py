@@ -18,37 +18,9 @@ from PySide6.QtWidgets import (
 )
 
 from ...config.paths import read_version
+from ..config_service import get_cfg as _cfg, target_for as _target_for, write_config_values as _write_config_values
 from ..theme import THEME
-
-
-def _cfg(name: str, default=None):
-    from ..main_window import _cfg as get_cfg
-
-    return get_cfg(name, default)
-
-
-def _target_for(kind: str) -> dict:
-    from ..main_window import _target_for as get_target
-
-    return get_target(kind)
-
-
-def _require_kind(kind: str) -> str:
-    from ..main_window import _require_kind as req_kind
-
-    return req_kind(kind)
-
-
-def _kind_label(kind: str) -> str:
-    from ..main_window import _kind_label as get_label
-
-    return get_label(kind)
-
-
-def _write_config_values(values: dict[tuple[str, str], object]) -> str:
-    from ..main_window import _write_config_values as write_vals
-
-    return write_vals(values)
+from ..tools import kind_label as _kind_label, require_kind as _require_kind
 
 
 class TargetDialog(QDialog):
