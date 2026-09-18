@@ -78,6 +78,100 @@ class UploadJournalTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 journal.mark_not_sent("image", "album", target=first)
 
+    def test_unknown_journal_blocks_until_manual_reconciliation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("mixed", "album-key", [{"path": "clip.jpg"}])
+            journal.submitted("mixed", "album-key", [11])
+            journal.unknown("mixed", "album-key", "confirmation timeout")
+            self.assertEqual(journal.unresolved("mixed", "album-key")["status"], UNKNOWN)
+            self.assertEqual(len(journal.list_unresolved()), 1)
+            journal.mark_not_sent("mixed", "album-key")
+            self.assertIsNone(journal.unresolved("mixed", "album-key"))
+            journal.prepare("mixed", "album-key", [{"path": "clip.jpg"}])
+            journal.confirmed("mixed", "album-key", [12])
+            self.assertIsNone(journal.get("mixed", "album-key"))
+
+    def test_confirmed_record_blocks_until_finalization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "album-key", [{"path": "clip.jpg"}])
+            journal.update("image", "album-key", CONFIRMED, message_ids=[7])
+            self.assertEqual(journal.unresolved("image", "album-key")["status"], CONFIRMED)
+            journal.confirmed("image", "album-key", [7])
+            self.assertIsNone(journal.unresolved("image", "album-key"))
+
+    def test_target_scoping_keeps_legacy_records_conservative(self):
+        first = {"target_mode": "forum_topic", "chat_id": -1001, "forum_topic_id": 1}
+        second = {"target_mode": "forum_topic", "chat_id": -1001, "forum_topic_id": 2}
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "album", [{"path": "photo.jpg"}], target=first)
+            journal.unknown("image", "album", "timeout", target=first)
+            self.assertIsNotNone(journal.unresolved("image", "album", target=first))
+            self.assertIsNone(journal.unresolved("image", "album", target=second))
+            journal.prepare("image", "legacy", [{"path": "photo.jpg"}])
+            journal.unknown("image", "legacy", "timeout")
+            self.assertIsNotNone(journal.unresolved("image", "legacy", target=first))
+            self.assertIsNotNone(journal.unresolved("image", "legacy", target=second))
+
+    def test_forum_unknown_record_matches_after_irrelevant_channel_change(self):
+        first = {
+            "target_mode": "forum_topic",
+            "chat_id": 100,
+            "forum_topic_id": 10,
+            "channel_chat_id": 999,
+        }
+        second = {**first, "channel_chat_id": 888}
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "forum-album", [{"path": "photo.jpg"}], target=first)
+            journal.unknown("image", "forum-album", "timeout", target=first)
+            self.assertIsNotNone(journal.unresolved("image", "forum-album", target=second))
+
+    def test_channel_unknown_record_matches_after_irrelevant_topic_change(self):
+        first = {
+            "target_mode": "channel",
+            "channel_chat_id": 200,
+            "forum_topic_id": 10,
+        }
+        second = {**first, "forum_topic_id": 999}
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "channel-album", [{"path": "photo.jpg"}], target=first)
+            journal.unknown("image", "channel-album", "timeout", target=first)
+            self.assertIsNotNone(journal.unresolved("image", "channel-album", target=second))
+
+    def test_version_two_target_record_uses_canonical_identity_for_fallback(self):
+        from hashlib import sha256
+
+        target = {
+            "target_mode": "forum_topic",
+            "chat_id": 100,
+            "forum_topic_id": 10,
+            "channel_chat_id": 999,
+        }
+        equivalent = {**target, "channel_chat_id": 888}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            journal = InflightJournal(root)
+            identity = json.dumps(target, sort_keys=True, separators=(",", ":"))
+            old_hash = sha256(f"image\nv2-album\n{identity}".encode("utf-8")).hexdigest()
+            (root / f"{old_hash}.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "kind": "image",
+                        "album_key": "v2-album",
+                        "status": UNKNOWN,
+                        "target": target,
+                        "items": [{"path": "photo.jpg"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertIsNotNone(journal.unresolved("image", "v2-album", target=equivalent))
+
     def test_corrupt_json_is_visible_and_remains_a_fail_closed_blocker(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

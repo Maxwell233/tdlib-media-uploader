@@ -4,6 +4,7 @@
 
 - 未确认上传页面以文件名/Album 摘要为主显示，并提供完整源路径详情、状态翻译、Telegram 目标、文件数、更新时间和错误信息；legacy 与 corrupt journal 均有明确 fallback。
 - `CONFIRMED` 仅允许修复本地 UploadState checkpoint，禁止走“Telegram 中不存在”路径；恢复失败保留 journal，避免重复上传。
+- `CONFIRMED` checkpoint 恢复失败按本地断点待修复处理，GUI 明确提示 Telegram 已确认，不会引导普通重传。
 - journal parse、截断和权限错误均 fail-closed；fallback lookup 使用 lazy index，正常 direct-path lookup 不扫描全目录。
 - 新增安全停止和立即中断两种 GUI 操作。安全停止不取消当前 Album；立即中断可能产生 UNKNOWN，并保留人工核对保护。
 
@@ -12,6 +13,7 @@
 - Image/Video planner 使用 snapshot identity lookup，并显式拒绝未知项、重复 identity 和 snapshot mismatch。
 - UploadState 在一个 Album 内复用统一 `sent_at`；清理无内部调用的 legacy image `format_duration`。
 - 新增独立 journal、reconciliation、stop semantics、media lookup、inflight GUI 测试，保持 unittest/offline 运行方式。
+- Windows 路径断言采用稳定路径语义，并迁移对应 ownership regression，保持 Windows/macOS 兼容。
 
 ### V1.9.3-beta1 更新
 

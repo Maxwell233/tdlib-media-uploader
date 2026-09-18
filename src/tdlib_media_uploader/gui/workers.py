@@ -36,6 +36,22 @@ def _load_upload_runner() -> Callable[..., Any]:
     return run_v2_upload
 
 
+def _has_confirmed_checkpoint_failure(result: Any) -> bool:
+    """Detect a confirmed send whose local checkpoint repair failed."""
+
+    for batch in getattr(result, "batches", ()) or ():
+        if isinstance(batch, Mapping):
+            status = batch.get("status", "")
+            error = batch.get("error")
+        else:
+            status = getattr(batch, "status", "")
+            error = getattr(batch, "error", None)
+        status = getattr(status, "value", status)
+        if str(status).upper() == "CONFIRMED" and error:
+            return True
+    return False
+
+
 class ScanWorker(QThread):
     """Run the GUI preview adapter without blocking the Qt event loop."""
 
@@ -180,12 +196,19 @@ class UploadWorker(QThread):
             elif status == "UNKNOWN":
                 self.completed.emit(False, "任务存在未确认的 Telegram Album；请先在‘未确认上传’中核对。")
             elif status == "PARTIAL":
-                deferred = len(getattr(result, "deferred_items", ()) or ())
-                failed = len(getattr(result, "failed_items", ()) or ())
-                self.completed.emit(
-                    False,
-                    f"任务部分完成：暂缓 {deferred} 个，失败 {failed} 个；修复后可重新扫描。",
-                )
+                if _has_confirmed_checkpoint_failure(result):
+                    self.completed.emit(
+                        False,
+                        "Telegram 已确认发送，但本地断点恢复失败；保护记录已保留，"
+                        "请在‘未确认上传’中修复本地断点。",
+                    )
+                else:
+                    deferred = len(getattr(result, "deferred_items", ()) or ())
+                    failed = len(getattr(result, "failed_items", ()) or ())
+                    self.completed.emit(
+                        False,
+                        f"任务部分完成：暂缓 {deferred} 个，失败 {failed} 个；修复后可重新扫描。",
+                    )
             else:
                 message = str(getattr(result, "error", "") or "任务未完成")
                 self.completed.emit(False, f"任务失败：{message}")

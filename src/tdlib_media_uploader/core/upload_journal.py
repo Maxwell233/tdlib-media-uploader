@@ -426,11 +426,6 @@ class InflightJournal:
     def unknown(self, kind: str, album_key: str, error: str = "", *, target=None) -> dict:
         return self.update(kind, album_key, UNKNOWN, error=error, target=target)
 
-    def mark_sent(self, kind: str, album_key: str, message_ids=None, *, target=None) -> dict | None:
-        """Mark a manually confirmed send; caller finalizes after state save."""
-
-        return self.mark_confirmed(kind, album_key, message_ids, target=target)
-
     def mark_not_sent(self, kind: str, album_key: str, *, target=None) -> None:
         """Manual reconciliation: it is safe to submit the Album again."""
 

@@ -714,6 +714,7 @@ class UploadEngine:
         ambiguous = False
         cancelled = False
         confirmed_count = 0
+        confirmed_recovery_failed = False
 
         try:
             _check_cancel(token)
@@ -831,6 +832,7 @@ class UploadEngine:
                             message = f"Album {plan.key} CONFIRMED 断点恢复失败：{recovery_error}"
                             self._log(sink, "ERROR", message)
                             errors.append(message)
+                            confirmed_recovery_failed = True
                             batches.append(
                                 UploadBatchResult(
                                     plan.key,
@@ -1262,6 +1264,10 @@ class UploadEngine:
 
         if ambiguous:
             status = RUN_UNKNOWN
+        elif confirmed_recovery_failed:
+            # Telegram already confirmed this Album.  A local checkpoint
+            # failure is actionable recovery work, not a failed send.
+            status = RUN_PARTIAL
         elif confirmed_count == 0 and not deferred_items and (errors or failed_items):
             status = RUN_FAILED
         elif errors or deferred_items or failed_items:

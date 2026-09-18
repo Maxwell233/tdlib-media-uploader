@@ -72,6 +72,40 @@ class Phase8GuiWorkersTest(unittest.TestCase):
         self.assertIs(kwargs["ui"], worker.ui)
         self.assertIs(kwargs["cancel_event"], worker.ui.cancel_event)
 
+    def test_upload_worker_distinguishes_confirmed_checkpoint_recovery_failure(self):
+        messages = []
+
+        def upload_runner(_kind, **_kwargs):
+            return SimpleNamespace(
+                status="PARTIAL",
+                batches=(
+                    SimpleNamespace(
+                        status="CONFIRMED",
+                        error="Album album CONFIRMED 断点恢复失败：disk full",
+                    ),
+                ),
+                deferred_items=(),
+                failed_items=(),
+                cancelled=False,
+            )
+
+        worker = UploadWorker(
+            "image",
+            AuthBridge(),
+            upload_runner=upload_runner,
+        )
+        worker.completed.connect(lambda success, message: messages.append((success, message)))
+        worker.run()
+
+        self.assertEqual(
+            messages,
+            [(
+                False,
+                "Telegram 已确认发送，但本地断点恢复失败；保护记录已保留，"
+                "请在‘未确认上传’中修复本地断点。",
+            )],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
