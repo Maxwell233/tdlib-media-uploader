@@ -21,7 +21,7 @@ import sys
 import tomllib
 from collections.abc import Mapping
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 if __name__ == "__main__" and not getattr(sys, "frozen", False):
@@ -1826,20 +1826,35 @@ class InflightPage(QWidget):
         title_row.addWidget(self.hint)
         layout.addLayout(title_row)
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(
-            ["媒体类型", "Album 标识", "状态", "创建时间", "最后更新", "目标", "文件数", "错误原因"]
+            [
+                "媒体类型",
+                "文件/Album 摘要",
+                "状态",
+                "创建时间",
+                "最后更新",
+                "Telegram 目标",
+                "源文件目录/路径",
+                "文件数",
+                "错误信息",
+            ]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(True)
+        self.table.cellDoubleClicked.connect(lambda row, _column: self._show_details(row))
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table, 1)
 
         buttons = QHBoxLayout()
         refresh = QPushButton("刷新")
         refresh.clicked.connect(self.reload_records)
+        self.details_button = QPushButton("查看完整文件列表")
+        self.details_button.clicked.connect(self._show_selected_details)
+        self.details_button.setEnabled(False)
         self.sent_button = QPushButton("我已确认 Telegram 中存在")
         self.sent_button.setObjectName("primaryButton")
         self.sent_button.clicked.connect(lambda: self._emit_choice(True))
@@ -1847,31 +1862,179 @@ class InflightPage(QWidget):
         self.not_sent_button.setObjectName("dangerButton")
         self.not_sent_button.clicked.connect(lambda: self._emit_choice(False))
         buttons.addWidget(refresh)
+        buttons.addWidget(self.details_button)
         buttons.addStretch(1)
         buttons.addWidget(self.sent_button)
         buttons.addWidget(self.not_sent_button)
         layout.addLayout(buttons)
+        self.table.itemSelectionChanged.connect(self._update_actions)
         self.reload_records()
 
-    def _emit_choice(self, sent: bool):
+    @staticmethod
+    def _item_paths(record: Mapping) -> list[str]:
+        values = record.get("items", []) if isinstance(record, Mapping) else []
+        if not isinstance(values, list):
+            return []
+        paths: list[str] = []
+        for raw in values:
+            value = raw.get("path") if isinstance(raw, Mapping) else raw
+            if value not in (None, ""):
+                paths.append(str(value))
+        return paths
+
+    @staticmethod
+    def _filename(path: str) -> str:
+        return (PureWindowsPath(path).name if "\\" in path else Path(path).name) or path
+
+    @classmethod
+    def _summary(cls, record: Mapping) -> str:
+        paths = cls._item_paths(record)
+        if not paths:
+            return (
+                "损坏的上传记录"
+                if str(record.get("status", "")).upper() == "CORRUPT"
+                else "旧版记录，缺少源文件信息"
+            )
+        if len(paths) == 1:
+            return cls._filename(paths[0])
+        return f"{cls._filename(paths[0])} 等 {len(paths)} 个文件"
+
+    @staticmethod
+    def _source_text(paths: list[str]) -> str:
+        if not paths:
+            return "旧版记录，缺少源文件信息"
+        first = paths[0]
+        parent = PureWindowsPath(first).parent if "\\" in first else Path(first).parent
+        parents = {
+            str(PureWindowsPath(path).parent if "\\" in path else Path(path).parent)
+            for path in paths
+        }
+        if len(parents) == 1:
+            return str(parent)
+        return f"多个目录（首个：{parent}）"
+
+    @staticmethod
+    def _status_text(status: str) -> str:
+        return {
+            "PREPARED": "待确认 / 尚未完成发送",
+            "SUBMITTED": "已提交 / 等待确认",
+            "UNKNOWN": "未确认 / 禁止自动重试",
+            "CONFIRMED": "Telegram 已确认 / 本地断点待修复",
+            "CORRUPT": "损坏的上传记录",
+        }.get(str(status).upper(), str(status or "未知"))
+
+    @staticmethod
+    def _target_text(record: Mapping) -> str:
+        from ..core.upload_journal import _record_target
+
+        target = _record_target(dict(record))
+        if not target:
+            return "⚠ 旧版记录：目标未知"
+        mode = str(target.get("target_mode", "")).lower()
+        chat_id = target.get("chat_id", "")
+        if mode == "channel":
+            return f"频道 · Chat ID {chat_id}"
+        return f"群组 · Chat ID {chat_id} · Topic {target.get('forum_topic_id', '')}"
+
+    @classmethod
+    def _detail_text(cls, record: Mapping) -> str:
+        paths = cls._item_paths(record)
+        lines = [
+            f"媒体类型：{_kind_label(record.get('kind', 'unknown'))}",
+            f"状态：{cls._status_text(str(record.get('status', '')))}",
+            f"Telegram 目标：{cls._target_text(record)}",
+            f"文件数量：{len(paths)}" if paths else "文件数量：未知",
+            f"内部 Album ID：{record.get('album_key', '未知')}",
+        ]
+        if paths:
+            lines.append("源文件：")
+            lines.extend(f"{index}. {path}" for index, path in enumerate(paths, start=1))
+        else:
+            lines.append("源文件：旧版记录，缺少源文件信息")
+        if record.get("journal_path"):
+            lines.append(f"journal 文件：{record['journal_path']}")
+        if record.get("error"):
+            lines.append(f"错误信息：{record['error']}")
+        return "\n".join(lines)
+
+    def _selected_record(self):
         row = self.table.currentRow()
         if row < 0:
-            QMessageBox.information(self, "请选择记录", "请先选择一条未确认上传记录。")
-            return
+            return None
+        item = self.table.item(row, 0)
+        value = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        return value if isinstance(value, dict) else None
+
+    def _update_actions(self):
+        record = self._selected_record()
+        status = str(record.get("status", "")).upper() if record else ""
+        corrupt = status == "CORRUPT"
+        confirmed = status == "CONFIRMED"
+        self.details_button.setEnabled(record is not None)
+        self.sent_button.setEnabled(record is not None and not corrupt)
+        self.sent_button.setText("修复本地断点" if confirmed else "我已确认 Telegram 中存在")
+        self.not_sent_button.setEnabled(
+            record is not None and status in {"PREPARED", "SUBMITTED", "UNKNOWN"}
+        )
+
+    def _show_details(self, row: int):
         item = self.table.item(row, 0)
         record = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if not isinstance(record, dict):
             return
-        action = "标记为已发送" if sent else "允许下次重新发送"
-        from ..core.upload_journal import _record_target
+        dialog = QDialog(self)
+        dialog.setWindowTitle("未确认上传详情")
+        dialog.resize(760, 520)
+        layout = QVBoxLayout(dialog)
+        text = QPlainTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(self._detail_text(record))
+        layout.addWidget(text)
+        close = QPushButton("关闭")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close)
+        dialog.exec()
 
-        target = _record_target(record)
-        has_target = bool(target)
+    def _show_selected_details(self):
+        row = self.table.currentRow()
+        if row >= 0:
+            self._show_details(row)
+
+    def _emit_choice(self, sent: bool):
+        record = self._selected_record()
+        if record is None:
+            QMessageBox.information(self, "请选择记录", "请先选择一条未确认上传记录。")
+            return
+        status = str(record.get("status", "")).upper()
+        if status == "CORRUPT":
+            QMessageBox.warning(
+                self,
+                "记录损坏",
+                f"这条记录无法安全处理，文件已保留：\n{record.get('journal_path', '')}",
+            )
+            return
+        if not sent and status == "CONFIRMED":
+            return
+        action = (
+            "修复本地断点并清理保护记录"
+            if status == "CONFIRMED"
+            else "标记为 Telegram 已发送"
+            if sent
+            else "允许下次重新发送"
+        )
+        target = self._target_text(record)
+        summary = self._summary(record)
+        paths = self._item_paths(record)
         message = (
-            f"将{action}：\n{record.get('album_key', '')}\n\n"
+            f"将{action}：\n"
+            f"文件/Album：{summary}\n"
+            f"状态：{self._status_text(status)}\n"
+            f"源文件：{self._source_text(paths)}\n"
+            f"文件数量：{len(paths) if paths else '未知'}\n"
+            f"Telegram 目标：{target}\n\n"
             "请确认你已经核对 Telegram 中的目标和 Album。"
         )
-        if sent and not has_target:
+        if sent and target.startswith("⚠"):
             message += (
                 "\n\n这是一条旧版未记录 Telegram 目标的上传记录。"
                 "\n程序无法确认它当时发送到哪个群组/Topic/频道。"
@@ -1891,10 +2054,10 @@ class InflightPage(QWidget):
 
     def reload_records(self):
         try:
-            from ..core.upload_journal import InflightJournal, UNRESOLVED, _record_target
+            from ..core.upload_journal import InflightJournal, UNRESOLVED
 
             records = [
-                record for record in InflightJournal().list_unresolved()
+                record for record in InflightJournal().list_unresolved(refresh=True)
                 if str(record.get("status", "")).upper() in UNRESOLVED
             ]
         except Exception as exc:
@@ -1903,22 +2066,16 @@ class InflightPage(QWidget):
             return
         self.table.setRowCount(len(records))
         for row, record in enumerate(records):
-            target = _record_target(record)
-            has_target = bool(target)
-            target_id = ""
-            if has_target:
-                target_mode = str(target.get("target_mode", ""))
-                target_id = target.get("chat_id", "")
-                if target_mode != "channel" and target.get("forum_topic_id"):
-                    target_id = f"{target_id} / Topic {target.get('forum_topic_id')}"
+            paths = self._item_paths(record)
             values = [
                 _kind_label(record.get("kind", "unknown")),
-                record.get("album_key", ""),
-                record.get("status", ""),
+                self._summary(record),
+                self._status_text(str(record.get("status", ""))),
                 record.get("created_at", ""),
                 record.get("updated_at", ""),
-                target_id or "⚠ 旧版记录：目标未知",
-                len(record.get("items", []) or []),
+                self._target_text(record),
+                self._source_text(paths),
+                len(paths) if paths else "未知",
                 record.get("error", ""),
             ]
             for column, value in enumerate(values):
@@ -1927,6 +2084,7 @@ class InflightPage(QWidget):
                     cell.setData(Qt.ItemDataRole.UserRole, record)
                 self.table.setItem(row, column, cell)
         self.table.resizeColumnsToContents()
+        self._update_actions()
         self.hint.setText(
             f"当前有 {len(records)} 条未确认记录。处理“已发送”前必须先核对 Telegram。"
             if records else "没有未确认上传记录。"
@@ -3105,7 +3263,8 @@ class MainWindow(QMainWindow):
             page.start_requested.connect(self._start_upload)
             page.path_selected.connect(self._save_source_path)
             page.edit_target_requested.connect(self._edit_target)
-        self.task_page.stop_requested.connect(self._stop_upload)
+        self.task_page.safe_stop_requested.connect(self._safe_stop_upload)
+        self.task_page.immediate_stop_requested.connect(self._immediate_stop_upload)
         self.inflight_page.reconciliation_requested.connect(self._reconcile_inflight)
         self.settings_page.open_editor.connect(self._edit_config)
         self.settings_page.open_scan_tools.connect(self._edit_scan_tools)
@@ -3121,7 +3280,6 @@ class MainWindow(QMainWindow):
         self.settings_page.refresh()
         self.inflight_page.reload_records()
         self.history_page.reload_records()
-        self.inflight_page.reload_records()
         if _CONFIG_CREATED:
             self.statusBar().showMessage("已创建 config.toml，请先在设置中填写 Telegram 信息")
 
@@ -3314,19 +3472,39 @@ class MainWindow(QMainWindow):
             + ("（频道）" if is_channel else f" / {payload.get('topic_name')}")
         )
 
-    def _stop_upload(self):
+    def _safe_stop_upload(self):
         if self.worker is not None and self.worker.isRunning():
             answer = QMessageBox.question(
                 self,
-                "立即停止上传",
-                "将立即取消当前文件/Album 的 TDLib 上传；未完整发送的 Album 不会写入断点，"
-                "下次会重新处理。是否继续？",
+                "安全停止上传",
+                "当前正在发送的 Album 会继续完成并保存断点；完成后不再开始新的 Album。"
+                "是否安全停止？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer == QMessageBox.StandardButton.Yes:
-                self.worker.request_stop()
-                self.task_page.task_status.setText("正在立即停止…")
-                self.statusBar().showMessage("正在立即停止上传任务…")
+                self.worker.request_safe_stop()
+                self.task_page.task_status.setText("当前 Album 完成后安全停止…")
+                self.statusBar().showMessage("已请求安全停止，当前 Album 将继续完成…")
+
+    def _immediate_stop_upload(self):
+        if self.worker is not None and self.worker.isRunning():
+            answer = QMessageBox.warning(
+                self,
+                "立即中断上传",
+                "将立即请求取消当前 TDLib 上传。当前 Album 可能已经部分或全部提交给 Telegram，"
+                "结果可能进入“未确认上传”，需要人工核对后才能继续。是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.worker.request_immediate_stop()
+                self.task_page.task_status.setText("正在立即中断…")
+                self.statusBar().showMessage("正在立即中断上传任务；当前 Album 可能进入 UNKNOWN…")
+
+    def _stop_upload(self):
+        """Compatibility alias for older integrations; uses safe stop."""
+
+        self._safe_stop_upload()
 
     def _upload_finished(self, success: bool, message: str):
         write_app_log(
@@ -3386,12 +3564,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "记录无效", "这条未确认记录缺少媒体类型或 Album 标识。")
             return
         try:
-            from ..telegram.tdlib_common import TDJsonClient
+            from tdlib_media_uploader.upload.reconciliation import ReconciliationService
 
-            client = TDJsonClient.__new__(TDJsonClient)
-            from ..core.upload_journal import InflightJournal
-
-            client.inflight_journal = InflightJournal()
+            client = ReconciliationService()
             target = record.get("target") if isinstance(record.get("target"), dict) else {
                 key: record.get(key)
                 for key in ("target_mode", "chat_id", "forum_topic_id", "channel_chat_id")

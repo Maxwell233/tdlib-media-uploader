@@ -62,6 +62,7 @@ class GuiConsoleUI(QObject):
         self._client = None
         self._client_lock = threading.Lock()
         self._stop_requested = threading.Event()
+        self._stop_after_current = threading.Event()
 
     @property
     def stop_requested(self) -> bool:
@@ -73,28 +74,50 @@ class GuiConsoleUI(QObject):
 
         return self._stop_requested
 
+    @property
+    def stop_after_current_event(self):
+        """Expose the cooperative stop marker to the V2 upload engine."""
+
+        return self._stop_after_current
+
+    @property
+    def safe_stop_requested(self) -> bool:
+        return self._stop_after_current.is_set()
+
     def register_client(self, client):
         with self._client_lock:
             self._client = client
             stop_already_requested = self._stop_requested.is_set()
         if stop_already_requested:
-            # The user can press stop while TDLib is still starting.  Carry
-            # that request into the newly created client instead of allowing
-            # the first upload to begin.
+            # Only an immediate stop may cancel a client during startup.
             client.cancel()
 
-    def request_stop(self):
+    def request_safe_stop(self):
+        """Finish the current Album, then stop at the next Album boundary."""
+
+        self._stop_after_current.set()
+        self.auth_bridge.answer("")
+
+    def request_immediate_stop(self):
+        """Abort the current transport and preserve an ambiguous send."""
+
         self._stop_requested.set()
+        self._stop_after_current.set()
         self.auth_bridge.answer("")
         with self._client_lock:
             client = self._client
         if client is not None:
             client.cancel()
 
+    def request_stop(self):
+        """Backward-compatible alias for the high-risk immediate stop."""
+
+        self.request_immediate_stop()
+
     def prompt(self, text: str, *, password: bool = False) -> str:
         value = self.auth_bridge.ask(text, password)
-        if not value:
-            self.request_stop()
+        if not value and not self.safe_stop_requested and not self.stop_requested:
+            self.request_immediate_stop()
         return value
 
     def _message(self, level: str, text):

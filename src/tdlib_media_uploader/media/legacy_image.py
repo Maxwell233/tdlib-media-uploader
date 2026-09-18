@@ -113,15 +113,6 @@ def format_size(value: float) -> str:
     return f"{value:.2f} TiB"
 
 
-def format_duration(seconds) -> str:
-    if seconds is None:
-        return "--:--"
-    seconds = max(0, int(seconds))
-    hours, rem = divmod(seconds, 3600)
-    minutes, seconds = divmod(rem, 60)
-    return f"{hours:02}:{minutes:02}:{seconds:02}" if hours else f"{minutes:02}:{seconds:02}"
-
-
 def relative_name(path: Path) -> str:
     return stable_relative_name(path, cfg.IMAGE_DIR)
 

@@ -150,8 +150,13 @@ def _legacy_root_scope(legacy: Any, config: Any, kind: str, root: Path):
 class GuiCancelToken:
     """Expose the shared worker event through the V2 cancellation protocol."""
 
-    def __init__(self, event: threading.Event | None = None):
+    def __init__(
+        self,
+        event: threading.Event | None = None,
+        stop_after_current_event: threading.Event | None = None,
+    ):
         self.event = event or threading.Event()
+        self.stop_after_current_event = stop_after_current_event or threading.Event()
 
     def is_cancelled(self) -> bool:
         return self.event.is_set()
@@ -159,6 +164,11 @@ class GuiCancelToken:
     def raise_if_cancelled(self) -> None:
         if self.is_cancelled():
             raise UploadCancelled("任务已取消")
+
+    def stop_after_current(self) -> bool:
+        """Return whether a cooperative Album-boundary stop was requested."""
+
+        return self.stop_after_current_event.is_set()
 
 
 class GuiEventSink:
@@ -727,6 +737,7 @@ def run_v2_upload(
     source_root: Path,
     target: Mapping[str, Any],
     cancel_event: threading.Event | None = None,
+    stop_after_current: threading.Event | None = None,
     preview_result: Mapping[str, Any] | None = None,
     config: Any | None = None,
     runtime_paths: Any | None = None,
@@ -747,7 +758,7 @@ def run_v2_upload(
         legacy.STATE_DIR = state_dir
     root = Path(source_root)
     strategy = _strategy(normalized, legacy, config, root)
-    token = GuiCancelToken(cancel_event)
+    token = GuiCancelToken(cancel_event, stop_after_current)
     sink = GuiEventSink(ui, kind=normalized)
 
     raw_items = tuple((preview_result or {}).get("items", ()) or ())

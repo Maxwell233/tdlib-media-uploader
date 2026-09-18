@@ -173,13 +173,20 @@ def _raw_snapshot(raw: Mapping[str, Any], path: Path) -> FileSnapshot:
 class _LegacyStateBridge:
     """Present V2 items to a legacy planner's path-only state callback."""
 
-    def __init__(self, strategy: "ImageStrategy", state: Any, items: Sequence[MediaItem]):
+    def __init__(
+        self,
+        strategy: "ImageStrategy",
+        state: Any,
+        items: Sequence[MediaItem],
+        lookup: Mapping[str, Mapping] | None = None,
+    ):
         self.strategy = strategy
         self.state = state
         self.items = tuple(items)
+        self.lookup = lookup if lookup is not None else strategy._build_item_lookup(self.items)
 
     def is_completed(self, value: Any) -> bool:
-        item = self.strategy._resolve_item(value, self.items)
+        item = self.strategy._resolve_item(value, self.items, self.lookup)
         return self.strategy._state_completed(self.state, item)
 
 
@@ -304,20 +311,52 @@ class ImageStrategy:
         self,
         raw: Any,
         candidates: Sequence[MediaItem],
+        lookup: Mapping[str, Mapping] | None = None,
     ) -> MediaItem:
+        index = lookup if lookup is not None else self._build_item_lookup(candidates)
         if isinstance(raw, MediaItem):
-            return raw
-        path = Path(raw.get("path") if isinstance(raw, Mapping) else raw)
-        size = raw.get("scan_size", raw.get("size")) if isinstance(raw, Mapping) else None
-        mtime_ns = raw.get("scan_mtime_ns", raw.get("mtime_ns")) if isinstance(raw, Mapping) else None
-        for item in candidates:
-            if self._normalize_path(item.path) != self._normalize_path(path):
-                continue
-            if size is not None and mtime_ns is not None:
-                if item.snapshot.as_tuple() != (int(size), int(mtime_ns)):
-                    continue
-            return item
+            path = Path(raw.path)
+            size, mtime_ns = raw.snapshot.as_tuple()
+            media_kind = str(raw.media_kind or self.kind)
+        else:
+            value = raw if isinstance(raw, Mapping) else {"path": raw}
+            if value.get("path") is None:
+                raise ValueError("legacy 图片计划返回了缺少 path 的项")
+            path = Path(value["path"])
+            size = value.get("scan_size", value.get("size"))
+            mtime_ns = value.get("scan_mtime_ns", value.get("mtime_ns"))
+            media_kind = str(value.get("media_kind", self.kind) or self.kind)
+        normalized_path = self._normalize_path(path)
+        by_identity = index["by_identity"]
+        if size is not None and mtime_ns is not None:
+            key = (normalized_path, int(size), int(mtime_ns), media_kind)
+            item = by_identity.get(key)
+            if item is not None:
+                return item
+        else:
+            matches = index["by_path"].get((normalized_path, media_kind), ())
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise ValueError(f"legacy 图片项缺少快照且 identity 不唯一：{path}")
         raise ValueError(f"legacy 图片计划返回了未知项：{path}")
+
+    def _build_item_lookup(self, candidates: Sequence[MediaItem]) -> dict[str, dict]:
+        by_identity: dict[tuple[object, ...], MediaItem] = {}
+        by_path: dict[tuple[str, str], list[MediaItem]] = {}
+        for item in candidates:
+            normalized_path = self._normalize_path(item.path)
+            key = (
+                normalized_path,
+                int(item.snapshot.size),
+                int(item.snapshot.mtime_ns),
+                str(item.media_kind or self.kind),
+            )
+            if key in by_identity:
+                raise ValueError(f"图片 MediaItem identity 重复：{item.path}")
+            by_identity[key] = item
+            by_path.setdefault((normalized_path, key[3]), []).append(item)
+        return {"by_identity": by_identity, "by_path": by_path}
 
     def _state_completed(self, state: Any, item: MediaItem) -> bool:
         if state is None:
@@ -457,7 +496,12 @@ class ImageStrategy:
         planner = getattr(self.legacy, "build_album_plans", None)
         if not callable(planner):
             raise TypeError("legacy image module 缺少 build_album_plans()")
-        state_bridge = _LegacyStateBridge(self, state, items) if state is not None else None
+        lookup = self._build_item_lookup(items)
+        state_bridge = (
+            _LegacyStateBridge(self, state, items, lookup)
+            if state is not None
+            else None
+        )
         with self._legacy_scope(source_root, items):
             raw_plans = _call_supported(
                 planner,
@@ -470,9 +514,9 @@ class ImageStrategy:
             if not isinstance(raw_plan, Mapping):
                 raise TypeError("legacy image planner 返回了无效 Album")
             raw_full = raw_plan.get("items", ())
-            full_items = tuple(self._resolve_item(raw, items) for raw in raw_full)
+            full_items = tuple(self._resolve_item(raw, items, lookup) for raw in raw_full)
             raw_pending = raw_plan.get("pending_items", raw_full)
-            pending_items = tuple(self._resolve_item(raw, items) for raw in raw_pending)
+            pending_items = tuple(self._resolve_item(raw, items, lookup) for raw in raw_pending)
             key = str(raw_plan.get("key", "") or "")
             if not key:
                 raise ValueError(f"legacy 图片 Album {index} 缺少稳定 key")
@@ -537,6 +581,7 @@ class ImageStrategy:
             raise TypeError("legacy image builder 必须返回 (contents, valid, skipped)")
         raw_contents, raw_valid, raw_skipped = result
         pending = tuple(plan.pending_items)
+        lookup = self._build_item_lookup(pending)
         ready: list[MediaItem] = []
         deferred: list[MediaItem] = []
         failed: list[MediaItem] = []
@@ -556,12 +601,12 @@ class ImageStrategy:
             bucket.append(item)
 
         for raw in raw_valid or ():
-            add(self._resolve_item(raw, pending), ready)
+            add(self._resolve_item(raw, pending, lookup), ready)
         for raw_record in raw_skipped or ():
             if not isinstance(raw_record, Mapping):
                 raise TypeError("legacy image builder 返回了无效 skipped record")
             raw_item = raw_record.get("item", raw_record.get("path"))
-            item = self._resolve_item(raw_item, pending)
+            item = self._resolve_item(raw_item, pending, lookup)
             add(item, deferred if self._category(raw_record) == "deferred" else failed)
             reason = str(raw_record.get("reason", "") or "").strip()
             if reason:

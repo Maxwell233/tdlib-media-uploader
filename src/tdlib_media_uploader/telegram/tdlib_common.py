@@ -1393,40 +1393,13 @@ class TDJsonClient:
         message_ids=None,
         target=None,
     ) -> None:
-        """Manually resolve an UNKNOWN send without querying Telegram history."""
-
-        requested_target = normalize_target(target)
-        effective_target = requested_target or self._target_identity()
-        selected_kind = kind or self._journal_kind_for(album_key, target=effective_target)
-        _path, record = self.inflight_journal.get_entry(selected_kind, album_key, effective_target)
-        if record is None:
-            raise RuntimeError(f"未找到未确认上传记录：{selected_kind} / {album_key}")
-        if not sent:
-            self.inflight_journal.mark_not_sent(selected_kind, album_key, target=effective_target)
-            return
-        items = self._journal_items(record)
-        if not items:
-            # A legacy path-only record can still be resolved when its source
-            # files remain available.  If they do not, retain the journal so
-            # the user is never allowed to accidentally create duplicates.
-            raise RuntimeError("上传日志缺少可恢复的文件快照，已保留记录以避免重复上传。")
-        ids = list(message_ids if message_ids is not None else record.get("message_ids", []))
-        state = self._state_for_journal(
-            selected_kind,
-            record,
-            fallback_target=requested_target or None,
-        )
-        # ``mark_album_completed`` performs an atomic fsync-backed save.  Do
-        # not touch the journal until it returns; a save failure therefore
-        # leaves the UNKNOWN/SUBMITTED record blocking automatic resends.
-        state.mark_album_completed(items, ids)
-        self.inflight_journal.mark_confirmed(
-            selected_kind,
-            album_key,
-            ids,
-            target=effective_target,
-        )
-        self.inflight_journal.finalize(selected_kind, album_key, target=effective_target)
+        """Compatibility entry point for local checkpoint reconciliation."""
+        from tdlib_media_uploader.upload.reconciliation import ReconciliationService
+        service = ReconciliationService(self.inflight_journal)
+        service._state_for_journal = self._state_for_journal
+        service._target_identity = self._target_identity
+        service.reconcile_inflight(album_key, sent=sent, kind=kind,
+                                   message_ids=message_ids, target=target)
 
     def _journal_kind_for(self, album_key: str, *, target=None) -> str:
         record = self.inflight_journal.find_album(album_key, target=target)

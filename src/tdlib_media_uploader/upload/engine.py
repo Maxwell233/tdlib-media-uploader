@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..contracts import CancelToken, EventSink, MediaStrategy, UploadContext
+from ..core.identity import canonical_target
 from ..core.models import (
     AlbumPlan,
     BatchStatus,
@@ -118,7 +119,8 @@ class _NullEventSink:
 
 def _stable_target(target: Mapping[str, Any] | None) -> str:
     try:
-        return json.dumps(dict(target or {}), ensure_ascii=False, sort_keys=True, default=str)
+        value = canonical_target(dict(target or {})) or dict(target or {})
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     except (TypeError, ValueError):
         return repr(target or {})
 
@@ -208,6 +210,18 @@ def _is_cancel_requested(token: CancelToken) -> bool:
         except Exception:
             return False
     return bool(getattr(token, "cancelled", False))
+
+
+def _stop_after_current_requested(token: CancelToken) -> bool:
+    """Return whether the caller requested a cooperative Album-boundary stop."""
+
+    checker = getattr(token, "stop_after_current", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+    return bool(getattr(token, "stop_after_current_requested", False))
 
 
 def _is_cancel_error(error: BaseException, token: CancelToken) -> bool:
@@ -670,6 +684,12 @@ class UploadEngine:
         kind = run_context.kind
         if not kind:
             return UploadRunResult(RUN_FAILED, error="MediaStrategy.kind 不能为空")
+        if _stop_after_current_requested(token):
+            return UploadRunResult(
+                RUN_CANCELLED,
+                error="已安全停止，未开始新的 Album",
+                cancelled=True,
+            )
 
         state = self._make_collaborator(
             run_context.state,
@@ -731,6 +751,13 @@ class UploadEngine:
                     cancelled=True,
                 )
             _check_cancel(token)
+            if _stop_after_current_requested(token):
+                return UploadRunResult(
+                    RUN_CANCELLED,
+                    error="已安全停止，未开始新的 Album",
+                    scanned_items=scanned_items,
+                    cancelled=True,
+                )
             raw_plans = _call_supported(
                 getattr(strategy, "build_plans"),
                 (scan_result,),
@@ -739,6 +766,13 @@ class UploadEngine:
                 context=run_context,
             )
             plans = tuple(raw_plans)
+            if _stop_after_current_requested(token):
+                return UploadRunResult(
+                    RUN_CANCELLED,
+                    error="已安全停止，未开始新的 Album",
+                    scanned_items=scanned_items,
+                    cancelled=True,
+                )
         except Exception as error:
             if _is_cancel_error(error, token):
                 return UploadRunResult(
@@ -754,9 +788,69 @@ class UploadEngine:
             )
 
         for plan in plans:
+            if _stop_after_current_requested(token):
+                cancelled = True
+                break
             plan_deferred: tuple[MediaItem, ...] = ()
             try:
                 validate_plan(plan)
+                try:
+                    unresolved = self._journal_call(
+                        journal,
+                        "unresolved",
+                        kind,
+                        plan.key,
+                        target=run_context.target,
+                    )
+                except Exception as journal_error:
+                    message = (
+                        f"Album {plan.key} 上传日志读取失败：{journal_error}；"
+                        "为避免重复上传已阻止自动重试"
+                    )
+                    self._log(sink, "ERROR", message)
+                    errors.append(message)
+                    batches.append(
+                        UploadBatchResult(plan.key, BatchStatus.UNKNOWN, error=message)
+                    )
+                    ambiguous = True
+                    continue
+                if unresolved is not None:
+                    status = str(unresolved.get("status", "UNKNOWN")).upper()
+                    if status == CONFIRMED:
+                        from .reconciliation import ReconciliationService
+
+                        try:
+                            repaired = ReconciliationService(journal).recover_confirmed(
+                                kind,
+                                plan.key,
+                                target=run_context.target,
+                                state=state,
+                                record=unresolved,
+                            )
+                        except Exception as recovery_error:
+                            message = f"Album {plan.key} CONFIRMED 断点恢复失败：{recovery_error}"
+                            self._log(sink, "ERROR", message)
+                            errors.append(message)
+                            batches.append(
+                                UploadBatchResult(
+                                    plan.key,
+                                    BatchStatus.CONFIRMED,
+                                    error=message,
+                                )
+                            )
+                            continue
+                        if repaired:
+                            self._log(sink, "INFO", f"Album {plan.key} 已恢复本地断点并清理保护记录")
+                            continue
+                    message = (
+                        f"Album {plan.key} 的发送状态为 {status}，"
+                        "为避免重复上传已阻止自动重试"
+                    )
+                    self._log(sink, "WARNING", message)
+                    errors.append(message)
+                    batches.append(UploadBatchResult(plan.key, BatchStatus.UNKNOWN, error=message))
+                    ambiguous = True
+                    continue
                 pending = tuple(
                     item for item in plan.pending_items if not self._state_completed(state, item)
                 )
@@ -909,32 +1003,21 @@ class UploadEngine:
                 batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
                 continue
 
-            send_plan = restrict_plan(effective_plan, ready_items)
+            if _stop_after_current_requested(token):
+                if run_context.stager is not None:
+                    try:
+                        self._cleanup(
+                            run_context.stager,
+                            effective_plan,
+                            run_context,
+                            confirmed=False,
+                        )
+                    except Exception as cleanup_error:
+                        errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
+                cancelled = True
+                break
 
-            try:
-                unresolved = self._journal_call(
-                    journal,
-                    "unresolved",
-                    kind,
-                    plan.key,
-                    target=run_context.target,
-                )
-            except Exception as error:
-                unresolved = None
-                message = f"Album {plan.key} 未能读取上传日志：{error}"
-                errors.append(message)
-                batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
-                continue
-            if unresolved is not None:
-                message = (
-                    f"Album {plan.key} 的发送状态为 {unresolved.get('status', 'UNKNOWN')}，"
-                    "为避免重复上传已阻止自动重试"
-                )
-                self._log(sink, "WARNING", message)
-                errors.append(message)
-                batches.append(UploadBatchResult(plan.key, BatchStatus.UNKNOWN, error=message))
-                ambiguous = True
-                continue
+            send_plan = restrict_plan(effective_plan, ready_items)
 
             if run_context.sender is None:
                 message = "UploadEngine 未配置 sender，未发起 Telegram 请求"
@@ -962,6 +1045,23 @@ class UploadEngine:
                 failed_items.extend(ready_items)
                 batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
                 continue
+
+            if _is_cancel_requested(token) or _stop_after_current_requested(token):
+                # The sender has not been called yet, so the PREPARED guard is
+                # safe to remove.  If deletion itself fails, retain the guard
+                # and let the next run fail closed instead of risking resend.
+                try:
+                    self._journal_call(
+                        journal,
+                        "finalize",
+                        kind,
+                        plan.key,
+                        target=run_context.target,
+                    )
+                except Exception as cleanup_error:
+                    errors.append(f"Album {plan.key} 停止前清理 PREPARED 日志失败：{cleanup_error}")
+                cancelled = True
+                break
 
             observed: _ObservedSend
             try:

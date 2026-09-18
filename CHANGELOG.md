@@ -1,5 +1,21 @@
 # 更新记录
 
+## 1.9.3-beta2
+
+### 上传安全与停止语义
+
+- 未确认上传页面改为显示文件名/Album 摘要、源目录、文件数量、Telegram 目标、更新时间和错误；详情对话框保留全部源路径，旧版缺少 `items` 的记录显示明确 fallback。
+- `CONFIRMED` journal 只能执行本地断点修复，禁止人工标记为“未发送”；启动任务时会优先使用 journal 快照恢复 UploadState，只有 checkpoint 成功后才清理保护记录。
+- 损坏或不可读的 journal 现在 fail-closed，保留文件路径和错误信息，不会被静默当作不存在而触发重复上传。
+- GUI 区分“安全停止”和“立即中断”：安全停止等待当前 Album 正常完成，立即中断保留 UNKNOWN 保护并提示人工核对。
+
+### 性能与测试
+
+- InflightJournal 保留 direct-path 快速查找，并为 legacy/filename fallback 增加进程内 lazy index；写入、更新、人工处理和 finalize 会失效缓存。
+- Image/Video V2 planner 和 state bridge 使用预构建 MediaItem identity lookup，检测未知项、快照不匹配和 duplicate identity，避免大任务中的重复线性匹配。
+- Album 内 UploadState `sent_at` 统一使用一次 UTC 时间戳；移除确认无内部调用的 legacy image `format_duration` helper。
+- 新增独立 journal、reconciliation、stop semantics、media lookup 和 inflight GUI 回归测试；保留 unittest/offline 测试结构，未新增上传速度限制。
+
 ## 1.9.3-beta1
 
 ### TDLib 与混合上传修复

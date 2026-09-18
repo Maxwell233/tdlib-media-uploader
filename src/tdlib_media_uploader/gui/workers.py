@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import importlib
+import inspect
 from pathlib import Path
 import threading
 from typing import Any
@@ -127,25 +128,55 @@ class UploadWorker(QThread):
         return importlib.import_module("tdlib_media_uploader.config.paths")
 
     def request_stop(self):
-        self.ui.request_stop()
+        self.ui.request_immediate_stop()
+
+    def request_safe_stop(self):
+        self.ui.request_safe_stop()
+
+    def request_immediate_stop(self):
+        self.ui.request_immediate_stop()
+
+    @staticmethod
+    def _runner_kwargs(runner, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Keep custom/offline runners compatible with the added stop hook."""
+
+        try:
+            parameters = inspect.signature(runner).parameters
+        except (TypeError, ValueError):
+            return kwargs
+        if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+            return kwargs
+        return {key: value for key, value in kwargs.items() if key in parameters}
 
     def run(self):
         try:
-            result = self.upload_runner(
-                self.kind,
-                ui=self.ui,
-                source_root=self._source_root(),
-                target=self._target(),
-                cancel_event=self.ui.cancel_event,
-                preview_result=self.preview_result,
-                config=self._config(),
-                runtime_paths=self._runtime_paths(),
+            runner_kwargs = self._runner_kwargs(
+                self.upload_runner,
+                {
+                    "ui": self.ui,
+                    "source_root": self._source_root(),
+                    "target": self._target(),
+                    "cancel_event": self.ui.cancel_event,
+                    "stop_after_current": self.ui.stop_after_current_event,
+                    "preview_result": self.preview_result,
+                    "config": self._config(),
+                    "runtime_paths": self._runtime_paths(),
+                },
             )
+            result = self.upload_runner(self.kind, **runner_kwargs)
             status = str(getattr(result, "status", "")).upper()
-            if self.ui.stop_requested or bool(getattr(result, "cancelled", False)):
-                self.completed.emit(False, "任务已立即停止；完整完成的 Album 已保存断点。")
-            elif status == "COMPLETED":
+            if status == "COMPLETED":
                 self.completed.emit(True, "上传任务完成。")
+            elif bool(getattr(result, "cancelled", False)) and self.ui.safe_stop_requested and not self.ui.stop_requested:
+                self.completed.emit(False, "已安全停止；当前 Album 已完成，未开始后续 Album。")
+            elif self.ui.stop_requested:
+                self.completed.emit(
+                    False,
+                    "已立即中断；当前 Album 可能已部分或全部提交，结果已保留为 UNKNOWN，"
+                    "请先在‘未确认上传’中人工核对。",
+                )
+            elif bool(getattr(result, "cancelled", False)):
+                self.completed.emit(False, "任务已取消；未确认的 Album 已保留保护记录。")
             elif status == "UNKNOWN":
                 self.completed.emit(False, "任务存在未确认的 Telegram Album；请先在‘未确认上传’中核对。")
             elif status == "PARTIAL":
@@ -159,8 +190,14 @@ class UploadWorker(QThread):
                 message = str(getattr(result, "error", "") or "任务未完成")
                 self.completed.emit(False, f"任务失败：{message}")
         except Exception as exc:
-            if bool(getattr(exc, "cancelled", False)) or type(exc).__name__ == "TDLibCancelled" or self.ui.stop_requested:
-                self.completed.emit(False, "任务已立即停止；完整完成的 Album 已保存断点。")
+            if self.ui.safe_stop_requested and not self.ui.stop_requested:
+                self.completed.emit(False, "已安全停止；当前 Album 已完成，未开始后续 Album。")
+            elif bool(getattr(exc, "cancelled", False)) or type(exc).__name__ == "TDLibCancelled" or self.ui.stop_requested:
+                self.completed.emit(
+                    False,
+                    "已立即中断；当前 Album 可能已部分或全部提交，结果已保留为 UNKNOWN，"
+                    "请先在‘未确认上传’中人工核对。",
+                )
             else:
                 self.ui.error(f"程序停止：{type(exc).__name__}: {exc}")
                 write_exception(

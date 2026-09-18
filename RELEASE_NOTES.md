@@ -1,3 +1,18 @@
+### V1.9.3-beta2 更新
+
+#### 上传安全与停止语义
+
+- 未确认上传页面以文件名/Album 摘要为主显示，并提供完整源路径详情、状态翻译、Telegram 目标、文件数、更新时间和错误信息；legacy 与 corrupt journal 均有明确 fallback。
+- `CONFIRMED` 仅允许修复本地 UploadState checkpoint，禁止走“Telegram 中不存在”路径；恢复失败保留 journal，避免重复上传。
+- journal parse、截断和权限错误均 fail-closed；fallback lookup 使用 lazy index，正常 direct-path lookup 不扫描全目录。
+- 新增安全停止和立即中断两种 GUI 操作。安全停止不取消当前 Album；立即中断可能产生 UNKNOWN，并保留人工核对保护。
+
+#### MediaItem lookup 与回归验证
+
+- Image/Video planner 使用 snapshot identity lookup，并显式拒绝未知项、重复 identity 和 snapshot mismatch。
+- UploadState 在一个 Album 内复用统一 `sent_at`；清理无内部调用的 legacy image `format_duration`。
+- 新增独立 journal、reconciliation、stop semantics、media lookup、inflight GUI 测试，保持 unittest/offline 运行方式。
+
 ### V1.9.3-beta1 更新
 
 #### TDLib 与混合上传

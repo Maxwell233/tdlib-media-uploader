@@ -46,7 +46,11 @@ def format_eta(seconds: float | int | None) -> str:
 class TaskPage(QWidget):
     """Display one upload run while keeping signal contracts stable."""
 
+    # stop_requested remains for compatibility with old embedders and
+    # represents the new primary safe-stop action.
     stop_requested = Signal()
+    safe_stop_requested = Signal()
+    immediate_stop_requested = Signal()
 
     def __init__(
         self,
@@ -102,17 +106,27 @@ class TaskPage(QWidget):
 
         bottom = QHBoxLayout()
         self.stop_button = QPushButton("安全停止")
-        self.stop_button.setObjectName("dangerButton")
+        self.stop_button.setObjectName("primaryButton")
         self.stop_button.setEnabled(False)
-        self.stop_button.clicked.connect(self.stop_requested)
+        self.stop_button.clicked.connect(self._emit_safe_stop)
+        self.immediate_stop_button = QPushButton("立即中断")
+        self.immediate_stop_button.setObjectName("dangerButton")
+        self.immediate_stop_button.setEnabled(False)
+        self.immediate_stop_button.clicked.connect(self.immediate_stop_requested)
         bottom.addStretch(1)
         bottom.addWidget(self.stop_button)
+        bottom.addWidget(self.immediate_stop_button)
         layout.addLayout(bottom)
+
+    def _emit_safe_stop(self):
+        self.safe_stop_requested.emit()
+        self.stop_requested.emit()
 
     def start_session(self, kind: str, result: dict):
         self.title.setText(f"任务中心 · {kind_label(kind)}")
         self.task_status.setText("正在启动…")
         self.stop_button.setEnabled(True)
+        self.immediate_stop_button.setEnabled(True)
         self.progress.setValue(0)
         self.metrics.setText(
             f"待上传 {result['pending_files']} 个 · "
@@ -152,6 +166,7 @@ class TaskPage(QWidget):
 
     def finish_session(self, success: bool, message: str):
         self.stop_button.setEnabled(False)
+        self.immediate_stop_button.setEnabled(False)
         self.task_status.setText("已完成" if success else message)
         self.log.appendPlainText(("✓ " if success else "! ") + message)
 

@@ -10,6 +10,7 @@ Album can safely be sent to another topic/channel.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -27,7 +28,8 @@ SUBMITTED = "SUBMITTED"
 CONFIRMED = "CONFIRMED"
 FAILED = "FAILED"
 UNKNOWN = "UNKNOWN"
-UNRESOLVED = frozenset({PREPARED, SUBMITTED, CONFIRMED, UNKNOWN})
+CORRUPT = "CORRUPT"
+UNRESOLVED = frozenset({PREPARED, SUBMITTED, CONFIRMED, UNKNOWN, CORRUPT})
 
 
 def _now() -> str:
@@ -102,6 +104,9 @@ class InflightJournal:
         self.root = Path(root) if root is not None else APP_DATA_DIR / "upload_inflight"
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._index = None
+        self._records = []
+        self._corrupt = []
 
     @staticmethod
     def _key_hash(kind: str, album_key: str, target=None) -> str:
@@ -126,33 +131,122 @@ class InflightJournal:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        self._index = None
 
-    def _read_path(self, path: Path) -> dict | None:
+    @staticmethod
+    def _corrupt_record(
+        path: Path,
+        error: BaseException,
+        *,
+        kind: str | None = None,
+        album_key: str | None = None,
+        target=None,
+    ) -> dict:
+        record = {
+            "status": CORRUPT,
+            "journal_path": str(path),
+            "error": f"{type(error).__name__}: {error}",
+        }
+        if kind:
+            record["kind"] = str(kind).strip().lower()
+        if album_key:
+            record["album_key"] = str(album_key)
+        normalized_target = normalize_target(target)
+        if normalized_target:
+            record["target"] = dict(normalized_target)
+            record.update(normalized_target)
+        return record
+
+    def _read_path(
+        self,
+        path: Path,
+        *,
+        expected_kind: str | None = None,
+        expected_album_key: str | None = None,
+        expected_target=None,
+    ) -> dict | None:
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
+            if not isinstance(value, dict):
+                raise ValueError("journal must be an object")
+            if not value.get("kind") or not value.get("album_key"):
+                raise ValueError("journal identity is missing")
+            status = str(value.get("status", "")).strip().upper()
+            if status not in UNRESOLVED | {FAILED}:
+                raise ValueError("invalid journal status")
+            value["status"] = status
+            if "items" in value and not isinstance(value["items"], list):
+                raise ValueError("invalid item snapshot list")
+            if "target" in value and not isinstance(value["target"], dict):
+                raise ValueError("invalid target identity")
+            return value
+        except FileNotFoundError:
             return None
-        return value if isinstance(value, dict) else None
+        except (OSError, ValueError, TypeError) as exc:
+            return self._corrupt_record(
+                path,
+                exc,
+                kind=expected_kind,
+                album_key=expected_album_key,
+                target=expected_target,
+            )
+
+    def invalidate(self):
+        """Explicit refresh boundary for external edits, including in-place writes."""
+        with self._lock:
+            self._index = None
+
+    def _ensure_index(self):
+        if self._index is not None:
+            return
+        index = {}
+        records = []
+        corrupt = []
+        for path in sorted(self.root.glob("*.json")):
+            record = self._read_path(path)
+            if record is None:
+                continue
+            records.append((path, record))
+            if record.get("status") == CORRUPT:
+                corrupt.append((path, record))
+                continue
+            key = (str(record["kind"]).strip().lower(), str(record["album_key"]))
+            index.setdefault(key, []).append((path, record))
+        self._index, self._records, self._corrupt = index, records, corrupt
 
     def _entries(self, kind: str | None, album_key: str, target=None):
-        expected_kind = str(kind).strip().lower() if kind else None
-        expected_album = str(album_key)
-        # Sorting gives deterministic selection if a previous process left a
-        # duplicate legacy record beside a newly scoped one.
-        for path in sorted(self.root.glob("*.json"), key=lambda value: value.name):
-            record = self._read_path(path)
-            if not record or str(record.get("album_key", "")) != expected_album:
+        self._ensure_index()
+        if kind:
+            candidates = self._index.get((str(kind).strip().lower(), str(album_key)), ())
+        else:
+            candidates = [(p, r) for p, r in self._records
+                          if str(r.get("album_key", "")) == str(album_key)]
+        for path, record in candidates:
+            if _target_matches(record, target):
+                yield path, copy.deepcopy(record)
+        # Hashed filenames cannot reliably recover an unknown identity.  Such
+        # a record remains a conservative global blocker instead of being
+        # mistaken for an absent journal and allowing a duplicate send.
+        for path, record in self._corrupt:
+            recorded_kind = str(record.get("kind", "")).strip().lower()
+            recorded_album = str(record.get("album_key", ""))
+            if kind and recorded_kind and recorded_kind != str(kind).strip().lower():
                 continue
-            if expected_kind and str(record.get("kind", "")).strip().lower() != expected_kind:
+            if recorded_album and recorded_album != str(album_key):
                 continue
             if not _target_matches(record, target):
                 continue
-            yield path, record
+            yield path, copy.deepcopy(record)
 
     def get_entry(self, kind: str, album_key: str, target=None):
         with self._lock:
             preferred = self.path_for(kind, album_key, target)
-            record = self._read_path(preferred)
+            record = self._read_path(
+                preferred,
+                expected_kind=kind,
+                expected_album_key=album_key,
+                expected_target=target,
+            )
             if record and _target_matches(record, target):
                 return preferred, record
             # Read legacy and records produced by an earlier target identity
@@ -236,6 +330,17 @@ class InflightJournal:
         self._with_target(record, target)
         with self._lock:
             path = self.path_for(kind, album_key, target)
+            existing_path, existing = self.get_entry(kind, album_key, target)
+            if existing is not None:
+                status = str(existing.get("status", "")).upper()
+                if status == CORRUPT:
+                    raise RuntimeError(f"损坏的上传记录：{existing.get('journal_path')}")
+                if status in UNRESOLVED:
+                    raise RuntimeError(
+                        f"已有未确认上传记录：{kind} / {album_key}（{status}）"
+                    )
+                if existing_path is not None:
+                    path = existing_path
             self._write(path, record)
         return record
 
@@ -258,6 +363,8 @@ class InflightJournal:
         with self._lock:
             existing_path, record = self.get_entry(kind, album_key, target)
             path = existing_path or self.path_for(kind, album_key, target)
+            if record and record.get("status") == CORRUPT:
+                raise RuntimeError(f"损坏的上传记录：{record.get('journal_path')}")
             record = record or {
                 "version": 2,
                 "kind": str(kind).strip().lower(),
@@ -296,7 +403,10 @@ class InflightJournal:
             path, _record = self.get_entry(kind, album_key, target)
             if path is None:
                 return False
+            if _record.get("status") == CORRUPT:
+                raise RuntimeError("不能删除损坏的上传记录")
             path.unlink(missing_ok=True)
+            self.invalidate()
             return True
 
     def confirmed(self, kind: str, album_key: str, message_ids=None, *, target=None) -> None:
@@ -326,17 +436,21 @@ class InflightJournal:
 
         with self._lock:
             path, _record = self.get_entry(kind, album_key, target)
+            if _record and _record.get("status") in {CONFIRMED, CORRUPT}:
+                raise ValueError("Telegram 已确认或记录损坏，不能标记为未发送")
             if path is not None:
                 path.unlink(missing_ok=True)
+                self.invalidate()
 
-    def list_unresolved(self) -> list[dict]:
-        records = []
+    def list_unresolved(self, *, refresh=False) -> list[dict]:
         with self._lock:
-            for path in sorted(self.root.glob("*.json"), key=lambda value: value.name):
-                record = self._read_path(path)
-                if record and str(record.get("status", "")).upper() in UNRESOLVED:
-                    records.append(record)
-        return records
+            if refresh:
+                self.invalidate()
+            self._ensure_index()
+            records = [copy.deepcopy(record) for _, record in self._records
+                       if record.get("status") in UNRESOLVED]
+            return sorted(records, key=lambda r: str(r.get("updated_at") or
+                          r.get("created_at") or ""), reverse=True)
 
 
 __all__ = [
@@ -346,6 +460,7 @@ __all__ = [
     "CONFIRMED",
     "FAILED",
     "UNKNOWN",
+    "CORRUPT",
     "UNRESOLVED",
     "normalize_target",
 ]

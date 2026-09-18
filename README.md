@@ -1,6 +1,6 @@
 # TDLib Media Uploader
 
-**V1.9.3-beta1 · Windows x64 + macOS arm64 桌面应用**
+**V1.9.3-beta2 · Windows x64 + macOS arm64 桌面应用**
 
 把本地或网络目录中的视频、图片批量上传到 Telegram 群组话题或频道。Windows x64 与 macOS Apple Silicon arm64 使用同一套 GUI、上传核心和功能配置；支持上传预览、标题编辑、断点恢复和独立代理，上传时无需打开 Telegram Desktop。
 

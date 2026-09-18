@@ -392,7 +392,10 @@ class MixedMediaStrategy:
         for item in items:
             if Path(item.source_root) != source_root:
                 raise ValueError("一个混合扫描结果不能包含多个 source_root")
-            lookup[_model_identity(item)] = item
+            identity = _model_identity(item)
+            if identity in lookup:
+                raise ValueError(f"混合 MediaItem identity 重复：{item.path}")
+            lookup[identity] = item
             group_name = str(item.group_name or "").strip()
             if not group_name:
                 try:

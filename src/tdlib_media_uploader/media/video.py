@@ -188,14 +188,16 @@ class _LegacyStateBridge:
         state: Any,
         items: Sequence[MediaItem],
         source_root: Path,
+        lookup: Mapping[str, Mapping] | None = None,
     ):
         self.strategy = strategy
         self.state = state
         self.items = tuple(items)
         self.source_root = source_root
+        self.lookup = lookup if lookup is not None else strategy._build_item_lookup(self.items)
 
     def is_completed(self, value: Any) -> bool:
-        item = self.strategy._match_item(value, self.items, self.source_root)
+        item = self.strategy._match_item(value, self.items, self.source_root, self.lookup)
         return self.strategy._state_completed(self.state, item)
 
 
@@ -460,29 +462,58 @@ class VideoStrategy:
         raw_item: Any,
         candidates: Sequence[MediaItem],
         source_root: Path,
+        lookup: Mapping[str, Mapping] | None = None,
     ) -> MediaItem:
+        index = lookup if lookup is not None else self._build_item_lookup(candidates)
         if isinstance(raw_item, MediaItem):
-            for candidate in candidates:
-                if (
-                    self._normalize_path(candidate.path)
-                    == self._normalize_path(raw_item.path)
-                    and candidate.media_kind == raw_item.media_kind
-                    and candidate.snapshot.as_tuple() == raw_item.snapshot.as_tuple()
-                ):
-                    return candidate
+            key = (
+                self._normalize_path(raw_item.path),
+                int(raw_item.snapshot.size),
+                int(raw_item.snapshot.mtime_ns),
+                str(raw_item.media_kind or self.kind),
+            )
+            candidate = index["by_identity"].get(key)
+            if candidate is not None:
+                return candidate
             raise ValueError(f"legacy 视频计划返回了未知项：{raw_item.path}")
         raw = raw_item if isinstance(raw_item, Mapping) else {"path": raw_item}
         path = _as_path(raw.get("path"), source_root)
         size = raw.get("scan_size", raw.get("size"))
         mtime_ns = raw.get("scan_mtime_ns", raw.get("mtime_ns"))
-        for candidate in candidates:
-            if self._normalize_path(candidate.path) != self._normalize_path(path):
-                continue
-            if size is not None and mtime_ns is not None:
-                if candidate.snapshot.as_tuple() != (_as_int(size), _as_int(mtime_ns)):
-                    continue
-            return candidate
+        media_kind = str(raw.get("media_kind", self.kind) or self.kind)
+        normalized_path = self._normalize_path(path)
+        if size is not None and mtime_ns is not None:
+            key = (normalized_path, _as_int(size), _as_int(mtime_ns), media_kind)
+            candidate = index["by_identity"].get(key)
+            if candidate is not None:
+                return candidate
+        else:
+            matches = index["by_path"].get((normalized_path, media_kind), ())
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise ValueError(f"legacy 视频项缺少快照且 identity 不唯一：{path}")
         raise ValueError(f"legacy 视频计划返回了未知项：{path}")
+
+    def _build_item_lookup(self, candidates: Sequence[MediaItem]) -> dict[str, dict]:
+        """Build one immutable-run lookup for legacy planner values."""
+
+        by_identity: dict[tuple[object, ...], MediaItem] = {}
+        by_path: dict[tuple[str, str], list[MediaItem]] = {}
+        for item in candidates:
+            normalized_path = self._normalize_path(item.path)
+            media_kind = str(item.media_kind or self.kind)
+            key = (
+                normalized_path,
+                int(item.snapshot.size),
+                int(item.snapshot.mtime_ns),
+                media_kind,
+            )
+            if key in by_identity:
+                raise ValueError(f"视频 MediaItem identity 重复：{item.path}")
+            by_identity[key] = item
+            by_path.setdefault((normalized_path, media_kind), []).append(item)
+        return {"by_identity": by_identity, "by_path": by_path}
 
     def _configured_dates_enabled(self) -> bool:
         checker = getattr(self.legacy, "video_dates_enabled", None)
@@ -662,8 +693,10 @@ class VideoStrategy:
         if not callable(planner):
             raise TypeError("legacy video module 缺少 build_album_plans()")
 
+        all_items = tuple(scan_result.items)
+        lookup = self._build_item_lookup(all_items)
         state_bridge = (
-            _LegacyStateBridge(self, state, scan_result.items, source_root)
+            _LegacyStateBridge(self, state, all_items, source_root, lookup)
             if state is not None
             else None
         )
@@ -675,14 +708,19 @@ class VideoStrategy:
             )
 
         plans: list[AlbumPlan] = []
-        all_items = tuple(scan_result.items)
         for index, raw_plan in enumerate(raw_plans or (), start=1):
             if not isinstance(raw_plan, Mapping):
                 raise TypeError(f"legacy Album 计划必须是 mapping，而不是 {type(raw_plan).__name__}")
             raw_full = raw_plan.get("items", legacy_items)
             raw_pending = raw_plan.get("pending_items", raw_full)
-            full_items = tuple(self._match_item(item, all_items, source_root) for item in raw_full or ())
-            pending_items = tuple(self._match_item(item, all_items, source_root) for item in raw_pending or ())
+            full_items = tuple(
+                self._match_item(item, all_items, source_root, lookup)
+                for item in raw_full or ()
+            )
+            pending_items = tuple(
+                self._match_item(item, all_items, source_root, lookup)
+                for item in raw_pending or ()
+            )
             key = str(raw_plan.get("key", "") or "")
             if not key:
                 raise ValueError(f"legacy Album {index} 缺少稳定 key")
@@ -742,11 +780,13 @@ class VideoStrategy:
         """Normalize the legacy tuple while enforcing an exact item partition."""
 
         pending = tuple(plan.pending_items)
+        item_lookup = self._build_item_lookup(pending)
         pending_lookup = {
             (
                 self._normalize_path(item.path),
                 item.snapshot.size,
                 item.snapshot.mtime_ns,
+                str(item.media_kind or self.kind),
             ): item
             for item in pending
         }
@@ -754,13 +794,14 @@ class VideoStrategy:
             raise ValueError("Album 待上传项 identity 重复")
 
         def resolve(raw_item: Any) -> MediaItem:
-            return self._match_item(raw_item, pending, source_root)
+            return self._match_item(raw_item, pending, source_root, item_lookup)
 
         def key(item: MediaItem) -> tuple[object, ...]:
             return (
                 self._normalize_path(item.path),
                 item.snapshot.size,
                 item.snapshot.mtime_ns,
+                str(item.media_kind or self.kind),
             )
 
         if isinstance(value, ContentBuildResult):

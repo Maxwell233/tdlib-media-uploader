@@ -136,6 +136,7 @@ class UploadState:
         values = list(items or [])
         ids = list(message_ids or [])
         with self.lock:
+            sent_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             for index, raw_item in enumerate(values):
                 item = raw_item if isinstance(raw_item, dict) else {"path": raw_item}
                 path = Path(item["path"])
@@ -148,7 +149,7 @@ class UploadState:
                     "size": int(snapshot[0]),
                     "mtime_ns": int(snapshot[1]),
                     "message_id": ids[index] if index < len(ids) else None,
-                    "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "sent_at": sent_at,
                 }
                 if isinstance(item, dict):
                     capture_time = item.get("capture_time")
