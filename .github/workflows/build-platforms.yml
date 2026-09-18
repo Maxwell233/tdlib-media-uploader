@@ -396,7 +396,7 @@ jobs:
 
   publish-release:
     name: Publish combined release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[publish-release]'))
     needs:
       - build-windows
       - build-macos-arm64
@@ -408,10 +408,29 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v6
 
+      - name: Resolve release metadata
+        id: release_meta
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="$GITHUB_REF_NAME"
+            artifact_label="$GITHUB_REF_NAME"
+          else
+            tag="v${version}"
+            artifact_label="${GITHUB_REF_NAME//\//-}"
+          fi
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "artifact_label=$artifact_label"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Download platform artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: tdlib-media-uploader-${{ github.ref_name }}-*
+          pattern: tdlib-media-uploader-${{ steps.release_meta.outputs.artifact_label }}-*
           path: release-assets
           merge-multiple: true
 
@@ -427,8 +446,9 @@ jobs:
             shasum -a 256 "$archive" >> release-assets/SHA256SUMS
           done
           version="$(tr -d '[:space:]' < VERSION)"
-          if [[ "$GITHUB_REF_NAME" != "v${version}" ]]; then
-            echo "GitHub tag $GITHUB_REF_NAME does not match VERSION $version" >&2
+          tag="${{ steps.release_meta.outputs.tag }}"
+          if [[ "$tag" != "v${version}" ]]; then
+            echo "Release tag $tag does not match VERSION $version" >&2
             exit 1
           fi
           if [[ -f RELEASE_NOTES.md ]]; then
@@ -457,6 +477,17 @@ jobs:
           EOF
           } > release-notes.md
 
+      - name: Repoint release tag to anonymized main
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tag="${{ steps.release_meta.outputs.tag }}"
+          git config user.name "Maxwell233"
+          git config user.email "33753009+Maxwell233@users.noreply.github.com"
+          git tag -f "$tag" "$GITHUB_SHA"
+          git push origin "refs/tags/$tag" --force
+
       - name: Publish combined GitHub Release
         shell: bash
         env:
@@ -464,7 +495,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           version="$(tr -d '[:space:]' < VERSION)"
-          tag="$GITHUB_REF_NAME"
+          tag="${{ steps.release_meta.outputs.tag }}"
           release_flags=(--title "V${version}" --notes-file release-notes.md)
           if [[ "$version" == *-* ]]; then
             release_flags+=(--prerelease)
