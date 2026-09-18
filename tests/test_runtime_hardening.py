@@ -237,7 +237,7 @@ class V190HardeningTest(unittest.TestCase):
         self.assertNotIn("actions/download-artifact@v4", workflow)
         self.assertNotIn("ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION", workflow)
         self.assertNotIn("FORCE_JAVASCRIPT_ACTIONS_TO_NODE24", workflow)
-        self.assertIn("pattern: tdlib-media-uploader-${{ github.ref_name }}-*", workflow)
+        self.assertIn("pattern: tdlib-media-uploader-${{ steps.release_meta.outputs.artifact_label }}-*", workflow)
         self.assertIn("merge-multiple: true", workflow)
 
     def test_direct_entrypoint_uses_shared_instance_lock(self):
