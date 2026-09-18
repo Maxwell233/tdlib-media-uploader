@@ -1,10 +1,5 @@
-"""Package-owned media upload page shared by the three media routes.
-
-The page deliberately knows only about the preview dictionary at the GUI edge.
-Configuration, caption persistence and compatibility dialogs are injected by
-the migration-period root module so existing extensions can keep their old
-patch points while the widget implementation moves into the package.
-"""
+# -*- coding: utf-8 -*-
+"""Modern package-owned media upload page shared by the three media routes."""
 
 from __future__ import annotations
 
@@ -17,14 +12,17 @@ from typing import Any
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -45,7 +43,7 @@ from ...core.album import (
 )
 from ...core.filesystem_legacy import stable_path
 from ...config.paths import RESOURCE_DIR
-
+from ..theme import THEME
 
 MEDIA_KINDS = ("video", "image", "mixed")
 KIND_LABELS = {"video": "视频", "image": "图片", "mixed": "混合"}
@@ -148,7 +146,7 @@ class UploadPageServices:
 
 
 class UploadPage(QWidget):
-    """Render and edit one media-kind preview without owning upload lifecycle."""
+    """Modern workbench for media scanning, preview filtering, captioning and upload dispatch."""
 
     start_requested = Signal(str)
     path_selected = Signal(str, str)
@@ -156,8 +154,8 @@ class UploadPage(QWidget):
     scan_cancel_requested = Signal(str)
     edit_target_requested = Signal(str)
 
-    def __init__(self, kind: str, *, services: UploadPageServices | None = None):
-        super().__init__()
+    def __init__(self, kind: str, *, services: UploadPageServices | None = None, parent=None):
+        super().__init__(parent)
         self.services = services or UploadPageServices()
         self.kind = self.services.require_kind(kind)
         self.result = None
@@ -168,43 +166,97 @@ class UploadPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(14)
-        title = QLabel(f"{accent}上传")
+
+        # Title
+        title = QLabel(f"{accent}上传工作台")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
 
-        source_box = QGroupBox("1 · 来源目录")
+        # 1. Source directory section
+        source_box = QGroupBox("1 · 本地媒体来源目录")
         source_layout = QHBoxLayout(source_box)
+        source_layout.setSpacing(10)
         self.source_edit = QLineEdit()
-        self.source_edit.setPlaceholderText("输入或粘贴目录，按 Enter 保存；也可点击选择目录")
+        self.source_edit.setPlaceholderText("输入或粘贴媒体目录路径，按 Enter 保存；也可点击右侧浏览选择…")
         self.source_edit.editingFinished.connect(self._commit_source)
-        browse = QPushButton("选择目录")
+
+        browse = QPushButton("浏览目录…")
         browse.clicked.connect(self._browse)
+
         source_layout.addWidget(self.source_edit, 1)
         source_layout.addWidget(browse)
         layout.addWidget(source_box)
 
-        preview_box = QGroupBox("2 · 文件与媒体组预览")
+        # 2. Telegram Target Card
+        target_box = QGroupBox(f"2 · Telegram 上传目标（{accent}）")
+        target_layout = QGridLayout(target_box)
+        target_layout.setSpacing(10)
+
+        target_layout.addWidget(QLabel(f"{accent}目标频道/群组："), 0, 0)
+        self.chat_label = QLabel("未配置")
+        self.chat_label.setObjectName("valueLabel")
+        target_layout.addWidget(self.chat_label, 0, 1)
+
+        target_layout.addWidget(QLabel("Forum Topic 话题："), 1, 0)
+        self.topic_label = QLabel("未配置")
+        self.topic_label.setObjectName("valueLabel")
+        target_layout.addWidget(self.topic_label, 1, 1)
+
+        edit_target = QPushButton(f"配置{accent}目标与参数…")
+        edit_target.setObjectName("secondaryButton")
+        edit_target.clicked.connect(lambda: self.edit_target_requested.emit(self.kind))
+        target_layout.addWidget(edit_target, 0, 2, 2, 1)
+        layout.addWidget(target_box)
+
+        # 3. Preview Section
+        preview_box = QGroupBox("3 · 文件与 Album 媒体组预览")
         preview_layout = QVBoxLayout(preview_box)
+        preview_layout.setSpacing(10)
+
+        # Filter toolbar
         filters = QHBoxLayout()
+        filters.setSpacing(10)
+
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("搜索文件名、路径或标题（仅筛选显示）")
+        self.search_edit.setPlaceholderText("搜索文件名、路径或标题…")
         self.search_edit.setClearButtonEnabled(True)
+
         self.pending_only = QCheckBox("只看待上传")
-        self.edit_caption_button = QPushButton("编辑标题")
+
+        self.edit_caption_button = QPushButton("编辑媒体组标题…")
         self.edit_caption_button.setEnabled(False)
         self.edit_caption_button.clicked.connect(lambda: self._edit_album(self.tree.currentItem()))
+
+        expand_btn = QPushButton("展开")
+        expand_btn.setObjectName("ghostButton")
+        expand_btn.clicked.connect(self.tree.expandAll if hasattr(self, "tree") else lambda: None)
+
+        collapse_btn = QPushButton("折叠")
+        collapse_btn.setObjectName("ghostButton")
+        collapse_btn.clicked.connect(self.tree.collapseAll if hasattr(self, "tree") else lambda: None)
+
         filters.addWidget(self.search_edit, 1)
         filters.addWidget(self.pending_only)
         filters.addWidget(self.edit_caption_button)
+        filters.addWidget(expand_btn)
+        filters.addWidget(collapse_btn)
         preview_layout.addLayout(filters)
+
+        # Tree widget
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["状态", "日期 / 分组", "大小", "文件"])
+        self.tree.setHeaderLabels(["状态", "日期 / 分组", "大小", "文件路径"])
         self.tree.header().setStretchLastSection(True)
         self.tree.setRootIsDecorated(True)
         self.tree.setAlternatingRowColors(True)
-        self.tree.setMinimumHeight(220)
+        self.tree.setMinimumHeight(240)
         self.tree.itemDoubleClicked.connect(self._edit_album)
         self.tree.itemSelectionChanged.connect(self._update_edit_button)
+
+        expand_btn.clicked.disconnect()
+        expand_btn.clicked.connect(self.tree.expandAll)
+        collapse_btn.clicked.disconnect()
+        collapse_btn.clicked.connect(self.tree.collapseAll)
+
         self.search_timer = QTimer(self)
         self.search_timer.setSingleShot(True)
         self.search_timer.setInterval(180)
@@ -212,42 +264,33 @@ class UploadPage(QWidget):
         self.search_edit.textChanged.connect(lambda: self.search_timer.start())
         self.pending_only.toggled.connect(self._filter_preview)
         preview_layout.addWidget(self.tree)
-        self.summary_label = QLabel("尚未扫描")
+
+        self.summary_label = QLabel("尚未扫描目录")
         self.summary_label.setObjectName("mutedLabel")
         preview_layout.addWidget(self.summary_label)
         layout.addWidget(preview_box, 1)
 
-        target_box = QGroupBox(f"3 · Telegram 目标（{accent}上传）")
-        target_layout = QGridLayout(target_box)
-        target_layout.addWidget(QLabel(f"{accent}目标"), 0, 0)
-        target_layout.addWidget(QLabel("Forum Topic"), 1, 0)
-        self.chat_label = QLabel("未配置")
-        self.topic_label = QLabel("未配置")
-        self.chat_label.setObjectName("valueLabel")
-        self.topic_label.setObjectName("valueLabel")
-        target_layout.addWidget(self.chat_label, 0, 1)
-        target_layout.addWidget(self.topic_label, 1, 1)
-        edit_target = QPushButton(f"编辑{accent}目标与配置")
-        edit_target.setObjectName("secondaryButton")
-        edit_target.clicked.connect(lambda: self.edit_target_requested.emit(self.kind))
-        target_layout.addWidget(edit_target, 0, 2, 2, 1)
-        layout.addWidget(target_box)
-
+        # 4. Action & Status Bar
         bottom = QHBoxLayout()
-        self.status_label = QLabel("准备扫描")
-        self.status_label.setObjectName("mutedLabel")
+        bottom.setSpacing(12)
+
+        self.status_label = QLabel("就绪")
+        self.status_label.setObjectName("valueLabel")
+
         self.scan_button = QPushButton("扫描目录")
         self.scan_button.setObjectName("secondaryButton")
         self.scan_button.clicked.connect(self._scan_button_clicked)
+
         self.start_button = QPushButton("开始上传")
         self.start_button.setObjectName("primaryButton")
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(lambda: self.start_requested.emit(self.kind))
-        bottom.addWidget(self.status_label)
-        bottom.addStretch(1)
+
+        bottom.addWidget(self.status_label, 1)
         bottom.addWidget(self.scan_button)
         bottom.addWidget(self.start_button)
         layout.addLayout(bottom)
+
         self.refresh_config()
 
     def _cfg(self, name: str, default=None):
@@ -275,7 +318,7 @@ class UploadPage(QWidget):
     def _browse(self):
         path = self.services.file_dialog_class.getExistingDirectory(
             self,
-            "选择目录",
+            "选择媒体来源目录",
             self.source_edit.text() or str(self.services.project_dir),
         )
         if path:
@@ -300,7 +343,7 @@ class UploadPage(QWidget):
         self.scan_button.setEnabled(not self._running)
         if active:
             self.clear_scan_result()
-            self.status_label.setText("正在扫描…")
+            self.status_label.setText("正在扫描目录…")
         self._update_edit_button()
 
     def set_result(self, result: dict):
@@ -434,8 +477,6 @@ class UploadPage(QWidget):
         return str(value)
 
     def set_cancelled(self, result: dict | None = None):
-        """Show cancellation explicitly and keep it out of normal counts."""
-
         self.result = result
         self.tree.clear()
         self.summary_label.setText("扫描已取消；请重新扫描以获取完整列表")
@@ -520,24 +561,24 @@ class UploadPage(QWidget):
                 caption_count.setStyleSheet("color: #91a2b5")
             except CaptionLimitError as exc:
                 preview.setPlainText(str(exc))
-                caption_count.setText(f"用户标题 {len(caption)}/{caption_limit}，超过限制")
+                caption_count.setText(f"超出字数限制：{len(caption)}/{caption_limit}")
                 caption_count.setStyleSheet("color: #ff7b72")
 
         base_edit.textChanged.connect(update_preview)
         custom_edit.textChanged.connect(update_preview)
-        update_preview()
-        form.addRow("基础标题" if self.kind in {"video", "mixed"} else "媒体组编号", base_edit)
-        form.addRow("追加文字", custom_edit)
-        form.addRow("字符数", caption_count)
-        form.addRow("发送限制", caption_hint)
-        form.addRow("标题预览", preview)
+        form.addRow("基础组标题", base_edit)
+        form.addRow("自定义追加", custom_edit)
+        form.addRow("发送预览", preview)
+        form.addRow("", caption_count)
+        form.addRow("", caption_hint)
         buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
-        if dialog.exec() != self.services.dialog_class.DialogCode.Accepted:
+        update_preview()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         base_label = base_edit.text().strip()
         custom_text = custom_edit.toPlainText().strip()
@@ -625,9 +666,10 @@ class UploadPage(QWidget):
     def clear_scan_result(self):
         self.result = None
         self.tree.clear()
-        self.summary_label.setText("请扫描目录，生成最新上传预览")
-        self.status_label.setText("等待重新扫描")
+        self.summary_label.setText("尚未扫描")
+        self.status_label.setText("准备扫描")
         self.start_button.setEnabled(False)
+        self._update_edit_button()
 
     def set_running(self, active: bool):
         self._running = active
@@ -646,18 +688,18 @@ class UploadPage(QWidget):
 
 
 class VideoPage(UploadPage):
-    def __init__(self, *, services: UploadPageServices | None = None):
-        super().__init__("video", services=services)
+    def __init__(self, *, services: UploadPageServices | None = None, parent=None):
+        super().__init__("video", services=services, parent=parent)
 
 
 class ImagePage(UploadPage):
-    def __init__(self, *, services: UploadPageServices | None = None):
-        super().__init__("image", services=services)
+    def __init__(self, *, services: UploadPageServices | None = None, parent=None):
+        super().__init__("image", services=services, parent=parent)
 
 
 class MixedPage(UploadPage):
-    def __init__(self, *, services: UploadPageServices | None = None):
-        super().__init__("mixed", services=services)
+    def __init__(self, *, services: UploadPageServices | None = None, parent=None):
+        super().__init__("mixed", services=services, parent=parent)
 
 
 __all__ = [

@@ -1,0 +1,513 @@
+# -*- coding: utf-8 -*-
+"""Modern design system, color tokens, and stylesheet for TDLib Media Uploader Beta 3."""
+
+from __future__ import annotations
+
+import sys
+from typing import NamedTuple
+
+
+class Palette(NamedTuple):
+    # Backgrounds
+    bg_base: str = "#0b0f17"
+    bg_sidebar: str = "#080c12"
+    bg_surface: str = "#111722"
+    bg_card: str = "#161f2e"
+    bg_card_hover: str = "#1c283c"
+    bg_input: str = "#0d131d"
+    bg_selection: str = "#1a365d"
+    bg_alt_row: str = "#121926"
+
+    # Borders
+    border_subtle: str = "#1e293b"
+    border_card: str = "#243247"
+    border_hover: str = "#33455e"
+    border_focus: str = "#38bdf8"
+
+    # Text
+    text_primary: str = "#f8fafc"
+    text_secondary: str = "#cbd5e1"
+    text_muted: str = "#8192a6"
+    text_dim: str = "#475569"
+
+    # Accents & Semantics
+    accent: str = "#0284c7"
+    accent_hover: str = "#0ea5e9"
+    accent_active: str = "#0369a1"
+
+    success: str = "#10b981"
+    success_hover: str = "#059669"
+    success_bg: str = "#064e3b"
+
+    warning: str = "#f59e0b"
+    warning_hover: str = "#d97706"
+    warning_bg: str = "#78350f"
+
+    danger: str = "#ef4444"
+    danger_hover: str = "#dc2626"
+    danger_bg: str = "#7f1d1d"
+
+    info: str = "#6366f1"
+    info_hover: str = "#4f46e5"
+    info_bg: str = "#312e81"
+
+
+THEME = Palette()
+
+FONT_FAMILY = (
+    '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif'
+    if sys.platform == "darwin"
+    else '"Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif'
+)
+
+
+def build_stylesheet(palette: Palette = THEME) -> str:
+    """Generate the complete Qt Stylesheet for Beta 3."""
+    return f"""
+QMainWindow, QWidget {{
+    background-color: {palette.bg_base};
+    color: {palette.text_secondary};
+    font-family: {FONT_FAMILY};
+    font-size: 13px;
+}}
+
+QToolTip {{
+    background-color: {palette.bg_card};
+    color: {palette.text_primary};
+    border: 1px solid {palette.border_card};
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+}}
+
+/* Sidebar navigation */
+QFrame#sidebarFrame {{
+    background-color: {palette.bg_sidebar};
+    border: 0;
+    border-right: 1px solid {palette.border_subtle};
+}}
+
+QListWidget#sidebar {{
+    background-color: transparent;
+    border: 0;
+    padding: 10px 8px;
+    outline: 0;
+}}
+
+QListWidget#sidebar::item {{
+    padding: 10px 14px;
+    margin: 2px 0;
+    border-radius: 8px;
+    color: {palette.text_muted};
+    font-weight: 500;
+}}
+
+QListWidget#sidebar::item:hover {{
+    background-color: {palette.bg_card};
+    color: {palette.text_primary};
+}}
+
+QListWidget#sidebar::item:selected {{
+    background-color: {palette.accent};
+    color: #ffffff;
+    font-weight: 600;
+}}
+
+/* Group Boxes & Cards */
+QGroupBox {{
+    background-color: {palette.bg_surface};
+    border: 1px solid {palette.border_subtle};
+    border-radius: 10px;
+    margin-top: 14px;
+    padding: 16px;
+    font-weight: 600;
+}}
+
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 14px;
+    padding: 0 8px;
+    color: {palette.text_primary};
+    background-color: {palette.bg_surface};
+    border-radius: 4px;
+}}
+
+QFrame#statCard {{
+    background-color: {palette.bg_card};
+    border: 1px solid {palette.border_subtle};
+    border-radius: 10px;
+}}
+
+QFrame#statCard:hover {{
+    border-color: {palette.border_card};
+}}
+
+QFrame#bannerFrame {{
+    background-color: {palette.bg_surface};
+    border: 1px solid {palette.border_subtle};
+    border-radius: 10px;
+    padding: 12px 16px;
+}}
+
+/* Typography */
+QLabel {{
+    background: transparent;
+}}
+
+QLabel#pageTitle {{
+    font-size: 22px;
+    font-weight: 700;
+    color: {palette.text_primary};
+}}
+
+QLabel#sectionTitle {{
+    font-size: 15px;
+    font-weight: 600;
+    color: {palette.text_primary};
+}}
+
+QLabel#statValue {{
+    font-size: 22px;
+    font-weight: 700;
+    color: {palette.text_primary};
+}}
+
+QLabel#statValue[good="true"] {{
+    color: {palette.success};
+}}
+
+QLabel#statValue[good="false"] {{
+    color: {palette.warning};
+}}
+
+QLabel#valueLabel {{
+    color: {palette.text_primary};
+    font-weight: 600;
+}}
+
+QLabel#mutedLabel {{
+    color: {palette.text_muted};
+    font-size: 12px;
+}}
+
+QLabel#badgeLabel {{
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+}}
+
+/* Buttons */
+QPushButton {{
+    min-height: 32px;
+    padding: 0 16px;
+    border-radius: 7px;
+    border: 1px solid {palette.border_subtle};
+    background-color: {palette.bg_card};
+    color: {palette.text_secondary};
+    font-weight: 500;
+}}
+
+QPushButton:hover {{
+    background-color: {palette.bg_card_hover};
+    border-color: {palette.border_hover};
+    color: {palette.text_primary};
+}}
+
+QPushButton:pressed {{
+    background-color: {palette.bg_input};
+}}
+
+QPushButton:disabled {{
+    color: {palette.text_dim};
+    background-color: {palette.bg_surface};
+    border-color: {palette.border_subtle};
+}}
+
+QPushButton#primaryButton {{
+    background-color: {palette.accent};
+    border-color: {palette.accent_hover};
+    color: #ffffff;
+    font-weight: 600;
+}}
+
+QPushButton#primaryButton:hover {{
+    background-color: {palette.accent_hover};
+    border-color: #7dd3fc;
+}}
+
+QPushButton#primaryButton:pressed {{
+    background-color: {palette.accent_active};
+}}
+
+QPushButton#secondaryButton {{
+    background-color: {palette.bg_card};
+    border: 1px solid {palette.border_card};
+    color: {palette.text_primary};
+}}
+
+QPushButton#secondaryButton:hover {{
+    background-color: {palette.bg_card_hover};
+    border-color: {palette.border_hover};
+}}
+
+QPushButton#successButton {{
+    background-color: {palette.success};
+    border-color: {palette.success_hover};
+    color: #ffffff;
+    font-weight: 600;
+}}
+
+QPushButton#successButton:hover {{
+    background-color: {palette.success_hover};
+}}
+
+QPushButton#dangerButton {{
+    background-color: {palette.danger};
+    border-color: {palette.danger_hover};
+    color: #ffffff;
+    font-weight: 600;
+}}
+
+QPushButton#dangerButton:hover {{
+    background-color: {palette.danger_hover};
+}}
+
+QPushButton#ghostButton {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    color: {palette.text_muted};
+}}
+
+QPushButton#ghostButton:hover {{
+    background-color: {palette.bg_card};
+    color: {palette.text_primary};
+}}
+
+/* Form Inputs */
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
+    background-color: {palette.bg_input};
+    color: {palette.text_primary};
+    border: 1px solid {palette.border_subtle};
+    border-radius: 7px;
+    padding: 6px 10px;
+    selection-background-color: {palette.bg_selection};
+    selection-color: #ffffff;
+}}
+
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{
+    border-color: {palette.border_focus};
+}}
+
+QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 24px;
+    border-left: 0;
+}}
+
+QComboBox QAbstractItemView {{
+    background-color: {palette.bg_surface};
+    color: {palette.text_secondary};
+    border: 1px solid {palette.border_card};
+    border-radius: 6px;
+    padding: 4px;
+    selection-background-color: {palette.bg_selection};
+    selection-color: #ffffff;
+    outline: 0;
+}}
+
+/* Checkboxes */
+QCheckBox {{
+    spacing: 8px;
+    color: {palette.text_secondary};
+}}
+
+QCheckBox::indicator {{
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border: 1px solid {palette.border_subtle};
+    background-color: {palette.bg_input};
+}}
+
+QCheckBox::indicator:hover {{
+    border-color: {palette.border_hover};
+}}
+
+QCheckBox::indicator:checked {{
+    background-color: {palette.accent};
+    border-color: {palette.accent_hover};
+}}
+
+/* Tree & Table */
+QTreeWidget, QTableWidget {{
+    background-color: {palette.bg_input};
+    color: {palette.text_secondary};
+    border: 1px solid {palette.border_subtle};
+    border-radius: 8px;
+    padding: 4px;
+    alternate-background-color: {palette.bg_alt_row};
+    gridline-color: {palette.border_subtle};
+    selection-background-color: {palette.bg_selection};
+    selection-color: #ffffff;
+    outline: 0;
+}}
+
+QTreeWidget:focus, QTableWidget:focus {{
+    border-color: {palette.border_hover};
+}}
+
+QTreeWidget::item, QTableWidget::item {{
+    padding: 6px 8px;
+    border-radius: 4px;
+}}
+
+QTreeWidget::item:hover, QTableWidget::item:hover {{
+    background-color: {palette.bg_card_hover};
+    color: {palette.text_primary};
+}}
+
+QTreeWidget::item:selected, QTableWidget::item:selected {{
+    background-color: {palette.bg_selection};
+    color: #ffffff;
+}}
+
+QHeaderView::section {{
+    background-color: {palette.bg_card};
+    color: {palette.text_muted};
+    border: 0;
+    border-bottom: 1px solid {palette.border_subtle};
+    padding: 8px 10px;
+    font-weight: 600;
+    font-size: 12px;
+}}
+
+QTableCornerButton::section {{
+    background-color: {palette.bg_card};
+    border: 0;
+}}
+
+/* Progress Bar */
+QProgressBar {{
+    background-color: {palette.bg_input};
+    border: 1px solid {palette.border_subtle};
+    border-radius: 7px;
+    height: 16px;
+    text-align: center;
+    color: {palette.text_primary};
+    font-size: 11px;
+    font-weight: 600;
+}}
+
+QProgressBar::chunk {{
+    background-color: {palette.accent};
+    border-radius: 6px;
+}}
+
+/* Scroll Bars */
+QScrollBar:vertical {{
+    background-color: transparent;
+    width: 10px;
+    margin: 0;
+}}
+
+QScrollBar::handle:vertical {{
+    background-color: {palette.border_card};
+    border-radius: 5px;
+    min-height: 28px;
+    margin: 2px;
+}}
+
+QScrollBar::handle:vertical:hover {{
+    background-color: {palette.border_hover};
+}}
+
+QScrollBar:horizontal {{
+    background-color: transparent;
+    height: 10px;
+    margin: 0;
+}}
+
+QScrollBar::handle:horizontal {{
+    background-color: {palette.border_card};
+    border-radius: 5px;
+    min-width: 28px;
+    margin: 2px;
+}}
+
+QScrollBar::handle:horizontal:hover {{
+    background-color: {palette.border_hover};
+}}
+
+QScrollBar::add-line, QScrollBar::sub-line {{
+    background: transparent;
+    border: 0;
+}}
+
+/* Status Bar */
+QStatusBar {{
+    background-color: {palette.bg_sidebar};
+    color: {palette.text_muted};
+    border-top: 1px solid {palette.border_subtle};
+    padding: 4px 10px;
+    font-size: 12px;
+}}
+
+/* Menus */
+QMenu {{
+    background-color: {palette.bg_surface};
+    color: {palette.text_secondary};
+    border: 1px solid {palette.border_card};
+    border-radius: 8px;
+    padding: 6px;
+}}
+
+QMenu::item {{
+    padding: 6px 14px;
+    border-radius: 4px;
+}}
+
+QMenu::item:selected {{
+    background-color: {palette.bg_selection};
+    color: #ffffff;
+}}
+
+/* Tab Widget */
+QTabWidget::pane {{
+    border: 1px solid {palette.border_subtle};
+    border-radius: 8px;
+    background-color: {palette.bg_surface};
+    padding: 12px;
+}}
+
+QTabBar::tab {{
+    background-color: {palette.bg_card};
+    color: {palette.text_muted};
+    border: 1px solid {palette.border_subtle};
+    border-bottom: 0;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 8px 18px;
+    margin-right: 4px;
+    font-weight: 500;
+}}
+
+QTabBar::tab:selected {{
+    background-color: {palette.bg_surface};
+    color: {palette.text_primary};
+    border-color: {palette.border_card};
+    font-weight: 600;
+}}
+
+QTabBar::tab:hover:!selected {{
+    background-color: {palette.bg_card_hover};
+    color: {palette.text_secondary};
+}}
+"""
+
+
+APP_STYLE = build_stylesheet()
+
+__all__ = ["THEME", "Palette", "APP_STYLE", "build_stylesheet", "FONT_FAMILY"]

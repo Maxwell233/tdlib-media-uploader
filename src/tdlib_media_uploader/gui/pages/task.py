@@ -1,4 +1,5 @@
-"""Package-owned task-center page for upload progress and diagnostics."""
+# -*- coding: utf-8 -*-
+"""Modern task-center page for upload progress and diagnostics in Beta 3."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import Signal, Slot
 from PySide6.QtWidgets import (
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -13,10 +15,12 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
+from ..theme import THEME
 
 KIND_LABELS = {"video": "视频", "image": "图片", "mixed": "混合"}
 
@@ -44,10 +48,8 @@ def format_eta(seconds: float | int | None) -> str:
 
 
 class TaskPage(QWidget):
-    """Display one upload run while keeping signal contracts stable."""
+    """Mission Control center displaying real-time upload progress, speed and diagnostics."""
 
-    # stop_requested remains for compatibility with old embedders and
-    # represents the new primary safe-stop action.
     stop_requested = Signal()
     safe_stop_requested = Signal()
     immediate_stop_requested = Signal()
@@ -57,63 +59,94 @@ class TaskPage(QWidget):
         *,
         size_formatter: Callable[[float | int | None], str] | None = None,
         eta_formatter: Callable[[float | int | None], str] | None = None,
+        parent=None,
     ):
-        super().__init__()
+        super().__init__(parent)
         self._size_formatter = size_formatter or format_size
         self._eta_formatter = eta_formatter or format_eta
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(14)
+
+        # Header Row
         title_row = QHBoxLayout()
         self.title = QLabel("任务中心")
         self.title.setObjectName("pageTitle")
         self.task_status = QLabel("无正在运行的任务")
-        self.task_status.setObjectName("mutedLabel")
+        self.task_status.setObjectName("valueLabel")
+
         title_row.addWidget(self.title)
         title_row.addStretch(1)
         title_row.addWidget(self.task_status)
         layout.addLayout(title_row)
 
-        progress_box = QGroupBox("当前 Album")
+        # Dual Progress & Metrics Card
+        progress_box = QGroupBox("实时上传进度")
         progress_layout = QVBoxLayout(progress_box)
-        self.album_label = QLabel("尚未开始")
+        progress_layout.setSpacing(10)
+
+        # Album title and progress bar
+        album_row = QHBoxLayout()
+        self.album_label = QLabel("当前 Album：尚未开始")
         self.album_label.setObjectName("valueLabel")
+        album_row.addWidget(self.album_label)
+        progress_layout.addLayout(album_row)
+
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
         self.progress.setValue(0)
         self.progress.setTextVisible(True)
+        progress_layout.addWidget(self.progress)
+
+        # Metrics bar
         self.metrics = QLabel("速度 — · Mbps — · ETA --:-- · 文件 0/0 · 已传 0 B")
         self.metrics.setObjectName("mutedLabel")
-        progress_layout.addWidget(self.album_label)
-        progress_layout.addWidget(self.progress)
         progress_layout.addWidget(self.metrics)
+
         layout.addWidget(progress_box)
 
+        # Splitter: Current Album file list + Live console log
         split = QHBoxLayout()
-        album_box = QGroupBox("Album 文件")
+        split.setSpacing(12)
+
+        album_box = QGroupBox("当前 Album 包含的文件")
         album_layout = QVBoxLayout(album_box)
         self.album_files = QListWidget()
+        self.album_files.setAlternatingRowColors(True)
         album_layout.addWidget(self.album_files)
-        log_box = QGroupBox("运行日志")
+
+        log_box = QGroupBox("实时上传日志终端")
         log_layout = QVBoxLayout(log_box)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(2000)
+        self.log.setMaximumBlockCount(3000)
         log_layout.addWidget(self.log)
+
         split.addWidget(album_box, 1)
         split.addWidget(log_box, 2)
         layout.addLayout(split, 1)
 
+        # Bottom Action Bar
         bottom = QHBoxLayout()
-        self.stop_button = QPushButton("安全停止")
+        bottom.setSpacing(12)
+
+        self.clear_log_btn = QPushButton("清空日志")
+        self.clear_log_btn.clicked.connect(self.log.clear)
+        bottom.addWidget(self.clear_log_btn)
+
+        bottom.addStretch(1)
+
+        self.stop_button = QPushButton("安全停止（当前 Album 发送完毕后退出）")
         self.stop_button.setObjectName("primaryButton")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self._emit_safe_stop)
+
         self.immediate_stop_button = QPushButton("立即中断")
         self.immediate_stop_button.setObjectName("dangerButton")
         self.immediate_stop_button.setEnabled(False)
         self.immediate_stop_button.clicked.connect(self.immediate_stop_requested)
-        bottom.addStretch(1)
+
         bottom.addWidget(self.stop_button)
         bottom.addWidget(self.immediate_stop_button)
         layout.addLayout(bottom)
