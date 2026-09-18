@@ -103,7 +103,12 @@ class InflightGuiTest(unittest.TestCase):
                 self.assertFalse(page.not_sent_button.isEnabled())
 
                 details = page._detail_text(page.table.item(confirmed_row, 0).data(256))
-                self.assertIn(str(single), details)
+                detail_path = next(
+                    line[3:]
+                    for line in details.splitlines()
+                    if line.startswith("1. ")
+                )
+                self.assertEqual(stable_path(detail_path), stable_path(single))
                 self.assertIn("内部 Album ID", details)
 
                 corrupt_row = next(
