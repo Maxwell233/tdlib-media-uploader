@@ -109,6 +109,7 @@ class ConfigDialog(QDialog):
         stage_form.addRow("暂存清理", self.staging_cleanup_on_start)
 
         self.staging_cleanup_days = QSpinBox()
+        self.staging_cleanup_days.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.staging_cleanup_days.setRange(0, 3650)
         self.staging_cleanup_days.setValue(int(_cfg("STAGING_CLEANUP_DAYS", 7)))
         self.staging_cleanup_days.setSuffix(" 天")
@@ -159,6 +160,7 @@ class ConfigDialog(QDialog):
         proxy_form.addRow("代理服务器", self.proxy_server)
 
         self.proxy_port = QSpinBox()
+        self.proxy_port.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.proxy_port.setRange(1, 65535)
         self.proxy_port.setValue(int(_cfg("PROXY_PORT", 1080)))
         proxy_form.addRow("代理端口", self.proxy_port)

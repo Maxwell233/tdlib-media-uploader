@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Independent scan tools, external process and concurrency dialog for Beta 3."""
+"""Independent scan tools, external process and concurrency dialog for Beta 4."""
 
 from __future__ import annotations
 
@@ -83,6 +83,7 @@ class ScanToolsDialog(QDialog):
 
         def integer_option(value, minimum, maximum, suffix=""):
             widget = QSpinBox()
+            widget.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
             widget.setRange(minimum, maximum)
             widget.setValue(int(value))
             if suffix:
@@ -91,6 +92,7 @@ class ScanToolsDialog(QDialog):
 
         def decimal_option(value, minimum, maximum, decimals=2, suffix=""):
             widget = QDoubleSpinBox()
+            widget.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
             widget.setRange(minimum, maximum)
             widget.setDecimals(decimals)
             widget.setValue(float(value))

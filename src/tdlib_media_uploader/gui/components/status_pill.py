@@ -21,7 +21,7 @@ def _current_styles():
 
 
 class StatusPill(QLabel):
-    """A pill-shaped status badge with semantic color tinting."""
+    """A pill-shaped status badge with semantic color tinting via global QSS."""
 
     STYLES = {
         "success": (THEME.success, THEME.success_bg),
@@ -34,6 +34,7 @@ class StatusPill(QLabel):
 
     def __init__(self, text: str = "", status: str = "neutral", parent=None):
         super().__init__(text, parent)
+        self.setObjectName("statusPill")
         self.variant = status
         self.status = status
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -44,25 +45,14 @@ class StatusPill(QLabel):
         self.status = status
         if text is not None:
             self.setText(text)
-        styles = _current_styles()
-        fg, bg = styles.get(status, styles["neutral"])
-        self.setStyleSheet(
-            f"""
-            QLabel {{
-                color: {fg};
-                background-color: {bg};
-                border: 1px solid {fg}40;
-                border-radius: 10px;
-                padding: 2px 10px;
-                font-size: 11px;
-                font-weight: 600;
-            }}
-            """
-        )
+        self.setProperty("status", status)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def refresh_theme(self):
-        """Re-apply styling for the active status using current theme palette."""
-        self.set_status(self.status)
+        """Re-polish dynamic styling for active theme palette."""
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
 __all__ = ["StatusPill"]

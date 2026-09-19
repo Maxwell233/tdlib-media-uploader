@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Modern upload history page with metrics and filtering for Beta 3."""
+"""Modern upload history page with metrics and filtering for Beta 4."""
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -58,16 +59,17 @@ class HistoryPage(QWidget):
         header.addWidget(clear_btn)
         layout.addLayout(header)
 
-        # Summary Metric Cards
+        # Summary Metric Cards: 历史任务数, 已上传文件数, 累计数据量
         metrics_layout = QGridLayout()
         metrics_layout.setSpacing(12)
-        self.total_runs_card = StatCard("历史任务总数", "0", "累计上传批次")
-        self.total_bytes_card = StatCard("累计上传数据量", "0 B", "成功与中断总计")
-        self.success_rate_card = StatCard("任务成功率", "—", "成功完成比例")
+        self.total_runs_card = StatCard("历史任务数", "0 次", "累计执行批次")
+        self.total_files_card = StatCard("已上传文件数", "0 个", "累计处理文件")
+        self.total_bytes_card = StatCard("累计数据量", "0 B", "总传输体积")
+        self.success_rate_card = self.total_files_card  # Backward compatibility alias
 
         metrics_layout.addWidget(self.total_runs_card, 0, 0)
-        metrics_layout.addWidget(self.total_bytes_card, 0, 1)
-        metrics_layout.addWidget(self.success_rate_card, 0, 2)
+        metrics_layout.addWidget(self.total_files_card, 0, 1)
+        metrics_layout.addWidget(self.total_bytes_card, 0, 2)
         layout.addLayout(metrics_layout)
 
         # Filter bar
@@ -75,7 +77,7 @@ class HistoryPage(QWidget):
         filter_bar.setSpacing(10)
 
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("按来源目录或错误信息搜索…")
+        self.search_edit.setPlaceholderText("按来源目录或说明搜索…")
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(self._apply_filter)
         filter_bar.addWidget(self.search_edit, 1)
@@ -118,16 +120,12 @@ class HistoryPage(QWidget):
 
     def _update_metrics(self, records: list[dict]):
         total_runs = len(records)
+        total_files = sum(int(r.get("total_files", 0) or 0) for r in records)
         total_bytes = sum(int(r.get("total_bytes", 0) or 0) for r in records)
-        successful_runs = sum(1 for r in records if r.get("success"))
 
         self.total_runs_card.set_value(f"{total_runs} 次")
+        self.total_files_card.set_value(f"{total_files} 个")
         self.total_bytes_card.set_value(_fmt_size(total_bytes))
-        if total_runs > 0:
-            pct = (successful_runs / total_runs) * 100
-            self.success_rate_card.set_value(f"{pct:.1f}%", good=pct >= 80)
-        else:
-            self.success_rate_card.set_value("—")
 
     def _apply_filter(self):
         query = self.search_edit.text().strip().lower()
@@ -165,10 +163,14 @@ class HistoryPage(QWidget):
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 if column == 5:
-                    item.setForeground(Qt.GlobalColor.green if is_success else Qt.GlobalColor.yellow)
+                    item.setForeground(QColor(THEME.success if is_success else THEME.warning))
                 self.table.setItem(row, column, item)
 
         self.table.resizeColumnsToContents()
+
+    def refresh_theme(self):
+        """Update table foreground colors on theme change."""
+        self._apply_filter()
 
     def _clear_history(self):
         if not self._all_records:

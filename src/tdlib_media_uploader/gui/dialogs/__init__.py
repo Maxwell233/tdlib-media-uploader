@@ -1,4 +1,4 @@
-"""Dialog widgets for TDLib Media Uploader Beta 3."""
+"""Dialog widgets for TDLib Media Uploader Beta 4."""
 
 from .caption_dialog import CaptionEditDialog
 from .config_dialog import ConfigDialog

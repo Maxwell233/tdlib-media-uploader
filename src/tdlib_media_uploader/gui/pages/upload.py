@@ -167,50 +167,118 @@ class UploadPage(QWidget):
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(14)
 
-        # Title
+        # Title & Subtitle Header
+        header_layout = QVBoxLayout()
+        header_layout.setSpacing(4)
         title = QLabel(f"{accent}上传工作台")
         title.setObjectName("pageTitle")
-        layout.addWidget(title)
+        header_layout.addWidget(title)
 
-        # 1. Source directory section
-        source_box = QGroupBox("1 · 本地媒体来源目录")
-        source_layout = QHBoxLayout(source_box)
-        source_layout.setSpacing(10)
+        desc_map = {
+            "video": "自动按拍摄月份或固定数量智能分组分发到多个 Album 媒体组；支持 EXIF 与封面提取。",
+            "image": "按自然顺序或修改时间分批分组；支持超限自动高质量压缩，确保原生画质发送。",
+            "mixed": "以一级子文件夹为分组单元，同组内照片与视频严格保序混合发送为 Album。",
+        }
+        subtitle = QLabel(desc_map.get(self.kind, "配置媒体来源与目标，一键执行扫描与分批上传。"))
+        subtitle.setObjectName("mutedLabel")
+        header_layout.addWidget(subtitle)
+        layout.addLayout(header_layout)
+
+        # 1. Source & Target Workbench Card (No QGroupBox)
+        st_card = QFrame()
+        st_card.setObjectName("surfaceCard")
+        st_layout = QVBoxLayout(st_card)
+        st_layout.setContentsMargins(16, 14, 16, 14)
+        st_layout.setSpacing(10)
+
+        # Source directory row
+        source_row = QHBoxLayout()
+        source_row.setSpacing(10)
+        source_lbl = QLabel("本地媒体来源：")
+        source_lbl.setObjectName("mutedLabel")
+        source_lbl.setFixedWidth(96)
         self.source_edit = QLineEdit()
         self.source_edit.setPlaceholderText("输入或粘贴媒体目录路径，按 Enter 保存；也可点击右侧浏览选择…")
         self.source_edit.editingFinished.connect(self._commit_source)
 
         browse = QPushButton("浏览目录…")
+        browse.setObjectName("secondaryButton")
         browse.clicked.connect(self._browse)
 
-        source_layout.addWidget(self.source_edit, 1)
-        source_layout.addWidget(browse)
-        layout.addWidget(source_box)
+        source_row.addWidget(source_lbl)
+        source_row.addWidget(self.source_edit, 1)
+        source_row.addWidget(browse)
+        st_layout.addLayout(source_row)
 
-        # 2. Telegram Target Card
-        target_box = QGroupBox(f"2 · Telegram 上传目标（{accent}）")
-        target_layout = QGridLayout(target_box)
-        target_layout.setSpacing(10)
+        # Telegram Target row
+        target_row = QHBoxLayout()
+        target_row.setSpacing(10)
+        target_lbl = QLabel("Telegram 目标：")
+        target_lbl.setObjectName("mutedLabel")
+        target_lbl.setFixedWidth(96)
 
-        target_layout.addWidget(QLabel(f"{accent}目标频道/群组："), 0, 0)
         self.chat_label = QLabel("未配置")
         self.chat_label.setObjectName("valueLabel")
-        target_layout.addWidget(self.chat_label, 0, 1)
 
-        target_layout.addWidget(QLabel("Forum Topic 话题："), 1, 0)
+        topic_tag = QLabel("Topic:")
+        topic_tag.setObjectName("mutedLabel")
         self.topic_label = QLabel("未配置")
         self.topic_label.setObjectName("valueLabel")
-        target_layout.addWidget(self.topic_label, 1, 1)
 
-        edit_target = QPushButton(f"配置{accent}目标与参数…")
+        edit_target = QPushButton(f"配置{accent}目标…")
         edit_target.setObjectName("secondaryButton")
         edit_target.clicked.connect(lambda: self.edit_target_requested.emit(self.kind))
-        target_layout.addWidget(edit_target, 0, 2, 2, 1)
-        layout.addWidget(target_box)
 
-        # 3. Preview Section
-        preview_box = QGroupBox("3 · 文件与 Album 媒体组预览")
-        preview_layout = QVBoxLayout(preview_box)
+        target_row.addWidget(target_lbl)
+        target_row.addWidget(self.chat_label)
+        target_row.addSpacing(14)
+        target_row.addWidget(topic_tag)
+        target_row.addWidget(self.topic_label)
+        target_row.addStretch(1)
+        target_row.addWidget(edit_target)
+        st_layout.addLayout(target_row)
+
+        layout.addWidget(st_card)
+
+        # 2. Scan Summary Metric Chips
+        chips_frame = QFrame()
+        chips_frame.setObjectName("surfaceCard")
+        chips_layout = QHBoxLayout(chips_frame)
+        chips_layout.setContentsMargins(12, 10, 12, 10)
+        chips_layout.setSpacing(10)
+
+        def make_chip(title_text: str, default_val: str = "—"):
+            chip = QFrame()
+            chip.setObjectName("metricChip")
+            cl = QVBoxLayout(chip)
+            cl.setContentsMargins(8, 6, 8, 6)
+            cl.setSpacing(2)
+            lbl = QLabel(title_text)
+            lbl.setObjectName("metricChipLabel")
+            val = QLabel(default_val)
+            val.setObjectName("metricChipValue")
+            cl.addWidget(lbl)
+            cl.addWidget(val)
+            return chip, val
+
+        c1, self.chip_files = make_chip("文件总数")
+        c2, self.chip_bytes = make_chip("数据总量")
+        c3, self.chip_done = make_chip("已完成")
+        c4, self.chip_pending = make_chip("待上传")
+        c5, self.chip_albums = make_chip("Album 媒体组")
+
+        chips_layout.addWidget(c1, 1)
+        chips_layout.addWidget(c2, 1)
+        chips_layout.addWidget(c3, 1)
+        chips_layout.addWidget(c4, 1)
+        chips_layout.addWidget(c5, 1)
+        layout.addWidget(chips_frame)
+
+        # 3. Preview Section (Visual Hero)
+        preview_container = QFrame()
+        preview_container.setObjectName("surfaceCard")
+        preview_layout = QVBoxLayout(preview_container)
+        preview_layout.setContentsMargins(14, 12, 14, 12)
         preview_layout.setSpacing(10)
 
         # Filter toolbar
@@ -224,16 +292,15 @@ class UploadPage(QWidget):
         self.pending_only = QCheckBox("只看待上传")
 
         self.edit_caption_button = QPushButton("编辑媒体组标题…")
+        self.edit_caption_button.setObjectName("secondaryButton")
         self.edit_caption_button.setEnabled(False)
         self.edit_caption_button.clicked.connect(lambda: self._edit_album(self.tree.currentItem()))
 
         expand_btn = QPushButton("展开")
         expand_btn.setObjectName("ghostButton")
-        expand_btn.clicked.connect(self.tree.expandAll if hasattr(self, "tree") else lambda: None)
 
         collapse_btn = QPushButton("折叠")
         collapse_btn.setObjectName("ghostButton")
-        collapse_btn.clicked.connect(self.tree.collapseAll if hasattr(self, "tree") else lambda: None)
 
         filters.addWidget(self.search_edit, 1)
         filters.addWidget(self.pending_only)
@@ -252,9 +319,7 @@ class UploadPage(QWidget):
         self.tree.itemDoubleClicked.connect(self._edit_album)
         self.tree.itemSelectionChanged.connect(self._update_edit_button)
 
-        expand_btn.clicked.disconnect()
         expand_btn.clicked.connect(self.tree.expandAll)
-        collapse_btn.clicked.disconnect()
         collapse_btn.clicked.connect(self.tree.collapseAll)
 
         self.search_timer = QTimer(self)
@@ -263,12 +328,12 @@ class UploadPage(QWidget):
         self.search_timer.timeout.connect(self._filter_preview)
         self.search_edit.textChanged.connect(lambda: self.search_timer.start())
         self.pending_only.toggled.connect(self._filter_preview)
-        preview_layout.addWidget(self.tree)
+        preview_layout.addWidget(self.tree, 1)
 
         self.summary_label = QLabel("尚未扫描目录")
         self.summary_label.setObjectName("mutedLabel")
         preview_layout.addWidget(self.summary_label)
-        layout.addWidget(preview_box, 1)
+        layout.addWidget(preview_container, 1)
 
         # 4. Action & Status Bar
         bottom = QHBoxLayout()
@@ -435,6 +500,14 @@ class UploadPage(QWidget):
             self._filter_preview()
         finally:
             self.tree.setUpdatesEnabled(True)
+
+        if hasattr(self, "chip_files"):
+            self.chip_files.setText(f"{result['total_files']} 个")
+            self.chip_bytes.setText(self.services.size_formatter(result['total_bytes']))
+            self.chip_done.setText(f"{result['completed_files']} 个")
+            self.chip_pending.setText(f"{result['pending_files']} 个")
+            self.chip_albums.setText(f"{result['album_count']} 组")
+
         self.summary_label.setText(
             f"共 {result['total_files']} 个 · {self.services.size_formatter(result['total_bytes'])} · "
             f"已完成 {result['completed_files']} · 待上传 {result['pending_files']} · "
@@ -483,6 +556,12 @@ class UploadPage(QWidget):
     def set_cancelled(self, result: dict | None = None):
         self.result = result
         self.tree.clear()
+        if hasattr(self, "chip_files"):
+            self.chip_files.setText("—")
+            self.chip_bytes.setText("—")
+            self.chip_done.setText("—")
+            self.chip_pending.setText("—")
+            self.chip_albums.setText("—")
         self.summary_label.setText("扫描已取消；请重新扫描以获取完整列表")
         self.status_label.setText("扫描已取消")
         self.start_button.setEnabled(False)
@@ -518,46 +597,13 @@ class UploadPage(QWidget):
         preview.setReadOnly(True)
         caption_limit = int(self.services.caption_limit)
         caption_count = QLabel()
-        caption_count.setObjectName("mutedLabel")
-        caption_hint = QLabel(
-            f"编辑器使用 {caption_limit} 字符软上限；连接 Telegram 后会按当前账号的最终限制再次确认。"
-        )
-        caption_hint.setObjectName("mutedLabel")
-        caption_hint.setWordWrap(True)
-        include_base = (
-            self.kind == "video"
-            or self.kind == "mixed" and self._cfg("MIXED_CAPTION_INCLUDE_GROUP_TITLE", True)
-            or self.kind == "image" and self._cfg("IMAGE_ALBUM_NUMBERING", True)
-        )
 
         def update_preview():
             caption = self.services.compose_caption(
-                base_edit.text() if include_base else "",
-                custom_edit.toPlainText(),
-                separator,
+                base_edit.text(), custom_edit.toPlainText(), separator
             )
             try:
-                rendered = self.services.filename_description(
-                    caption,
-                    plan.get("items", []),
-                    bool(self._cfg(
-                        "VIDEO_CAPTION_INCLUDE_FILENAMES"
-                        if self.kind == "video"
-                        else "MIXED_CAPTION_INCLUDE_FILENAMES"
-                        if self.kind == "mixed"
-                        else "IMAGE_CAPTION_INCLUDE_FILENAMES",
-                        False,
-                    )),
-                    bool(self._cfg(
-                        "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS"
-                        if self.kind == "video"
-                        else "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS"
-                        if self.kind == "mixed"
-                        else "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
-                        True,
-                    )),
-                    max_chars=caption_limit,
-                )
+                rendered = self.services.validate_caption(caption, limit=caption_limit)
                 preview.setPlainText(rendered)
                 caption_count.setText(
                     f"用户标题 {len(caption)}/{caption_limit} · 发送预览 {len(rendered)}/{caption_limit}"
@@ -576,66 +622,57 @@ class UploadPage(QWidget):
 
         base_edit.textChanged.connect(update_preview)
         custom_edit.textChanged.connect(update_preview)
-        form.addRow("基础组标题", base_edit)
+        update_preview()
+        form.addRow("基准标题", base_edit)
         form.addRow("自定义追加", custom_edit)
-        form.addRow("发送预览", preview)
+        form.addRow("生成预览", preview)
         form.addRow("", caption_count)
-        form.addRow("", caption_hint)
         buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            dialog,
         )
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
-        update_preview()
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        base_label = base_edit.text().strip()
-        custom_text = custom_edit.toPlainText().strip()
-        try:
-            self.services.validate_caption(
-                self.services.compose_caption(
-                    base_label if include_base else "",
-                    custom_text,
-                    separator,
-                ),
-                caption_limit,
+        if dialog.exec() == self.services.dialog_class.DialogCode.Accepted:
+            caption = self.services.compose_caption(
+                base_edit.text(), custom_edit.toPlainText(), separator
             )
-        except CaptionLimitError as exc:
-            self.services.message_box_class.warning(self, "标题过长", str(exc))
-            return
-        store = self.services.caption_store_factory(self.kind)
-        if self.kind in {"video", "mixed"} and self._cfg(
-            "VIDEO_CAPTION_INCLUDE_GROUP_TITLE"
-            if self.kind == "video"
-            else "MIXED_CAPTION_INCLUDE_GROUP_TITLE",
-            True,
-        ) and not base_label:
-            self.services.message_box_class.warning(self, "未保存", "请填写基础标题。")
-            return
-        try:
-            store.set(plan["key"], base_label=base_label, custom_text=custom_text)
-        except OSError as exc:
-            self.services.message_box_class.warning(self, "保存失败", str(exc))
-            return
-        plan["caption"] = {
-            "base_label": base_label,
-            "custom_text": custom_text,
-            "text": self.services.compose_caption(
-                base_label if include_base else "",
-                custom_text,
-                separator,
-            ),
-        }
-        item.setText(1, self._album_title(plan))
-        item.setToolTip(1, preview.toPlainText())
-        self._filter_preview()
-        self.status_label.setText("标题已保存")
-
-    def _album_title(self, plan):
-        text = " ".join(plan.get("caption", {}).get("text", "").split())
-        label = f"媒体组 {plan.get('number', 1)}"
-        return label if text in {"", str(plan.get("number", 1)), f"Album {plan.get('number', 1)}"} else f"{label} · {text[:100]}"
+            try:
+                rendered = self.services.validate_caption(caption, limit=caption_limit)
+            except CaptionLimitError:
+                return
+            plan["caption"] = {
+                "text": rendered,
+                "base_label": base_edit.text(),
+                "custom_text": custom_edit.toPlainText(),
+            }
+            item.setData(0, Qt.ItemDataRole.UserRole, plan)
+            item.setText(1, self._album_title(plan))
+            include_key = {
+                "video": "VIDEO_CAPTION_INCLUDE_FILENAMES",
+                "mixed": "MIXED_CAPTION_INCLUDE_FILENAMES",
+                "image": "IMAGE_CAPTION_INCLUDE_FILENAMES",
+            }[self.kind]
+            number_key = {
+                "video": "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS",
+                "mixed": "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS",
+                "image": "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
+            }[self.kind]
+            caption_text = self.services.filename_description(
+                rendered,
+                plan.get("items", []),
+                bool(self._cfg(include_key, False)),
+                bool(self._cfg(number_key, True)),
+                max_chars=caption_limit,
+            )
+            item.setToolTip(1, caption_text or "无标题")
+            store = self.services.caption_store_factory(self.kind)
+            store.set(
+                plan["key"],
+                base_label=base_edit.text(),
+                custom_text=custom_edit.toPlainText(),
+            )
 
     def _update_edit_button(self):
         item = self.tree.currentItem()
@@ -649,6 +686,22 @@ class UploadPage(QWidget):
                 and not self._scanning
             )
         )
+
+    def _album_title(self, plan: dict) -> str:
+        caption = plan.get("caption", {}) or {}
+        text = str(caption.get("base_label") or caption.get("text") or "").strip()
+        num = plan.get("number")
+        if text and num is not None:
+            return f"第 {num} 组 · {text}"
+        if num is not None:
+            return f"第 {num} 组"
+        return text or "未命名"
+
+    def _scan_button_clicked(self):
+        if self._scanning:
+            self.scan_cancel_requested.emit(self.kind)
+        else:
+            self.scan_requested.emit(self.kind)
 
     def _filter_preview(self):
         query = self.search_edit.text().strip().casefold()
@@ -676,6 +729,12 @@ class UploadPage(QWidget):
     def clear_scan_result(self):
         self.result = None
         self.tree.clear()
+        if hasattr(self, "chip_files"):
+            self.chip_files.setText("—")
+            self.chip_bytes.setText("—")
+            self.chip_done.setText("—")
+            self.chip_pending.setText("—")
+            self.chip_albums.setText("—")
         self.summary_label.setText("尚未扫描")
         self.status_label.setText("准备扫描")
         self.start_button.setEnabled(False)
@@ -717,9 +776,103 @@ class MixedPage(UploadPage):
         super().__init__("mixed", services=services, parent=parent)
 
 
+class UploadHubPage(QWidget):
+    """Container hosting Video, Image and Mixed upload workbenches under a segmented selector."""
+
+    def __init__(
+        self,
+        video_page: UploadPage,
+        image_page: UploadPage,
+        mixed_page: UploadPage,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.video_page = video_page
+        self.image_page = image_page
+        self.mixed_page = mixed_page
+        self.pages = {
+            "video": video_page,
+            "image": image_page,
+            "mixed": mixed_page,
+        }
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Top segmented selector
+        top_bar = QWidget()
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(28, 16, 28, 0)
+        top_layout.setSpacing(12)
+
+        seg_frame = QFrame()
+        seg_frame.setObjectName("segmentedFrame")
+        seg_layout = QHBoxLayout(seg_frame)
+        seg_layout.setContentsMargins(4, 4, 4, 4)
+        seg_layout.setSpacing(4)
+
+        from ..icons import get_svg_icon
+
+        self.buttons: dict[str, QPushButton] = {}
+        for kind, label, icon_name in (
+            ("video", "视频上传", "video"),
+            ("image", "图片上传", "image"),
+            ("mixed", "混合上传", "mixed"),
+        ):
+            btn = QPushButton(label)
+            btn.setObjectName("segmentedButton")
+            btn.setIcon(get_svg_icon(icon_name, size=16))
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _, k=kind: self.set_current_kind(k))
+            seg_layout.addWidget(btn)
+            self.buttons[kind] = btn
+
+        top_layout.addWidget(seg_frame)
+        top_layout.addStretch(1)
+        layout.addWidget(top_bar)
+
+        from PySide6.QtWidgets import QStackedWidget
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(video_page)
+        self.stack.addWidget(image_page)
+        self.stack.addWidget(mixed_page)
+        layout.addWidget(self.stack, 1)
+
+        self.set_current_kind("video")
+
+    def set_current_kind(self, kind: str):
+        if kind not in self.pages:
+            return
+        idx = {"video": 0, "image": 1, "mixed": 2}[kind]
+        self.stack.setCurrentIndex(idx)
+        for k, btn in self.buttons.items():
+            active = k == kind
+            btn.setChecked(active)
+            btn.setProperty("active", "true" if active else "false")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+    def current_kind(self) -> str:
+        idx = self.stack.currentIndex()
+        return ("video", "image", "mixed")[idx]
+
+    def refresh_theme(self):
+        from ..icons import get_svg_icon
+
+        for kind, btn in self.buttons.items():
+            icon_name = {"video": "video", "image": "image", "mixed": "mixed"}[kind]
+            btn.setIcon(get_svg_icon(icon_name, size=16))
+        for p in self.pages.values():
+            if hasattr(p, "refresh_theme"):
+                p.refresh_theme()
+
+
 __all__ = [
     "ImagePage",
     "MixedPage",
+    "UploadHubPage",
     "UploadPage",
     "UploadPageServices",
     "VideoPage",

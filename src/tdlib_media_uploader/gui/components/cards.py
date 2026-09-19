@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Modern metric cards and interactive action cards for Beta 3."""
+"""Modern metric cards and interactive action cards for Beta 4."""
 
 from __future__ import annotations
 
@@ -64,6 +64,10 @@ class StatCard(QFrame):
         self.set_subtitle(text)
 
 
+from ..icons import get_svg_pixmap
+from ..theme import THEME
+
+
 class ActionCard(QFrame):
     """Interactive card for fast navigation or initiating an action."""
 
@@ -75,21 +79,32 @@ class ActionCard(QFrame):
         description: str,
         icon_text: str = "",
         badge_text: str = "",
+        icon_name: str = "",
         *,
         parent=None,
     ):
         super().__init__(parent)
         self.setObjectName("statCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.icon_name = icon_name
+        self.icon_text = icon_text
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(6)
 
         header = QHBoxLayout()
-        if icon_text:
-            icon_label = QLabel(icon_text)
-            icon_label.setObjectName("actionCardIcon")
-            header.addWidget(icon_label)
+        if icon_name:
+            self.icon_label = QLabel()
+            self.icon_label.setObjectName("actionCardIcon")
+            self.icon_label.setPixmap(get_svg_pixmap(icon_name, color=THEME.accent, size=20))
+            header.addWidget(self.icon_label)
+        elif icon_text:
+            self.icon_label = QLabel(icon_text)
+            self.icon_label.setObjectName("actionCardIcon")
+            header.addWidget(self.icon_label)
+        else:
+            self.icon_label = None
+
         self.title_label = QLabel(title)
         self.title_label.setObjectName("sectionTitle")
         header.addWidget(self.title_label)
@@ -104,6 +119,11 @@ class ActionCard(QFrame):
         self.desc_label.setObjectName("mutedLabel")
         self.desc_label.setWordWrap(True)
         layout.addWidget(self.desc_label)
+
+    def refresh_theme(self):
+        """Update SVG icon color on theme change."""
+        if self.icon_name and self.icon_label is not None:
+            self.icon_label.setPixmap(get_svg_pixmap(self.icon_name, color=THEME.accent, size=20))
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:

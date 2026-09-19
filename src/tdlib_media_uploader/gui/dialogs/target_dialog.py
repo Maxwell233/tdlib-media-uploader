@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Target and media-route configuration dialog for Beta 3."""
+"""Target and media-route configuration dialog for Beta 4."""
 
 from __future__ import annotations
 
@@ -144,6 +144,7 @@ class TargetDialog(QDialog):
             group_form.addRow("分组方式", self.video_group_mode)
 
             self.video_album = QSpinBox()
+            self.video_album.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
             self.video_album.setRange(1, 10)
             self.video_album.setValue(int(_cfg("VIDEO_ALBUM_SIZE", 10)))
             group_form.addRow("每组视频数", self.video_album)
@@ -186,6 +187,7 @@ class TargetDialog(QDialog):
             image_form.addRow("排序方式", self.image_sort)
 
             self.image_album = QSpinBox()
+            self.image_album.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
             self.image_album.setRange(1, 10)
             self.image_album.setValue(int(_cfg("IMAGE_ALBUM_SIZE", 10)))
             image_form.addRow("每组图片数", self.image_album)
@@ -221,6 +223,7 @@ class TargetDialog(QDialog):
             )
             mixed_form.addRow("排序方式", self.mixed_sort)
             self.mixed_album = QSpinBox()
+            self.mixed_album.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
             self.mixed_album.setRange(1, 10)
             self.mixed_album.setValue(int(_cfg("MIXED_ALBUM_SIZE", 10)))
             mixed_form.addRow("每组媒体数", self.mixed_album)

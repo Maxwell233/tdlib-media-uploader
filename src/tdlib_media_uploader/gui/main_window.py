@@ -114,6 +114,7 @@ from .pages import (
     ImagePage as _PackageImagePage,
     MixedPage as _PackageMixedPage,
     TaskPage,
+    UploadHubPage,
     UploadPage as _PackageUploadPage,
     UploadPageServices,
     VideoPage as _PackageVideoPage,
@@ -290,8 +291,9 @@ class MainWindow(QMainWindow):
         self.video_page = _PackageVideoPage(services=page_services)
         self.image_page = _PackageImagePage(services=page_services)
         self.mixed_page = _PackageMixedPage(services=page_services)
-        self.inflight_page = InflightPage()
+        self.upload_hub = UploadHubPage(self.video_page, self.image_page, self.mixed_page)
         self.task_page = TaskPage()
+        self.inflight_page = InflightPage()
         self.history_page = HistoryPage()
         self.settings_page = SettingsPage()
         self.upload_pages = {
@@ -299,20 +301,25 @@ class MainWindow(QMainWindow):
             "image": self.image_page,
             "mixed": self.mixed_page,
         }
-        self.sidebar_rows = {"video": 1, "image": 2, "mixed": 3, "inflight": 4, "task": 5, "history": 6, "settings": 7}
-        for page in (self.home, self.video_page, self.image_page, self.mixed_page, self.inflight_page, self.task_page, self.history_page, self.settings_page):
-            if isinstance(page, (_PackageUploadPage, SettingsPage)):
-                # Upload and settings pages contain several stacked sections.
-                # Keeping both in a scroll area prevents controls and wrapped
-                # diagnostic paths from being compressed or clipped when the
-                # window is made shorter or narrower.
+        self.sidebar_rows = {
+            "dashboard": 0,
+            "upload": 1,
+            "video": 1,
+            "image": 1,
+            "mixed": 1,
+            "task": 2,
+            "inflight": 3,
+            "history": 4,
+            "settings": 5,
+        }
+        for page in (self.home, self.upload_hub, self.task_page, self.inflight_page, self.history_page, self.settings_page):
+            if isinstance(page, SettingsPage):
                 scroll = QScrollArea()
                 scroll.setWidgetResizable(True)
                 scroll.setFrameShape(QFrame.Shape.NoFrame)
-                if isinstance(page, SettingsPage):
-                    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-                    page.setMinimumWidth(0)
-                    page.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                page.setMinimumWidth(0)
+                page.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
                 scroll.setWidget(page)
                 self.stack.addWidget(scroll)
             else:
@@ -346,6 +353,8 @@ class MainWindow(QMainWindow):
             self.nav_sidebar.refresh_theme()
         if hasattr(self.home, "refresh_theme"):
             self.home.refresh_theme()
+        if hasattr(self, "upload_hub") and hasattr(self.upload_hub, "refresh_theme"):
+            self.upload_hub.refresh_theme()
         if hasattr(self.settings_page, "refresh_theme"):
             self.settings_page.refresh_theme()
         for p in self.upload_pages.values():
@@ -364,6 +373,8 @@ class MainWindow(QMainWindow):
 
     def _open_upload(self, kind: str):
         self.sidebar.setCurrentRow(self._sidebar_row(kind))
+        if hasattr(self, "upload_hub"):
+            self.upload_hub.set_current_kind(kind)
         self._scan(kind)
 
     def _scan(self, kind: str):

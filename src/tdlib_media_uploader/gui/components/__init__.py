@@ -1,4 +1,4 @@
-"""Modern UI component primitives for TDLib Media Uploader Beta 3."""
+"""Modern UI component primitives for TDLib Media Uploader Beta 4."""
 
 from .cards import ActionCard, StatCard
 from .sidebar import NavigationSidebar

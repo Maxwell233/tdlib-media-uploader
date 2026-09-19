@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Modern task-center page for upload progress and diagnostics in Beta 3."""
+"""Modern task center page for TDLib Media Uploader Beta 4."""
 
 from __future__ import annotations
 
@@ -8,43 +8,18 @@ from collections.abc import Callable
 from PySide6.QtCore import Signal, Slot
 from PySide6.QtWidgets import (
     QFrame,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from ..theme import THEME
-
-KIND_LABELS = {"video": "视频", "image": "图片", "mixed": "混合"}
-
-
-def kind_label(kind: str) -> str:
-    return KIND_LABELS.get(str(kind).lower(), str(kind))
-
-
-def format_size(value: float | int | None) -> str:
-    value = float(value or 0)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if value < 1024 or unit == "TiB":
-            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.2f} {unit}"
-        value /= 1024
-    return f"{value:.2f} TiB"
-
-
-def format_eta(seconds: float | int | None) -> str:
-    if seconds is None:
-        return "--:--"
-    seconds = max(0, int(seconds))
-    hours, remainder = divmod(seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f"{hours:02}:{minutes:02}:{seconds:02}" if hours else f"{minutes:02}:{seconds:02}"
+from ..tools import format_eta, format_size, kind_label
 
 
 class TaskPage(QWidget):
@@ -67,7 +42,7 @@ class TaskPage(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
         # Header Row
         title_row = QHBoxLayout()
@@ -81,17 +56,17 @@ class TaskPage(QWidget):
         title_row.addWidget(self.task_status)
         layout.addLayout(title_row)
 
-        # Dual Progress & Metrics Card
-        progress_box = QGroupBox("实时上传进度")
-        progress_layout = QVBoxLayout(progress_box)
+        # 1. Dual Progress & Real-time Metrics Card (No QGroupBox)
+        progress_card = QFrame()
+        progress_card.setObjectName("surfaceCard")
+        progress_layout = QVBoxLayout(progress_card)
+        progress_layout.setContentsMargins(18, 16, 18, 16)
         progress_layout.setSpacing(10)
 
         # Album title and progress bar
-        album_row = QHBoxLayout()
         self.album_label = QLabel("当前 Album：尚未开始")
-        self.album_label.setObjectName("valueLabel")
-        album_row.addWidget(self.album_label)
-        progress_layout.addLayout(album_row)
+        self.album_label.setObjectName("sectionTitle")
+        progress_layout.addWidget(self.album_label)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
@@ -104,41 +79,62 @@ class TaskPage(QWidget):
         self.metrics.setObjectName("mutedLabel")
         progress_layout.addWidget(self.metrics)
 
-        layout.addWidget(progress_box)
+        layout.addWidget(progress_card)
 
-        # Splitter: Current Album file list + Live console log
+        # 2. Split Area: Current Album Files + Live Upload Log Terminal
         split = QHBoxLayout()
-        split.setSpacing(12)
+        split.setSpacing(14)
 
-        album_box = QGroupBox("当前 Album 包含的文件")
-        album_layout = QVBoxLayout(album_box)
+        # Current Album files panel
+        album_card = QFrame()
+        album_card.setObjectName("surfaceCard")
+        album_layout = QVBoxLayout(album_card)
+        album_layout.setContentsMargins(14, 12, 14, 12)
+        album_layout.setSpacing(8)
+
+        album_title = QLabel("当前 Album 包含的文件")
+        album_title.setObjectName("sectionTitle")
+        album_layout.addWidget(album_title)
+
         self.album_files = QListWidget()
         self.album_files.setAlternatingRowColors(True)
-        album_layout.addWidget(self.album_files)
+        album_layout.addWidget(self.album_files, 1)
+        split.addWidget(album_card, 1)
 
-        log_box = QGroupBox("实时上传日志终端")
-        log_layout = QVBoxLayout(log_box)
+        # Live terminal log panel
+        log_card = QFrame()
+        log_card.setObjectName("surfaceCard")
+        log_layout = QVBoxLayout(log_card)
+        log_layout.setContentsMargins(14, 12, 14, 12)
+        log_layout.setSpacing(8)
+
+        log_header = QHBoxLayout()
+        log_title = QLabel("实时上传日志")
+        log_title.setObjectName("sectionTitle")
+        log_header.addWidget(log_title)
+        log_header.addStretch(1)
+
+        self.clear_log_btn = QPushButton("清空日志")
+        self.clear_log_btn.setObjectName("ghostButton")
+        self.clear_log_btn.clicked.connect(lambda: self.log.clear())
+        log_header.addWidget(self.clear_log_btn)
+        log_layout.addLayout(log_header)
+
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(3000)
-        log_layout.addWidget(self.log)
+        log_layout.addWidget(self.log, 1)
+        split.addWidget(log_card, 2)
 
-        split.addWidget(album_box, 1)
-        split.addWidget(log_box, 2)
         layout.addLayout(split, 1)
 
-        # Bottom Action Bar
+        # 3. Bottom Action Bar (Semantic secondary vs danger button)
         bottom = QHBoxLayout()
         bottom.setSpacing(12)
-
-        self.clear_log_btn = QPushButton("清空日志")
-        self.clear_log_btn.clicked.connect(self.log.clear)
-        bottom.addWidget(self.clear_log_btn)
-
         bottom.addStretch(1)
 
         self.stop_button = QPushButton("安全停止（当前 Album 发送完毕后退出）")
-        self.stop_button.setObjectName("primaryButton")
+        self.stop_button.setObjectName("secondaryButton")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self._emit_safe_stop)
 

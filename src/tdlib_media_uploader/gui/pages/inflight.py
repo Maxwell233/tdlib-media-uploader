@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Modern unconfirmed upload (inflight reconciliation) page for Beta 3."""
+"""Modern unconfirmed upload (inflight reconciliation) page for Beta 4."""
 
 from __future__ import annotations
 
@@ -131,11 +131,11 @@ class InflightPage(QWidget):
         self.details_button.clicked.connect(self._show_selected_details)
         self.details_button.setEnabled(False)
 
-        self.sent_button = QPushButton("我已确认 Telegram 中存在")
+        self.sent_button = QPushButton("标记为已发送")
         self.sent_button.setObjectName("primaryButton")
         self.sent_button.clicked.connect(lambda: self._emit_choice(True))
 
-        self.not_sent_button = QPushButton("我已确认 Telegram 中不存在")
+        self.not_sent_button = QPushButton("允许重新上传")
         self.not_sent_button.setObjectName("dangerButton")
         self.not_sent_button.clicked.connect(lambda: self._emit_choice(False))
 
@@ -263,7 +263,7 @@ class InflightPage(QWidget):
         confirmed = status == "CONFIRMED"
         self.details_button.setEnabled(record is not None)
         self.sent_button.setEnabled(record is not None and not corrupt)
-        self.sent_button.setText("修复本地断点" if confirmed else "我已确认 Telegram 中存在")
+        self.sent_button.setText("修复本地断点" if confirmed else "标记为已发送")
         self.not_sent_button.setEnabled(
             record is not None and status in {"PREPARED", "SUBMITTED", "UNKNOWN"}
         )

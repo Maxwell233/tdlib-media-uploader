@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Modern sidebar navigation component for Beta 3."""
+"""Modern sidebar navigation component for Beta 4."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...config.paths import read_version
+from ..icons import get_svg_icon
 from ..theme import THEME, build_stylesheet, get_current_theme_mode, toggle_theme
 
 
@@ -40,14 +41,12 @@ class NavigationSidebar(QFrame):
     item_selected = Signal(int)
 
     NAV_ITEMS = (
-        ("概览", "dashboard"),
-        ("视频上传", "video"),
-        ("图片上传", "image"),
-        ("混合上传", "mixed"),
-        ("未确认上传", "inflight"),
-        ("任务中心", "task"),
-        ("历史记录", "history"),
-        ("设置与诊断", "settings"),
+        ("概览", "dashboard", "dashboard"),
+        ("媒体上传", "upload", "upload"),
+        ("任务中心", "task", "task"),
+        ("未确认上传", "inflight", "inflight"),
+        ("历史记录", "history", "history"),
+        ("设置与诊断", "settings", "settings"),
     )
 
     def __init__(self, version: str | None = None, parent=None):
@@ -79,13 +78,16 @@ class NavigationSidebar(QFrame):
         title_row.addWidget(self.badge)
         title_row.addStretch(1)
 
-        # Theme toggle button (Sun / Moon)
+        # Theme toggle button (Vector Sun / Moon icon)
         curr_mode = get_current_theme_mode()
-        self.theme_btn = QPushButton("🌙" if curr_mode == "dark" else "☀️")
+        self.theme_btn = QPushButton()
         self.theme_btn.setObjectName("themeToggleBtn")
-        self.theme_btn.setFixedSize(28, 28)
+        self.theme_btn.setFixedSize(30, 30)
         self.theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.theme_btn.setToolTip("切换明暗主题 (☀️/🌙)")
+        self.theme_btn.setProperty("themeMode", curr_mode)
+        self.theme_btn.setIcon(get_svg_icon("sun" if curr_mode == "dark" else "moon", 16, 16))
+        self.theme_btn.setIconSize(QSize(16, 16))
+        self.theme_btn.setToolTip("切换明暗主题 (Light / Dark)")
         self.theme_btn.clicked.connect(self._toggle_theme)
         title_row.addWidget(self.theme_btn)
 
@@ -100,9 +102,11 @@ class NavigationSidebar(QFrame):
         self.list = QListWidget()
         self.list.setObjectName("sidebar")
         self.list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.list.setIconSize(QSize(18, 18))
 
-        for label, _key in self.NAV_ITEMS:
+        for label, _key, icon_name in self.NAV_ITEMS:
             item = QListWidgetItem(label)
+            item.setIcon(get_svg_icon(icon_name, 18, 18))
             self.list.addItem(item)
 
         self.list.currentRowChanged.connect(self.item_selected.emit)
@@ -139,8 +143,9 @@ class NavigationSidebar(QFrame):
 
     def _toggle_theme(self):
         new_mode = toggle_theme()
-        self.theme_btn.setText("☀️" if new_mode == "light" else "🌙")
-        self.theme_btn.setToolTip(f"当前{'浅色' if new_mode == 'light' else '深色'}模式，点击切换主题 (☀️/🌙)")
+        self.theme_btn.setIcon(get_svg_icon("sun" if new_mode == "dark" else "moon", 16, 16))
+        self.theme_btn.setProperty("themeMode", new_mode)
+        self.theme_btn.setToolTip(f"当前{'浅色' if new_mode == 'light' else '深色'}模式，点击切换主题")
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(build_stylesheet(THEME))
@@ -150,6 +155,13 @@ class NavigationSidebar(QFrame):
 
     def refresh_theme(self):
         """Refresh styling and re-polish dynamic elements."""
+        curr_mode = get_current_theme_mode()
+        self.theme_btn.setIcon(get_svg_icon("sun" if curr_mode == "dark" else "moon", 16, 16))
+        self.theme_btn.setProperty("themeMode", curr_mode)
+        for idx, (_, _, icon_name) in enumerate(self.NAV_ITEMS):
+            item = self.list.item(idx)
+            if item is not None:
+                item.setIcon(get_svg_icon(icon_name, 18, 18))
         self.status_dot.style().unpolish(self.status_dot)
         self.status_dot.style().polish(self.status_dot)
 

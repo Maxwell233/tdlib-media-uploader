@@ -115,12 +115,12 @@ class Beta3ThemeAndComponentsTest(unittest.TestCase):
         # Test sidebar button integration
         sidebar = NavigationSidebar()
         try:
-            self.assertEqual(sidebar.theme_btn.text(), "🌙")
+            self.assertEqual(sidebar.theme_btn.property("themeMode"), "dark")
             sidebar.theme_btn.click()
-            self.assertEqual(sidebar.theme_btn.text(), "☀️")
+            self.assertEqual(sidebar.theme_btn.property("themeMode"), "light")
             self.assertEqual(get_current_theme_mode(), "light")
             sidebar.theme_btn.click()
-            self.assertEqual(sidebar.theme_btn.text(), "🌙")
+            self.assertEqual(sidebar.theme_btn.property("themeMode"), "dark")
             self.assertEqual(get_current_theme_mode(), "dark")
         finally:
             sidebar.deleteLater()
@@ -162,11 +162,11 @@ class Beta3ThemeAndComponentsTest(unittest.TestCase):
 
     def test_navigation_sidebar_structure_and_status(self):
         sidebar = NavigationSidebar(version="1.9.3-beta3")
-        self.assertEqual(sidebar.list.count(), 8)
+        self.assertEqual(sidebar.list.count(), 6)
         items = [sidebar.list.item(i).text() for i in range(sidebar.list.count())]
         self.assertEqual(
             items,
-            ["概览", "视频上传", "图片上传", "混合上传", "未确认上传", "任务中心", "历史记录", "设置与诊断"],
+            ["概览", "媒体上传", "任务中心", "未确认上传", "历史记录", "设置与诊断"],
         )
         sidebar.setCurrentRow(2)
         self.assertEqual(sidebar.currentRow(), 2)
@@ -321,8 +321,8 @@ class Beta3MainWindowAndArchitectureTest(unittest.TestCase):
             self.assertIn("1.9.3-beta4", window.windowTitle())
 
             # Sidebar and stack synchronization
-            self.assertEqual(window.sidebar.count(), 8)
-            self.assertEqual(window.stack.count(), 8)
+            self.assertEqual(window.sidebar.count(), 6)
+            self.assertEqual(window.stack.count(), 6)
             for key, row in window.sidebar_rows.items():
                 window.sidebar.setCurrentRow(row)
                 self.assertEqual(window.stack.currentIndex(), row)

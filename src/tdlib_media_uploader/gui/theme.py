@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Modern design system, color tokens, and stylesheet for TDLib Media Uploader Beta 3."""
+"""Modern design system, color tokens, and stylesheet for TDLib Media Uploader Beta 4."""
 
 from __future__ import annotations
 
@@ -178,8 +178,10 @@ FONT_FAMILY = (
 )
 
 
-def build_stylesheet(palette: Palette = THEME) -> str:
-    """Generate the complete Qt Stylesheet for Beta 3."""
+def build_stylesheet(palette: Palette | str = THEME) -> str:
+    """Generate the complete Qt Stylesheet for Beta 4."""
+    if isinstance(palette, str):
+        palette = LIGHT_PALETTE if palette.lower() == "light" else DARK_PALETTE
     return f"""
 QMainWindow, QWidget {{
     background-color: {palette.bg_base};
@@ -435,6 +437,137 @@ QLabel#captionCount[over_limit="false"] {{
     color: {palette.text_muted};
 }}
 
+/* Status Pill semantic states */
+QLabel#statusPill {{
+    border-radius: 10px;
+    padding: 2px 10px;
+    font-size: 11px;
+    font-weight: 600;
+}}
+
+QLabel#statusPill[status="success"] {{
+    color: {palette.success};
+    background-color: {palette.success_bg};
+    border: 1px solid {palette.success}40;
+}}
+
+QLabel#statusPill[status="warning"] {{
+    color: {palette.warning};
+    background-color: {palette.warning_bg};
+    border: 1px solid {palette.warning}40;
+}}
+
+QLabel#statusPill[status="danger"] {{
+    color: {palette.danger};
+    background-color: {palette.danger_bg};
+    border: 1px solid {palette.danger}40;
+}}
+
+QLabel#statusPill[status="info"] {{
+    color: {palette.info};
+    background-color: {palette.info_bg};
+    border: 1px solid {palette.info}40;
+}}
+
+QLabel#statusPill[status="neutral"] {{
+    color: {palette.text_muted};
+    background-color: {palette.bg_surface};
+    border: 1px solid {palette.border_subtle};
+}}
+
+QLabel#statusPill[status="accent"] {{
+    color: {palette.accent_hover};
+    background-color: {palette.bg_selection};
+    border: 1px solid {palette.accent}40;
+}}
+
+/* Segmented Control */
+QFrame#segmentedFrame {{
+    background-color: {palette.bg_surface};
+    border: 1px solid {palette.border_subtle};
+    border-radius: 8px;
+    padding: 3px;
+}}
+
+QPushButton#segmentedButton {{
+    background-color: transparent;
+    border: none;
+    border-radius: 6px;
+    color: {palette.text_secondary};
+    font-weight: 500;
+    padding: 6px 14px;
+    min-height: 28px;
+}}
+
+QPushButton#segmentedButton:hover {{
+    background-color: {palette.bg_card_hover};
+    color: {palette.text_primary};
+}}
+
+QPushButton#segmentedButton[active="true"], QPushButton#segmentedButton:checked {{
+    background-color: {palette.accent};
+    color: #ffffff;
+    font-weight: 600;
+}}
+
+/* Modern Surfaces and Metric Chips */
+QFrame#surfaceCard {{
+    background-color: {palette.bg_card};
+    border: 1px solid {palette.border_subtle};
+    border-radius: 10px;
+    padding: 14px 18px;
+}}
+
+QFrame#surfaceCard:hover {{
+    border-color: {palette.border_card};
+}}
+
+QFrame#metricChip {{
+    background-color: {palette.bg_surface};
+    border: 1px solid {palette.border_subtle};
+    border-radius: 8px;
+    padding: 8px 12px;
+}}
+
+QLabel#metricChipValue {{
+    font-size: 15px;
+    font-weight: 700;
+    color: {palette.text_primary};
+}}
+
+QLabel#metricChipLabel {{
+    font-size: 11px;
+    color: {palette.text_muted};
+}}
+
+/* Settings Navigation List */
+QListWidget#settingsNav {{
+    background-color: {palette.bg_surface};
+    border: 1px solid {palette.border_subtle};
+    border-radius: 8px;
+    padding: 4px;
+    outline: none;
+}}
+
+QListWidget#settingsNav::item {{
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: {palette.text_secondary};
+    font-weight: 500;
+    min-height: 24px;
+}}
+
+QListWidget#settingsNav::item:hover {{
+    background-color: {palette.bg_card_hover};
+    color: {palette.text_primary};
+}}
+
+QListWidget#settingsNav::item:selected {{
+    background-color: {palette.bg_selection};
+    color: {palette.text_selection};
+    font-weight: 600;
+}}
+
 /* Buttons */
 QPushButton {{
     min-height: 32px;
@@ -535,6 +668,22 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
 
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{
     border-color: {palette.border_focus};
+}}
+
+/* Hide SpinBox / DoubleSpinBox up/down buttons */
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+    width: 0px;
+    height: 0px;
+    border: none;
+    background: transparent;
+}}
+
+QSpinBox::up-arrow, QSpinBox::down-arrow,
+QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow {{
+    image: none;
+    width: 0px;
+    height: 0px;
 }}
 
 QComboBox::drop-down {{

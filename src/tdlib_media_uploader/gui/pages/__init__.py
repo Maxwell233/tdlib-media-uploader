@@ -7,7 +7,7 @@ from .inflight import InflightPage
 from .mixed import MixedPage
 from .settings import SettingsPage
 from .task import TaskPage
-from .upload import UploadPage, UploadPageServices
+from .upload import UploadHubPage, UploadPage, UploadPageServices
 from .video import VideoPage
 
 __all__ = [
@@ -18,6 +18,7 @@ __all__ = [
     "MixedPage",
     "SettingsPage",
     "TaskPage",
+    "UploadHubPage",
     "UploadPage",
     "UploadPageServices",
     "VideoPage",
