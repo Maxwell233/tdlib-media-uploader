@@ -72,7 +72,7 @@ class CaptionEditDialog(QDialog):
 
         # Status & character counter
         self.caption_count = QLabel()
-        self.caption_count.setObjectName("mutedLabel")
+        self.caption_count.setObjectName("captionCount")
         layout.addWidget(self.caption_count)
 
         caption_hint = QLabel(
@@ -113,13 +113,17 @@ class CaptionEditDialog(QDialog):
                 f"标题长度 {len(caption)}/{self.caption_limit} 字符 · 发送预览 {chars}/{self.caption_limit} 字符"
             )
             if chars > self.caption_limit:
-                self.caption_count.setStyleSheet(f"color: {THEME.danger};")
+                self.caption_count.setProperty("over_limit", "true")
             else:
-                self.caption_count.setStyleSheet(f"color: {THEME.text_muted};")
+                self.caption_count.setProperty("over_limit", "false")
+            self.caption_count.style().unpolish(self.caption_count)
+            self.caption_count.style().polish(self.caption_count)
         except Exception as exc:
             self.preview.setPlainText(str(exc))
             self.caption_count.setText(f"标题格式错误：{exc}")
-            self.caption_count.setStyleSheet(f"color: {THEME.danger};")
+            self.caption_count.setProperty("over_limit", "true")
+            self.caption_count.style().unpolish(self.caption_count)
+            self.caption_count.style().polish(self.caption_count)
 
     @property
     def custom_text(self) -> str:

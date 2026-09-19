@@ -29,7 +29,7 @@ from ..core.filesystem_legacy import (
     validate_scan_root,
 )
 from ..core.logging import write_app_log
-from .config_service import _CONFIG_ERROR, cfg, get_cfg, target_for
+from .config_service import _CONFIG_ERROR, get_cfg, get_config, target_for
 from .models import scan_result as _translate_v2_scan_result
 from .tools import (
     KIND_PATH_KEYS,
@@ -312,9 +312,10 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
     if kind not in MEDIA_KINDS:
         raise ValueError(f"未知媒体类型：{kind}")
     path_size.cache_clear()
-    if cfg is None:
+    current_cfg = get_config()
+    if current_cfg is None:
         raise RuntimeError(_CONFIG_ERROR or "配置不可用。")
-    activate = getattr(cfg, "activate_target", None)
+    activate = getattr(current_cfg, "activate_target", None)
     if callable(activate):
         activate(kind)
 
@@ -646,7 +647,8 @@ def v2_scan_result(bundle, *, progress_callback=None, cancel_event=None) -> dict
 def scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
     """Run the V2 strategy scan, retaining the old preview fallback."""
     kind = require_kind(kind)
-    if cfg is None:
+    current_cfg = get_config()
+    if current_cfg is None:
         raise RuntimeError(_CONFIG_ERROR or "配置不可用。")
     try:
         unavailable, _run_v2_upload, scan_v2 = load_v2_gui_integration()
@@ -658,7 +660,7 @@ def scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
             target=target_for(kind),
             cancel_event=cancel_event,
             progress_callback=progress_callback,
-            config=cfg,
+            config=current_cfg,
             runtime_paths=_runtime_paths,
         )
         return v2_scan_result(bundle, progress_callback=progress_callback, cancel_event=cancel_event)

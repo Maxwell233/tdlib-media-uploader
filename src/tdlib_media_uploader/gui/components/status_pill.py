@@ -9,6 +9,17 @@ from PySide6.QtWidgets import QLabel
 from ..theme import THEME
 
 
+def _current_styles():
+    return {
+        "success": (THEME.success, THEME.success_bg),
+        "warning": (THEME.warning, THEME.warning_bg),
+        "danger": (THEME.danger, THEME.danger_bg),
+        "info": (THEME.info, THEME.info_bg),
+        "neutral": (THEME.text_muted, THEME.bg_surface),
+        "accent": (THEME.accent_hover, THEME.bg_selection),
+    }
+
+
 class StatusPill(QLabel):
     """A pill-shaped status badge with semantic color tinting."""
 
@@ -33,7 +44,8 @@ class StatusPill(QLabel):
         self.status = status
         if text is not None:
             self.setText(text)
-        fg, bg = self.STYLES.get(status, self.STYLES["neutral"])
+        styles = _current_styles()
+        fg, bg = styles.get(status, styles["neutral"])
         self.setStyleSheet(
             f"""
             QLabel {{
@@ -47,6 +59,10 @@ class StatusPill(QLabel):
             }}
             """
         )
+
+    def refresh_theme(self):
+        """Re-apply styling for the active status using current theme palette."""
+        self.set_status(self.status)
 
 
 __all__ = ["StatusPill"]

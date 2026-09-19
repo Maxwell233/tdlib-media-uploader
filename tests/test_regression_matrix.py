@@ -22,6 +22,7 @@ if str(SRC_ROOT) not in sys.path:
 from tdlib_media_uploader.core import album as metadata
 from tdlib_media_uploader.core import logging as app_logging
 from tdlib_media_uploader.gui import main_window as gui
+from tdlib_media_uploader.gui import config_service, tools, cache_service
 from tdlib_media_uploader.core import filesystem_legacy as path_utils
 from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
 
@@ -88,8 +89,8 @@ class ImprovementsTest(unittest.TestCase):
         config = gui.ConfigDialog()
         scan_tools = gui.ScanToolsDialog()
         try:
-            with patch.object(gui, "_write_config_values", return_value="") as save, \
-                    patch.object(gui, "_validate_exiftool_path", return_value=""):
+            with patch.object(config_service, "write_config_values", return_value="") as save, \
+                    patch.object(tools, "validate_exiftool_path", return_value=""):
                 config._save()
                 config_values = save.call_args.args[0]
             self.assertIn(("telegram", "api_id"), config_values)
@@ -98,8 +99,8 @@ class ImprovementsTest(unittest.TestCase):
             self.assertNotIn(("paths", "exiftool_path"), config_values)
             self.assertFalse(any(section in {"scan", "process"} for section, _ in config_values))
 
-            with patch.object(gui, "_write_config_values", return_value="") as save:
-                with patch.object(gui, "_validate_exiftool_path", return_value=""):
+            with patch.object(config_service, "write_config_values", return_value="") as save:
+                with patch.object(tools, "validate_exiftool_path", return_value=""):
                     scan_tools._save()
                 scan_values = save.call_args.args[0]
             self.assertIn(("paths", "exiftool_path"), scan_values)
@@ -121,8 +122,8 @@ class ImprovementsTest(unittest.TestCase):
             executable = Path(directory) / "exiftool"
             executable.write_bytes(b"tool")
             completed = subprocess.CompletedProcess([], 0, "12.95\n", "")
-            with patch.object(gui, "run_cancellable_process", return_value=completed) as run:
-                self.assertEqual(gui._validate_exiftool_path(str(executable)), "")
+            with patch.object(tools, "run_cancellable_process", return_value=completed) as run:
+                self.assertEqual(tools.validate_exiftool_path(str(executable)), "")
             self.assertEqual(run.call_args.args[0], [str(executable), "-ver"])
             self.assertEqual(run.call_args.kwargs["timeout"], 5.0)
 
@@ -963,8 +964,8 @@ class ImprovementsTest(unittest.TestCase):
             config = Path(directory) / "config.toml"
             original = '[paths]\nvideo_dir = "old"\n'
             config.write_text(original, encoding="utf-8")
-            with patch.object(gui, "CONFIG_PATH", config), patch.object(gui, "_reload_config", side_effect=["空路径", ""]):
-                self.assertEqual(gui._write_config_values({("paths", "video_dir"): ""}), "空路径")
+            with patch.object(config_service, "CONFIG_PATH", config), patch.object(config_service, "reload_config", side_effect=["空路径", ""]):
+                self.assertEqual(config_service.write_config_values({("paths", "video_dir"): ""}), "空路径")
             self.assertEqual(config.read_text(encoding="utf-8"), original)
 
     def test_toml_update_preserves_other_sections(self):
@@ -1712,8 +1713,8 @@ class ImprovementsTest(unittest.TestCase):
             log_dir.mkdir()
             (log_dir / "app.log").write_text("app", encoding="utf-8")
             (log_dir / "tdlib.log").write_text("tdlib", encoding="utf-8")
-            with patch.object(gui, "CACHE_TARGETS", {"logs": ("运行日志", log_dir)}):
-                removed, errors = gui._clear_cache(("logs",))
+            with patch.object(cache_service, "CACHE_TARGETS", {"logs": ("运行日志", log_dir)}):
+                removed, errors = cache_service.clear_cache(("logs",))
             self.assertEqual(removed, ["运行日志"])
             self.assertFalse(errors)
             self.assertTrue(log_dir.is_dir())

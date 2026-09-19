@@ -24,15 +24,8 @@ from PySide6.QtWidgets import (
 )
 
 from ...config.paths import STAGING_CACHE_DIR, read_version
-from ..config_service import get_cfg as _cfg, write_config_values as _default_write_config_values
-
-
-def _write_config_values(values: dict[tuple[str, str], object]) -> str:
-    import sys
-    main_mod = sys.modules.get("tdlib_media_uploader.gui.main_window")
-    if main_mod is not None and hasattr(main_mod, "_write_config_values"):
-        return main_mod._write_config_values(values)
-    return _default_write_config_values(values)
+from .. import config_service
+from ..config_service import get_cfg as _cfg
 
 
 class ConfigDialog(QDialog):
@@ -284,7 +277,7 @@ class ConfigDialog(QDialog):
             if values[("proxy", "type")] == "mtproto" and not values[("proxy", "secret")]:
                 QMessageBox.critical(self, "保存失败", "使用 MTProto 代理时必须填写 Secret。")
                 return
-        error = _write_config_values(values)
+        error = config_service.write_config_values(values)
         if error:
             QMessageBox.critical(self, "保存失败", error)
             return

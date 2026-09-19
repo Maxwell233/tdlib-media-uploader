@@ -31,7 +31,7 @@ from ...config.paths import (
 from ...core.logging import APP_LOG_PATH, TDLIB_LOG_PATH
 from ..cache_service import cache_status_text
 from ..components.status_pill import StatusPill
-from ..config_service import _CONFIG_ERROR, cfg, get_cfg
+from ..config_service import _CONFIG_ERROR, get_cfg, get_config
 from ..theme import THEME
 
 
@@ -88,10 +88,7 @@ class SettingsPage(QWidget):
         ]
         for idx, (name, desc) in enumerate(deps):
             card = QFrame()
-            card.setStyleSheet(
-                f"background-color: {THEME.bg_card}; border: 1px solid {THEME.border_subtle}; "
-                f"border-radius: 8px; padding: 10px 12px;"
-            )
+            card.setObjectName("envCard")
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(0, 0, 0, 0)
             card_layout.setSpacing(4)
@@ -100,6 +97,7 @@ class SettingsPage(QWidget):
             name_label = QLabel(name)
             name_label.setObjectName("valueLabel")
             status_label = QLabel("检测中")
+            status_label.setObjectName("envStatus")
             self.env_labels[name] = status_label
             top.addWidget(name_label)
             top.addStretch(1)
@@ -182,7 +180,8 @@ class SettingsPage(QWidget):
         cache_layout = QVBoxLayout(cache_box)
         cache_layout.setSpacing(10)
 
-        self.cache_status = QLabel()
+        self._cache_worker = None
+        self.cache_status = QLabel("就绪，点击“统计缓存占用”可统计占用空间")
         self.cache_status.setObjectName("valueLabel")
         self.cache_status.setWordWrap(True)
         cache_layout.addWidget(self.cache_status)
@@ -196,6 +195,10 @@ class SettingsPage(QWidget):
         cache_layout.addWidget(cache_hint)
 
         cache_buttons = QHBoxLayout()
+        calc_cache = QPushButton("统计缓存占用")
+        calc_cache.setObjectName("secondaryButton")
+        calc_cache.clicked.connect(self.refresh_cache_stats)
+
         clear_thumb = QPushButton("仅清理视频封面缓存")
         clear_thumb.setObjectName("secondaryButton")
         clear_thumb.clicked.connect(lambda: self.clear_thumb_requested.emit())
@@ -204,6 +207,7 @@ class SettingsPage(QWidget):
         clear_all.setObjectName("dangerButton")
         clear_all.clicked.connect(lambda: self.clear_all_requested.emit())
 
+        cache_buttons.addWidget(calc_cache)
         cache_buttons.addWidget(clear_thumb)
         cache_buttons.addWidget(clear_all)
         cache_buttons.addStretch(1)
@@ -227,31 +231,54 @@ class SettingsPage(QWidget):
         layout.addStretch(1)
         self.refresh()
 
-    def refresh(self):
-        from ..config_service import _CONFIG_ERROR, cfg
+    def refresh_cache_stats(self):
+        """Asynchronously compute cache size on a worker thread to avoid freezing UI."""
+        if self._cache_worker is not None and self._cache_worker.isRunning():
+            return
+        self.cache_status.setText("正在计算缓存占用…")
+        from ..workers import CacheStatsWorker  # noqa: PLC0415
+
+        self._cache_worker = CacheStatsWorker(self)
+        self._cache_worker.finished.connect(self._on_cache_stats_ready)
+        self._cache_worker.start()
+
+    def _on_cache_stats_ready(self, text: str):
+        self.cache_status.setText(text)
+
+    def refresh_theme(self):
+        """Re-apply dynamic styles when theme is toggled."""
+        self.refresh()
+
+    def refresh(self, update_cache: bool = False):
+        from ..config_service import _CONFIG_ERROR, get_config
 
         if _CONFIG_ERROR:
             self.config_status.setText(f"配置不可用：{_CONFIG_ERROR}")
-            self.config_status.setStyleSheet(f"color: {THEME.danger};")
+            self.config_status.setProperty("status", "danger")
         elif _cfg("API_ID", 12345678) == 12345678 or _cfg("API_HASH", "YOUR_API_HASH") == "YOUR_API_HASH":
             self.config_status.setText("配置文件已找到，但 Telegram API 仍为示例值，请先编辑配置。")
-            self.config_status.setStyleSheet(f"color: {THEME.warning};")
+            self.config_status.setProperty("status", "warning")
         else:
             self.config_status.setText(f"配置文件已加载：{CONFIG_PATH}")
-            self.config_status.setStyleSheet(f"color: {THEME.success};")
+            self.config_status.setProperty("status", "success")
+        self.config_status.style().unpolish(self.config_status)
+        self.config_status.style().polish(self.config_status)
 
+        current_cfg = get_config()
         exiftool_path = _cfg("EXIFTOOL_PATH", None)
         checks = {
             "PySide6": True,
             "tdjson": bool(importlib.util.find_spec("tdjson")),
             "Pillow": bool(importlib.util.find_spec("PIL")),
             "imageio-ffmpeg": bool(importlib.util.find_spec("imageio_ffmpeg")),
-            "ExifTool": bool(cfg is not None and exiftool_path and Path(exiftool_path).exists()),
+            "ExifTool": bool(current_cfg is not None and exiftool_path and Path(exiftool_path).exists()),
         }
         for name, available in checks.items():
             label = self.env_labels[name]
             label.setText("可用" if available else "未找到 / 可选")
-            label.setStyleSheet(f"color: {THEME.success if available else THEME.warning}; font-weight: 600;")
+            label.setProperty("status", "ok" if available else "warn")
+            label.style().unpolish(label)
+            label.style().polish(label)
 
         proxy_label = self.env_labels["代理"]
         if _cfg("PROXY_ENABLED", False):
@@ -263,12 +290,15 @@ class SettingsPage(QWidget):
             proxy_label.setText(
                 f"已启用 · {proxy_type} {_cfg('PROXY_SERVER', '')}:{_cfg('PROXY_PORT', '')}"
             )
-            proxy_label.setStyleSheet(f"color: {THEME.success}; font-weight: 600;")
+            proxy_label.setProperty("status", "ok")
         else:
             proxy_label.setText("未启用 · 直连")
-            proxy_label.setStyleSheet(f"color: {THEME.text_muted};")
+            proxy_label.setProperty("status", "muted")
+        proxy_label.style().unpolish(proxy_label)
+        proxy_label.style().polish(proxy_label)
 
-        self.cache_status.setText(_cache_status_text())
+        if update_cache:
+            self.refresh_cache_stats()
 
 
 __all__ = ["SettingsPage"]

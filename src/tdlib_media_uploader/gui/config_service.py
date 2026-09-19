@@ -56,9 +56,16 @@ def reload_config() -> str:
         return _CONFIG_ERROR
 
 
+def get_config() -> Any:
+    """Return the active config loader module or None."""
+    global cfg
+    return cfg
+
+
 def get_cfg(name: str, default: Any = None) -> Any:
     """Safe attribute getter from the active config loader."""
-    return getattr(cfg, name, default) if cfg is not None else default
+    current = get_config()
+    return getattr(current, name, default) if current is not None else default
 
 
 def target_for(kind: str) -> dict[str, Any]:
@@ -179,6 +186,7 @@ __all__ = [
     "cfg",
     "ensure_config_file",
     "get_cfg",
+    "get_config",
     "get_key_re",
     "get_section_re",
     "reload_config",

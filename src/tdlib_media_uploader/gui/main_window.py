@@ -189,30 +189,10 @@ from .scanner import (
 )
 
 
-def _validate_exiftool_path(value: str) -> str:
-    import sys
-    self_mod = sys.modules.get("tdlib_media_uploader.gui.main_window")
-    runner = getattr(self_mod, "run_cancellable_process", run_cancellable_process)
-    return validate_exiftool_path(value, runner=runner)
-
-
-def _write_config_values(values: dict[tuple[str, str], object]) -> str:
-    import sys
-    self_mod = sys.modules.get("tdlib_media_uploader.gui.main_window")
-    path = getattr(self_mod, "CONFIG_PATH", CONFIG_PATH)
-    reloader = getattr(self_mod, "_reload_config", _reload_config)
-    return write_config_values(values, config_path=path, reloader=reloader)
-
-
-def _current_cache_targets() -> dict:
-    import sys
-    self_mod = sys.modules.get("tdlib_media_uploader.gui.main_window")
-    base = getattr(self_mod, "CACHE_TARGETS", CACHE_TARGETS)
-    return current_cache_targets(base_targets=base)
-
-
-def _clear_cache(keys: tuple[str, ...]) -> tuple[list[str], list[str]]:
-    return clear_cache(keys, targets=_current_cache_targets())
+_validate_exiftool_path = validate_exiftool_path
+_write_config_values = write_config_values
+_current_cache_targets = current_cache_targets
+_clear_cache = clear_cache
 
 
 def _ensure_config_file() -> bool:
@@ -358,6 +338,19 @@ class MainWindow(QMainWindow):
         self.settings_page.clear_thumb_requested.connect(self._clear_thumb_cache)
 
         self.statusBar().showMessage("就绪")
+        self._telegram_connected = False
+
+    def refresh_theme(self):
+        """Re-apply styling across composite widgets on theme switch."""
+        if hasattr(self.nav_sidebar, "refresh_theme"):
+            self.nav_sidebar.refresh_theme()
+        if hasattr(self.home, "refresh_theme"):
+            self.home.refresh_theme()
+        if hasattr(self.settings_page, "refresh_theme"):
+            self.settings_page.refresh_theme()
+        for p in self.upload_pages.values():
+            if hasattr(p, "refresh_theme"):
+                p.refresh_theme()
 
     def _refresh_pages(self):
         self.video_page.refresh_config()
@@ -541,6 +534,7 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _target_from_worker(self, payload: dict):
+        self._telegram_connected = True
         self.home.set_connection("已连接", True)
         self.nav_sidebar.set_connection_status(True, "已连接")
         kind = _require_kind(payload.get("kind") or self.active_kind)
@@ -621,8 +615,8 @@ class MainWindow(QMainWindow):
         for upload_page in self.upload_pages.values():
             upload_page.set_running(False)
         self.home.task_value.setText("无")
-        self.home.set_connection("已连接" if success else "未连接", success)
-        self.nav_sidebar.set_connection_status(success, "已连接" if success else "未连接")
+        self.home.set_connection("已连接" if self._telegram_connected else "未连接", self._telegram_connected)
+        self.nav_sidebar.set_connection_status(self._telegram_connected, "已连接" if self._telegram_connected else "未连接")
         self.statusBar().showMessage(message)
         self.history_page.reload_records()
         self.inflight_page.reload_records()
@@ -806,8 +800,14 @@ class MainWindow(QMainWindow):
                 return
         for scanner in list(self.scanners.values()):
             if scanner.isRunning():
-                scanner.cancel()
-                scanner.wait(3000)
+                if hasattr(scanner, "request_stop"):
+                    scanner.request_stop()
+                elif hasattr(scanner, "cancel"):
+                    scanner.cancel()
+                if not scanner.wait(5000):
+                    QMessageBox.warning(self, "仍在扫描", "扫描任务尚未结束，请稍候再关闭窗口。")
+                    event.ignore()
+                    return
         event.accept()
 
 

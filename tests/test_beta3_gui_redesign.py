@@ -317,8 +317,8 @@ class Beta3MainWindowAndArchitectureTest(unittest.TestCase):
         window = gui_app.MainWindow()
         try:
             version = read_version()
-            self.assertEqual(version, "1.9.3-beta3")
-            self.assertIn("1.9.3-beta3", window.windowTitle())
+            self.assertEqual(version, "1.9.3-beta4")
+            self.assertIn("1.9.3-beta4", window.windowTitle())
 
             # Sidebar and stack synchronization
             self.assertEqual(window.sidebar.count(), 8)
@@ -364,33 +364,45 @@ class Beta3MainWindowAndArchitectureTest(unittest.TestCase):
             if not pkg_dir.is_dir():
                 continue
             for py_file in pkg_dir.rglob("*.py"):
-                tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.Import):
-                        for alias in node.names:
-                            self.assertNotIn(
-                                "main_window",
-                                alias.name.split("."),
-                                f"Forbidden reverse import to main_window in {py_file} -> {alias.name}",
-                            )
-                    elif isinstance(node, ast.ImportFrom) and node.module:
-                        self.assertNotIn(
-                            "main_window",
-                            node.module.split("."),
-                            f"Forbidden reverse import to main_window in {py_file} -> {node.module}",
-                        )
+                source = py_file.read_text(encoding="utf-8")
+                self.assertNotIn(
+                    "main_window",
+                    source,
+                    f"Forbidden reverse reference to main_window in {py_file}",
+                )
+        for single_file in ("tools.py", "cache_service.py", "config_service.py", "history_service.py"):
+            target = gui_path / single_file
+            if target.is_file():
+                self.assertNotIn(
+                    "main_window",
+                    target.read_text(encoding="utf-8"),
+                    f"Forbidden reverse reference to main_window in {target}",
+                )
 
     def test_main_window_scanner_cancellation_on_close(self):
-        from unittest.mock import MagicMock
+        from unittest.mock import MagicMock, patch
+        from PySide6.QtGui import QCloseEvent
         window = gui_app.MainWindow()
         try:
             mock_scanner = MagicMock()
             mock_scanner.isRunning.return_value = True
+            mock_scanner.wait.return_value = True
             window.scanners["video"] = mock_scanner
 
             window.close()
-            mock_scanner.cancel.assert_called_once()
-            mock_scanner.wait.assert_called_once()
+            mock_scanner.request_stop.assert_called_once()
+            mock_scanner.wait.assert_called_once_with(5000)
+
+            # Also verify timeout: if wait returns False, event is ignored and warning shown
+            mock_scanner2 = MagicMock()
+            mock_scanner2.isRunning.return_value = True
+            mock_scanner2.wait.return_value = False
+            window.scanners["video"] = mock_scanner2
+            event = QCloseEvent()
+            with patch.object(gui_app.QMessageBox, "warning") as mock_warn:
+                window.closeEvent(event)
+                self.assertFalse(event.isAccepted())
+                mock_warn.assert_called_once()
         finally:
             window.deleteLater()
             self.app.processEvents()

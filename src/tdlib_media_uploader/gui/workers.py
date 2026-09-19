@@ -71,6 +71,10 @@ class ScanWorker(QThread):
 
         self.cancel_event.set()
 
+    def cancel(self):
+        """Backward-compatible alias for request_stop."""
+        self.request_stop()
+
     def _report_progress(self, payload: dict):
         self.progress_changed.emit(self.kind, payload)
 
@@ -88,6 +92,23 @@ class ScanWorker(QThread):
         except Exception as exc:
             write_exception(f"{self.kind} 扫描失败", exc, source=f"scan/{self.kind}")
             self.failed.emit(f"扫描失败：{type(exc).__name__}: {exc}")
+
+
+class CacheStatsWorker(QThread):
+    """Calculate cache usage statistics in background without blocking Qt UI."""
+
+    finished = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def run(self):
+        try:
+            from .cache_service import cache_status_text  # noqa: PLC0415
+            text = cache_status_text()
+        except Exception as exc:
+            text = f"计算缓存占用失败：{exc}"
+        self.finished.emit(text)
 
 
 class UploadWorker(QThread):
@@ -231,4 +252,4 @@ class UploadWorker(QThread):
                 self.completed.emit(False, f"任务失败：{type(exc).__name__}: {exc}")
 
 
-__all__ = ["AuthBridge", "GuiConsoleUI", "ScanWorker", "UploadWorker"]
+__all__ = ["AuthBridge", "CacheStatsWorker", "GuiConsoleUI", "ScanWorker", "UploadWorker"]

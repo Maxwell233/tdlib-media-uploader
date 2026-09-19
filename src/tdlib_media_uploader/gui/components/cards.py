@@ -88,7 +88,7 @@ class ActionCard(QFrame):
         header = QHBoxLayout()
         if icon_text:
             icon_label = QLabel(icon_text)
-            icon_label.setStyleSheet(f"font-size: 18px; color: {THEME.accent};")
+            icon_label.setObjectName("actionCardIcon")
             header.addWidget(icon_label)
         self.title_label = QLabel(title)
         self.title_label.setObjectName("sectionTitle")
@@ -96,10 +96,7 @@ class ActionCard(QFrame):
         header.addStretch(1)
         if badge_text:
             badge = QLabel(badge_text)
-            badge.setObjectName("badgeLabel")
-            badge.setStyleSheet(
-                f"background-color: {THEME.bg_selection}; color: {THEME.accent_hover};"
-            )
+            badge.setObjectName("actionCardBadge")
             header.addWidget(badge)
         layout.addLayout(header)
 

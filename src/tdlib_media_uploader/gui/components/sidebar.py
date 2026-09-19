@@ -22,11 +22,16 @@ from ..theme import THEME, build_stylesheet, get_current_theme_mode, toggle_them
 
 def _format_badge(version: str) -> str:
     v = str(version or "").strip()
-    if "beta" in v.lower():
-        parts = v.lower().split("beta")
-        suffix = parts[-1].strip(" -_.")
-        return f"Beta {suffix}" if suffix else "Beta"
-    return "Beta 3"
+    vl = v.lower()
+    for tag in ("beta", "rc", "alpha", "dev"):
+        if tag in vl:
+            parts = vl.split(tag)
+            suffix = parts[-1].strip(" -_.")
+            tag_name = tag.upper() if tag in ("rc", "dev") else tag.capitalize()
+            return f"{tag_name} {suffix}".strip()
+    if v:
+        return "Stable"
+    return "Beta 4"
 
 
 class NavigationSidebar(QFrame):
@@ -66,15 +71,12 @@ class NavigationSidebar(QFrame):
         title_row.setSpacing(8)
 
         app_title = QLabel("TDLib Uploader")
-        app_title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {THEME.text_primary};")
+        app_title.setObjectName("sidebarAppTitle")
         title_row.addWidget(app_title)
 
-        badge = QLabel(_format_badge(self.version))
-        badge.setStyleSheet(
-            f"background-color: {THEME.bg_selection}; color: {THEME.accent_hover}; "
-            f"font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 6px;"
-        )
-        title_row.addWidget(badge)
+        self.badge = QLabel(_format_badge(self.version))
+        self.badge.setObjectName("sidebarBadge")
+        title_row.addWidget(self.badge)
         title_row.addStretch(1)
 
         # Theme toggle button (Sun / Moon)
@@ -90,7 +92,7 @@ class NavigationSidebar(QFrame):
         brand_layout.addLayout(title_row)
 
         subtitle = QLabel("TG 媒体批量上传工具")
-        subtitle.setStyleSheet(f"font-size: 11px; color: {THEME.text_dim};")
+        subtitle.setObjectName("sidebarSubtitle")
         brand_layout.addWidget(subtitle)
         layout.addWidget(brand_widget)
 
@@ -113,27 +115,25 @@ class NavigationSidebar(QFrame):
         footer_layout.setSpacing(4)
 
         status_box = QFrame()
-        status_box.setStyleSheet(
-            f"background-color: {THEME.bg_surface}; border: 1px solid {THEME.border_subtle}; "
-            f"border-radius: 8px; padding: 6px 10px;"
-        )
+        status_box.setObjectName("sidebarStatusBox")
         box_layout = QHBoxLayout(status_box)
         box_layout.setContentsMargins(0, 0, 0, 0)
         box_layout.setSpacing(8)
 
         self.status_dot = QLabel("●")
-        self.status_dot.setStyleSheet(f"color: {THEME.text_dim}; font-size: 10px;")
+        self.status_dot.setObjectName("sidebarStatusDot")
+        self.status_dot.setProperty("connected", "false")
         self.status_text = QLabel("TG 未连接")
-        self.status_text.setStyleSheet(f"color: {THEME.text_muted}; font-size: 11px; font-weight: 500;")
+        self.status_text.setObjectName("sidebarStatusText")
 
         box_layout.addWidget(self.status_dot)
         box_layout.addWidget(self.status_text, 1)
         footer_layout.addWidget(status_box)
 
-        version_label = QLabel(f"Version {self.version}")
-        version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        version_label.setStyleSheet(f"color: {THEME.text_dim}; font-size: 10px;")
-        footer_layout.addWidget(version_label)
+        self.version_label = QLabel(f"Version {self.version}")
+        self.version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.version_label.setObjectName("sidebarVersionLabel")
+        footer_layout.addWidget(self.version_label)
 
         layout.addWidget(footer)
 
@@ -144,10 +144,19 @@ class NavigationSidebar(QFrame):
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(build_stylesheet(THEME))
+            for widget in app.topLevelWidgets():
+                if hasattr(widget, "refresh_theme"):
+                    widget.refresh_theme()
+
+    def refresh_theme(self):
+        """Refresh styling and re-polish dynamic elements."""
+        self.status_dot.style().unpolish(self.status_dot)
+        self.status_dot.style().polish(self.status_dot)
 
     def set_connection_status(self, connected: bool, text: str = ""):
-        color = THEME.success if connected else THEME.warning if text else THEME.text_dim
-        self.status_dot.setStyleSheet(f"color: {color}; font-size: 10px;")
+        self.status_dot.setProperty("connected", "true" if connected else ("warn" if text else "false"))
+        self.status_dot.style().unpolish(self.status_dot)
+        self.status_dot.style().polish(self.status_dot)
         self.status_text.setText(text or ("TG 已连接" if connected else "TG 未连接"))
 
     def setCurrentRow(self, row: int):

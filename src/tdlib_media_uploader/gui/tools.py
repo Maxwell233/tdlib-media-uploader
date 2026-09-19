@@ -90,9 +90,7 @@ def hidden_subprocess_kwargs() -> dict[str, Any]:
 def validate_exiftool_path(value: str, runner=None) -> str:
     """Return a user-facing error when ExifTool cannot answer ``-ver`` quickly."""
     if runner is None:
-        import sys
-        main_mod = sys.modules.get("tdlib_media_uploader.gui.main_window")
-        runner = getattr(main_mod, "run_cancellable_process", run_cancellable_process) if main_mod else run_cancellable_process
+        runner = run_cancellable_process
 
     text = str(value or "").strip().strip('"')
     if not text:

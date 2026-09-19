@@ -24,24 +24,8 @@ from PySide6.QtWidgets import (
 )
 
 from ...config.paths import read_version
-from ..config_service import get_cfg as _cfg, write_config_values as _default_write_config_values
-from ..tools import validate_exiftool_path as _default_validate_exiftool_path
-
-
-def _write_config_values(values: dict[tuple[str, str], object]) -> str:
-    import sys
-    main_mod = sys.modules.get("tdlib_media_uploader.gui.main_window")
-    if main_mod is not None and hasattr(main_mod, "_write_config_values"):
-        return main_mod._write_config_values(values)
-    return _default_write_config_values(values)
-
-
-def _validate_exiftool_path(value: str) -> str:
-    import sys
-    main_mod = sys.modules.get("tdlib_media_uploader.gui.main_window")
-    if main_mod is not None and hasattr(main_mod, "_validate_exiftool_path"):
-        return main_mod._validate_exiftool_path(value)
-    return _default_validate_exiftool_path(value)
+from .. import config_service, tools
+from ..config_service import get_cfg as _cfg
 
 
 class ScanToolsDialog(QDialog):
@@ -203,7 +187,7 @@ class ScanToolsDialog(QDialog):
 
     def _save(self):
         exiftool_path = self.fields["exiftool_path"].text().strip()
-        validation_error = _validate_exiftool_path(exiftool_path)
+        validation_error = tools.validate_exiftool_path(exiftool_path)
         if validation_error:
             QMessageBox.warning(self, "ExifTool 路径不可用", validation_error)
             return
@@ -226,7 +210,7 @@ class ScanToolsDialog(QDialog):
         values.update({("process", key): widget.value() for key, widget in self.process_timeouts.items()})
         values[("process", "exiftool_batch_size")] = self.exiftool_batch_size.value()
         values[("process", "exiftool_retries")] = self.exiftool_retries.value()
-        error = _write_config_values(values)
+        error = config_service.write_config_values(values)
         if error:
             QMessageBox.critical(self, "保存失败", error)
             return

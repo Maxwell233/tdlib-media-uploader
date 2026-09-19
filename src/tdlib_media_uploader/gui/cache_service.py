@@ -21,7 +21,7 @@ from ..config.paths import (
     VIDEO_STATE_DIR,
 )
 from ..core.filesystem_legacy import is_link_or_junction
-from .config_service import cfg
+from .config_service import get_cfg
 from .tools import format_size
 
 CACHE_TARGETS: dict[str, tuple[str, Path]] = {
@@ -43,13 +43,8 @@ ALL_CACHE_KEYS = tuple(CACHE_TARGETS)
 
 def current_cache_targets(base_targets: dict[str, tuple[str, Path]] | None = None) -> dict[str, tuple[str, Path]]:
     """Resolve dynamic cache locations, especially configured staging."""
-    if base_targets is None:
-        import sys
-        main_mod = sys.modules.get("tdlib_media_uploader.gui.main_window")
-        if main_mod is not None and hasattr(main_mod, "CACHE_TARGETS"):
-            base_targets = main_mod.CACHE_TARGETS
     targets = dict(base_targets if base_targets is not None else CACHE_TARGETS)
-    targets["staging"] = ("本地暂存文件", Path(getattr(cfg, "STAGING_DIR", STAGING_CACHE_DIR)))
+    targets["staging"] = ("本地暂存文件", Path(get_cfg("STAGING_DIR", STAGING_CACHE_DIR)))
     return targets
 
 

@@ -348,89 +348,93 @@ class UploadPage(QWidget):
 
     def set_result(self, result: dict):
         self.result = result
-        self.tree.clear()
-        completed_paths = set(result.get("completed_paths", []))
-        for group in result["groups"]:
-            label = (
-                f"{group['label']} · {len(group['items'])} 个 · "
-                f"已完成 {group['completed']} · 待上传 {group['pending']} · "
-                f"{group['albums']} 组待上传"
-            )
-            top = QTreeWidgetItem(["分组", group["label"], "", label])
-            if self.kind in {"video", "mixed"}:
-                self.tree.addTopLevelItem(top)
-                top.setExpanded(True)
-            plans = group.get("album_plans") or [{
-                "key": "",
-                "number": 1,
-                "items": group["items"],
-                "pending_items": [
-                    item for item in group["items"]
-                    if self._stable(_item_path(item)) not in completed_paths
-                ],
-                "caption": {
-                    "text": group.get("caption", ""),
-                    "base_label": group.get("caption", ""),
-                    "custom_text": "",
-                },
-            }]
-            for plan in plans:
-                album_items = plan.get("items", [])
-                pending_count = len(plan.get("pending_items", []))
-                completed_count = len(album_items) - pending_count
-                caption = plan.get("caption", {}) or {}
-                include_key = {
-                    "video": "VIDEO_CAPTION_INCLUDE_FILENAMES",
-                    "mixed": "MIXED_CAPTION_INCLUDE_FILENAMES",
-                    "image": "IMAGE_CAPTION_INCLUDE_FILENAMES",
-                }[self.kind]
-                number_key = {
-                    "video": "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS",
-                    "mixed": "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS",
-                    "image": "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
-                }[self.kind]
-                caption_text = self.services.filename_description(
-                    caption.get("text", ""),
-                    album_items,
-                    bool(self._cfg(include_key, False)),
-                    bool(self._cfg(number_key, True)),
-                    max_chars=int(self.services.caption_limit),
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self.tree.clear()
+            completed_paths = set(result.get("completed_paths", []))
+            for group in result["groups"]:
+                label = (
+                    f"{group['label']} · {len(group['items'])} 个 · "
+                    f"已完成 {group['completed']} · 待上传 {group['pending']} · "
+                    f"{group['albums']} 组待上传"
                 )
-                album_row = QTreeWidgetItem([
-                    "待上传" if pending_count else "已完成",
-                    self._album_title(plan),
-                    self.services.size_formatter(sum(self._size(item) for item in album_items)),
-                    f"{len(album_items)} 个文件 · 已完成 {completed_count} · 待上传 {pending_count}",
-                ])
-                album_row.setData(0, Qt.ItemDataRole.UserRole, plan)
-                album_row.setToolTip(1, caption_text or "无标题")
-                if self.kind == "image":
-                    self.tree.addTopLevelItem(album_row)
-                else:
-                    top.addChild(album_row)
-                for item in album_items:
-                    path = _item_path(item)
-                    completed = self._stable(path) in completed_paths
-                    date_value = item.get("capture_time") if isinstance(item, Mapping) else None
-                    if self.kind == "mixed" and isinstance(item, Mapping):
-                        date_value = "图片" if item.get("media_kind") == "image" else "视频"
-                    row = QTreeWidgetItem([
-                        "待上传" if not completed else "已完成",
-                        self._format_date(date_value),
-                        self.services.size_formatter(self._size(item)),
-                        str(path),
+                top = QTreeWidgetItem(["分组", group["label"], "", label])
+                if self.kind in {"video", "mixed"}:
+                    self.tree.addTopLevelItem(top)
+                    top.setExpanded(True)
+                plans = group.get("album_plans") or [{
+                    "key": "",
+                    "number": 1,
+                    "items": group["items"],
+                    "pending_items": [
+                        item for item in group["items"]
+                        if self._stable(_item_path(item)) not in completed_paths
+                    ],
+                    "caption": {
+                        "text": group.get("caption", ""),
+                        "base_label": group.get("caption", ""),
+                        "custom_text": "",
+                    },
+                }]
+                for plan in plans:
+                    album_items = plan.get("items", [])
+                    pending_count = len(plan.get("pending_items", []))
+                    completed_count = len(album_items) - pending_count
+                    caption = plan.get("caption", {}) or {}
+                    include_key = {
+                        "video": "VIDEO_CAPTION_INCLUDE_FILENAMES",
+                        "mixed": "MIXED_CAPTION_INCLUDE_FILENAMES",
+                        "image": "IMAGE_CAPTION_INCLUDE_FILENAMES",
+                    }[self.kind]
+                    number_key = {
+                        "video": "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS",
+                        "mixed": "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS",
+                        "image": "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
+                    }[self.kind]
+                    caption_text = self.services.filename_description(
+                        caption.get("text", ""),
+                        album_items,
+                        bool(self._cfg(include_key, False)),
+                        bool(self._cfg(number_key, True)),
+                        max_chars=int(self.services.caption_limit),
+                    )
+                    album_row = QTreeWidgetItem([
+                        "待上传" if pending_count else "已完成",
+                        self._album_title(plan),
+                        self.services.size_formatter(sum(self._size(item) for item in album_items)),
+                        f"{len(album_items)} 个文件 · 已完成 {completed_count} · 待上传 {pending_count}",
                     ])
-                    album_row.addChild(row)
-                    row.setToolTip(3, str(path))
-                    if isinstance(item, Mapping):
-                        source = item.get("date_tag") or "未知"
-                        row.setToolTip(
-                            1,
-                            f"{self._format_date(date_value)}\n日期来源：{source}",
-                        )
-        for column, width in enumerate((140, 250, 100)):
-            self.tree.setColumnWidth(column, width)
-        self._filter_preview()
+                    album_row.setData(0, Qt.ItemDataRole.UserRole, plan)
+                    album_row.setToolTip(1, caption_text or "无标题")
+                    if self.kind == "image":
+                        self.tree.addTopLevelItem(album_row)
+                    else:
+                        top.addChild(album_row)
+                    for item in album_items:
+                        path = _item_path(item)
+                        completed = self._stable(path) in completed_paths
+                        date_value = item.get("capture_time") if isinstance(item, Mapping) else None
+                        if self.kind == "mixed" and isinstance(item, Mapping):
+                            date_value = "图片" if item.get("media_kind") == "image" else "视频"
+                        row = QTreeWidgetItem([
+                            "待上传" if not completed else "已完成",
+                            self._format_date(date_value),
+                            self.services.size_formatter(self._size(item)),
+                            str(path),
+                        ])
+                        album_row.addChild(row)
+                        row.setToolTip(3, str(path))
+                        if isinstance(item, Mapping):
+                            source = item.get("date_tag") or "未知"
+                            row.setToolTip(
+                                1,
+                                f"{self._format_date(date_value)}\n日期来源：{source}",
+                            )
+            for column, width in enumerate((140, 250, 100)):
+                self.tree.setColumnWidth(column, width)
+            self._filter_preview()
+        finally:
+            self.tree.setUpdatesEnabled(True)
         self.summary_label.setText(
             f"共 {result['total_files']} 个 · {self.services.size_formatter(result['total_bytes'])} · "
             f"已完成 {result['completed_files']} · 待上传 {result['pending_files']} · "
@@ -558,11 +562,17 @@ class UploadPage(QWidget):
                 caption_count.setText(
                     f"用户标题 {len(caption)}/{caption_limit} · 发送预览 {len(rendered)}/{caption_limit}"
                 )
-                caption_count.setStyleSheet(f"color: {THEME.text_muted};")
+                caption_count.setObjectName("captionCount")
+                caption_count.setProperty("over_limit", "false")
+                caption_count.style().unpolish(caption_count)
+                caption_count.style().polish(caption_count)
             except CaptionLimitError as exc:
                 preview.setPlainText(str(exc))
                 caption_count.setText(f"超出字数限制：{len(caption)}/{caption_limit}")
-                caption_count.setStyleSheet(f"color: {THEME.danger};")
+                caption_count.setObjectName("captionCount")
+                caption_count.setProperty("over_limit", "true")
+                caption_count.style().unpolish(caption_count)
+                caption_count.style().polish(caption_count)
 
         base_edit.textChanged.connect(update_preview)
         custom_edit.textChanged.connect(update_preview)
@@ -685,6 +695,11 @@ class UploadPage(QWidget):
         )
         if active:
             self.status_label.setText("任务运行中，请在任务中心查看进度")
+
+    def refresh_theme(self):
+        """Re-apply dynamic status styles when theme is toggled."""
+        if hasattr(self, "status_pill") and hasattr(self.status_pill, "refresh_theme"):
+            self.status_pill.refresh_theme()
 
 
 class VideoPage(UploadPage):

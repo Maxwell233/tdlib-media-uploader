@@ -20,16 +20,7 @@ from PySide6.QtWidgets import (
 from ...config.paths import read_version
 from ..components.cards import ActionCard, StatCard
 from ..theme import THEME
-
-
-def format_size(value: float | int | None) -> str:
-    """Format a byte count with appropriate binary unit."""
-    value = float(value or 0)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if value < 1024 or unit == "TiB":
-            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.2f} {unit}"
-        value /= 1024
-    return f"{value:.2f} TiB"
+from ..tools import format_size
 
 
 def _card(title: str, value: str = "—", subtitle: str = "") -> tuple[QFrame, QLabel]:
@@ -160,6 +151,11 @@ class HomePage(QWidget):
     def set_connection(self, text: str, good: bool = False):
         self.connection_value.setText(text)
         self.connection_value.setProperty("good", good)
+        self.connection_value.style().unpolish(self.connection_value)
+        self.connection_value.style().polish(self.connection_value)
+
+    def refresh_theme(self):
+        """Re-polish connection and dynamic values on theme change."""
         self.connection_value.style().unpolish(self.connection_value)
         self.connection_value.style().polish(self.connection_value)
 

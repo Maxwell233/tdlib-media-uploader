@@ -35,6 +35,8 @@ class Palette(NamedTuple):
     accent_hover: str = "#0ea5e9"
     accent_active: str = "#0369a1"
 
+    text_selection: str = "#f8fafc"
+
     success: str = "#10b981"
     success_hover: str = "#059669"
     success_bg: str = "#064e3b"
@@ -62,7 +64,7 @@ LIGHT_PALETTE = Palette(
     bg_card="#ffffff",
     bg_card_hover="#f8fafc",
     bg_input="#ffffff",
-    bg_selection="#e0f2fe",
+    bg_selection="#bae6fd",
     bg_alt_row="#f8fafc",
 
     # Borders
@@ -81,6 +83,7 @@ LIGHT_PALETTE = Palette(
     accent="#0284c7",
     accent_hover="#0ea5e9",
     accent_active="#0369a1",
+    text_selection="#0369a1",
 
     success="#10b981",
     success_hover="#059669",
@@ -227,6 +230,61 @@ QListWidget#sidebar::item:selected {{
     font-weight: 600;
 }}
 
+QLabel#sidebarAppTitle {{
+    font-size: 16px;
+    font-weight: 700;
+    color: {palette.text_primary};
+}}
+
+QLabel#sidebarBadge {{
+    background-color: {palette.bg_selection};
+    color: {palette.text_selection};
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 6px;
+}}
+
+QLabel#sidebarSubtitle {{
+    font-size: 11px;
+    color: {palette.text_dim};
+}}
+
+QFrame#sidebarStatusBox {{
+    background-color: {palette.bg_surface};
+    border: 1px solid {palette.border_subtle};
+    border-radius: 8px;
+    padding: 6px 10px;
+}}
+
+QLabel#sidebarStatusDot {{
+    font-size: 10px;
+    color: {palette.text_dim};
+}}
+
+QLabel#sidebarStatusDot[connected="true"] {{
+    color: {palette.success};
+}}
+
+QLabel#sidebarStatusDot[connected="warn"] {{
+    color: {palette.warning};
+}}
+
+QLabel#sidebarStatusDot[connected="false"] {{
+    color: {palette.text_dim};
+}}
+
+QLabel#sidebarStatusText {{
+    color: {palette.text_muted};
+    font-size: 11px;
+    font-weight: 500;
+}}
+
+QLabel#sidebarVersionLabel {{
+    color: {palette.text_dim};
+    font-size: 10px;
+}}
+
 /* Group Boxes & Cards */
 QGroupBox {{
     background-color: {palette.bg_surface};
@@ -310,6 +368,71 @@ QLabel#badgeLabel {{
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 10px;
+}}
+
+/* ActionCard components */
+QLabel#actionCardIcon {{
+    font-size: 18px;
+    color: {palette.accent};
+}}
+
+QLabel#actionCardBadge {{
+    background-color: {palette.bg_selection};
+    color: {palette.text_selection};
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 8px;
+}}
+
+/* Environment & Settings cards */
+QFrame#envCard {{
+    background-color: {palette.bg_card};
+    border: 1px solid {palette.border_subtle};
+    border-radius: 8px;
+    padding: 10px 12px;
+}}
+
+QFrame#envCard:hover {{
+    border-color: {palette.border_card};
+}}
+
+QLabel#configStatus[status="danger"] {{
+    color: {palette.danger};
+    font-weight: 600;
+}}
+
+QLabel#configStatus[status="warning"] {{
+    color: {palette.warning};
+    font-weight: 600;
+}}
+
+QLabel#configStatus[status="success"] {{
+    color: {palette.success};
+    font-weight: 600;
+}}
+
+QLabel#envStatus[status="ok"] {{
+    color: {palette.success};
+    font-weight: 600;
+}}
+
+QLabel#envStatus[status="warn"] {{
+    color: {palette.warning};
+    font-weight: 600;
+}}
+
+QLabel#envStatus[status="muted"] {{
+    color: {palette.text_muted};
+}}
+
+QLabel#captionCount[over_limit="true"] {{
+    color: {palette.danger};
+    font-weight: 600;
+}}
+
+QLabel#captionCount[over_limit="false"] {{
+    color: {palette.text_muted};
 }}
 
 /* Buttons */
@@ -407,7 +530,7 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
     border-radius: 7px;
     padding: 6px 10px;
     selection-background-color: {palette.bg_selection};
-    selection-color: #ffffff;
+    selection-color: {palette.text_selection};
 }}
 
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{
@@ -428,7 +551,7 @@ QComboBox QAbstractItemView {{
     border-radius: 6px;
     padding: 4px;
     selection-background-color: {palette.bg_selection};
-    selection-color: #ffffff;
+    selection-color: {palette.text_selection};
     outline: 0;
 }}
 
@@ -465,7 +588,7 @@ QTreeWidget, QTableWidget {{
     alternate-background-color: {palette.bg_alt_row};
     gridline-color: {palette.border_subtle};
     selection-background-color: {palette.bg_selection};
-    selection-color: #ffffff;
+    selection-color: {palette.text_selection};
     outline: 0;
 }}
 
@@ -485,7 +608,8 @@ QTreeWidget::item:hover, QTableWidget::item:hover {{
 
 QTreeWidget::item:selected, QTableWidget::item:selected {{
     background-color: {palette.bg_selection};
-    color: #ffffff;
+    color: {palette.text_selection};
+    font-weight: 500;
 }}
 
 QHeaderView::section {{
@@ -585,7 +709,7 @@ QMenu::item {{
 
 QMenu::item:selected {{
     background-color: {palette.bg_selection};
-    color: #ffffff;
+    color: {palette.text_selection};
 }}
 
 /* Tab Widget */
