@@ -373,7 +373,9 @@ class UploadPanel(SettingsPanel):
         self.video_filename_numbers.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS", True)))
         self.video_separator.setText(str(_cfg("VIDEO_ALBUM_CAPTION_SEPARATOR", " · ")))
         self.video_thumbnail.setChecked(bool(_cfg("VIDEO_GENERATE_THUMBNAIL", True)))
-        self.video_validate_media.setChecked(bool(_cfg("VIDEO_VALIDATE_MEDIA", False)))
+        self.video_validate_media.setChecked(
+            bool(_cfg("VIDEO_VERIFY_ALL_METADATA", _cfg("VIDEO_VALIDATE_MEDIA", False)))
+        )
         self._update_video_date_fields()
 
         # 2. Image
@@ -388,7 +390,9 @@ class UploadPanel(SettingsPanel):
         self.image_separator.setText(str(_cfg("IMAGE_ALBUM_CAPTION_SEPARATOR", " · ")))
         self.image_filenames.setChecked(bool(_cfg("IMAGE_CAPTION_INCLUDE_FILENAMES", False)))
         self.image_compress.setChecked(bool(_cfg("IMAGE_COMPRESS_OVERSIZE", False)))
-        self.image_validate_media.setChecked(bool(_cfg("IMAGE_VALIDATE_MEDIA", False)))
+        self.image_validate_media.setChecked(
+            bool(_cfg("IMAGE_VERIFY_ALL_IMAGES", _cfg("IMAGE_VALIDATE_MEDIA", False)))
+        )
 
         # 3. Mixed
         self.mixed_target_editor.load("mixed")
@@ -400,7 +404,9 @@ class UploadPanel(SettingsPanel):
         self.mixed_filename_numbers.setChecked(bool(_cfg("MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS", True)))
         self.mixed_separator.setText(str(_cfg("MIXED_ALBUM_CAPTION_SEPARATOR", " · ")))
         self.mixed_thumbnail.setChecked(bool(_cfg("MIXED_GENERATE_THUMBNAIL", True)))
-        self.mixed_validate_media.setChecked(bool(_cfg("MIXED_VALIDATE_MEDIA", False)))
+        self.mixed_validate_media.setChecked(
+            bool(_cfg("MIXED_VERIFY_MEDIA", _cfg("MIXED_VALIDATE_MEDIA", False)))
+        )
 
         self.blockSignals(False)
         self._initial_values = self._current_values_dict()
@@ -478,7 +484,7 @@ class UploadPanel(SettingsPanel):
             ("video", "caption_include_filename_numbers"): self.video_filename_numbers.isChecked(),
             ("video", "album_caption_separator"): self.video_separator.text(),
             ("video", "generate_thumbnail"): self.video_thumbnail.isChecked(),
-            ("video", "validate_media"): self.video_validate_media.isChecked(),
+            ("video", "verify_all_metadata_before_upload"): self.video_validate_media.isChecked(),
         })
 
         values.update({
@@ -488,7 +494,7 @@ class UploadPanel(SettingsPanel):
             ("image", "album_caption_separator"): self.image_separator.text(),
             ("image", "caption_include_filenames"): self.image_filenames.isChecked(),
             ("image", "compress_oversize"): self.image_compress.isChecked(),
-            ("image", "validate_media"): self.image_validate_media.isChecked(),
+            ("image", "verify_all_images_before_upload"): self.image_validate_media.isChecked(),
         })
 
         values.update({
@@ -499,7 +505,7 @@ class UploadPanel(SettingsPanel):
             ("mixed", "caption_include_filename_numbers"): self.mixed_filename_numbers.isChecked(),
             ("mixed", "album_caption_separator"): self.mixed_separator.text(),
             ("mixed", "generate_thumbnail"): self.mixed_thumbnail.isChecked(),
-            ("mixed", "validate_media"): self.mixed_validate_media.isChecked(),
+            ("mixed", "verify_media_before_upload"): self.mixed_validate_media.isChecked(),
         })
         return values
 

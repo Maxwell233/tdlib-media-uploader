@@ -248,7 +248,9 @@ class AdvancedPanel(SettingsPanel):
         self.exiftool_timeout.setValue(int(_cfg("EXIFTOOL_TIMEOUT_SECONDS", 120)))
         self.ffmpeg_metadata_timeout.setValue(int(_cfg("FFMPEG_METADATA_TIMEOUT_SECONDS", 30)))
         self.ffmpeg_thumbnail_timeout.setValue(int(_cfg("FFMPEG_THUMBNAIL_TIMEOUT_SECONDS", 30)))
-        self.ffmpeg_compress_timeout.setValue(int(_cfg("FFMPEG_COMPRESS_TIMEOUT_SECONDS", 60)))
+        self.ffmpeg_compress_timeout.setValue(
+            int(_cfg("FFMPEG_COMPRESSION_TIMEOUT_SECONDS", 45))
+        )
 
         self.scan_discovery_attempts.setValue(int(_cfg("SCAN_DISCOVERY_ATTEMPTS", 3)))
         self.scan_discovery_initial_delay.setValue(float(_cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15)))
@@ -311,7 +313,7 @@ class AdvancedPanel(SettingsPanel):
             ("process", "exiftool_timeout_seconds"): c["exiftool_timeout"],
             ("process", "ffmpeg_metadata_timeout_seconds"): c["ffmpeg_metadata_timeout"],
             ("process", "ffmpeg_thumbnail_timeout_seconds"): c["ffmpeg_thumbnail_timeout"],
-            ("process", "ffmpeg_compress_timeout_seconds"): c["ffmpeg_compress_timeout"],
+            ("process", "ffmpeg_compression_timeout_seconds"): c["ffmpeg_compress_timeout"],
             ("scan", "discovery_attempts"): c["scan_discovery_attempts"],
             ("scan", "discovery_initial_delay_seconds"): c["scan_discovery_initial_delay"],
             ("scan", "discovery_max_delay_seconds"): c["scan_discovery_max_delay"],

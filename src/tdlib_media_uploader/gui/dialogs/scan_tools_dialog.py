@@ -163,7 +163,7 @@ class ScanToolsDialog(QDialog):
             ("exiftool_timeout_seconds", "ExifTool 超时", "EXIFTOOL_TIMEOUT_SECONDS", 120),
             ("ffmpeg_metadata_timeout_seconds", "FFmpeg 日期超时", "FFMPEG_METADATA_TIMEOUT_SECONDS", 30),
             ("ffmpeg_thumbnail_timeout_seconds", "FFmpeg 封面超时", "FFMPEG_THUMBNAIL_TIMEOUT_SECONDS", 30),
-            ("ffmpeg_compress_timeout_seconds", "FFmpeg 压缩超时", "FFMPEG_COMPRESS_TIMEOUT_SECONDS", 60),
+            ("ffmpeg_compression_timeout_seconds", "FFmpeg 压缩超时", "FFMPEG_COMPRESSION_TIMEOUT_SECONDS", 45),
         ):
             widget = integer_option(_cfg(config_key, default), 1, 3600, " 秒")
             self.process_timeouts[key] = widget

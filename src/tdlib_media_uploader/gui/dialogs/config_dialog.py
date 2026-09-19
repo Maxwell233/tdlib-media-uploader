@@ -251,9 +251,14 @@ class ConfigDialog(QDialog):
             QMessageBox.warning(self, "无法保存", "API ID 必须是正整数。")
             return
 
+        api_hash = self.fields["api_hash"].text().strip()
+        if not api_hash or api_hash == "YOUR_API_HASH":
+            QMessageBox.warning(self, "无法保存", "API Hash 不能为空或示例值。")
+            return
+
         values = {
             ("telegram", "api_id"): api_id,
-            ("telegram", "api_hash"): self.fields["api_hash"].text().strip(),
+            ("telegram", "api_hash"): api_hash,
             ("paths", "video_dir"): self.fields["video_dir"].text().strip(),
             ("paths", "image_dir"): self.fields["image_dir"].text().strip(),
             ("paths", "mixed_dir"): self.fields["mixed_dir"].text().strip(),

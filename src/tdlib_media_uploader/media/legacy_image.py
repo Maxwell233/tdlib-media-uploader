@@ -852,7 +852,7 @@ def show_upload_summary(images, state, completed, pending, total_albums, skipped
     )
 
 def validate_config():
-    if cfg.API_ID == 12345678 or cfg.API_HASH == "YOUR_API_HASH":
+    if cfg.API_ID == 12345678 or not str(cfg.API_HASH).strip() or cfg.API_HASH == "YOUR_API_HASH":
         raise RuntimeError("请先在 config.toml 中填写 API_ID / API_HASH。")
     if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel":
         if cfg.CHAT_ID in {0, -1001234567890}:

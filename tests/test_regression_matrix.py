@@ -91,6 +91,7 @@ class ImprovementsTest(unittest.TestCase):
         try:
             with patch.object(config_service, "write_config_values", return_value="") as save, \
                     patch.object(tools, "validate_exiftool_path", return_value=""):
+                config.fields["api_hash"].setText("valid-api-hash")
                 config._save()
                 config_values = save.call_args.args[0]
             self.assertIn(("telegram", "api_id"), config_values)

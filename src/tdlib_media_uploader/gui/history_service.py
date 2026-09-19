@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from ..config.paths import HISTORY_PATH
@@ -23,13 +25,30 @@ def load_history() -> list[dict[str, Any]]:
 
 def save_history(records: list[dict[str, Any]]) -> None:
     """Save the most recent upload records to disk."""
+    temporary = None
     try:
-        HISTORY_PATH.write_text(
-            json.dumps(records[-100:], ensure_ascii=False, indent=2),
+        HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
             encoding="utf-8",
-        )
+            dir=HISTORY_PATH.parent,
+            prefix=f".{HISTORY_PATH.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(records[-100:], stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, HISTORY_PATH)
     except OSError:
         pass
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def clear_history() -> None:

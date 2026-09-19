@@ -223,7 +223,7 @@ process = _optional_section("process")
 
 # Telegram
 API_ID = int(_required(telegram, "api_id"))
-API_HASH = str(_required(telegram, "api_hash"))
+API_HASH = str(_required(telegram, "api_hash")).strip()
 
 
 def _target_section(name: str):
@@ -471,7 +471,7 @@ VIDEO_SHOW_FILE_LIST = bool(
 VIDEO_VERIFY_ALL_METADATA = bool(
     video.get(
         "verify_all_metadata_before_upload",
-        False
+        video.get("validate_media", False),
     )
 )
 
@@ -560,7 +560,7 @@ IMAGE_SHOW_FILE_LIST = bool(
 IMAGE_VERIFY_ALL_IMAGES = bool(
     image.get(
         "verify_all_images_before_upload",
-        False
+        image.get("validate_media", False),
     )
 )
 
@@ -636,7 +636,11 @@ FFMPEG_THUMBNAIL_TIMEOUT_SECONDS = _bounded_float(
     process, "ffmpeg_thumbnail_timeout_seconds", 45.0, 1.0, 86_400.0
 )
 FFMPEG_COMPRESSION_TIMEOUT_SECONDS = _bounded_float(
-    process, "ffmpeg_compression_timeout_seconds", 45.0, 1.0, 86_400.0
+    process,
+    "ffmpeg_compression_timeout_seconds",
+    float(process.get("ffmpeg_compress_timeout_seconds", 45.0)),
+    1.0,
+    86_400.0,
 )
 EXIFTOOL_BATCH_SIZE = _bounded_int(process, "exiftool_batch_size", 256, 1, 4096)
 EXIFTOOL_RETRIES = _bounded_int(process, "exiftool_retries", 2, 0, 5)
@@ -674,7 +678,7 @@ MIXED_GENERATE_THUMBNAIL = bool(
     mixed.get("generate_thumbnail", VIDEO_GENERATE_THUMBNAIL)
 )
 MIXED_VERIFY_MEDIA = bool(
-    mixed.get("verify_media_before_upload", False)
+    mixed.get("verify_media_before_upload", mixed.get("validate_media", False))
 )
 MIXED_RESET_STATE = bool(mixed.get("reset_state", False))
 

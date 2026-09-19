@@ -32,7 +32,23 @@ def _path_size(path: str) -> int:
 def item_size(value: Any) -> int:
     """Read a preview item's current size, matching the legacy page contract."""
 
-    path = value["path"] if isinstance(value, dict) else getattr(value, "path", value)
+    if isinstance(value, Mapping):
+        raw_size = value.get("scan_size", value.get("size"))
+        if raw_size is not None:
+            try:
+                return max(0, int(raw_size))
+            except (TypeError, ValueError):
+                pass
+        path = value.get("path")
+    else:
+        snapshot = getattr(value, "snapshot", None)
+        raw_size = getattr(snapshot, "size", None)
+        if raw_size is not None:
+            try:
+                return max(0, int(raw_size))
+            except (TypeError, ValueError):
+                pass
+        path = getattr(value, "path", value)
     return _path_size(str(path))
 
 

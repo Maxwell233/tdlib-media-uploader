@@ -18,8 +18,8 @@ from PySide6.QtWidgets import (
 )
 
 from ...config.paths import CONFIG_PATH
+from .. import config_service
 from ..config_service import (
-    _CONFIG_ERROR,
     get_cfg as _cfg,
     write_config_values as _write_config_values,
 )
@@ -223,10 +223,14 @@ class SettingsPage(QWidget):
         self.refresh()
 
     def refresh(self, update_cache: bool = False):
-        if _CONFIG_ERROR:
-            self.config_status.setText(f"配置不可用：{_CONFIG_ERROR}")
+        if config_service._CONFIG_ERROR:
+            self.config_status.setText(f"配置不可用：{config_service._CONFIG_ERROR}")
             self.config_status.setProperty("status", "danger")
-        elif _cfg("API_ID", 12345678) == 12345678 or _cfg("API_HASH", "YOUR_API_HASH") == "YOUR_API_HASH":
+        elif (
+            _cfg("API_ID", 12345678) == 12345678
+            or not str(_cfg("API_HASH", "")).strip()
+            or str(_cfg("API_HASH", "")).strip() == "YOUR_API_HASH"
+        ):
             self.config_status.setText("Telegram API 仍为示例值，请先配置。")
             self.config_status.setProperty("status", "warning")
         else:

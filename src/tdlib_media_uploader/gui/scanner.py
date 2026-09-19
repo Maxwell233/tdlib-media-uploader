@@ -17,9 +17,10 @@ from ..config.paths import (
     RESOURCE_DIR,
     VIDEO_STATE_DIR,
 )
-from ..core.album import CaptionStore, album_key, validate_caption
+from ..core.album import CaptionStore, album_key, compose_caption, validate_caption
 from ..core.filesystem_legacy import (
     file_mtime,
+    file_snapshot,
     is_link_or_junction,
     iter_directory_entries_with_retry,
     iter_files,
@@ -29,7 +30,8 @@ from ..core.filesystem_legacy import (
     validate_scan_root,
 )
 from ..core.logging import write_app_log
-from .config_service import _CONFIG_ERROR, get_cfg, get_config, target_for
+from . import config_service
+from .config_service import get_cfg, get_config, target_for
 from .models import scan_result as _translate_v2_scan_result
 from .tools import (
     KIND_PATH_KEYS,
@@ -53,7 +55,23 @@ def path_size(path_str: str) -> int:
 
 
 def item_size(item: Any) -> int:
-    path = item["path"] if isinstance(item, dict) else item
+    if isinstance(item, dict):
+        raw_size = item.get("scan_size", item.get("size"))
+        if raw_size is not None:
+            try:
+                return max(0, int(raw_size))
+            except (TypeError, ValueError):
+                pass
+        path = item.get("path")
+    else:
+        snapshot = getattr(item, "snapshot", None)
+        raw_size = getattr(snapshot, "size", None)
+        if raw_size is not None:
+            try:
+                return max(0, int(raw_size))
+            except (TypeError, ValueError):
+                pass
+        path = item
     return path_size(str(path))
 
 
@@ -74,17 +92,32 @@ def apply_size_limits(paths: list[Path], kind: str) -> tuple[list[Path], list[di
         else:
             media_kind = kind
         limit = (
-            int(get_cfg("TELEGRAM_VIDEO_SIZE_LIMIT_BYTES", 2000 * 1024 * 1024))
+            int(
+                get_cfg(
+                    "VIDEO_MAX_BYTES",
+                    get_cfg("TELEGRAM_VIDEO_SIZE_LIMIT_BYTES", 2000 * 1024 * 1024),
+                )
+            )
             if media_kind == "video"
-            else int(get_cfg("TELEGRAM_IMAGE_SIZE_LIMIT_BYTES", 10 * 1024 * 1024))
+            else int(
+                get_cfg(
+                    "IMAGE_MAX_BYTES",
+                    get_cfg("TELEGRAM_IMAGE_SIZE_LIMIT_BYTES", 10 * 1024 * 1024),
+                )
+            )
         )
-        compress_images = bool(get_cfg("COMPRESS_OVERSIZED_IMAGES", False))
+        compress_images = bool(
+            get_cfg(
+                "IMAGE_COMPRESS_OVERSIZE",
+                get_cfg("COMPRESS_OVERSIZED_IMAGES", False),
+            )
+        )
         media_label = "视频" if media_kind == "video" else "图片"
         limit_label = format_size(limit)
         snapshot = BASIC_SCAN_SNAPSHOTS.get(stable_path(path))
         size = int(snapshot[0]) if snapshot is not None else path_size(str(path))
         if size > limit:
-            action = "compress" if compress_images else "skip"
+            action = "compress" if media_kind == "image" and compress_images else "skip"
             skipped.append({
                 "path": path,
                 "media_kind": media_kind,
@@ -314,7 +347,7 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
     path_size.cache_clear()
     current_cfg = get_config()
     if current_cfg is None:
-        raise RuntimeError(_CONFIG_ERROR or "配置不可用。")
+        raise RuntimeError(config_service._CONFIG_ERROR or "配置不可用。")
     activate = getattr(current_cfg, "activate_target", None)
     if callable(activate):
         activate(kind)
@@ -487,32 +520,79 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
 
     store = CaptionStore(kind)
     group_size = int(
-        get_cfg("ALBUM_GROUP_SIZE", 10)
+        get_cfg(
+            "IMAGE_ALBUM_SIZE",
+            get_cfg("ALBUM_GROUP_SIZE", 10),
+        )
         if kind == "image"
-        else get_cfg("MIXED_ALBUM_GROUP_SIZE", 10)
+        else get_cfg(
+            "MIXED_ALBUM_SIZE",
+            get_cfg("MIXED_ALBUM_GROUP_SIZE", 10),
+        )
         if kind == "mixed"
-        else get_cfg("VIDEO_ALBUM_GROUP_SIZE", 10)
+        else get_cfg(
+            "VIDEO_ALBUM_SIZE",
+            get_cfg("VIDEO_ALBUM_GROUP_SIZE", 10),
+        )
     )
     group_size = max(1, min(group_size, 10))
     groups = []
     source_dir = str(get_cfg(KIND_PATH_KEYS[kind], ""))
+    source_root = source_dir or None
+
+    def scan_snapshot(path):
+        """Return the immutable snapshot captured by a legacy scanner."""
+        path = Path(path)
+        snapshot = BASIC_SCAN_SNAPSHOTS.get(stable_path(path))
+        if snapshot is not None:
+            return snapshot
+        for mapping_name in ("IMAGE_SCAN_SNAPSHOTS", "LAST_SCAN_SNAPSHOTS"):
+            snapshots = (
+                getattr(core, mapping_name, {}) or {}
+                if core is not None
+                else {}
+            )
+            for key in (stable_path(path), str(path)):
+                snapshot = snapshots.get(key)
+                if snapshot is not None:
+                    return snapshot
+        return file_snapshot(path)
 
     def completed(item) -> bool:
         if state is None:
             return False
-        path = item["path"] if isinstance(item, dict) else item
-        return state.is_completed(path)
+        return state.is_completed(item)
 
     if kind == "video":
         read_dates = bool(get_cfg("VIDEO_READ_DATES", True))
         group_mode = str(get_cfg("VIDEO_GROUP_MODE", "date")).strip().lower()
-        if not read_dates or group_mode == "fixed":
+        force_fixed = (
+            not read_dates
+            or group_mode == "fixed"
+            or bool(get_cfg("VIDEO_FORCE_TEN_PER_ALBUM", False))
+        )
+        force_mode = getattr(core, "force_ten_per_album", None) if core is not None else None
+        if callable(force_mode):
+            try:
+                force_fixed = bool(force_mode())
+            except Exception:
+                pass
+        forced_group_key = getattr(core, "FORCED_GROUP_KEY", "__all_videos__")
+        if force_fixed:
             for index, start in enumerate(range(0, len(items), group_size), start=1):
                 chunk = items[start : start + group_size]
-                key = album_key("video", "all", index)
+                key_group = f"{forced_group_key}:{index}"
+                key = album_key(
+                    "video",
+                    key_group,
+                    chunk,
+                    root=source_root,
+                    snapshot_provider=scan_snapshot,
+                )
                 caption = store.get(key, f"第 {index} 组")
                 groups.append({
                     "album_key": key,
+                    "number": index,
                     "title": f"第 {index} 组",
                     "subtitle": f"第 {index} 组（共 {len(chunk)} 个视频）",
                     "caption": caption,
@@ -529,10 +609,17 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
                 month_title = f"{month_key}（共 {len(month_items)} 个视频）"
                 for index, start in enumerate(range(0, len(month_items), group_size), start=1):
                     chunk = month_items[start : start + group_size]
-                    key = album_key("video", month_key, index)
+                    key = album_key(
+                        "video",
+                        month_key,
+                        chunk,
+                        root=source_root,
+                        snapshot_provider=scan_snapshot,
+                    )
                     caption = store.get(key, f"{month_key} · 第 {index} 组")
                     groups.append({
                         "album_key": key,
+                        "number": index,
                         "title": f"{month_key} · 第 {index} 组",
                         "subtitle": f"{month_title} · 第 {index} 组",
                         "caption": caption,
@@ -544,10 +631,20 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
     elif kind == "image":
         for index, start in enumerate(range(0, len(items), group_size), start=1):
             chunk = items[start : start + group_size]
-            key = album_key("image", "all", index)
+            album_number = (
+                int(get_cfg("IMAGE_ALBUM_NUMBER_START", 1)) + index - 1
+            )
+            key = album_key(
+                "image",
+                f"Album {album_number}",
+                chunk,
+                root=source_root,
+                snapshot_provider=scan_snapshot,
+            )
             caption = store.get(key, f"第 {index} 组")
             groups.append({
                 "album_key": key,
+                "number": album_number,
                 "title": f"第 {index} 组",
                 "subtitle": f"第 {index} 组（共 {len(chunk)} 张图片）",
                 "caption": caption,
@@ -563,11 +660,18 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
             total_items = len(group_items)
             for index, start in enumerate(range(0, total_items, group_size), start=1):
                 chunk = group_items[start : start + group_size]
-                key = album_key("mixed", folder_name, index)
+                key = album_key(
+                    "mixed",
+                    f"{folder_name}:{index}",
+                    chunk,
+                    root=source_root,
+                    snapshot_provider=scan_snapshot,
+                )
                 default_caption = folder_name if total_items <= group_size else f"{folder_name} ({index})"
                 caption = store.get(key, default_caption)
                 groups.append({
                     "album_key": key,
+                    "number": index,
                     "title": f"{folder_name} · 第 {index} 组",
                     "subtitle": f"{folder_name}（共 {total_items} 个媒体）· 第 {index} 组",
                     "caption": caption,
@@ -577,34 +681,88 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
                     "completed_count": sum(1 for item in chunk if completed(item)),
                 })
 
-    all_paths = [
-        item["path"] if isinstance(item, dict) else item
+    all_items = [
+        item
         for group in groups
         for item in group["items"]
     ]
-    completed_paths = [path for path in all_paths if state is not None and state.is_completed(path)]
-    total_bytes = sum(item_size(path) for path in all_paths)
+    completed_paths = [
+        stable_path(item["path"] if isinstance(item, dict) else item)
+        for item in all_items
+        if state is not None and state.is_completed(item)
+    ]
+    total_bytes = sum(item_size(item) for item in all_items)
     pending_bytes = sum(
-        item_size(item["path"] if isinstance(item, dict) else item)
+        item_size(item)
         for group in groups
         for item in group["items"]
         if not completed(item)
     )
 
+    separator_key = {
+        "video": "VIDEO_ALBUM_CAPTION_SEPARATOR",
+        "image": "IMAGE_ALBUM_CAPTION_SEPARATOR",
+        "mixed": "MIXED_ALBUM_CAPTION_SEPARATOR",
+    }[kind]
+    normalized_groups = []
+    for group in groups:
+        group_items = list(group.get("items", []))
+        pending_items = [item for item in group_items if not completed(item)]
+        completed_count = len(group_items) - len(pending_items)
+        default_label = str(group.get("title") or group.get("subtitle") or "")
+        raw_caption = group.get("caption")
+        if isinstance(raw_caption, dict):
+            base_label = str(raw_caption.get("base_label", default_label) or default_label)
+            custom_text = str(raw_caption.get("custom_text", "") or "")
+        else:
+            base_label = str(raw_caption or default_label)
+            custom_text = ""
+        caption_text = compose_caption(
+            base_label,
+            custom_text,
+            str(get_cfg(separator_key, " · ")),
+        )
+        plan = {
+            "key": group.get("album_key", ""),
+            "number": group.get("number", len(normalized_groups) + 1),
+            "items": group_items,
+            "pending_items": pending_items,
+            "caption": {
+                "text": caption_text,
+                "base_label": base_label,
+                "custom_text": custom_text,
+            },
+        }
+        normalized = dict(group)
+        normalized.update(
+            {
+                "label": default_label,
+                "caption": caption_text,
+                "items": group_items,
+                "completed": completed_count,
+                "pending": len(pending_items),
+                "albums": 1 if pending_items else 0,
+                "album_plans": [plan],
+                "caption_warning": validate_caption(caption_text, 4096),
+                "completed_count": completed_count,
+            }
+        )
+        normalized_groups.append(normalized)
+
     return {
         "kind": kind,
         "items": items,
         "missing": missing,
-        "groups": groups,
-        "total_files": len(all_paths),
+        "groups": normalized_groups,
+        "total_files": len(all_items),
         "completed_files": len(completed_paths),
-        "pending_files": len(all_paths) - len(completed_paths),
+        "pending_files": len(all_items) - len(completed_paths),
         "total_bytes": total_bytes,
         "pending_bytes": pending_bytes,
-        "album_count": len(groups),
+        "album_count": sum(group["albums"] for group in normalized_groups),
         "completed_paths": completed_paths,
         "source_dir": source_dir,
-        "state_path": str(getattr(state, "file_path", "")),
+        "state_path": str(getattr(state, "path", getattr(state, "file_path", ""))),
         "core_available": core is not None,
         "warning": warning,
         "scan_errors": scan_errors,
@@ -649,7 +807,7 @@ def scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
     kind = require_kind(kind)
     current_cfg = get_config()
     if current_cfg is None:
-        raise RuntimeError(_CONFIG_ERROR or "配置不可用。")
+        raise RuntimeError(config_service._CONFIG_ERROR or "配置不可用。")
     try:
         unavailable, _run_v2_upload, scan_v2 = load_v2_gui_integration()
         from ..config import paths as _runtime_paths

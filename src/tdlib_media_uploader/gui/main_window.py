@@ -146,7 +146,6 @@ from .tools import (
 from .config_service import (
     ensure_config_file as _ensure_config_file_service,
     _CONFIG_CREATED,
-    _CONFIG_ERROR,
     cfg,
     reload_config as _reload_config,
     get_cfg as _cfg,
@@ -505,7 +504,12 @@ class MainWindow(QMainWindow):
                 "当前环境只能预览，无法启动 TDLib 上传。请从 GitHub Releases 下载完整发布包。",
             )
             return
-        if _cfg("API_ID", 12345678) == 12345678 or _cfg("API_HASH", "YOUR_API_HASH") == "YOUR_API_HASH":
+        api_hash = str(_cfg("API_HASH", "")).strip()
+        if (
+            _cfg("API_ID", 12345678) == 12345678
+            or not api_hash
+            or api_hash == "YOUR_API_HASH"
+        ):
             QMessageBox.warning(self, "尚未配置", "请先在设置中填写 Telegram API ID 和 API Hash。")
             self.sidebar.setCurrentRow(self.sidebar_rows["settings"])
             return

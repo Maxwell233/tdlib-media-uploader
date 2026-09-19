@@ -412,12 +412,79 @@ class UploadPage(QWidget):
             self.status_label.setText("正在扫描目录…")
         self._update_edit_button()
 
+    def _normalize_legacy_group(self, value: Mapping[str, Any], completed_paths: set[str]) -> dict:
+        """Keep older scanner payloads renderable during the V2 migration."""
+        group = dict(value or {})
+        if all(key in group for key in ("label", "completed", "pending", "albums")):
+            return group
+
+        items = list(group.get("items", []) or [])
+        pending_items = [
+            item
+            for item in items
+            if self._stable(_item_path(item)) not in completed_paths
+        ]
+        label = str(group.get("label") or group.get("title") or group.get("subtitle") or "")
+        raw_caption = group.get("caption", "")
+        if isinstance(raw_caption, Mapping):
+            base_label = str(raw_caption.get("base_label", label) or label)
+            custom_text = str(raw_caption.get("custom_text", "") or "")
+            separator_key = {
+                "video": "VIDEO_ALBUM_CAPTION_SEPARATOR",
+                "image": "IMAGE_ALBUM_CAPTION_SEPARATOR",
+                "mixed": "MIXED_ALBUM_CAPTION_SEPARATOR",
+            }[self.kind]
+            caption_text = self.services.compose_caption(
+                base_label,
+                custom_text,
+                str(self._cfg(separator_key, " · ")),
+            )
+        else:
+            caption_text = str(raw_caption or label)
+            base_label = caption_text
+            custom_text = ""
+        group.update(
+            {
+                "label": label,
+                "caption": caption_text,
+                "completed": len(items) - len(pending_items),
+                "pending": len(pending_items),
+                "albums": 1 if pending_items else 0,
+                "album_plans": [
+                    {
+                        "key": group.get("album_key", ""),
+                        "number": 1,
+                        "items": items,
+                        "pending_items": pending_items,
+                        "caption": {
+                            "text": caption_text,
+                            "base_label": base_label,
+                            "custom_text": custom_text,
+                        },
+                    }
+                ],
+            }
+        )
+        return group
+
     def set_result(self, result: dict):
+        result = dict(result or {})
+        completed_paths = set()
+        normalized_completed_paths = []
+        for path in result.get("completed_paths", []):
+            stable = self._stable(path)
+            if stable not in completed_paths:
+                completed_paths.add(stable)
+                normalized_completed_paths.append(stable)
+        result["completed_paths"] = normalized_completed_paths
+        result["groups"] = [
+            self._normalize_legacy_group(group, completed_paths)
+            for group in result.get("groups", [])
+        ]
         self.result = result
         self.tree.setUpdatesEnabled(False)
         try:
             self.tree.clear()
-            completed_paths = set(result.get("completed_paths", []))
             for group in result["groups"]:
                 label = (
                     f"{group['label']} · {len(group['items'])} 个 · "

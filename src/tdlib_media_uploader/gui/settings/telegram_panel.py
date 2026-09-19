@@ -284,6 +284,10 @@ class TelegramPanel(SettingsPanel):
         except ValueError:
             return False, "API ID 必须是正整数。"
 
+        api_hash = self.api_hash.text().strip()
+        if not api_hash or api_hash == "YOUR_API_HASH":
+            return False, "API Hash 不能为空或示例值。"
+
         if self.radio_proxy.isChecked():
             if not self.proxy_server.text().strip():
                 return False, "启用代理时必须填写代理服务器。"
