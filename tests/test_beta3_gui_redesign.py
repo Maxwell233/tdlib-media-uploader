@@ -252,8 +252,13 @@ class Beta3PagesTest(unittest.TestCase):
             home.video_card.clicked.emit()
             self.assertIn("upload:video", emitted)
 
-            home.settings_card.clicked.emit()
-            self.assertIn("settings", emitted)
+            home.image_card.clicked.emit()
+            self.assertIn("upload:image", emitted)
+
+            home.mixed_card.clicked.emit()
+            self.assertIn("upload:mixed", emitted)
+
+            self.assertFalse(hasattr(home, "settings_card"))
         finally:
             home.deleteLater()
 

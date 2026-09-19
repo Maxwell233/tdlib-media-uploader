@@ -383,5 +383,9 @@ class InflightPage(QWidget):
             if records else "没有未确认上传记录。"
         )
 
+    def refresh_theme(self):
+        """Re-render inflight view on theme switch."""
+        self.reload_records()
+
 
 __all__ = ["InflightPage"]

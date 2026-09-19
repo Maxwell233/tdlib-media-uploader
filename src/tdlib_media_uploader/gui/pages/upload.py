@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -28,6 +27,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -44,6 +45,7 @@ from ...core.album import (
 from ...core.filesystem_legacy import stable_path
 from ...config.paths import RESOURCE_DIR
 from ..theme import THEME
+from ..tools import format_size as _format_size
 
 MEDIA_KINDS = ("video", "image", "mixed")
 KIND_LABELS = {"video": "视频", "image": "图片", "mixed": "混合"}
@@ -59,15 +61,6 @@ def _require_kind(kind: str) -> str:
 
 def _kind_label(kind: str) -> str:
     return KIND_LABELS.get(str(kind).lower(), str(kind))
-
-
-def _format_size(value: float | int | None) -> str:
-    value = float(value or 0)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if value < 1024 or unit == "TiB":
-            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.2f} {unit}"
-        value /= 1024
-    return f"{value:.2f} TiB"
 
 
 def _config_getter(name: str, default=None):
@@ -164,8 +157,8 @@ class UploadPage(QWidget):
         accent = self.services.kind_label(self.kind)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(14)
+        layout.setContentsMargins(24, 16, 24, 16)
+        layout.setSpacing(10)
 
         # Title & Subtitle Header
         header_layout = QVBoxLayout()
@@ -315,7 +308,7 @@ class UploadPage(QWidget):
         self.tree.header().setStretchLastSection(True)
         self.tree.setRootIsDecorated(True)
         self.tree.setAlternatingRowColors(True)
-        self.tree.setMinimumHeight(240)
+        self.tree.setMinimumHeight(150)
         self.tree.itemDoubleClicked.connect(self._edit_album)
         self.tree.itemSelectionChanged.connect(self._update_edit_button)
 
@@ -832,12 +825,21 @@ class UploadHubPage(QWidget):
         top_layout.addStretch(1)
         layout.addWidget(top_bar)
 
-        from PySide6.QtWidgets import QStackedWidget
+        from PySide6.QtWidgets import QScrollArea, QStackedWidget
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(video_page)
-        self.stack.addWidget(image_page)
-        self.stack.addWidget(mixed_page)
+        self.scroll_areas = {}
+        for kind, page in (("video", video_page), ("image", image_page), ("mixed", mixed_page)):
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            page.setMinimumWidth(0)
+            page.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            scroll.setWidget(page)
+            self.scroll_areas[kind] = scroll
+            self.stack.addWidget(scroll)
         layout.addWidget(self.stack, 1)
 
         self.set_current_kind("video")
@@ -847,10 +849,13 @@ class UploadHubPage(QWidget):
             return
         idx = {"video": 0, "image": 1, "mixed": 2}[kind]
         self.stack.setCurrentIndex(idx)
+        from ..icons import get_svg_icon
         for k, btn in self.buttons.items():
-            active = k == kind
+            active = (k == kind)
             btn.setChecked(active)
             btn.setProperty("active", "true" if active else "false")
+            color = "#ffffff" if active else THEME.text_secondary
+            btn.setIcon(get_svg_icon(k, color=color, size=16))
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
@@ -860,10 +865,11 @@ class UploadHubPage(QWidget):
 
     def refresh_theme(self):
         from ..icons import get_svg_icon
-
+        curr_k = self.current_kind()
         for kind, btn in self.buttons.items():
-            icon_name = {"video": "video", "image": "image", "mixed": "mixed"}[kind]
-            btn.setIcon(get_svg_icon(icon_name, size=16))
+            active = (kind == curr_k)
+            color = "#ffffff" if active else THEME.text_secondary
+            btn.setIcon(get_svg_icon(kind, color=color, size=16))
         for p in self.pages.values():
             if hasattr(p, "refresh_theme"):
                 p.refresh_theme()

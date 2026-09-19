@@ -97,14 +97,6 @@ class HomePage(QWidget):
         )
         self.mixed_card.clicked.connect(lambda: self.start_upload.emit("mixed"))
 
-        self.settings_card = ActionCard(
-            "系统配置",
-            "Telegram API 凭据、代理网络、暂存缓存与并发工具设置。",
-            icon_name="settings",
-            badge_text="设置与诊断",
-        )
-        self.settings_card.clicked.connect(self.open_settings)
-
         action_layout.addWidget(self.video_card, 0, 0)
         action_layout.addWidget(self.image_card, 0, 1)
         action_layout.addWidget(self.mixed_card, 0, 2)
@@ -173,12 +165,30 @@ class HomePage(QWidget):
         self.connection_value.style().unpolish(self.connection_value)
         self.connection_value.style().polish(self.connection_value)
 
+    def set_task_running(self, kind: str, summary: str = ""):
+        from ..tools import kind_label
+        label = kind_label(kind)
+        self.task_value.setText(f"{label}上传中")
+        self.task_hint.setText(summary or "正在向 Telegram 发送媒体，请在任务中心查看详情")
+
+    def set_task_progress(self, current: int, total: int, speed: str = "", eta: str = ""):
+        parts = [f"{current} / {total} 个文件"]
+        if speed:
+            parts.append(speed)
+        if eta:
+            parts.append(f"ETA {eta}")
+        self.task_hint.setText(" · ".join(parts))
+
+    def set_task_idle(self):
+        self.task_value.setText("无正在运行的上传任务")
+        self.task_hint.setText("在上方选择媒体类型即可进入上传工作台")
+
     def refresh_theme(self):
         """Re-polish connection and dynamic values on theme change."""
         self.connection_value.style().unpolish(self.connection_value)
         self.connection_value.style().polish(self.connection_value)
         self.task_icon_label.setPixmap(get_svg_pixmap("task", color=THEME.text_muted, size=22))
-        for card in (self.video_card, self.image_card, self.mixed_card, self.settings_card):
+        for card in (self.video_card, self.image_card, self.mixed_card):
             if hasattr(card, "refresh_theme"):
                 card.refresh_theme()
 

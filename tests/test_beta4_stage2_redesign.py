@@ -29,6 +29,7 @@ from tdlib_media_uploader.gui.icons import (
 from tdlib_media_uploader.gui.main_window import MainWindow
 from tdlib_media_uploader.gui.pages import (
     HistoryPage,
+    HomePage,
     InflightPage,
     SettingsPage,
     TaskPage,
@@ -289,6 +290,108 @@ class Beta4Stage2RedesignTest(unittest.TestCase):
             window.close()
             window.deleteLater()
             self.app.processEvents()
+
+    def test_theme_propagation_across_all_ten_pages(self):
+        window = MainWindow()
+        try:
+            pages = [
+                window.nav_sidebar,
+                window.home,
+                window.upload_hub,
+                window.video_page,
+                window.image_page,
+                window.mixed_page,
+                window.task_page,
+                window.inflight_page,
+                window.history_page,
+                window.settings_page,
+            ]
+            for page in pages:
+                self.assertTrue(
+                    hasattr(page, "refresh_theme"),
+                    f"Page {page.__class__.__name__} must implement refresh_theme()",
+                )
+
+            # Calling MainWindow.refresh_theme() should execute without errors
+            window.refresh_theme()
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+    def test_navigation_and_upload_hub_icon_states(self):
+        sidebar = NavigationSidebar(version="1.9.3-beta4")
+        video_p = UploadPage("video")
+        image_p = UploadPage("image")
+        mixed_p = UploadPage("mixed")
+        hub = UploadHubPage(video_p, image_p, mixed_p)
+        try:
+            # Test sidebar active row selection update
+            sidebar.list.setCurrentRow(1)
+            self.assertEqual(sidebar.list.currentRow(), 1)
+            sidebar.refresh_theme()
+
+            # Test upload hub button icon states on selection
+            self.assertTrue(hub.buttons["video"].isChecked())
+            self.assertFalse(hub.buttons["image"].isChecked())
+            hub.buttons["image"].click()
+            self.assertTrue(hub.buttons["image"].isChecked())
+            self.assertFalse(hub.buttons["video"].isChecked())
+            hub.refresh_theme()
+        finally:
+            sidebar.deleteLater()
+            hub.deleteLater()
+
+    def test_home_task_lifecycle_transitions(self):
+        home = HomePage(app_version="1.9.3-beta4")
+        try:
+            # 1. Initial idle state
+            self.assertEqual(home.task_value.text(), "无正在运行的上传任务")
+            self.assertIn("在上方选择媒体类型", home.task_hint.text())
+
+            # 2. Running state
+            home.set_task_running("video", "待上传 8 个文件 · 1 个 Album")
+            self.assertIn("视频上传中", home.task_value.text())
+            self.assertIn("待上传 8 个文件", home.task_hint.text())
+
+            # 3. Progress update
+            home.set_task_progress(3, 8, "2.4 MB/s", "00:45")
+            self.assertIn("3 / 8 个文件", home.task_hint.text())
+            self.assertIn("2.4 MB/s", home.task_hint.text())
+            self.assertIn("ETA 00:45", home.task_hint.text())
+
+            # 4. Back to idle
+            home.set_task_idle()
+            self.assertEqual(home.task_value.text(), "无正在运行的上传任务")
+            self.assertIn("在上方选择媒体类型", home.task_hint.text())
+        finally:
+            home.deleteLater()
+
+    def test_dialog_groupbox_modernization(self):
+        target_dlg = TargetDialog("video")
+        try:
+            # Outer media_box should be flat QWidget, not nested QGroupBox
+            from PySide6.QtWidgets import QWidget
+            self.assertIsInstance(target_dlg.media_box, QWidget)
+            self.assertNotIsInstance(target_dlg.media_box, QGroupBox)
+        finally:
+            target_dlg.deleteLater()
+
+    def test_upload_page_scroll_area_containment(self):
+        video_p = UploadPage("video")
+        image_p = UploadPage("image")
+        mixed_p = UploadPage("mixed")
+        hub = UploadHubPage(video_p, image_p, mixed_p)
+        try:
+            self.assertEqual(len(hub.scroll_areas), 3)
+            for scroll in hub.scroll_areas.values():
+                self.assertIsInstance(scroll, QScrollArea)
+                self.assertTrue(scroll.widgetResizable())
+            for page in (video_p, image_p, mixed_p):
+                self.assertGreaterEqual(page.tree.minimumHeight(), 150)
+                self.assertLessEqual(page.tree.minimumHeight(), 180)
+        finally:
+            hub.deleteLater()
 
 
 if __name__ == "__main__":

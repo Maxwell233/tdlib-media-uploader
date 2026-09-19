@@ -60,12 +60,10 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -79,7 +77,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -349,17 +346,21 @@ class MainWindow(QMainWindow):
 
     def refresh_theme(self):
         """Re-apply styling across composite widgets on theme switch."""
-        if hasattr(self.nav_sidebar, "refresh_theme"):
-            self.nav_sidebar.refresh_theme()
-        if hasattr(self.home, "refresh_theme"):
-            self.home.refresh_theme()
-        if hasattr(self, "upload_hub") and hasattr(self.upload_hub, "refresh_theme"):
-            self.upload_hub.refresh_theme()
-        if hasattr(self.settings_page, "refresh_theme"):
-            self.settings_page.refresh_theme()
-        for p in self.upload_pages.values():
-            if hasattr(p, "refresh_theme"):
-                p.refresh_theme()
+        targets = [
+            getattr(self, "nav_sidebar", None),
+            getattr(self, "home", None),
+            getattr(self, "upload_hub", None),
+            getattr(self, "video_page", None),
+            getattr(self, "image_page", None),
+            getattr(self, "mixed_page", None),
+            getattr(self, "task_page", None),
+            getattr(self, "inflight_page", None),
+            getattr(self, "history_page", None),
+            getattr(self, "settings_page", None),
+        ]
+        for target in targets:
+            if target is not None and hasattr(target, "refresh_theme"):
+                target.refresh_theme()
 
     def _refresh_pages(self):
         self.video_page.refresh_config()
@@ -531,18 +532,29 @@ class MainWindow(QMainWindow):
         )
         self.worker = worker
         worker.ui.message_added.connect(self.task_page.add_message)
-        worker.ui.progress_changed.connect(self.task_page.show_progress)
+        worker.ui.progress_changed.connect(self._on_worker_progress)
         worker.ui.album_changed.connect(self.task_page.show_album)
         worker.ui.target_changed.connect(self._target_from_worker)
         worker.completed.connect(self._upload_finished)
         worker.finished.connect(lambda w=worker: self._worker_thread_finished(w))
         for upload_page in self.upload_pages.values():
             upload_page.set_running(True)
-        self.home.task_value.setText(f"{_kind_label(kind)}上传中")
+        summary = f"待上传 {result['pending_files']} 个文件 · {result.get('album_count', 0)} 个 Album"
+        self.home.set_task_running(kind, summary)
         self.home.set_connection("上传中", True)
         self.nav_sidebar.set_connection_status(True, "上传中")
         self.statusBar().showMessage("上传任务已启动")
         worker.start()
+
+    def _on_worker_progress(self, payload: dict):
+        self.task_page.show_progress(payload)
+        current = int(payload.get("done_files", 0) or 0)
+        total = int(payload.get("total_files", 0) or 0)
+        speed_val = float(payload.get("speed", 0) or 0)
+        speed_str = f"{_fmt_size(speed_val)}/s" if speed_val > 0 else ""
+        eta_val = payload.get("eta")
+        eta_str = _fmt_eta(eta_val) if eta_val is not None else ""
+        self.home.set_task_progress(current, total, speed_str, eta_str)
 
     def _target_from_worker(self, payload: dict):
         self._telegram_connected = True
@@ -625,7 +637,7 @@ class MainWindow(QMainWindow):
             page.clear_scan_result()
         for upload_page in self.upload_pages.values():
             upload_page.set_running(False)
-        self.home.task_value.setText("无")
+        self.home.set_task_idle()
         self.home.set_connection("已连接" if self._telegram_connected else "未连接", self._telegram_connected)
         self.nav_sidebar.set_connection_status(self._telegram_connected, "已连接" if self._telegram_connected else "未连接")
         self.statusBar().showMessage(message)

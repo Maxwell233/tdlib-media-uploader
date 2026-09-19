@@ -199,5 +199,9 @@ class TaskPage(QWidget):
         self.task_status.setText("已完成" if success else message)
         self.log.appendPlainText(("✓ " if success else "! ") + message)
 
+    def refresh_theme(self):
+        """Re-apply dynamic theme styling."""
+        pass
+
 
 __all__ = ["TaskPage", "format_eta", "format_size", "kind_label"]

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 
 from ...config.paths import read_version
@@ -65,8 +66,10 @@ class TargetDialog(QDialog):
         form.addRow("Forum Topic ID", self.topic_id)
         layout.addWidget(target_box)
 
-        self.media_box = QGroupBox(f"2 · {accent}分组与格式选项")
+        self.media_box = QWidget()
         self.media_layout = QVBoxLayout(self.media_box)
+        self.media_layout.setContentsMargins(0, 0, 0, 0)
+        self.media_layout.setSpacing(10)
         self._build_media_fields()
         layout.addWidget(self.media_box)
 

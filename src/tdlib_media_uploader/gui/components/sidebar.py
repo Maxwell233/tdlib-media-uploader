@@ -106,10 +106,10 @@ class NavigationSidebar(QFrame):
 
         for label, _key, icon_name in self.NAV_ITEMS:
             item = QListWidgetItem(label)
-            item.setIcon(get_svg_icon(icon_name, 18, 18))
+            item.setIcon(get_svg_icon(icon_name, color=THEME.text_secondary, size=18, selected_color="#ffffff"))
             self.list.addItem(item)
 
-        self.list.currentRowChanged.connect(self.item_selected.emit)
+        self.list.currentRowChanged.connect(self._on_row_changed)
         layout.addWidget(self.list, 1)
 
         # Bottom status card
@@ -141,6 +141,18 @@ class NavigationSidebar(QFrame):
 
         layout.addWidget(footer)
 
+    def _on_row_changed(self, row: int):
+        self._update_icons()
+        self.item_selected.emit(row)
+
+    def _update_icons(self):
+        curr_row = self.list.currentRow()
+        for idx, (_, _, icon_name) in enumerate(self.NAV_ITEMS):
+            item = self.list.item(idx)
+            if item is not None:
+                color = "#ffffff" if idx == curr_row else THEME.text_secondary
+                item.setIcon(get_svg_icon(icon_name, color=color, size=18, selected_color="#ffffff"))
+
     def _toggle_theme(self):
         new_mode = toggle_theme()
         self.theme_btn.setIcon(get_svg_icon("sun" if new_mode == "dark" else "moon", 16, 16))
@@ -158,10 +170,7 @@ class NavigationSidebar(QFrame):
         curr_mode = get_current_theme_mode()
         self.theme_btn.setIcon(get_svg_icon("sun" if curr_mode == "dark" else "moon", 16, 16))
         self.theme_btn.setProperty("themeMode", curr_mode)
-        for idx, (_, _, icon_name) in enumerate(self.NAV_ITEMS):
-            item = self.list.item(idx)
-            if item is not None:
-                item.setIcon(get_svg_icon(icon_name, 18, 18))
+        self._update_icons()
         self.status_dot.style().unpolish(self.status_dot)
         self.status_dot.style().polish(self.status_dot)
 
@@ -173,6 +182,7 @@ class NavigationSidebar(QFrame):
 
     def setCurrentRow(self, row: int):
         self.list.setCurrentRow(row)
+        self._update_icons()
 
     def currentRow(self) -> int:
         return self.list.currentRow()

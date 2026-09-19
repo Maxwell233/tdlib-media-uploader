@@ -101,6 +101,9 @@ class SettingsPage(QWidget):
         # Connect sub-navigation
         self.nav_list.currentRowChanged.connect(self.stack.setCurrentIndex)
 
+        # Track secondary buttons with theme-adaptive icons
+        self.theme_icon_buttons: list[tuple[QPushButton, str]] = []
+
         # Build category pages
         self._build_general_tab()
         self._build_telegram_tab()
@@ -161,6 +164,7 @@ class SettingsPage(QWidget):
         scan_btn.setObjectName("secondaryButton")
         scan_btn.setIcon(get_svg_icon("search", 14, 14))
         scan_btn.clicked.connect(self.open_scan_tools)
+        self.theme_icon_buttons.append((scan_btn, "search"))
 
         btn_row.addWidget(edit_btn)
         btn_row.addWidget(scan_btn)
@@ -212,6 +216,7 @@ class SettingsPage(QWidget):
         btn.setObjectName("secondaryButton")
         btn.setIcon(get_svg_icon("telegram", 14, 14))
         btn.clicked.connect(self.open_editor)
+        self.theme_icon_buttons.append((btn, "telegram"))
         c_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignLeft)
 
         p_layout.addWidget(card)
@@ -249,6 +254,7 @@ class SettingsPage(QWidget):
         btn.setObjectName("secondaryButton")
         btn.setIcon(get_svg_icon("edit", 14, 14))
         btn.clicked.connect(self.open_editor)
+        self.theme_icon_buttons.append((btn, "edit"))
         btn_row.addWidget(btn)
         btn_row.addStretch(1)
         c_layout.addLayout(btn_row)
@@ -286,6 +292,7 @@ class SettingsPage(QWidget):
         btn.setObjectName("secondaryButton")
         btn.setIcon(get_svg_icon("search", 14, 14))
         btn.clicked.connect(self.open_scan_tools)
+        self.theme_icon_buttons.append((btn, "search"))
         btn_row.addWidget(btn)
         btn_row.addStretch(1)
         c_layout.addLayout(btn_row)
@@ -364,11 +371,13 @@ class SettingsPage(QWidget):
         calc_cache.setObjectName("secondaryButton")
         calc_cache.setIcon(get_svg_icon("refresh", 14, 14))
         calc_cache.clicked.connect(self.refresh_cache_stats)
+        self.theme_icon_buttons.append((calc_cache, "refresh"))
 
         clear_thumb = QPushButton("仅清理视频封面缓存")
         clear_thumb.setObjectName("secondaryButton")
         clear_thumb.setIcon(get_svg_icon("delete", 14, 14))
         clear_thumb.clicked.connect(lambda: self.clear_thumb_requested.emit())
+        self.theme_icon_buttons.append((clear_thumb, "delete"))
 
         clear_all = QPushButton("清理所有缓存与断点")
         clear_all.setObjectName("dangerButton")
@@ -497,6 +506,8 @@ class SettingsPage(QWidget):
             item = self.nav_list.item(idx)
             if item is not None:
                 item.setIcon(get_svg_icon(icon_name, 16, 16))
+        for btn, icon_name in self.theme_icon_buttons:
+            btn.setIcon(get_svg_icon(icon_name, 14, 14))
         self.refresh()
 
     def refresh(self, update_cache: bool = False):

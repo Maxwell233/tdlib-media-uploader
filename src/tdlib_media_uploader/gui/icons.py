@@ -2,7 +2,8 @@
 """Unified SVG vector icon system for TDLib Media Uploader.
 
 Provides monochrome, theme-aware Feather/Lucide-style vector icons
-with zero dependency on system emoji fonts.
+with zero dependency on system emoji fonts, featuring crisp High-DPI
+and Retina scaling.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import Mapping
 from PySide6.QtCore import QByteArray, QSize, Qt
 from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtWidgets import QApplication
 
 from .theme import THEME
 
@@ -150,6 +152,15 @@ def build_svg_markup(name: str, color: str = "#8192a6", stroke_width: float = 2.
     )
 
 
+def _get_active_dpr() -> float:
+    app = QApplication.instance()
+    if app:
+        screen = app.primaryScreen()
+        if screen:
+            return max(1.0, float(screen.devicePixelRatio()))
+    return 1.0
+
+
 def _parse_icon_args(args, kwargs):
     color = kwargs.get("color")
     size = kwargs.get("size", 18)
@@ -168,20 +179,26 @@ def get_svg_pixmap(
     color: str | None = None,
     size: int = 18,
     stroke_width: float = 2.0,
+    dpr: float | None = None,
 ) -> QPixmap:
-    """Render the named vector icon to a transparent QPixmap."""
+    """Render the named vector icon to a transparent QPixmap with Retina/High-DPI support."""
     c, s, sw = _parse_icon_args(args, {"color": color, "size": size, "stroke_width": stroke_width})
     fill_color = c or THEME.text_secondary
     xml = build_svg_markup(name, color=fill_color, stroke_width=sw)
     renderer = QSvgRenderer(QByteArray(xml.encode("utf-8")))
 
-    pixmap = QPixmap(s, s)
+    target_dpr = dpr if dpr is not None else _get_active_dpr()
+    pixel_size = max(1, int(round(s * target_dpr)))
+
+    pixmap = QPixmap(pixel_size, pixel_size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     renderer.render(painter)
     painter.end()
+
+    pixmap.setDevicePixelRatio(target_dpr)
     return pixmap
 
 
@@ -191,11 +208,20 @@ def get_svg_icon(
     color: str | None = None,
     size: int = 18,
     stroke_width: float = 2.0,
+    selected_color: str | None = None,
 ) -> QIcon:
-    """Return a QIcon wrapping the rendered vector pixmap."""
+    """Return a crisp, multi-scale High-DPI QIcon supporting Normal and Selected states."""
     c, s, sw = _parse_icon_args(args, {"color": color, "size": size, "stroke_width": stroke_width})
-    pixmap = get_svg_pixmap(name, color=c, size=s, stroke_width=sw)
-    return QIcon(pixmap)
+    icon = QIcon()
+    for scale in (1.0, 2.0, 3.0):
+        px = get_svg_pixmap(name, color=c, size=s, stroke_width=sw, dpr=scale)
+        icon.addPixmap(px, QIcon.Mode.Normal, QIcon.State.Off)
+        icon.addPixmap(px, QIcon.Mode.Normal, QIcon.State.On)
+        if selected_color:
+            sel_px = get_svg_pixmap(name, color=selected_color, size=s, stroke_width=sw, dpr=scale)
+            icon.addPixmap(sel_px, QIcon.Mode.Selected, QIcon.State.Off)
+            icon.addPixmap(sel_px, QIcon.Mode.Selected, QIcon.State.On)
+    return icon
 
 
 __all__ = [
