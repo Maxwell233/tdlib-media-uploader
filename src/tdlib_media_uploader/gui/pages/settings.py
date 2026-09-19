@@ -243,5 +243,10 @@ class SettingsPage(QWidget):
         if update_cache:
             self.refresh_cache_stats()
 
+    def open_upload_parameters(self, kind: str):
+        """Navigate directly to Upload Parameters category and select the specific kind subpanel."""
+        self.nav_list.setCurrentRow(2)
+        self.upload_panel.set_current_kind(kind)
+
 
 __all__ = ["SettingsPage"]

@@ -46,6 +46,7 @@ from ...core.album import (
 )
 from ...core.filesystem_legacy import stable_path
 from ...config.paths import RESOURCE_DIR
+from ..icons import get_svg_icon
 from ..theme import THEME
 from ..tools import format_size as _format_size
 
@@ -148,6 +149,7 @@ class UploadPage(QWidget):
     scan_requested = Signal(str)
     scan_cancel_requested = Signal(str)
     edit_target_requested = Signal(str)
+    edit_parameters_requested = Signal(str)
 
     def __init__(self, kind: str, *, services: UploadPageServices | None = None, parent=None):
         super().__init__(parent)
@@ -224,6 +226,12 @@ class UploadPage(QWidget):
         edit_target.setObjectName("secondaryButton")
         edit_target.clicked.connect(lambda: self.edit_target_requested.emit(self.kind))
 
+        self.edit_params_button = QPushButton(f"编辑{accent}上传参数")
+        self.edit_params_button.setObjectName("secondaryButton")
+        self.edit_params_button.setIcon(get_svg_icon("sliders", 14, 14))
+        self.edit_params_button.setToolTip(f"跳转至设置页面调整{accent}分卷规则与高级参数")
+        self.edit_params_button.clicked.connect(lambda: self.edit_parameters_requested.emit(self.kind))
+
         target_row.addWidget(target_lbl)
         target_row.addWidget(self.chat_label)
         target_row.addSpacing(14)
@@ -231,6 +239,7 @@ class UploadPage(QWidget):
         target_row.addWidget(self.topic_label)
         target_row.addStretch(1)
         target_row.addWidget(edit_target)
+        target_row.addWidget(self.edit_params_button)
         st_layout.addLayout(target_row)
 
         layout.addWidget(st_card)
@@ -286,14 +295,13 @@ class UploadPage(QWidget):
 
         self.pending_only = QCheckBox("只看待上传")
 
-        self.edit_caption_button = QPushButton("编辑媒体组标题…", self)
+        self.edit_caption_button = QPushButton("编辑标题", self)
         self.edit_caption_button.setObjectName("secondaryButton")
+        self.edit_caption_button.setIcon(get_svg_icon("edit", 14, 14))
+        self.edit_caption_button.setToolTip("编辑所选媒体组标题，也可双击媒体组")
         self.edit_caption_button.setEnabled(False)
-        self.edit_caption_button.setVisible(False)
+        self.edit_caption_button.setVisible(True)
         self.edit_caption_button.clicked.connect(lambda: self._edit_album(self.tree.currentItem()))
-
-        hint_label = QLabel("双击媒体组可编辑标题")
-        hint_label.setObjectName("mutedLabel")
 
         expand_btn = QPushButton("展开全部")
         expand_btn.setObjectName("ghostButton")
@@ -303,7 +311,7 @@ class UploadPage(QWidget):
 
         filters.addWidget(self.search_edit, 1)
         filters.addWidget(self.pending_only)
-        filters.addWidget(hint_label)
+        filters.addWidget(self.edit_caption_button)
         filters.addWidget(expand_btn)
         filters.addWidget(collapse_btn)
         preview_layout.addLayout(filters)
@@ -807,6 +815,10 @@ class UploadPage(QWidget):
         """Re-apply dynamic status styles when theme is toggled."""
         if hasattr(self, "status_pill") and hasattr(self.status_pill, "refresh_theme"):
             self.status_pill.refresh_theme()
+        if hasattr(self, "edit_caption_button"):
+            self.edit_caption_button.setIcon(get_svg_icon("edit", 14, 14))
+        if hasattr(self, "edit_params_button"):
+            self.edit_params_button.setIcon(get_svg_icon("sliders", 14, 14))
 
 
 class VideoPage(UploadPage):

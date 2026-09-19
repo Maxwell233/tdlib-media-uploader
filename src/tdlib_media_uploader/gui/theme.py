@@ -727,8 +727,8 @@ QCheckBox::indicator:checked {{
     border-color: {palette.accent_hover};
 }}
 
-/* Tree & Table */
-QTreeWidget, QTableWidget {{
+/* Tree, Table & List */
+QTreeWidget, QTableWidget, QListWidget {{
     background-color: {palette.bg_input};
     color: {palette.text_secondary};
     border: 1px solid {palette.border_subtle};
@@ -741,21 +741,49 @@ QTreeWidget, QTableWidget {{
     outline: 0;
 }}
 
-QTreeWidget:focus, QTableWidget:focus {{
+QTreeWidget:focus, QTableWidget:focus, QListWidget:focus {{
     border-color: {palette.border_hover};
 }}
 
-QTreeWidget::item, QTableWidget::item {{
+QTreeWidget::item, QTableWidget::item, QListWidget::item {{
     padding: 6px 8px;
     border-radius: 4px;
 }}
 
-QTreeWidget::item:hover, QTableWidget::item:hover {{
+QTreeWidget::item:hover, QTableWidget::item:hover, QListWidget::item:hover {{
     background-color: {palette.bg_card_hover};
     color: {palette.text_primary};
 }}
 
-QTreeWidget::item:selected, QTableWidget::item:selected {{
+QTreeWidget::item:selected, QTableWidget::item:selected, QListWidget::item:selected {{
+    background-color: {palette.bg_selection};
+    color: {palette.text_selection};
+    font-weight: 500;
+}}
+
+QListWidget#albumFilesList {{
+    background-color: {palette.bg_input};
+    color: {palette.text_secondary};
+    border: 1px solid {palette.border_subtle};
+    border-radius: 8px;
+    padding: 4px;
+    alternate-background-color: {palette.bg_alt_row};
+    selection-background-color: {palette.bg_selection};
+    selection-color: {palette.text_selection};
+    outline: 0;
+}}
+
+QListWidget#albumFilesList::item {{
+    padding: 6px 8px;
+    border-radius: 4px;
+}}
+
+QListWidget#albumFilesList::item:hover {{
+    background-color: {palette.bg_card_hover};
+    color: {palette.text_primary};
+}}
+
+QListWidget#albumFilesList::item:selected {{
     background-color: {palette.bg_selection};
     color: {palette.text_selection};
     font-weight: 500;

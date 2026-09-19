@@ -82,6 +82,14 @@ class UploadPanel(SettingsPanel):
     def _on_segment_clicked(self, idx: int):
         self.stack.setCurrentIndex(idx)
 
+    def set_current_kind(self, kind: str):
+        kind_map = {"video": 0, "image": 1, "mixed": 2}
+        idx = kind_map.get(kind, 0)
+        btn = self.btn_group.button(idx)
+        if btn:
+            btn.setChecked(True)
+        self.stack.setCurrentIndex(idx)
+
     # ------------------ VIDEO ------------------
     def _build_video_subpanel(self) -> QWidget:
         scroll = QScrollArea()

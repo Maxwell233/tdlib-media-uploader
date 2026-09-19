@@ -243,16 +243,80 @@ class Beta5SettingsAndUXTest(unittest.TestCase):
             all_buttons = [btn.text() for btn in page.findChildren(QPushButton)]
             self.assertIn("选择目录", all_buttons)
             self.assertIn("修改目标", all_buttons)
+            self.assertIn("编辑视频上传参数", all_buttons)
             self.assertNotIn("浏览目录…", all_buttons)
             self.assertNotIn("配置视频目标…", all_buttons)
 
-            # Caption edit button is hidden in toolbar, hint is present
-            self.assertFalse(page.edit_caption_button.isVisible())
-            all_labels = [lbl.text() for lbl in page.findChildren(QPushButton)[0].parentWidget().findChildren(QLineEdit)[0].parentWidget().findChildren(QPushButton)[0].parentWidget().findChildren(QPushButton)[0].parentWidget().findChildren(QPushButton)[0].parentWidget().findChildren(QPushButton)[0].parentWidget().findChildren(QPushButton)[0].parentWidget().findChildren(QPushButton)]
+            # Caption edit button is restored and not hidden, hint label is removed
+            self.assertFalse(page.edit_caption_button.isHidden())
+            page.show()
+            self.assertTrue(page.edit_caption_button.isVisible())
+            self.assertEqual(page.edit_caption_button.text(), "编辑标题")
+            self.assertIn("编辑所选媒体组标题", page.edit_caption_button.toolTip())
+            self.assertFalse(page.edit_caption_button.isEnabled())
+            all_labels = [lbl.text() for lbl in page.findChildren(QLabel)]
+            self.assertNotIn("双击媒体组可编辑标题", all_labels)
             self.assertTrue(hasattr(page, "tree"))
             self.assertEqual(page.tree.contextMenuPolicy(), Qt.ContextMenuPolicy.CustomContextMenu)
         finally:
             page.deleteLater()
+
+    def test_task_album_files_dark_and_light_styling(self):
+        from tdlib_media_uploader.gui.pages.task import TaskPage
+        from tdlib_media_uploader.gui.theme import build_stylesheet
+
+        task_page = TaskPage()
+        try:
+            self.assertEqual(task_page.album_files.objectName(), "albumFilesList")
+            self.assertTrue(task_page.album_files.alternatingRowColors())
+
+            dark_qss = build_stylesheet("dark")
+            self.assertIn("QListWidget#albumFilesList", dark_qss)
+            self.assertIn("alternate-background-color: #121926", dark_qss)
+            self.assertIn("QTreeWidget, QTableWidget, QListWidget", dark_qss)
+
+            light_qss = build_stylesheet("light")
+            self.assertIn("QListWidget#albumFilesList", light_qss)
+            self.assertIn("alternate-background-color: #f8fafc", light_qss)
+        finally:
+            task_page.deleteLater()
+
+    def test_upload_page_edit_parameters_shortcut(self):
+        for kind, label in (("video", "视频"), ("image", "图片"), ("mixed", "混合")):
+            page = UploadPage(kind)
+            try:
+                self.assertEqual(page.edit_params_button.text(), f"编辑{label}上传参数")
+                emitted = []
+                page.edit_parameters_requested.connect(emitted.append)
+                page.edit_params_button.click()
+                self.assertEqual(emitted, [kind])
+            finally:
+                page.deleteLater()
+
+    def test_main_window_open_upload_parameters_navigation(self):
+        window = MainWindow()
+        try:
+            # Video
+            window._open_upload_parameters("video")
+            self.assertEqual(window.sidebar.currentRow(), window.sidebar_rows["settings"])
+            self.assertEqual(window.settings_page.nav_list.currentRow(), 2)
+            self.assertEqual(window.settings_page.upload_panel.stack.currentIndex(), 0)
+            self.assertTrue(window.settings_page.upload_panel.btn_video.isChecked())
+
+            # Image
+            window._open_upload_parameters("image")
+            self.assertEqual(window.settings_page.nav_list.currentRow(), 2)
+            self.assertEqual(window.settings_page.upload_panel.stack.currentIndex(), 1)
+            self.assertTrue(window.settings_page.upload_panel.btn_image.isChecked())
+
+            # Mixed
+            window._open_upload_parameters("mixed")
+            self.assertEqual(window.settings_page.nav_list.currentRow(), 2)
+            self.assertEqual(window.settings_page.upload_panel.stack.currentIndex(), 2)
+            self.assertTrue(window.settings_page.upload_panel.btn_mixed.isChecked())
+        finally:
+            window.close()
+            window.deleteLater()
 
     def test_sidebar_brand_header_and_version(self):
         sidebar = NavigationSidebar(version="1.9.3")

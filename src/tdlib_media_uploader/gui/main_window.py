@@ -332,6 +332,7 @@ class MainWindow(QMainWindow):
             page.start_requested.connect(self._start_upload)
             page.path_selected.connect(self._save_source_path)
             page.edit_target_requested.connect(self._edit_target)
+            page.edit_parameters_requested.connect(self._open_upload_parameters)
         self.task_page.safe_stop_requested.connect(self._safe_stop_upload)
         self.task_page.immediate_stop_requested.connect(self._immediate_stop_upload)
         self.inflight_page.reconciliation_requested.connect(self._reconcile_inflight)
@@ -774,6 +775,13 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"{_kind_label(saved_kind)}上传目标已保存"
             )
+
+    def _open_upload_parameters(self, kind: str = "video"):
+        kind = _require_kind(kind)
+        if not self._can_change_configuration():
+            return
+        self.sidebar.setCurrentRow(self.sidebar_rows["settings"])
+        self.settings_page.open_upload_parameters(kind)
 
     def _edit_config(self):
         if not self._can_change_configuration():

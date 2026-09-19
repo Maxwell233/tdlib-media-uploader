@@ -97,6 +97,7 @@ class TaskPage(QWidget):
         album_layout.addWidget(album_title)
 
         self.album_files = QListWidget()
+        self.album_files.setObjectName("albumFilesList")
         self.album_files.setAlternatingRowColors(True)
         album_layout.addWidget(self.album_files, 1)
         split.addWidget(album_card, 1)
