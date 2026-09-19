@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Comprehensive verification tests for TDLib Media Uploader 1.9.3-beta5."""
+"""Comprehensive verification tests for TDLib Media Uploader 1.9.3."""
 
 from __future__ import annotations
 
@@ -42,9 +42,9 @@ class Beta5SettingsAndUXTest(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_version_bump_is_beta5(self):
+    def test_version_is_stable(self):
         version = read_version()
-        self.assertEqual(version, "1.9.3-beta5")
+        self.assertEqual(version, "1.9.3")
 
     def test_settings_page_six_inline_categories(self):
         page = SettingsPage()
@@ -255,11 +255,11 @@ class Beta5SettingsAndUXTest(unittest.TestCase):
             page.deleteLater()
 
     def test_sidebar_brand_header_and_version(self):
-        sidebar = NavigationSidebar(version="1.9.3-beta5")
+        sidebar = NavigationSidebar(version="1.9.3")
         try:
             # Badge should not be visible in header
             self.assertFalse(sidebar.badge.isVisible())
-            self.assertEqual(sidebar.version_label.text(), "Version 1.9.3-beta5")
+            self.assertEqual(sidebar.version_label.text(), "Version 1.9.3")
         finally:
             sidebar.deleteLater()
 
@@ -268,11 +268,11 @@ class Beta5SettingsAndUXTest(unittest.TestCase):
             icon = get_svg_icon(icon_name, 16, 16)
             self.assertFalse(icon.isNull(), f"Icon {icon_name} should not be null")
 
-    def test_main_window_integration_beta5(self):
+    def test_main_window_integration_stable(self):
         window = MainWindow()
         try:
-            self.assertIn("1.9.3-beta5", window.windowTitle())
-            self.assertEqual(window.nav_sidebar.version_label.text(), "Version 1.9.3-beta5")
+            self.assertIn("1.9.3", window.windowTitle())
+            self.assertEqual(window.nav_sidebar.version_label.text(), "Version 1.9.3")
             self.assertFalse(window.nav_sidebar.badge.isVisible())
             self.assertEqual(window.settings_page.nav_list.count(), 6)
         finally:

@@ -1,6 +1,6 @@
 # TDLib Media Uploader
 
-**V1.9.3-beta5 · Windows x64 + macOS arm64 桌面应用**
+**V1.9.3 · Windows x64 + macOS arm64 桌面应用**
 
 把本地或网络目录中的视频、图片批量上传到 Telegram 群组话题或频道。Windows x64 与 macOS Apple Silicon arm64 使用同一套 GUI、上传核心和功能配置；支持上传预览、标题编辑、断点恢复和独立代理，上传时无需打开 Telegram Desktop。
 
@@ -117,7 +117,7 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 
 每个待发送 Album 在请求前会写入 `data/upload_inflight/<hash>.json`。状态依次记录为 `PREPARED`、`SUBMITTED`、`CONFIRMED`，正常断点写入后才删除；超时、断线、取消或部分成功会记录为 `UNKNOWN`，下一次不会自动重发可能已经提交的 Album。请打开侧栏的“未确认上传”，先在 Telegram 中核对对应目标，再手动处理。
 
-发送前会递归校验混合 Album 中每个 Photo/Video 的 `InputFile` 结构，并检查临时本地文件是否仍可读取；空的 `photo`/`video` 不会被提交给 TDLib，也不会先写入发送 journal。当前 beta 固定使用 `tdjson 1.8.64.post1`。
+发送前会递归校验混合 Album 中每个 Photo/Video 的 `InputFile` 结构，并检查临时本地文件是否仍可读取；空的 `photo`/`video` 不会被提交给 TDLib，也不会先写入发送 journal。当前正式版固定使用 `tdjson 1.8.64.post1`。
 
 如果源文件位于 SMB/NAS，可在“设置与诊断”中选择本地暂存模式，或在配置中设置 `[staging] mode`：`off` 直接读取源文件，`network` 只暂存网络盘，`always` 暂存所有文件。程序会在 `data/cache/staging` 或你指定的受管目录中创建带 marker 的暂存副本，只清理自己创建的文件，不会递归删除 base directory 中的其他用户文件。
 
