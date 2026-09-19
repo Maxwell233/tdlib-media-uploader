@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..dialogs.caption_dialog import CaptionEditDialog
 from ...core.album import (
     CaptionLimitError,
     CaptionStore,
@@ -194,7 +196,7 @@ class UploadPage(QWidget):
         self.source_edit.setPlaceholderText("输入或粘贴媒体目录路径，按 Enter 保存；也可点击右侧浏览选择…")
         self.source_edit.editingFinished.connect(self._commit_source)
 
-        browse = QPushButton("浏览目录…")
+        browse = QPushButton("选择目录")
         browse.setObjectName("secondaryButton")
         browse.clicked.connect(self._browse)
 
@@ -218,7 +220,7 @@ class UploadPage(QWidget):
         self.topic_label = QLabel("未配置")
         self.topic_label.setObjectName("valueLabel")
 
-        edit_target = QPushButton(f"配置{accent}目标…")
+        edit_target = QPushButton("修改目标")
         edit_target.setObjectName("secondaryButton")
         edit_target.clicked.connect(lambda: self.edit_target_requested.emit(self.kind))
 
@@ -284,20 +286,24 @@ class UploadPage(QWidget):
 
         self.pending_only = QCheckBox("只看待上传")
 
-        self.edit_caption_button = QPushButton("编辑媒体组标题…")
+        self.edit_caption_button = QPushButton("编辑媒体组标题…", self)
         self.edit_caption_button.setObjectName("secondaryButton")
         self.edit_caption_button.setEnabled(False)
+        self.edit_caption_button.setVisible(False)
         self.edit_caption_button.clicked.connect(lambda: self._edit_album(self.tree.currentItem()))
 
-        expand_btn = QPushButton("展开")
+        hint_label = QLabel("双击媒体组可编辑标题")
+        hint_label.setObjectName("mutedLabel")
+
+        expand_btn = QPushButton("展开全部")
         expand_btn.setObjectName("ghostButton")
 
-        collapse_btn = QPushButton("折叠")
+        collapse_btn = QPushButton("收起全部")
         collapse_btn.setObjectName("ghostButton")
 
         filters.addWidget(self.search_edit, 1)
         filters.addWidget(self.pending_only)
-        filters.addWidget(self.edit_caption_button)
+        filters.addWidget(hint_label)
         filters.addWidget(expand_btn)
         filters.addWidget(collapse_btn)
         preview_layout.addLayout(filters)
@@ -309,6 +315,8 @@ class UploadPage(QWidget):
         self.tree.setRootIsDecorated(True)
         self.tree.setAlternatingRowColors(True)
         self.tree.setMinimumHeight(150)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         self.tree.itemDoubleClicked.connect(self._edit_album)
         self.tree.itemSelectionChanged.connect(self._update_edit_button)
 
@@ -560,6 +568,22 @@ class UploadPage(QWidget):
         self.start_button.setEnabled(False)
         self._update_edit_button()
 
+    def _show_tree_context_menu(self, pos):
+        item = self.tree.itemAt(pos)
+        if item is None or self._running or self._scanning:
+            return
+        plan = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(plan, dict) and item.parent() is not None:
+            item = item.parent()
+            plan = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(plan, dict) or not plan.get("key"):
+            return
+        menu = QMenu(self)
+        edit_action = menu.addAction("编辑标题")
+        action = menu.exec(self.tree.viewport().mapToGlobal(pos))
+        if action == edit_action:
+            self._edit_album(item)
+
     def _edit_album(self, item, _column=0):
         if item is None or self._running or self._scanning:
             return
@@ -578,80 +602,44 @@ class UploadPage(QWidget):
             "image": "IMAGE_ALBUM_CAPTION_SEPARATOR",
         }[self.kind]
         separator = str(self._cfg(separator_key, " · "))
-        dialog = self.services.dialog_class(self)
-        dialog.setWindowTitle("编辑媒体组标题")
-        dialog.resize(560, 350)
-        form = QFormLayout(dialog)
-        base_edit = QLineEdit(base_label)
-        base_edit.setReadOnly(self.kind == "image")
-        custom_edit = QPlainTextEdit(custom_text)
-        custom_edit.setPlaceholderText("可输入多行；留空表示不追加")
-        preview = QPlainTextEdit()
-        preview.setReadOnly(True)
+        include_key = {
+            "video": "VIDEO_CAPTION_INCLUDE_FILENAMES",
+            "mixed": "MIXED_CAPTION_INCLUDE_FILENAMES",
+            "image": "IMAGE_CAPTION_INCLUDE_FILENAMES",
+        }[self.kind]
+        number_key = {
+            "video": "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS",
+            "mixed": "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS",
+            "image": "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
+        }[self.kind]
         caption_limit = int(self.services.caption_limit)
-        caption_count = QLabel()
 
-        def update_preview():
-            caption = self.services.compose_caption(
-                base_edit.text(), custom_edit.toPlainText(), separator
-            )
-            try:
-                rendered = self.services.validate_caption(caption, limit=caption_limit)
-                preview.setPlainText(rendered)
-                caption_count.setText(
-                    f"用户标题 {len(caption)}/{caption_limit} · 发送预览 {len(rendered)}/{caption_limit}"
-                )
-                caption_count.setObjectName("captionCount")
-                caption_count.setProperty("over_limit", "false")
-                caption_count.style().unpolish(caption_count)
-                caption_count.style().polish(caption_count)
-            except CaptionLimitError as exc:
-                preview.setPlainText(str(exc))
-                caption_count.setText(f"超出字数限制：{len(caption)}/{caption_limit}")
-                caption_count.setObjectName("captionCount")
-                caption_count.setProperty("over_limit", "true")
-                caption_count.style().unpolish(caption_count)
-                caption_count.style().polish(caption_count)
-
-        base_edit.textChanged.connect(update_preview)
-        custom_edit.textChanged.connect(update_preview)
-        update_preview()
-        form.addRow("基准标题", base_edit)
-        form.addRow("自定义追加", custom_edit)
-        form.addRow("生成预览", preview)
-        form.addRow("", caption_count)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
-            dialog,
+        dialog = CaptionEditDialog(
+            base_label=base_label,
+            custom_text=custom_text,
+            separator=separator,
+            items=plan.get("items", []),
+            kind=self.kind,
+            caption_limit=caption_limit,
+            include_filenames=bool(self._cfg(include_key, False)),
+            include_filename_numbers=bool(self._cfg(number_key, True)),
+            parent=self,
         )
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        form.addRow(buttons)
-        if dialog.exec() == self.services.dialog_class.DialogCode.Accepted:
-            caption = self.services.compose_caption(
-                base_edit.text(), custom_edit.toPlainText(), separator
-            )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_base = dialog.base_text
+            new_custom = dialog.custom_text
+            caption = self.services.compose_caption(new_base, new_custom, separator)
             try:
                 rendered = self.services.validate_caption(caption, limit=caption_limit)
             except CaptionLimitError:
                 return
             plan["caption"] = {
                 "text": rendered,
-                "base_label": base_edit.text(),
-                "custom_text": custom_edit.toPlainText(),
+                "base_label": new_base,
+                "custom_text": new_custom,
             }
             item.setData(0, Qt.ItemDataRole.UserRole, plan)
             item.setText(1, self._album_title(plan))
-            include_key = {
-                "video": "VIDEO_CAPTION_INCLUDE_FILENAMES",
-                "mixed": "MIXED_CAPTION_INCLUDE_FILENAMES",
-                "image": "IMAGE_CAPTION_INCLUDE_FILENAMES",
-            }[self.kind]
-            number_key = {
-                "video": "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS",
-                "mixed": "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS",
-                "image": "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
-            }[self.kind]
             caption_text = self.services.filename_description(
                 rendered,
                 plan.get("items", []),
@@ -663,8 +651,8 @@ class UploadPage(QWidget):
             store = self.services.caption_store_factory(self.kind)
             store.set(
                 plan["key"],
-                base_label=base_edit.text(),
-                custom_text=custom_edit.toPlainText(),
+                base_label=new_base,
+                custom_text=new_custom,
             )
 
     def _update_edit_button(self):

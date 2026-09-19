@@ -73,9 +73,9 @@ class NavigationSidebar(QFrame):
         app_title.setObjectName("sidebarAppTitle")
         title_row.addWidget(app_title)
 
-        self.badge = QLabel(_format_badge(self.version))
+        self.badge = QLabel(_format_badge(self.version), brand_widget)
         self.badge.setObjectName("sidebarBadge")
-        title_row.addWidget(self.badge)
+        self.badge.setVisible(False)
         title_row.addStretch(1)
 
         # Theme toggle button (Vector Sun / Moon icon)

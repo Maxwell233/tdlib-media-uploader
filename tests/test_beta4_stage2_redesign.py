@@ -195,15 +195,14 @@ class Beta4Stage2RedesignTest(unittest.TestCase):
     def test_settings_two_level_sub_navigation(self):
         settings = SettingsPage()
         try:
-            self.assertEqual(settings.nav_list.count(), 7)
+            self.assertEqual(settings.nav_list.count(), 6)
             categories = [settings.nav_list.item(i).text() for i in range(settings.nav_list.count())]
             self.assertIn("常规", categories)
             self.assertIn("Telegram", categories)
             self.assertIn("上传参数", categories)
-            self.assertIn("扫描与工具", categories)
+            self.assertIn("高级选项", categories)
             self.assertIn("存储与缓存", categories)
-            self.assertIn("环境诊断", categories)
-            self.assertIn("关于与许可", categories)
+            self.assertIn("环境与许可", categories)
 
             # Test switching category tabs
             for row in range(settings.nav_list.count()):

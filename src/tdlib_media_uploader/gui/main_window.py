@@ -340,6 +340,7 @@ class MainWindow(QMainWindow):
         self.settings_page.open_scan_tools.connect(self._edit_scan_tools)
         self.settings_page.clear_all_requested.connect(self._clear_all_cache)
         self.settings_page.clear_thumb_requested.connect(self._clear_thumb_cache)
+        self.settings_page.config_saved.connect(self._on_settings_saved)
 
         self.statusBar().showMessage("就绪")
         self._telegram_connected = False
@@ -371,6 +372,11 @@ class MainWindow(QMainWindow):
         self.history_page.reload_records()
         if _CONFIG_CREATED:
             self.statusBar().showMessage("已创建 config.toml，请先在设置中填写 Telegram 信息")
+
+    def _on_settings_saved(self):
+        self._invalidate_previews()
+        self._refresh_pages()
+        self.statusBar().showMessage("设置已保存并生效")
 
     def _open_upload(self, kind: str):
         self.sidebar.setCurrentRow(self._sidebar_row(kind))

@@ -133,6 +133,30 @@ def validate_exiftool_path(value: str, runner=None) -> str:
     return ""
 
 
+def detect_ffmpeg() -> str | None:
+    """Detect available FFmpeg executable from environment, bundled tools, or PATH."""
+    import shutil
+    configured = os.environ.get("IMAGEIO_FFMPEG_EXE", "").strip()
+    if configured and Path(configured).is_file():
+        return configured
+    names = ("ffmpeg.exe", "ffmpeg") if os.name == "nt" else ("ffmpeg",)
+    for candidate in (
+        RESOURCE_DIR / "tools" / "ffmpeg" / names[0],
+        DATA_DIR / "tools" / "ffmpeg" / names[0],
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    try:
+        import imageio_ffmpeg
+        if hasattr(imageio_ffmpeg, "get_ffmpeg_exe"):
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+            if exe and Path(exe).is_file():
+                return str(exe)
+    except Exception:
+        pass
+    return shutil.which("ffmpeg")
+
+
 def prepare_windows_app_identity() -> None:
     """Give Windows a stable taskbar identity before any UI is created."""
     if os.name != "nt":
@@ -220,6 +244,7 @@ __all__ = [
     "_require_kind",
     "_validate_exiftool_path",
     "application_icon",
+    "detect_ffmpeg",
     "format_date",
     "format_eta",
     "format_size",
