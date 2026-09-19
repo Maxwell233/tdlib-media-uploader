@@ -23,18 +23,21 @@ def _text(value: object) -> str:
     return os.fspath(value) if hasattr(value, "__fspath__") else str(value)
 
 
-def _natural_parts(value: object) -> list[tuple[int, object, str]]:
-    """Split *value* into case-folded text and integer runs."""
+def _natural_parts(value: object) -> tuple[tuple[int, object, int, str], ...]:
+    """Split *value* into an orderable tuple of case-folded text and integer runs."""
 
-    parts: list[tuple[int, object, str]] = []
+    parts: list[tuple[int, object, int, str]] = []
     for part in _NATURAL_PART_RE.split(_text(value)):
         if not part:
             continue
         if part.isdigit():
-            parts.append((1, int(part), part))
+            # Include len(part) as the 3rd element so shorter numeric runs evaluate as smaller
+            # when values are equal (e.g. 1 < 01 < 001).
+            parts.append((1, int(part), len(part), part))
         else:
-            parts.append((0, part.casefold(), part))
-    return parts
+            # 3rd element padded with 0 for tuple symmetry
+            parts.append((0, part.casefold(), 0, part))
+    return tuple(parts)
 
 
 def natural_compare(left: object, right: object) -> int:
@@ -47,23 +50,13 @@ def natural_compare(left: object, right: object) -> int:
 
     a_parts = _natural_parts(left)
     b_parts = _natural_parts(right)
-    for (a_type, a_value, a_raw), (b_type, b_value, b_raw) in zip(
-        a_parts, b_parts
-    ):
-        if a_type != b_type:
-            return -1 if a_type < b_type else 1
-        if a_value == b_value:
-            if a_type == 1 and len(a_raw) != len(b_raw):
-                return -1 if len(a_raw) < len(b_raw) else 1
-            if a_raw != b_raw:
-                return (a_raw > b_raw) - (a_raw < b_raw)
-            continue
-        return -1 if a_value < b_value else 1
+    if a_parts == b_parts:
+        a_text, b_text = _text(left), _text(right)
+        if a_text == b_text:
+            return 0
+        return -1 if a_text < b_text else 1
 
-    if len(a_parts) != len(b_parts):
-        return -1 if len(a_parts) < len(b_parts) else 1
-    a_text, b_text = _text(left), _text(right)
-    return (a_text > b_text) - (a_text < b_text)
+    return -1 if a_parts < b_parts else 1
 
 
 def natural_sort(values, *, key: Callable[[_T], object] | None = None) -> list[_T]:
@@ -74,21 +67,23 @@ def natural_sort(values, *, key: Callable[[_T], object] | None = None) -> list[_
     """
 
     key_func = key or (lambda value: value)
-    decorated = [
-        (key_func(value), index, value) for index, value in enumerate(values)
-    ]
 
-    def compare(left, right) -> int:
-        result = natural_compare(left[0], right[0])
-        return result or (left[1] - right[1])
+    # Python tuple sorting naturally handles natural_compare logic:
+    # 1. parts (case-insensitive strings and value-aware ints)
+    # 2. original text string as fallback
+    # 3. index to keep sort stable
+    decorated = []
+    for index, value in enumerate(values):
+        key_val = key_func(value)
+        decorated.append((_natural_parts(key_val), _text(key_val), index, value))
 
-    return [value for _, _, value in sorted(decorated, key=cmp_to_key(compare))]
+    return [value for _, _, _, value in sorted(decorated)]
 
 
-def natural_sort_key(value: object) -> tuple[tuple[int, object, str], ...]:
+def natural_sort_key(value: object) -> tuple[tuple[int, object, int, str], ...]:
     """Expose a comparable natural key for callers that need one."""
 
-    return tuple(_natural_parts(value))
+    return _natural_parts(value)
 
 
 def relative_name(path: object, root: object | None = None) -> str:
@@ -125,26 +120,29 @@ def _relative_components(path: object, root: object | None = None) -> tuple[str,
     return tuple(component for component in value.split("/") if component not in {"", "."})
 
 
+def _relative_components_parts(path: object, root: object | None = None) -> tuple[tuple[tuple[int, object, int, str], ...], ...]:
+    return tuple(_natural_parts(c) for c in _relative_components(path, root))
+
+
 def relative_path_compare(
     left: object, right: object, root: object | None = None
 ) -> int:
     """Compare relative path components using :func:`natural_compare`."""
 
-    left_parts = _relative_components(left, root)
-    right_parts = _relative_components(right, root)
-    for left_part, right_part in zip(left_parts, right_parts):
-        result = natural_compare(left_part, right_part)
-        if result:
-            return result
-    if len(left_parts) != len(right_parts):
-        return -1 if len(left_parts) < len(right_parts) else 1
+    a_parts = _relative_components_parts(left, root)
+    b_parts = _relative_components_parts(right, root)
+
+    if a_parts != b_parts:
+        return -1 if a_parts < b_parts else 1
 
     # ``natural_compare`` already resolved leading-zero numeric runs and
     # case ties component by component.  Keep the complete relative spelling
     # as a final deterministic fallback for paths that compare equal there.
-    left_raw = "/".join(left_parts)
-    right_raw = "/".join(right_parts)
-    return (left_raw > right_raw) - (left_raw < right_raw)
+    left_raw = "/".join(_relative_components(left, root))
+    right_raw = "/".join(_relative_components(right, root))
+    if left_raw == right_raw:
+        return 0
+    return -1 if left_raw < right_raw else 1
 
 
 def _default_mtime(path: object) -> int | float:
@@ -178,6 +176,7 @@ def media_path_sort(
 
     path_func = path_key or (lambda value: value)
     decorated = []
+
     for index, value in enumerate(values):
         path = path_func(value)
         mtime = None
@@ -186,15 +185,16 @@ def media_path_sort(
                 mtime = mtime_key(value) if mtime_key is not None else _default_mtime(path)
             except (OSError, TypeError, ValueError):
                 mtime = 0
-        decorated.append((path, mtime, index, value))
 
-    def compare(left, right) -> int:
-        if normalized_mode == "mtime" and left[1] != right[1]:
-            return -1 if left[1] < right[1] else 1
-        result = relative_path_compare(left[0], right[0], root)
-        return result or (left[2] - right[2])
+        parts = _relative_components_parts(path, root)
+        raw_str = "/".join(_relative_components(path, root))
 
-    return [value for _, _, _, value in sorted(decorated, key=cmp_to_key(compare))]
+        decorated.append((mtime, parts, raw_str, index, value))
+
+    if normalized_mode == "mtime":
+        return [value for _, _, _, _, value in sorted(decorated, key=lambda x: (x[0], x[1], x[2], x[3]))]
+    else:
+        return [value for _, _, _, _, value in sorted(decorated, key=lambda x: (x[1], x[2], x[3]))]
 
 
 __all__ = [
