@@ -206,7 +206,7 @@ class UploadReconciliationTest(unittest.TestCase):
             with patch.object(image_core.cfg, "IMAGE_DIR", root), \
                     patch.object(image_core, "STATE_DIR", Path(directory) / "state"):
                 path.write_bytes(b"changed source")
-                client.reconcile_inflight("album-key", sent=True, kind="image", target=target)
+                client.reconcile_inflight("album-key", sent=True, kind="image", target=target, source_root=root)
                 state = image_core.UploadState(target=target)
                 self.assertIn(
                     image_core.file_signature(path, (snapshot.st_size, snapshot.st_mtime_ns)),
@@ -238,10 +238,10 @@ class UploadReconciliationTest(unittest.TestCase):
                 image_core.UploadState(target=target)
                 client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
                 client.inflight_journal = journal
-                with patch.object(image_core.UploadState, "_save", side_effect=OSError("disk full")):
+                with patch("tdlib_media_uploader.core.upload_state.UploadState._save", side_effect=OSError("disk full")):
                     with self.assertRaises(OSError):
                         client.reconcile_inflight(
-                            "album-key", sent=True, kind="image", target=target
+                            "album-key", sent=True, kind="image", target=target, source_root=root
                         )
             self.assertIsNotNone(journal.unresolved("image", "album-key", target=target))
 
@@ -301,7 +301,7 @@ class UploadReconciliationTest(unittest.TestCase):
                     patch.object(module, "STATE_DIR", Path(directory) / "state"),
                 ]
                 with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
-                    client.reconcile_inflight("legacy-kind-album", sent=True, kind=kind)
+                    client.reconcile_inflight("legacy-kind-album", sent=True, kind=kind, source_root=root)
                     state_a = module.UploadState(target=target_a)
                     state_b = module.UploadState(target=target_b)
                     signature = module.file_signature(path, (snapshot.st_size, snapshot.st_mtime_ns))
@@ -335,7 +335,7 @@ class UploadReconciliationTest(unittest.TestCase):
                     patch.object(tdlib_common.cfg, "CHANNEL_CHAT_ID", 0):
                 state = client._state_for_journal(
                     "image",
-                    {"target": target_a},
+                    {"target": target_a, "source_root": str(Path(directory) / "images")},
                     fallback_target=target_b,
                 )
                 self.assertEqual(state._chat_id, target_a["chat_id"])

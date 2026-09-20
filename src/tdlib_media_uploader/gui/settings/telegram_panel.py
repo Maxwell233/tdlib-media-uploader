@@ -299,7 +299,7 @@ class TelegramPanel(SettingsPanel):
     def collect_values(self) -> dict:
         curr = self._current_values_dict()
         return {
-            ("telegram", "api_id"): int(curr["api_id"]),
+            ("telegram", "api_id"): int(curr["api_id"]) if curr["api_id"].isdigit() else curr["api_id"],
             ("telegram", "api_hash"): curr["api_hash"],
             ("proxy", "enabled"): curr["proxy_enabled"],
             ("proxy", "type"): curr["proxy_type"],

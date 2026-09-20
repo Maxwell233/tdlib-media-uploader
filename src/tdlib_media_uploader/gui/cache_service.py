@@ -48,7 +48,7 @@ def current_cache_targets(base_targets: dict[str, tuple[str, Path]] | None = Non
     return targets
 
 
-def cache_usage(path: Path) -> tuple[int, int]:
+def cache_usage(path: Path, cancel_event=None) -> tuple[int, int]:
     """Return file count and byte size without following a directory symlink."""
     try:
         if is_link_or_junction(path):
@@ -62,10 +62,14 @@ def cache_usage(path: Path) -> tuple[int, int]:
 
         stack = [os.fspath(path)]
         while stack:
+            if cancel_event is not None and cancel_event.is_set():
+                break
             current_dir = stack.pop()
             try:
                 with os.scandir(current_dir) as it:
                     for entry in it:
+                        if cancel_event is not None and cancel_event.is_set():
+                            break
                         try:
                             if entry.name == ".marker.json":
                                 continue
@@ -90,13 +94,15 @@ def cache_usage(path: Path) -> tuple[int, int]:
         return (0, 0)
 
 
-def cache_status_text() -> str:
+def cache_status_text(cancel_event=None) -> str:
     """Return human-readable summary of all cache targets."""
     rows = []
     for label, path in current_cache_targets().values():
+        if cancel_event is not None and cancel_event.is_set():
+            return "统计已取消"
         if not (path.exists() or path.is_symlink()):
             continue
-        count, total = cache_usage(path)
+        count, total = cache_usage(path, cancel_event=cancel_event)
         rows.append(f"{label} {count} 项 · {format_size(total)}")
     return "当前应用缓存：" + (" · ".join(rows) if rows else "无")
 
@@ -149,7 +155,11 @@ def clear_cache(
         if not (path.exists() or path.is_symlink()):
             continue
         try:
-            remove_cache_path(path)
+            if key == "staging":
+                from ..upload.staging import cleanup_staging
+                cleanup_staging(path, remove_empty=True)
+            else:
+                remove_cache_path(path)
             removed.append(label)
         except OSError as exc:
             errors.append(f"{label}：{exc}")

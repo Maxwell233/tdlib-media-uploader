@@ -62,7 +62,10 @@ class InflightGuiTest(unittest.TestCase):
             journal.unknown("image", "single", "timeout", target=target)
             journal.prepare("video", "multi", [{"path": single}, {"path": second}])
             journal.unknown("video", "multi", "connection lost")
-            journal.prepare("image", "confirmed", [{"path": single}], target=target)
+            journal.prepare("image", "confirmed", [], target=target)
+            path, record = journal.get_entry("image", "confirmed", target)
+            record["items"] = journal._normalize_items([{"path": single}])
+            journal._write(path, record)
             journal.update("image", "confirmed", "CONFIRMED", message_ids=[17], target=target)
             (journal_root / "broken.json").write_text("{", encoding="utf-8")
 

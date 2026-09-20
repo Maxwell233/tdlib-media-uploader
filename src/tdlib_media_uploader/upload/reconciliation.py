@@ -14,6 +14,10 @@ from ..core.upload_journal import (
 )
 
 
+class SourceRootRequired(ValueError):
+    """An old journal needs an explicitly selected original source root."""
+
+
 class ReconciliationService:
     def __init__(self, journal=None):
         self.inflight_journal = journal if journal is not None else InflightJournal()
@@ -78,7 +82,7 @@ class ReconciliationService:
             )
         return items
 
-    def _state_for_journal(self, kind: str, record: dict, *, fallback_target=None):
+    def _state_for_journal(self, kind: str, record: dict, *, fallback_target=None, source_root=None):
         """Create the matching uploader state without touching source files.
 
         A target recorded with the send attempt is authoritative.  Legacy
@@ -107,7 +111,24 @@ class ReconciliationService:
             module = importlib.import_module("tdlib_media_uploader.media.legacy_mixed")
         else:
             raise ValueError(f"无法为未知媒体类型恢复上传断点：{kind}")
-        return module.UploadState(target=target)
+        roots = {str(item.get("source_root")) for item in record.get("items", ())
+                 if isinstance(item, dict) and item.get("source_root")}
+        if record.get("source_root"):
+            roots.add(str(record["source_root"]))
+        if len(roots) > 1:
+            raise ValueError("上传记录包含多个来源目录，已保留保护记录")
+        root = next(iter(roots), None) or source_root
+        if root is None:
+            raise SourceRootRequired("旧记录缺少来源目录，请选择当时扫描的根目录；不会使用当前配置猜测")
+        from ..core.filesystem_legacy import stable_path
+        normalized_root = Path(stable_path(root))
+        if any(not Path(stable_path(item["path"])).is_relative_to(normalized_root)
+               for item in record.get("items", ())
+               if isinstance(item, dict) and item.get("path")):
+            raise ValueError("来源目录不包含上传记录中的文件，已保留保护记录")
+        from ..core.upload_state import UploadState
+        return UploadState(kind=kind, source_root=Path(root), target=target,
+                           state_dir=module.STATE_DIR, reset=False)
 
     def reconcile_inflight(
         self,
@@ -117,6 +138,7 @@ class ReconciliationService:
         kind: str | None = None,
         message_ids=None,
         target=None,
+        source_root=None,
     ) -> None:
         """Manually resolve an UNKNOWN send without querying Telegram history."""
 
@@ -139,6 +161,7 @@ class ReconciliationService:
             selected_kind,
             record,
             fallback_target=requested_target or None,
+            source_root=source_root,
         )
         # ``mark_album_completed`` performs an atomic fsync-backed save.  Do
         # not touch the journal until it returns; a save failure therefore

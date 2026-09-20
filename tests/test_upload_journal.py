@@ -110,7 +110,7 @@ class UploadJournalTest(unittest.TestCase):
             journal.unknown("image", "album", "timeout", target=first)
             self.assertIsNotNone(journal.unresolved("image", "album", target=first))
             self.assertIsNone(journal.unresolved("image", "album", target=second))
-            journal.prepare("image", "legacy", [{"path": "photo.jpg"}])
+            journal.prepare("image", "legacy", [{"path": "legacy-photo.jpg"}])
             journal.unknown("image", "legacy", "timeout")
             self.assertIsNotNone(journal.unresolved("image", "legacy", target=first))
             self.assertIsNotNone(journal.unresolved("image", "legacy", target=second))

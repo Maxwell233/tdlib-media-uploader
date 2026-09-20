@@ -40,7 +40,7 @@ from tdlib_media_uploader.gui.workers import CacheStatsWorker  # noqa: E402
 class Beta4VersionAndBadgeTest(unittest.TestCase):
     def test_version_bump_is_beta4(self):
         version = read_version()
-        self.assertEqual(version, "1.9.3")
+        self.assertEqual(version, (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip())
 
     def test_badge_formatting(self):
         self.assertEqual(_format_badge("1.9.3-beta4"), "Beta 4")
@@ -108,7 +108,7 @@ class Beta4AsyncCacheStatsWorkerTest(unittest.TestCase):
     def test_cache_stats_worker_execution(self):
         worker = CacheStatsWorker()
         results: list[str] = []
-        worker.finished.connect(results.append)
+        worker.result_ready.connect(results.append)
 
         # Run worker synchronously for testing
         worker.run()

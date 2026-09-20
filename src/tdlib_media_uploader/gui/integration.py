@@ -11,7 +11,8 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import sys
 import importlib
 import inspect
 import threading
@@ -22,6 +23,8 @@ from typing import Any, Callable
 from ..core.filesystem_legacy import stable_path
 
 from ..contracts import UploadContext
+from ..config.snapshot import snapshot_config
+from ..core.models import FileSnapshot
 from ..core.models import (
     AlbumPlan,
     AuthEvent,
@@ -121,12 +124,7 @@ def _new_state(legacy: Any, target: Mapping[str, Any]) -> Any:
     state_type = getattr(legacy, "UploadState", None)
     if not callable(state_type):
         raise TypeError("legacy uploader 缺少 UploadState()")
-    try:
-        return state_type(target=dict(target or {}))
-    except TypeError:
-        # Lightweight embedding fakes often preserve the original no-arg
-        # constructor.  The production facade accepts the target keyword.
-        return state_type()
+    return _call_supported(state_type, target=dict(target or {}))
 
 
 @contextmanager
@@ -394,6 +392,7 @@ class GuiUploadProgress:
     def __init__(self, kind: str, all_items: Sequence[Any] = (), completed_paths=(), ui: Any = None):
         self.kind = _normalize_kind(kind)
         self.ui = ui
+        self.total_bytes = 0
         self.sizes: dict[str, int] = {}
         self.paths: dict[str, Path] = {}
         for item in all_items or ():
@@ -449,7 +448,7 @@ class GuiUploadProgress:
             self.sizes[key] = self._size(value, path)
             self.paths[key] = path
             self.total_files = len(self.sizes)
-            self.total_bytes = sum(self.sizes.values())
+            self.total_bytes += self.sizes[key]
         return key
 
     def begin_album(self, items: Sequence[Any], plan: AlbumPlan, total_albums: int) -> None:
@@ -643,18 +642,23 @@ class TDLibSender:
         caption_limit=None,
         timeout=None,
     ) -> SendResult:
-        del target, context, caption_limit, timeout
+        del caption_limit, timeout
         if plan is None:
             raise TypeError("TDLibSender 需要 AlbumPlan")
         items = tuple(plan.pending_items)
         self.progress.begin_album(items, plan, self.total_albums)
         legacy_items = tuple(_legacy_item(item) for item in items)
+        def on_submitted(message_ids):
+            if context is not None and context.journal is not None:
+                context.journal.submitted(plan.kind, plan.key, message_ids, target=dict(target or {}))
         try:
             value = _call_supported(
                 self.client.send_contents,
                 (tuple(contents),),
                 progress=self.progress,
                 items=legacy_items,
+                target=dict(target or {}),
+                on_submitted=on_submitted,
             )
             if isinstance(value, SendResult):
                 result = value
@@ -730,7 +734,66 @@ def _cleanup_for(legacy: Any, kind: str) -> Callable[[Sequence[Any]], None] | No
     )
 
 
-def run_v2_upload(
+def run_v2_upload(kind: str, **kwargs) -> UploadRunResult:
+    """Freeze settings for the full upload, including nested media helpers."""
+    config = kwargs.get("config")
+    if config is None:
+        config = importlib.import_module("tdlib_media_uploader.config.loader")
+    frozen = snapshot_config(config, kind, kwargs.get("target"))
+    legacy = _load_legacy(kind)
+    modules = [legacy]
+    for name in _LEGACY_MODULES.values():
+        module = sys.modules.get(name)
+        if module is not None and all(module is not value for value in modules):
+            modules.append(module)
+    previous = [(module, getattr(module, "cfg", _MISSING)) for module in modules]
+    try:
+        for module, _ in previous:
+            module.cfg = frozen
+        return _run_v2_upload(kind, **{**kwargs, "config": frozen})
+    finally:
+        for module, value in previous:
+            if value is _MISSING:
+                del module.cfg
+            else:
+                module.cfg = value
+
+
+def _confirmed_preview(preview, strategy, root, target, state):
+    """Use only the captured scan; caption edits are keyed by the same Album."""
+    if preview is None:
+        return None, None
+    scan = preview.get("scan_result")
+    if scan is None:
+        items = []
+        for raw in preview.get("items", ()):
+            if isinstance(raw, MediaItem):
+                items.append(raw)
+                continue
+            if not isinstance(raw, Mapping) or raw.get("scan_size") is None or raw.get("scan_mtime_ns") is None:
+                raise ValueError("预览缺少文件快照，请重新扫描")
+            path = Path(raw["path"])
+            items.append(MediaItem(path, root, raw.get("media_kind", strategy.kind),
+                                   FileSnapshot(str(path), int(raw["scan_size"]), int(raw["scan_mtime_ns"]))))
+        scan = ScanResult(tuple(items))
+    if not isinstance(scan, ScanResult) or scan.cancelled:
+        raise ValueError("预览不可用，请重新扫描")
+    if stable_path(preview.get("source_dir", root)) != stable_path(root):
+        raise ValueError("来源目录已改变，请重新扫描")
+    from ..core.identity import canonical_target
+    if preview.get("target") and canonical_target(dict(preview["target"])) != canonical_target(dict(target)):
+        raise ValueError("上传目标已改变，请重新扫描")
+    plans = preview.get("plans")
+    if plans is None:
+        plans = strategy.build_plans(scan, target=target, state=state)
+    captions = {plan["key"]: plan.get("caption", {}).get("text", "")
+                for group in preview.get("groups", ())
+                for plan in group.get("album_plans", ())}
+    captions.update(preview.get("caption_overrides", {}))
+    return scan, tuple(replace(plan, caption=captions.get(plan.key, plan.caption)) for plan in plans)
+
+
+def _run_v2_upload(
     kind: str,
     *,
     ui: Any,
@@ -772,6 +835,7 @@ def run_v2_upload(
     client = _call_supported(
         client_factory,
         (ui, _DEVICE_MODELS[normalized]),
+        config=config,
     )
     callback_added = False
     try:
@@ -810,7 +874,10 @@ def run_v2_upload(
             ui,
             total_albums=int((preview_result or {}).get("album_count", 0) or 0),
         )
+        captured_scan, captured_plans = _confirmed_preview(preview_result, strategy, root, target, state_adapter)
         context = UploadContext(
+            scan_result=captured_scan,
+            plans=captured_plans,
             source_root=root,
             target=dict(target or {}),
             cancel_token=token,

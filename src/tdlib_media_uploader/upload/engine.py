@@ -478,6 +478,8 @@ class UploadEngine:
             stager=stager,
             preflight=preflight_checker,
             metadata=metadata,
+            scan_result=context.scan_result if context else None,
+            plans=context.plans if context else None,
         )
 
     @staticmethod
@@ -718,13 +720,15 @@ class UploadEngine:
 
         try:
             _check_cancel(token)
-            scan_result = _call_supported(
-                getattr(strategy, "scan"),
-                (run_context.source_root,),
-                cancel_token=token,
-                event_sink=sink,
-                context=run_context,
-            )
+            scan_result = run_context.scan_result
+            if scan_result is None:
+                scan_result = _call_supported(
+                    getattr(strategy, "scan"),
+                    (run_context.source_root,),
+                    cancel_token=token,
+                    event_sink=sink,
+                    context=run_context,
+                )
             if not isinstance(scan_result, ScanResult):
                 raise TypeError("MediaStrategy.scan() 必须返回 ScanResult")
             scanned_items = tuple(scan_result.items)
@@ -759,13 +763,15 @@ class UploadEngine:
                     scanned_items=scanned_items,
                     cancelled=True,
                 )
-            raw_plans = _call_supported(
-                getattr(strategy, "build_plans"),
-                (scan_result,),
-                target=run_context.target,
-                state=state,
-                context=run_context,
-            )
+            raw_plans = run_context.plans
+            if raw_plans is None:
+                raw_plans = _call_supported(
+                    getattr(strategy, "build_plans"),
+                    (scan_result,),
+                    target=run_context.target,
+                    state=state,
+                    context=run_context,
+                )
             plans = tuple(raw_plans)
             if _stop_after_current_requested(token):
                 return UploadRunResult(
@@ -815,7 +821,14 @@ class UploadEngine:
                     )
                     ambiguous = True
                     continue
+                overlap_check = getattr(journal, "unresolved_for_items", None)
+                if unresolved is None and callable(overlap_check):
+                    unresolved = overlap_check(
+                        kind, [_item_payload(item) for item in plan.pending_items],
+                        target=run_context.target,
+                    )
                 if unresolved is not None:
+                    protected_key = str(unresolved.get("album_key") or plan.key)
                     status = str(unresolved.get("status", "UNKNOWN")).upper()
                     if status == CONFIRMED:
                         from .reconciliation import ReconciliationService
@@ -823,7 +836,7 @@ class UploadEngine:
                         try:
                             repaired = ReconciliationService(journal).recover_confirmed(
                                 kind,
-                                plan.key,
+                                protected_key,
                                 target=run_context.target,
                                 state=state,
                                 record=unresolved,
@@ -843,16 +856,19 @@ class UploadEngine:
                             continue
                         if repaired:
                             self._log(sink, "INFO", f"Album {plan.key} 已恢复本地断点并清理保护记录")
-                            continue
+                            if protected_key == plan.key:
+                                continue
+                            unresolved = None
                     message = (
-                        f"Album {plan.key} 的发送状态为 {status}，"
+                        f"Album {protected_key} 的发送状态为 {status}，"
                         "为避免重复上传已阻止自动重试"
                     )
-                    self._log(sink, "WARNING", message)
-                    errors.append(message)
-                    batches.append(UploadBatchResult(plan.key, BatchStatus.UNKNOWN, error=message))
-                    ambiguous = True
-                    continue
+                    if unresolved is not None:
+                        self._log(sink, "WARNING", message)
+                        errors.append(message)
+                        batches.append(UploadBatchResult(plan.key, BatchStatus.UNKNOWN, error=message))
+                        ambiguous = True
+                        continue
                 pending = tuple(
                     item for item in plan.pending_items if not self._state_completed(state, item)
                 )
@@ -1082,7 +1098,12 @@ class UploadEngine:
                     cancelled = True
                 submitted = getattr(error, "submitted", None)
                 status = BatchStatus.FAILED if submitted is False else BatchStatus.UNKNOWN
-                observed = _ObservedSend(status, error=str(error) or status.value)
+                delivery = getattr(error, "result", None)
+                if isinstance(delivery, Mapping):
+                    observed = _normalize_send_result(delivery, len(ready_items))
+                    observed = replace(observed, error=str(error) or observed.error)
+                else:
+                    observed = _ObservedSend(status, error=str(error) or status.value)
 
             if observed.status is BatchStatus.FAILED:
                 try:
@@ -1111,7 +1132,9 @@ class UploadEngine:
                 continue
 
             try:
-                if observed.status is not BatchStatus.PREPARED:
+                if observed.status is not BatchStatus.PREPARED and (
+                    observed.message_ids or observed.status is not BatchStatus.UNKNOWN
+                ):
                     self._journal_call(
                         journal,
                         "submitted",
@@ -1123,10 +1146,14 @@ class UploadEngine:
                 if observed.status is BatchStatus.UNKNOWN:
                     self._journal_call(
                         journal,
-                        "unknown",
+                        "update",
                         kind,
                         plan.key,
-                        observed.error or "Album 发送结果无法确认",
+                        UNKNOWN,
+                        error=observed.error or "Album 发送结果无法确认",
+                        succeeded_ids=observed.succeeded_ids,
+                        failed_ids=observed.failed_ids,
+                        pending_ids=observed.pending_ids,
                         target=run_context.target,
                     )
                 elif observed.status is BatchStatus.PREPARED:

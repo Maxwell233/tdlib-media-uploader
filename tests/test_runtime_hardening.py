@@ -223,17 +223,17 @@ class V190HardeningTest(unittest.TestCase):
             workflow,
         )
 
-    def test_workflow_uses_node24_official_actions(self):
+    def test_workflow_pins_node24_official_actions(self):
         workflow = (
             Path(__file__).resolve().parents[1]
             / ".github"
             / "workflows"
             / "build-platforms.yml"
         ).read_text(encoding="utf-8")
-        self.assertEqual(workflow.count("uses: actions/checkout@v6"), 3)
-        self.assertEqual(workflow.count("uses: actions/setup-python@v6"), 2)
-        self.assertEqual(workflow.count("uses: actions/upload-artifact@v7"), 2)
-        self.assertEqual(workflow.count("uses: actions/download-artifact@v8"), 1)
+        self.assertEqual(workflow.count("uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"), 3)
+        self.assertEqual(workflow.count("uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"), 2)
+        self.assertEqual(workflow.count("uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"), 2)
+        self.assertEqual(workflow.count("uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"), 1)
         self.assertNotIn("actions/download-artifact@v4", workflow)
         self.assertNotIn("ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION", workflow)
         self.assertNotIn("FORCE_JAVASCRIPT_ACTIONS_TO_NODE24", workflow)

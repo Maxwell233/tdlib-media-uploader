@@ -1,6 +1,6 @@
 # TDLib Media Uploader
 
-**V1.9.3 · Windows x64 + macOS arm64 桌面应用**
+**V1.9.4 · Windows x64 + macOS arm64 桌面应用**
 
 把本地或网络目录中的视频、图片批量上传到 Telegram 群组话题或频道。Windows x64 与 macOS Apple Silicon arm64 使用同一套 GUI、上传核心和功能配置；支持上传预览、标题编辑、断点恢复和独立代理，上传时无需打开 Telegram Desktop。
 
@@ -125,9 +125,9 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 
 配置保存在统一数据目录的 `data/config.toml`，首次运行从包内的 `resources/default_config.toml` 创建。日常通过界面编辑；保存无效配置时恢复原文件。
 
-- API、媒体目录、暂存和代理：在“设置与诊断 → 编辑配置”编辑。
-- 扫描稳定性、ExifTool 路径、FFmpeg/ExifTool 超时、批次大小和重试：在“设置与诊断 → 扫描与外部工具”编辑。
-- 视频/图片/混合目标、分组、标题和处理选项：在相应上传页面编辑。
+- API、媒体目录、暂存和代理：在“设置与诊断”的常规、Telegram、存储与缓存面板编辑。
+- 扫描稳定性、ExifTool 路径、FFmpeg/ExifTool 超时、批次大小和重试：在“设置与诊断 → 高级选项”编辑。
+- 视频/图片/混合目标、分组、标题和处理选项：通过上传页“修改目标”或“编辑上传参数”编辑。
 - 目标未单独配置时继承 `[telegram]`；单独目标位于 `[telegram.video]`、`[telegram.image]` 和 `[telegram.mixed]`。频道模式不使用 Topic。
 - 代理支持 SOCKS5、HTTP、MTProto，默认关闭并使用直连。SOCKS5/HTTP 可填写用户名与密码；MTProto 需要 Secret。代理由 TDLib 配置，无需额外代理库。
 - `[scan]` 集中控制网络目录扫描：`stability_checks_local/network` 与对应间隔分别控制本地和网络盘的连续稳定检查，旧的 `stability_checks`/`stability_interval_seconds` 仍作为回退；`discovery_attempts` 和两个 delay 控制目录发现阶段的有限重试，`readiness_attempts` 是暂时不可读时的重试次数，`read_probe_bytes` 是头尾读探针大小；`io_workers_local` 与 `io_workers_network` 分别限制本地和 SMB/NAS 的 I/O 并发。扫描会跳过符号链接和 Windows junction，按下“停止”可取消目录遍历；正在进行的系统文件调用会在返回后响应取消。
@@ -145,8 +145,12 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 离线回归测试（安装依赖后运行）：
 
 ```powershell
+$env:PYTHONPATH = "src"
+$env:QT_QPA_PLATFORM = "offscreen"
 python -m unittest discover -s tests -v
 ```
+
+测试按功能组织，`test_regression_*` 保留跨模块行为回归；优先为实际故障增加最小复现，避免重复的测试名称索引。
 
 便携包支持 `--self-test` 离线检查。全新包即使还没有 `data/config.toml` 也可以直接运行；检查只验证资源、可写数据目录、TDLib 路径和可选 FFmpeg，不会连接 Telegram 或修改正式配置。
 
@@ -158,13 +162,13 @@ python -m unittest discover -s tests -v
 
 核心文件位于 `src/tdlib_media_uploader/`：`app.py`（打包入口）、`gui/application.py`（GUI 启动与自检边界）、`gui/events.py` 与 `gui/workers.py`（GUI 事件和线程边界）、`gui/models.py`（预览模型适配）、`gui/main_window.py`（界面与生命周期）、`config/loader.py` 与 `config/paths.py`（配置和路径）、`media/legacy_video.py`、`media/legacy_image.py`、`media/legacy_mixed.py`（由 V2 策略调用的媒体实现）以及 `telegram/tdlib_common.py`（TDLib）。上传流程入口也会复用 `data/app.lock`；内部模块不提供独立启动入口。构建配置集中在根目录 `tdlib_media_uploader.spec`，平台构建只在 GitHub Actions 中执行。
 
-版本使用“主版本.功能版本.修订版本”：日常优化增加最后一位，较大功能更新增加中间一位。版本号唯一存放在根目录 `VERSION`，程序、界面和平台构建 workflow 会从该文件读取。此次修改见 [CHANGELOG.md](CHANGELOG.md)。
+版本使用“主版本.功能版本.修订版本”：日常优化增加最后一位，较大功能更新增加中间一位。版本号唯一存放在根目录 `VERSION`，程序、界面和平台构建 workflow 会从该文件读取。此次修改见 [CHANGELOG.md](CHANGELOG.md)。推送 main 只构建和测试；发布需创建与 VERSION 一致的新版本标签，既有标签和 Release 不自动覆盖。下载资产与 SHA256SUMS 放在同一目录后，可执行 `shasum -a 256 -c SHA256SUMS` 校验。
 
 ## 信任与风险
 
 建议只从本仓库的 [GitHub Releases](https://github.com/Maxwell233/tdlib-media-uploader/releases) 下载，并在运行前核对 `SHA256SUMS`。平台构建 workflow、项目许可、作者署名和第三方依赖清单都公开在仓库中；发布 ZIP 也包含许可/署名文件，便于检查来源和再分发条件。SHA-256 只能证明文件与发布者提供的摘要一致，不能替代代码审查或操作系统安全认证。
 
-macOS v1.9.1 包未配置 Apple Developer 签名和公证，所以 Gatekeeper 可能显示“无法验证开发者”。请不要绕过来源核验后直接运行未知文件；确认仓库地址、标签和 SHA-256 后再按系统提示打开。Windows 版也不应被视为经过独立安全机构认证的程序。应用会调用随包提供或系统中的 FFmpeg/ExifTool 处理媒体；请确认这些工具来源和许可，并注意压缩失败、网络中断、Telegram 限制以及重复上传等运行风险。
+macOS 包未配置 Apple Developer 签名和公证，所以 Gatekeeper 可能显示“无法验证开发者”。请不要绕过来源核验后直接运行未知文件；确认仓库地址、标签和 SHA-256 后再按系统提示打开。Windows 版也不应被视为经过独立安全机构认证的程序。应用会调用随包提供或系统中的 FFmpeg/ExifTool 处理媒体；请确认这些工具来源和许可，并注意压缩失败、网络中断、Telegram 限制以及重复上传等运行风险。
 
 程序需要 Telegram API ID/API Hash，并会在本机 `data/` 保存 Telegram 登录数据库、代理设置、上传断点和用户输入的标题；这些数据不会随发布包提供。不要把 `data/config.toml`、API Hash、登录数据库、代理密码或缓存发给他人。上传目标、代理、媒体内容和 Telegram 账号权限均由使用者自行确认；请遵守 Telegram 使用条款、版权要求和目标群组/频道规则。若使用 ExifTool 或自行替换 FFmpeg，还需遵守对应上游许可证。
 

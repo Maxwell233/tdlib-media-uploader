@@ -44,7 +44,7 @@ class Beta5SettingsAndUXTest(unittest.TestCase):
 
     def test_version_is_stable(self):
         version = read_version()
-        self.assertEqual(version, "1.9.3")
+        self.assertEqual(version, (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip())
 
     def test_settings_page_six_inline_categories(self):
         page = SettingsPage()
@@ -335,8 +335,8 @@ class Beta5SettingsAndUXTest(unittest.TestCase):
     def test_main_window_integration_stable(self):
         window = MainWindow()
         try:
-            self.assertIn("1.9.3", window.windowTitle())
-            self.assertEqual(window.nav_sidebar.version_label.text(), "Version 1.9.3")
+            self.assertIn(read_version(), window.windowTitle())
+            self.assertEqual(window.nav_sidebar.version_label.text(), f"Version {read_version()}")
             self.assertFalse(window.nav_sidebar.badge.isVisible())
             self.assertEqual(window.settings_page.nav_list.count(), 6)
         finally:

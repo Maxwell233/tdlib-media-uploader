@@ -262,6 +262,27 @@ class InflightJournal:
             return record
         return None
 
+    def unresolved_for_items(self, kind: str, items, *, target=None):
+        """Find protected source snapshots even after their Album is regrouped."""
+        def identity(item):
+            return (stable_path(item["path"]),
+                    item.get("size", item.get("scan_size")),
+                    item.get("mtime_ns", item.get("scan_mtime_ns")))
+        requested = {identity(item) for item in items}
+        with self._lock:
+            self._ensure_index()
+            for _path, record in self._records:
+                if (record.get("kind") == kind and record.get("status") in UNRESOLVED
+                        and _target_matches(record, target)):
+                    if any(isinstance(item, dict) and item.get("path")
+                           and any(identity(item)[0] == candidate[0]
+                                   and all(left is None or right is None or left == right
+                                           for left, right in zip(identity(item)[1:], candidate[1:]))
+                                   for candidate in requested)
+                           for item in record.get("items", ())):
+                        return copy.deepcopy(record)
+        return None
+
     def find_album(self, album_key: str, kind: str | None = None, target=None) -> dict | None:
         """Find a record by Album key when the media kind is not known."""
 
@@ -293,6 +314,8 @@ class InflightJournal:
                 snapshot = file_snapshot(path)
                 if snapshot is not None:
                     value["size"], value["mtime_ns"] = snapshot
+            if source.get("source_root") is not None:
+                value["source_root"] = stable_path(source["source_root"])
             capture_time = source.get("capture_time")
             if capture_time is not None:
                 value["capture_time"] = (
@@ -341,6 +364,9 @@ class InflightJournal:
                     )
                 if existing_path is not None:
                     path = existing_path
+            overlap = self.unresolved_for_items(kind, record["items"], target=target)
+            if overlap is not None:
+                raise RuntimeError(f"源文件已有未确认上传记录：{overlap['album_key']}")
             self._write(path, record)
         return record
 

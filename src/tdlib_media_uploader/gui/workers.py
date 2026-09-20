@@ -97,18 +97,22 @@ class ScanWorker(QThread):
 class CacheStatsWorker(QThread):
     """Calculate cache usage statistics in background without blocking Qt UI."""
 
-    finished = Signal(str)
+    result_ready = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.cancel_event = threading.Event()
+
+    def request_stop(self):
+        self.cancel_event.set()
 
     def run(self):
         try:
             from .cache_service import cache_status_text  # noqa: PLC0415
-            text = cache_status_text()
+            text = cache_status_text(cancel_event=self.cancel_event)
         except Exception as exc:
             text = f"计算缓存占用失败：{exc}"
-        self.finished.emit(text)
+        self.result_ready.emit(text)
 
 
 class UploadWorker(QThread):

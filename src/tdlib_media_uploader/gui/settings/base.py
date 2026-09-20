@@ -6,6 +6,12 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QFrame,
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QLineEdit,
+    QSpinBox,
+    QAbstractSpinBox,
     QHBoxLayout,
     QLabel,
     QVBoxLayout,
@@ -34,6 +40,22 @@ class SettingsPanel(QWidget):
     def collect_values(self) -> dict:
         """Collect configuration dictionary mapping (section, key) -> value."""
         raise NotImplementedError
+
+    def input_snapshot(self):
+        """Capture editable controls without labels or internal spinbox editors."""
+        values = {}
+        for widget in self.findChildren(QWidget):
+            if isinstance(widget, QCheckBox):
+                values[widget] = ("setChecked", widget.isChecked())
+            elif isinstance(widget, QComboBox):
+                values[widget] = ("setCurrentIndex", widget.currentIndex())
+            elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+                values[widget] = ("setValue", widget.value())
+            elif isinstance(widget, QLineEdit) and not isinstance(
+                widget.parentWidget(), (QAbstractSpinBox, QComboBox)
+            ):
+                values[widget] = ("setText", widget.text())
+        return values
 
     def reset(self):
         """Reset panel inputs to loaded configuration."""

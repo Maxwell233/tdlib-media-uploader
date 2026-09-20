@@ -185,9 +185,11 @@ class CaptionStore:
             return {}
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
-            return value if isinstance(value, dict) else {}
-        except (OSError, ValueError, TypeError):
-            return {}
+            if not isinstance(value, dict):
+                raise ValueError("标题文件必须是 JSON 对象")
+            return value
+        except (OSError, ValueError, TypeError) as exc:
+            raise RuntimeError(f"标题文件读取失败，已保留原文件：{self.path} · {exc}") from exc
 
     def get(self, key: str, default_label: str) -> dict:
         # A store belongs to one plan/scan. Parse once, not once per Album.

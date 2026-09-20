@@ -53,6 +53,8 @@ class UploadContext:
     stager: Any | None = None
     preflight: Any | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    scan_result: ScanResult | None = None
+    plans: tuple[AlbumPlan, ...] | None = None
 
 
 class MediaStrategy(Protocol):

@@ -138,11 +138,18 @@ class TelegramTargetEditor(QWidget):
         return True, ""
 
     def collect_values(self, kind: str | None = None) -> dict:
+        def integer_or_text(field):
+            text = field.text().strip()
+            try:
+                return int(text or "0")
+            except ValueError:
+                return text
+
         k = kind or self.kind
         mode = self.target_mode.currentData() or "forum_topic"
-        group_id = int(self.chat_id.text().strip() or "0")
-        channel_id = int(self.channel_chat_id.text().strip() or "0")
-        topic_id = int(self.topic_id.text().strip() or "0")
+        group_id = integer_or_text(self.chat_id)
+        channel_id = integer_or_text(self.channel_chat_id)
+        topic_id = integer_or_text(self.topic_id)
         return {
             (f"telegram.{k}", "target_mode"): mode,
             (f"telegram.{k}", "chat_id"): group_id,

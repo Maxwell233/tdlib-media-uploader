@@ -708,6 +708,14 @@ class UploadPage(QWidget):
                 rendered = self.services.validate_caption(caption, limit=caption_limit)
             except CaptionLimitError:
                 return
+            try:
+                store = self.services.caption_store_factory(self.kind)
+                store.set(plan["key"], base_label=new_base, custom_text=new_custom)
+            except (OSError, RuntimeError, ValueError) as exc:
+                QMessageBox.warning(self, "标题保存失败", str(exc))
+                return
+            if self.result is not None:
+                self.result.setdefault("caption_overrides", {})[plan["key"]] = rendered
             plan["caption"] = {
                 "text": rendered,
                 "base_label": new_base,
@@ -723,12 +731,7 @@ class UploadPage(QWidget):
                 max_chars=caption_limit,
             )
             item.setToolTip(1, caption_text or "无标题")
-            store = self.services.caption_store_factory(self.kind)
-            store.set(
-                plan["key"],
-                base_label=new_base,
-                custom_text=new_custom,
-            )
+
 
     def _update_edit_button(self):
         item = self.tree.currentItem()

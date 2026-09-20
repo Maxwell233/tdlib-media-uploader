@@ -52,8 +52,9 @@ class SettingsPage(QWidget):
         ("环境与许可", "info"),
     )
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, can_save=None):
         super().__init__(parent)
+        self.can_save = can_save or (lambda: True)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(14)
@@ -153,6 +154,9 @@ class SettingsPage(QWidget):
         self.nav_list.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav_list.setCurrentRow(0)
 
+        self._baselines = {p: p.collect_values() for p in self.panels}
+        self._input_baselines = {p: p.input_snapshot() for p in self.panels}
+        self._conflicts = {}
         self.refresh()
 
     @property
@@ -174,11 +178,23 @@ class SettingsPage(QWidget):
         """Discard uncommitted modifications in panels and reload loaded values."""
         for p in self.panels:
             p.reset()
+        self._baselines = {p: p.collect_values() for p in self.panels}
+        self._input_baselines = {p: p.input_snapshot() for p in self.panels}
+        self._conflicts = {}
         self._on_dirty_changed(False)
         self._set_status("已恢复未保存修改", "muted")
 
     def save_changes(self):
         """Validate and commit dirty configuration values to config.toml."""
+        if not self.can_save():
+            self._set_status("任务运行中，暂时不能保存配置", "warning")
+            return
+        for panel, conflicts in getattr(self, "_conflicts", {}).items():
+            current = panel.collect_values()
+            if any(current.get(key) == value and value != self._baselines[panel].get(key)
+                   for key, value in conflicts.items()):
+                self._set_status("同一配置已在其他页面修改；请恢复或重新编辑冲突项后保存", "warning")
+                return
         for p in self.panels:
             valid, msg = p.validate()
             if not valid:
@@ -188,7 +204,9 @@ class SettingsPage(QWidget):
         dirty_values = {}
         for p in self.panels:
             if p.is_dirty():
-                dirty_values.update(p.collect_values())
+                baseline = self._baselines.get(p, {})
+                dirty_values.update({key: value for key, value in p.collect_values().items()
+                                     if baseline.get(key) != value})
 
         if not dirty_values:
             self._set_status("没有检测到更改", "muted")
@@ -239,7 +257,29 @@ class SettingsPage(QWidget):
         self.config_status.style().unpolish(self.config_status)
         self.config_status.style().polish(self.config_status)
 
-        self.env_panel.load()
+        for panel in self.panels:
+            previous = self._baselines.get(panel, {})
+            edited = panel.collect_values()
+            inputs = panel.input_snapshot()
+            changed_inputs = {
+                widget: value for widget, value in inputs.items()
+                if panel.is_dirty() and self._input_baselines.get(panel, {}).get(widget) != value
+            }
+            panel.load()
+            latest = panel.collect_values()
+            self._baselines[panel] = latest
+            self._input_baselines[panel] = panel.input_snapshot()
+            for widget, (setter, value) in changed_inputs.items():
+                getattr(widget, setter)(value)
+            conflicts = self._conflicts.setdefault(panel, {})
+            conflicts.update({key: value for key, value in edited.items()
+                              if changed_inputs and previous.get(key) != value
+                              and latest.get(key) != previous.get(key) and latest.get(key) != value})
+            current = panel.collect_values()
+            self._conflicts[panel] = {key: value for key, value in conflicts.items()
+                                     if current.get(key) == value and latest.get(key) != value}
+        if any(self._conflicts.values()):
+            self._set_status("配置已同步；有未保存项与其他页面冲突，请恢复或重新编辑冲突项", "warning")
         if update_cache:
             self.refresh_cache_stats()
 

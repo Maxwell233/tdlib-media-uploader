@@ -322,8 +322,8 @@ class Beta3MainWindowAndArchitectureTest(unittest.TestCase):
         window = gui_app.MainWindow()
         try:
             version = read_version()
-            self.assertEqual(version, "1.9.3")
-            self.assertIn("1.9.3", window.windowTitle())
+            self.assertEqual(version, (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip())
+            self.assertIn(version, window.windowTitle())
 
             # Sidebar and stack synchronization
             self.assertEqual(window.sidebar.count(), 6)

@@ -291,7 +291,7 @@ class MainWindow(QMainWindow):
         self.task_page = TaskPage()
         self.inflight_page = InflightPage()
         self.history_page = HistoryPage()
-        self.settings_page = SettingsPage()
+        self.settings_page = SettingsPage(can_save=self._can_change_configuration)
         self.upload_pages = {
             "video": self.video_page,
             "image": self.image_page,
@@ -690,12 +690,16 @@ class MainWindow(QMainWindow):
                 for key in ("target_mode", "chat_id", "forum_topic_id", "channel_chat_id")
                 if key in record
             }
-            client.reconcile_inflight(
-                album_key,
-                sent=bool(sent),
-                kind=kind,
-                target=target or None,
-            )
+            from tdlib_media_uploader.upload.reconciliation import SourceRootRequired
+            try:
+                client.reconcile_inflight(album_key, sent=bool(sent), kind=kind, target=target or None)
+            except SourceRootRequired:
+                source_root = QFileDialog.getExistingDirectory(
+                    self, "旧记录缺少来源目录：请选择当时扫描的根目录")
+                if not source_root:
+                    return
+                client.reconcile_inflight(album_key, sent=bool(sent), kind=kind,
+                                         target=target or None, source_root=source_root)
         except Exception as exc:
             QMessageBox.warning(
                 self,
@@ -849,6 +853,13 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(self, "仍在扫描", "扫描任务尚未结束，请稍候再关闭窗口。")
                     event.ignore()
                     return
+        cache_worker = self.settings_page.storage_panel._cache_worker
+        if cache_worker is not None and cache_worker.isRunning():
+            cache_worker.request_stop()
+            if not cache_worker.wait(1000):
+                self.statusBar().showMessage("正在停止缓存统计，请稍后再关闭窗口")
+                event.ignore()
+                return
         event.accept()
 
 

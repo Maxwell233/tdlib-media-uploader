@@ -11,6 +11,10 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -22,10 +26,10 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Python 3.13 x64
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
           architecture: x64
@@ -108,7 +112,7 @@ jobs:
           foreach ($noticeName in @("LICENSE", "ATTRIBUTION", "THIRD_PARTY_LICENSES.md")) {
             Copy-Item -LiteralPath (Join-Path $projectDir $noticeName) -Destination (Join-Path $distDir $noticeName) -Force
           }
-          $zipPath = Join-Path $projectDir "dist\TDLib Media Uploader-v$version-windows-x64.zip"
+          $zipPath = Join-Path $projectDir "dist\TDLib.Media.Uploader-v$version-windows-x64.zip"
           Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
           Compress-Archive -Path (Join-Path $distDir "*") -DestinationPath $zipPath -CompressionLevel Optimal
 
@@ -162,7 +166,7 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $ffmpegVersion -match "--enable-gpl" -or $ffmpegVersion -match "--enable-nonfree") {
             throw "Portable build contains an invalid GPL/nonfree FFmpeg binary"
           }
-          $archive = Get-ChildItem -LiteralPath "dist" -Filter "TDLib Media Uploader-v*.zip" | Select-Object -First 1
+          $archive = Get-ChildItem -LiteralPath "dist" -Filter "TDLib.Media.Uploader-v*.zip" | Select-Object -First 1
           if ($null -eq $archive) {
             throw "Portable ZIP not found in dist"
           }
@@ -171,16 +175,18 @@ jobs:
 
       - name: Compute Windows artifact label
         id: windows_artifact
+        env:
+          ARTIFACT_REF: ${{ github.event.pull_request.number || github.ref_name }}
         shell: pwsh
         run: |
-          $label = "${{ github.event.pull_request.number || github.ref_name }}".Replace("/", "-")
+          $label = $env:ARTIFACT_REF.Replace("/", "-")
           "label=$label" >> $env:GITHUB_OUTPUT
 
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: tdlib-media-uploader-${{ steps.windows_artifact.outputs.label }}-windows-x64
-          path: dist/TDLib Media Uploader-v*.zip
+          path: dist/TDLib.Media.Uploader-v*.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -191,7 +197,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Verify Apple Silicon runner
         shell: bash
@@ -200,7 +206,7 @@ jobs:
           test "$(uname -m)" = "arm64"
 
       - name: Set up Python 3.13 arm64
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
           architecture: arm64
@@ -322,7 +328,7 @@ jobs:
             cp "$PROJECT_DIR/$notice" "$APP_PATH/Contents/Resources/$notice" 2>/dev/null || cp "$PROJECT_DIR/$notice" "$APP_PATH/$notice"
           done
 
-          PACKAGE_NAME="TDLib Media Uploader-v${VERSION}-macos-arm64"
+          PACKAGE_NAME="TDLib.Media.Uploader-v${VERSION}-macos-arm64"
           DMG_STAGE_DIR="$BUILD_DIR/dmg/$PACKAGE_NAME"
           DMG_PATH="$DIST_DIR/${PACKAGE_NAME}.dmg"
           rm -rf "$DMG_STAGE_DIR" "$DMG_PATH" "$DMG_PATH.sha256"
@@ -364,7 +370,7 @@ jobs:
           for notice in LICENSE ATTRIBUTION THIRD_PARTY_LICENSES.md; do
             test -f "$APP/Contents/Resources/$notice" || test -f "$APP/$notice"
           done
-          DMG="$(find dist -maxdepth 1 -type f -name 'TDLib Media Uploader-v*-macos-arm64.dmg' -print -quit)"
+          DMG="$(find dist -maxdepth 1 -type f -name 'TDLib.Media.Uploader-v*-macos-arm64.dmg' -print -quit)"
           test -n "$DMG"
           test -f "$DMG.sha256"
           MOUNT_POINT="$(mktemp -d)"
@@ -379,24 +385,26 @@ jobs:
 
       - name: Compute macOS artifact label
         id: macos_artifact
+        env:
+          ARTIFACT_REF: ${{ github.event.pull_request.number || github.ref_name }}
         shell: bash
         run: |
-          label="${{ github.event.pull_request.number || github.ref_name }}"
+          label="$ARTIFACT_REF"
           echo "label=${label//\//-}" >> "$GITHUB_OUTPUT"
 
       - name: Upload macOS artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: tdlib-media-uploader-${{ steps.macos_artifact.outputs.label }}-macos-arm64
           path: |
-            dist/TDLib Media Uploader-v*-macos-arm64.dmg
-            dist/TDLib Media Uploader-v*-macos-arm64.dmg.sha256
+            dist/TDLib.Media.Uploader-v*-macos-arm64.dmg
+            dist/TDLib.Media.Uploader-v*-macos-arm64.dmg.sha256
           if-no-files-found: error
           retention-days: 30
 
   publish-release:
     name: Publish combined release
-    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[publish-release]'))
+    if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - build-windows
       - build-macos-arm64
@@ -406,7 +414,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Resolve release metadata
         id: release_meta
@@ -428,13 +436,15 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Download platform artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: tdlib-media-uploader-${{ steps.release_meta.outputs.artifact_label }}-*
           path: release-assets
           merge-multiple: true
 
       - name: Create checksums and release notes
+        env:
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -443,10 +453,11 @@ jobs:
           test "${#archives[@]}" -eq 2
           : > release-assets/SHA256SUMS
           for archive in "${archives[@]}"; do
-            shasum -a 256 "$archive" >> release-assets/SHA256SUMS
+            (cd release-assets && shasum -a 256 "$(basename "$archive")") >> release-assets/SHA256SUMS
           done
+          (cd release-assets && shasum -a 256 -c SHA256SUMS)
           version="$(tr -d '[:space:]' < VERSION)"
-          tag="${{ steps.release_meta.outputs.tag }}"
+          tag="$RELEASE_TAG"
           if [[ "$tag" != "v${version}" ]]; then
             echo "Release tag $tag does not match VERSION $version" >&2
             exit 1
@@ -477,25 +488,15 @@ jobs:
           EOF
           } > release-notes.md
 
-      - name: Repoint release tag to anonymized main
-        if: github.ref == 'refs/heads/main'
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          tag="${{ steps.release_meta.outputs.tag }}"
-          git config user.name "Maxwell233"
-          git config user.email "33753009+Maxwell233@users.noreply.github.com"
-          git tag -f "$tag" "$GITHUB_SHA"
-          git push origin "refs/tags/$tag" --force
-
       - name: Publish combined GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
         run: |
           set -Eeuo pipefail
           version="$(tr -d '[:space:]' < VERSION)"
-          tag="${{ steps.release_meta.outputs.tag }}"
+          tag="$RELEASE_TAG"
           release_flags=(--title "V${version}" --notes-file release-notes.md)
           if [[ "$version" == *-* ]]; then
             release_flags+=(--prerelease)
@@ -503,9 +504,8 @@ jobs:
             release_flags+=(--latest)
           fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" release-assets/*.zip release-assets/*.dmg release-assets/SHA256SUMS --clobber
-            gh release edit "$tag" "${release_flags[@]}"
-          else
-            gh release create "$tag" release-assets/*.zip release-assets/*.dmg release-assets/SHA256SUMS \
-              "${release_flags[@]}"
+            echo "Release $tag already exists; publish a new version instead of overwriting it" >&2
+            exit 1
           fi
+          gh release create "$tag" release-assets/*.zip release-assets/*.dmg release-assets/SHA256SUMS \
+            --verify-tag "${release_flags[@]}"

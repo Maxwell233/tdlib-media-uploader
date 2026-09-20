@@ -345,6 +345,8 @@ def scan_result(
     pending_bytes = sum(size_of(item_dict(item)) for item in pending_items)
     return {
         "kind": kind,
+        "scan_result": scan,
+        "plans": tuple(bundle.plans),
         "items": item_values,
         "missing": [str(path) for path in bundle.missing],
         "groups": groups,

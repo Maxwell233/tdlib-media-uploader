@@ -52,6 +52,16 @@ class UploadUnknownError(RuntimeError):
     """The Telegram request may have been accepted but was not confirmed."""
 
 
+class SendResultFailed(RuntimeError):
+    """Every message was definitively rejected; a retry is safe."""
+
+    submitted = False
+
+    def __init__(self, message, result):
+        super().__init__(message)
+        self.result = result
+
+
 class SendResultUnknown(TimeoutError):
     """A submitted Album has known and/or unknown individual outcomes."""
 
@@ -451,7 +461,7 @@ def topic_object() -> dict | None:
     }
 
 
-def build_tdlib_parameters(device_model: str) -> dict:
+def build_tdlib_parameters(device_model: str, config=None) -> dict:
     """Build the one canonical TDLib initialization payload.
 
     Keeping this payload in a pure helper makes the writable data locations
@@ -459,29 +469,32 @@ def build_tdlib_parameters(device_model: str) -> dict:
     a network connection.  Both paths are always below the V1.9 ``DATA_DIR``.
     """
 
+    config = cfg if config is None else config
     return {
         "@type": "setTdlibParameters",
         "use_test_dc": False,
         "database_directory": str(TDLIB_DATABASE_DIR.resolve()),
         "files_directory": str(TDLIB_FILES_DIR.resolve()),
-        "database_encryption_key": cfg.TDLIB_DATABASE_ENCRYPTION_KEY,
-        "use_file_database": cfg.TDLIB_USE_FILE_DATABASE,
-        "use_chat_info_database": cfg.TDLIB_USE_CHAT_INFO_DATABASE,
-        "use_message_database": cfg.TDLIB_USE_MESSAGE_DATABASE,
+        "database_encryption_key": config.TDLIB_DATABASE_ENCRYPTION_KEY,
+        "use_file_database": config.TDLIB_USE_FILE_DATABASE,
+        "use_chat_info_database": config.TDLIB_USE_CHAT_INFO_DATABASE,
+        "use_message_database": config.TDLIB_USE_MESSAGE_DATABASE,
         "use_secret_chats": False,
-        "api_id": int(cfg.API_ID),
-        "api_hash": cfg.API_HASH,
+        "api_id": int(config.API_ID),
+        "api_hash": config.API_HASH,
         "system_language_code": "zh-Hans",
         "device_model": str(device_model),
         "system_version": "macOS" if sys.platform == "darwin" else platform.system(),
-        "application_version": cfg.APP_VERSION,
+        "application_version": config.APP_VERSION,
     }
 
 
 class TDJsonClient:
     """Small synchronous wrapper around TDLib's JSON interface."""
 
-    def __init__(self, ui, device_model: str):
+    def __init__(self, ui, device_model: str, *, config=None):
+        from ..config.snapshot import snapshot_config
+        self._config = snapshot_config(config if config is not None else cfg)
         self.ui = ui
         self.device_model = device_model
         TDLIB_DATABASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -511,7 +524,7 @@ class TDJsonClient:
 
         self.execute({
             "@type": "setLogVerbosityLevel",
-            "new_verbosity_level": int(cfg.TDLIB_LOG_VERBOSITY),
+            "new_verbosity_level": int(self.config.TDLIB_LOG_VERBOSITY),
         })
 
         self.client_id = tdjson.td_create_client_id()
@@ -539,6 +552,10 @@ class TDJsonClient:
             daemon=True,
         )
         self.receiver_thread.start()
+
+    @property
+    def config(self):
+        return getattr(self, "_config", cfg)
 
     @staticmethod
     def _encode(obj: dict) -> bytes:
@@ -591,7 +608,7 @@ class TDJsonClient:
     def request(self, query: dict, timeout: int | float | None = None):
         self._raise_if_cancelled()
         if timeout is None:
-            timeout = cfg.TDLIB_REQUEST_TIMEOUT
+            timeout = self.config.TDLIB_REQUEST_TIMEOUT
         extra = "req:" + uuid.uuid4().hex
         payload = dict(query)
         payload["@extra"] = extra
@@ -681,27 +698,26 @@ class TDJsonClient:
                 self.ui.warning(f"TDLib receiver 异常：{type(exc).__name__}: {exc}")
                 time.sleep(1)
 
-    @staticmethod
-    def _configured_proxy() -> dict:
+    def _configured_proxy(self) -> dict:
         """Build the TDLib proxy object from the optional local config."""
-        proxy_type = cfg.PROXY_TYPE
+        proxy_type = self.config.PROXY_TYPE
         if proxy_type == "socks5":
             type_payload = {
                 "@type": "proxyTypeSocks5",
-                "username": cfg.PROXY_USERNAME,
-                "password": cfg.PROXY_PASSWORD,
+                "username": self.config.PROXY_USERNAME,
+                "password": self.config.PROXY_PASSWORD,
             }
         elif proxy_type == "http":
             type_payload = {
                 "@type": "proxyTypeHttp",
-                "username": cfg.PROXY_USERNAME,
-                "password": cfg.PROXY_PASSWORD,
-                "http_only": cfg.PROXY_HTTP_ONLY,
+                "username": self.config.PROXY_USERNAME,
+                "password": self.config.PROXY_PASSWORD,
+                "http_only": self.config.PROXY_HTTP_ONLY,
             }
         elif proxy_type == "mtproto":
             type_payload = {
                 "@type": "proxyTypeMtproto",
-                "secret": cfg.PROXY_SECRET,
+                "secret": self.config.PROXY_SECRET,
             }
         else:
             # app_config validates this, but keep the client defensive when
@@ -709,14 +725,14 @@ class TDJsonClient:
             raise RuntimeError(f"不支持的代理类型：{proxy_type}")
         return {
             "@type": "proxy",
-            "server": cfg.PROXY_SERVER,
-            "port": int(cfg.PROXY_PORT),
+            "server": self.config.PROXY_SERVER,
+            "port": int(self.config.PROXY_PORT),
             "type": type_payload,
         }
 
     def _configure_proxy(self):
         """Apply the independent proxy setting before authentication."""
-        if not cfg.PROXY_ENABLED:
+        if not self.config.PROXY_ENABLED:
             # A previous run may have enabled a proxy in TDLib's database.
             # Explicitly disable it so the unchecked setting always means a
             # direct connection.
@@ -754,8 +770,8 @@ class TDJsonClient:
 
         labels = {"socks5": "SOCKS5", "http": "HTTP", "mtproto": "MTProto"}
         self.ui.info(
-            f"代理已启用：{labels.get(cfg.PROXY_TYPE, cfg.PROXY_TYPE)} "
-            f"{cfg.PROXY_SERVER}:{cfg.PROXY_PORT}"
+            f"代理已启用：{labels.get(self.config.PROXY_TYPE, self.config.PROXY_TYPE)} "
+            f"{self.config.PROXY_SERVER}:{self.config.PROXY_PORT}"
         )
 
     def login(self):
@@ -765,9 +781,9 @@ class TDJsonClient:
             pass
 
         proxy_configured = False
+        auth_deadline = time.monotonic() + 120
         while True:
             self._raise_if_cancelled()
-            auth_deadline = time.monotonic() + 120
             remaining = auth_deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("等待 TDLib 授权状态超时")
@@ -779,7 +795,7 @@ class TDJsonClient:
             state_type = state.get("@type")
             if state_type == "authorizationStateWaitTdlibParameters":
                 self.ui.info("正在初始化 TDLib…")
-                self.request(build_tdlib_parameters(self.device_model))
+                self.request(build_tdlib_parameters(self.device_model, self.config))
                 if not proxy_configured:
                     self._configure_proxy()
                     proxy_configured = True
@@ -818,6 +834,8 @@ class TDJsonClient:
                 return
             elif state_type == "authorizationStateClosed":
                 raise RuntimeError("TDLib 已关闭。")
+            # User input time does not consume the next network-state timeout.
+            auth_deadline = time.monotonic() + 120
 
     def _prompt(self, text: str, *, password: bool = False) -> str:
         prompt = getattr(self.ui, "prompt", None)
@@ -843,7 +861,7 @@ class TDJsonClient:
     def _load_chat_list_until_found(self, chat_list, label: str, max_rounds: int = 100):
         self.ui.info(f"正在加载 Telegram {label}，以定位目标群…")
         for index in range(1, max_rounds + 1):
-            chat = self._try_get_chat(cfg.CHAT_ID)
+            chat = self._try_get_chat(self.config.CHAT_ID)
             if chat is not None:
                 self.ui.success(f"已在{label}中找到目标聊天。")
                 return chat
@@ -855,17 +873,17 @@ class TDJsonClient:
                 }, timeout=60)
             except TDLibError as exc:
                 if exc.code == 404:
-                    return self._try_get_chat(cfg.CHAT_ID)
+                    return self._try_get_chat(self.config.CHAT_ID)
                 raise
             time.sleep(0.05)
-            chat = self._try_get_chat(cfg.CHAT_ID)
+            chat = self._try_get_chat(self.config.CHAT_ID)
             if chat is not None:
                 self.ui.success(f"已在{label}中找到目标聊天（第 {index} 批）。")
                 return chat
         return None
 
     def ensure_target_chat(self):
-        chat = self._try_get_chat(cfg.CHAT_ID)
+        chat = self._try_get_chat(self.config.CHAT_ID)
         if chat is not None:
             return chat
         self.ui.info("当前 TDLib 数据库尚未加载目标聊天，开始加载聊天列表。")
@@ -875,8 +893,8 @@ class TDJsonClient:
         chat = self._load_chat_list_until_found({"@type": "chatListArchive"}, "归档聊天列表")
         if chat is not None:
             return chat
-        if cfg.CHAT_ID <= -1000000000001:
-            supergroup_id = -int(cfg.CHAT_ID) - 1000000000000
+        if self.config.CHAT_ID <= -1000000000001:
+            supergroup_id = -int(self.config.CHAT_ID) - 1000000000000
             try:
                 return self.request({
                     "@type": "createSupergroupChat",
@@ -895,13 +913,13 @@ class TDJsonClient:
         if chat_type.get("@type") != "chatTypeSupergroup":
             raise RuntimeError("目标聊天必须是超级群组或频道。")
 
-        if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel":
+        if getattr(self.config, "TARGET_MODE", "forum_topic") == "channel":
             if not chat_type.get("is_channel", False):
                 raise RuntimeError("当前 Chat ID 不是频道，请在目标设置中选择正确的频道。")
             self.ui.target(
                 chat.get("title", ""),
                 "",
-                cfg.CHAT_ID,
+                self.config.CHAT_ID,
                 None,
             )
             return chat, None
@@ -911,19 +929,19 @@ class TDJsonClient:
         try:
             topic = self.request({
                 "@type": "getForumTopic",
-                "chat_id": int(cfg.CHAT_ID),
-                "forum_topic_id": int(cfg.FORUM_TOPIC_ID),
+                "chat_id": int(self.config.CHAT_ID),
+                "forum_topic_id": int(self.config.FORUM_TOPIC_ID),
             })
         except TDLibError as exc:
             raise RuntimeError(
-                f"CHAT_ID 已找到，但 Topic 无法解析。FORUM_TOPIC_ID={cfg.FORUM_TOPIC_ID}；{exc}"
+                f"CHAT_ID 已找到，但 Topic 无法解析。FORUM_TOPIC_ID={self.config.FORUM_TOPIC_ID}；{exc}"
             ) from exc
         topic_name = topic.get("info", {}).get("name", "")
         self.ui.target(
             chat.get("title", ""),
             topic_name,
-            cfg.CHAT_ID,
-            cfg.FORUM_TOPIC_ID,
+            self.config.CHAT_ID,
+            self.config.FORUM_TOPIC_ID,
         )
         return chat, topic
 
@@ -941,7 +959,7 @@ class TDJsonClient:
     def wait_for_send_results(self, messages, timeout: int | None = None):
         self._raise_if_cancelled()
         if timeout is None:
-            timeout = cfg.TDLIB_MESSAGE_SEND_TIMEOUT
+            timeout = self.config.TDLIB_MESSAGE_SEND_TIMEOUT
         pending_ids = []
         succeeded_ids = []
         failed_ids = []
@@ -1116,6 +1134,8 @@ class TDJsonClient:
         album_key: str | None = None,
         kind: str | None = None,
         journal_items=None,
+        target=None,
+        on_submitted=None,
     ):
         return self._send_contents(
             contents,
@@ -1124,6 +1144,8 @@ class TDJsonClient:
             album_key=album_key,
             kind=kind,
             journal_items=journal_items,
+            target=target,
+            on_submitted=on_submitted,
         )
 
     @staticmethod
@@ -1284,15 +1306,14 @@ class TDJsonClient:
             rows.append(line)
         return rows
 
-    @staticmethod
-    def _target_identity() -> dict:
+    def _target_identity(self) -> dict:
         """Capture the effective Telegram destination for journal scoping."""
 
         return normalize_target({
-            "target_mode": getattr(cfg, "TARGET_MODE", "forum_topic"),
-            "chat_id": getattr(cfg, "CHAT_ID", 0),
-            "forum_topic_id": getattr(cfg, "FORUM_TOPIC_ID", 0),
-            "channel_chat_id": getattr(cfg, "CHANNEL_CHAT_ID", 0),
+            "target_mode": getattr(self.config, "TARGET_MODE", "forum_topic"),
+            "chat_id": getattr(self.config, "CHAT_ID", 0),
+            "forum_topic_id": getattr(self.config, "FORUM_TOPIC_ID", 0),
+            "channel_chat_id": getattr(self.config, "CHANNEL_CHAT_ID", 0),
         })
 
     @staticmethod
@@ -1303,67 +1324,12 @@ class TDJsonClient:
 
     @staticmethod
     def _journal_items(record: dict) -> list[dict]:
-        """Convert both v1 path-only and v2 snapshot records to state items."""
+        from ..upload.reconciliation import ReconciliationService
+        return ReconciliationService._journal_items(record)
 
-        values = []
-        for raw in record.get("items", []) if isinstance(record, dict) else []:
-            if isinstance(raw, dict):
-                item = dict(raw)
-            else:
-                item = {"path": raw}
-            if not item.get("path"):
-                continue
-            item["path"] = Path(item["path"])
-            # UploadState implementations accept the scanner spelling while
-            # journal records use concise snapshot keys.
-            if item.get("size") is not None and item.get("scan_size") is None:
-                item["scan_size"] = item["size"]
-            if item.get("mtime_ns") is not None and item.get("scan_mtime_ns") is None:
-                item["scan_mtime_ns"] = item["mtime_ns"]
-            # Manual reconciliation must reproduce the exact source identity
-            # that was sent.  UploadState therefore prefers these stored
-            # values over a fresh stat (the source may have changed or gone
-            # offline since the ambiguous request).
-            item["_journal_snapshot"] = True
-            capture_time = item.get("capture_time")
-            if isinstance(capture_time, str) and capture_time:
-                try:
-                    item["capture_time"] = __import__("datetime").datetime.fromisoformat(capture_time)
-                except ValueError:
-                    item["capture_time"] = None
-            values.append(item)
-        return values
-
-    def _state_for_journal(self, kind: str, record: dict, *, fallback_target=None):
-        """Create the matching uploader state without touching source files.
-
-        A target recorded with the send attempt is authoritative.  Legacy
-        target-less records use an explicitly supplied fallback, then the
-        media-kind-specific configured target, and only lastly the historical
-        mutable global target values.
-        """
-
-        target = self._journal_target(record)
-        if not target and fallback_target is not None:
-            target = normalize_target(fallback_target)
-        if not target:
-            target_for = getattr(cfg, "target_for", None)
-            if callable(target_for):
-                try:
-                    target = normalize_target(target_for(kind))
-                except Exception:
-                    target = {}
-        if not target:
-            target = self._target_identity()
-        if kind == "video":
-            module = importlib.import_module("tdlib_media_uploader.media.legacy_video")
-        elif kind == "image":
-            module = importlib.import_module("tdlib_media_uploader.media.legacy_image")
-        elif kind == "mixed":
-            module = importlib.import_module("tdlib_media_uploader.media.legacy_mixed")
-        else:
-            raise ValueError(f"无法为未知媒体类型恢复上传断点：{kind}")
-        return module.UploadState(target=target)
+    def _state_for_journal(self, kind: str, record: dict, **kwargs):
+        from ..upload.reconciliation import ReconciliationService
+        return ReconciliationService()._state_for_journal(kind, record, **kwargs)
 
     def finalize_inflight(
         self,
@@ -1392,6 +1358,7 @@ class TDJsonClient:
         kind: str | None = None,
         message_ids=None,
         target=None,
+        source_root=None,
     ) -> None:
         """Compatibility entry point for local checkpoint reconciliation."""
         from tdlib_media_uploader.upload.reconciliation import ReconciliationService
@@ -1399,7 +1366,7 @@ class TDJsonClient:
         service._state_for_journal = self._state_for_journal
         service._target_identity = self._target_identity
         service.reconcile_inflight(album_key, sent=sent, kind=kind,
-                                   message_ids=message_ids, target=target)
+                                   message_ids=message_ids, target=target, source_root=source_root)
 
     def _journal_kind_for(self, album_key: str, *, target=None) -> str:
         record = self.inflight_journal.find_album(album_key, target=target)
@@ -1418,12 +1385,19 @@ class TDJsonClient:
         album_key=None,
         kind=None,
         journal_items=None,
+        target=None,
+        on_submitted=None,
     ):
         """Send media and persist PREPARED/SUBMITTED/UNKNOWN transitions."""
         journal = getattr(self, "inflight_journal", None)
         selected_kind = kind or self._infer_upload_kind(contents)
         journal_active = bool(album_key and journal is not None)
-        journal_target = self._target_identity() if journal_active else None
+        send_target = normalize_target(dict(target)) if target is not None else self._target_identity()
+        if not send_target:
+            raise ValueError("缺少有效的 Telegram 上传目标")
+        send_topic = None if send_target["target_mode"] == "channel" else {
+            "@type": "messageTopicForum", "forum_topic_id": send_target["forum_topic_id"]}
+        journal_target = send_target if journal_active else None
         submitted = False
         journal_terminal = False
         self._active_request_type = (
@@ -1463,8 +1437,8 @@ class TDJsonClient:
             if len(contents) == 1:
                 message = self.request({
                     "@type": "sendMessage",
-                    "chat_id": int(cfg.CHAT_ID),
-                    "topic_id": topic_object(),
+                    "chat_id": int(send_target["chat_id"]),
+                    "topic_id": send_topic,
                     "reply_to": None,
                     "options": None,
                     "reply_markup": None,
@@ -1474,22 +1448,13 @@ class TDJsonClient:
             else:
                 response = self.request({
                     "@type": "sendMessageAlbum",
-                    "chat_id": int(cfg.CHAT_ID),
-                    "topic_id": topic_object(),
+                    "chat_id": int(send_target["chat_id"]),
+                    "topic_id": send_topic,
                     "reply_to": None,
                     "options": None,
                     "input_message_contents": contents,
                 })
                 messages = response.get("messages", [])
-                if len(messages) != len(contents):
-                    # TDLib accepted the request but returned an incomplete
-                    # response.  The missing message IDs make the delivery
-                    # outcome ambiguous, so keep the prepared journal in the
-                    # UNKNOWN path instead of allowing an automatic resend.
-                    submitted = journal_active
-                    raise RuntimeError(
-                        f"TDLib sendMessageAlbum 返回消息数量异常：{len(messages)}/{len(contents)}"
-                    )
             # The request has reached TDLib even when one item is already in
             # a failed sending state. Record the whole message set so a mixed
             # success/failure outcome can never be mistaken for a clean retry.
@@ -1501,6 +1466,14 @@ class TDJsonClient:
                     target=journal_target,
                 )
                 submitted = True
+            if on_submitted is not None:
+                on_submitted([message.get("id") for message in messages])
+            if len(messages) != len(contents):
+                raise SendResultUnknown(
+                    f"TDLib 返回消息数量异常：{len(messages)}/{len(contents)}",
+                    result={"succeeded": [], "failed": [],
+                            "pending": [message.get("id") for message in messages]},
+                )
             if progress is not None and items is not None:
                 progress.register_messages(messages, items)
             result = self.wait_for_send_results(messages)
@@ -1525,9 +1498,9 @@ class TDJsonClient:
                     )
                     journal_terminal = True
                 if not succeeded and not pending:
-                    raise RuntimeError("Album 内消息全部发送失败")
-                raise UploadUnknownError(
-                    "Album 仅部分消息确认，已标记 UNKNOWN，暂不自动重试。"
+                    raise SendResultFailed("Album 内消息全部发送失败", result)
+                raise SendResultUnknown(
+                    "Album 仅部分消息确认，已标记 UNKNOWN，暂不自动重试。", result
                 )
             if journal_active:
                 journal.update(
@@ -1541,7 +1514,7 @@ class TDJsonClient:
                 journal_terminal = True
             return succeeded
         except SendResultUnknown as exc:
-            if journal_active:
+            if journal_active and not journal_terminal:
                 delivery = exc.result if isinstance(exc.result, dict) else {}
                 journal.update(
                     selected_kind,
@@ -1571,7 +1544,7 @@ class TDJsonClient:
                     "rights_required",
                 )
             )
-            if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel" and forbidden:
+            if getattr(self.config, "TARGET_MODE", "forum_topic") == "channel" and forbidden:
                 raise RuntimeError("当前账号没有在该频道发布内容的权限。") from exc
             raise
         except (TimeoutError, TDLibCancelled) as exc:

@@ -132,8 +132,10 @@ class StoragePanel(SettingsPanel):
         self.cache_status.setText("正在计算缓存占用…")
         from ..workers import CacheStatsWorker  # noqa: PLC0415
 
+        if self._cache_worker is not None:
+            self._cache_worker.deleteLater()
         self._cache_worker = CacheStatsWorker(self)
-        self._cache_worker.finished.connect(self._on_cache_stats_ready)
+        self._cache_worker.result_ready.connect(self._on_cache_stats_ready)
         self._cache_worker.start()
 
     def _on_cache_stats_ready(self, text: str):
