@@ -13,7 +13,7 @@ WORKFLOW = Path(__file__).resolve().parents[1] / '.github/workflows/build-platfo
 class ReleaseArtifactsTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which('bash') and shutil.which('shasum'), 'requires workflow shell tools')
     def test_checksums_verify_after_assets_are_downloaded_to_another_directory(self):
-        workflow = WORKFLOW.read_text()
+        workflow = WORKFLOW.read_text(encoding="utf-8")
         start = workflow.index('          shopt -s nullglob')
         end = workflow.index('          version=', start)
         script = 'set -Eeuo pipefail\n' + textwrap.dedent(workflow[start:end])
@@ -25,7 +25,7 @@ class ReleaseArtifactsTest(unittest.TestCase):
             for name in names:
                 (assets / name).write_bytes(name.encode())
             subprocess.run(['bash', '-c', script], cwd=root, check=True, capture_output=True)
-            sums = (assets / 'SHA256SUMS').read_text()
+            sums = (assets / 'SHA256SUMS').read_text(encoding='utf-8')
             for name in names:
                 self.assertIn(f'{hashlib.sha256(name.encode()).hexdigest()}  {name}', sums)
             self.assertNotIn('release-assets/', sums)
@@ -35,7 +35,7 @@ class ReleaseArtifactsTest(unittest.TestCase):
                            cwd=downloaded, check=True, capture_output=True)
 
     def test_existing_releases_and_tags_are_not_overwritten(self):
-        workflow = WORKFLOW.read_text()
+        workflow = WORKFLOW.read_text(encoding="utf-8")
         release = workflow.split('  publish-release:', 1)[1]
         self.assertIn("if: startsWith(github.ref, 'refs/tags/v')", release)
         self.assertIn('gh release view "$tag"', release)

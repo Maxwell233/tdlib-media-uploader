@@ -48,7 +48,7 @@ class SettingsDataSafetyTest(unittest.TestCase):
         panel.video_dir.setText('/unsaved-video')
         with patch.object(config_service.cfg, 'IMAGE_DIR', Path('/new-image')):
             page.refresh()
-            self.assertEqual(panel.image_dir.text(), '/new-image')
+            self.assertEqual(panel.image_dir.text(), str(Path('/new-image')))
             self.assertEqual(panel.video_dir.text(), '/unsaved-video')
             self.assertTrue(panel.is_dirty())
             page.refresh()
@@ -67,7 +67,7 @@ class SettingsDataSafetyTest(unittest.TestCase):
             write.assert_not_called()
             self.assertIn('冲突', page.save_status_label.text())
             page.revert_changes()
-            self.assertEqual(page.general_panel.image_dir.text(), '/new-image')
+            self.assertEqual(page.general_panel.image_dir.text(), str(Path('/new-image')))
             self.assertFalse(page._conflicts)
 
     def test_main_window_refreshes_both_configuration_entry_points(self):
@@ -78,7 +78,7 @@ class SettingsDataSafetyTest(unittest.TestCase):
         with patch.object(config_service.cfg, 'IMAGE_DIR', Path('/synced-image')):
             window._on_settings_saved()
             self.assertIn('synced-image', window.image_page.source_edit.text())
-            self.assertEqual(window.settings_page.general_panel.image_dir.text(), '/synced-image')
+            self.assertEqual(window.settings_page.general_panel.image_dir.text(), str(Path('/synced-image')))
         target = {'target_mode': 'channel', 'chat_id': -100987, 'channel_chat_id': -100987}
         window.settings_page.upload_panel.image_album.setValue(3)
         with patch.object(config_service.cfg, 'target_for', return_value=target):
