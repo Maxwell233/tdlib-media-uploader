@@ -1,6 +1,7 @@
 """Exercise the workflow checksum commands against downloaded asset names."""
 from pathlib import Path
 import hashlib
+import os
 import shutil
 import subprocess
 import tempfile
@@ -11,7 +12,8 @@ WORKFLOW = Path(__file__).resolve().parents[1] / '.github/workflows/build-platfo
 
 
 class ReleaseArtifactsTest(unittest.TestCase):
-    @unittest.skipUnless(shutil.which('bash') and shutil.which('shasum'), 'requires workflow shell tools')
+    @unittest.skipUnless(os.name != 'nt' and shutil.which('bash') and shutil.which('shasum'),
+                         'executes the Unix-only publish job; Windows bash may be a WSL launcher')
     def test_checksums_verify_after_assets_are_downloaded_to_another_directory(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         start = workflow.index('          shopt -s nullglob')
@@ -24,7 +26,7 @@ class ReleaseArtifactsTest(unittest.TestCase):
                      'TDLib.Media.Uploader-v1.9.4-macos-arm64.dmg']
             for name in names:
                 (assets / name).write_bytes(name.encode())
-            subprocess.run(['bash', '-c', script], cwd=root, check=True, capture_output=True)
+            subprocess.run(['bash', '-c', script], cwd=root, check=True)
             sums = (assets / 'SHA256SUMS').read_text(encoding='utf-8')
             for name in names:
                 self.assertIn(f'{hashlib.sha256(name.encode()).hexdigest()}  {name}', sums)
@@ -32,7 +34,7 @@ class ReleaseArtifactsTest(unittest.TestCase):
             downloaded = root / 'downloaded'
             assets.rename(downloaded)
             subprocess.run(['shasum', '-a', '256', '-c', 'SHA256SUMS'],
-                           cwd=downloaded, check=True, capture_output=True)
+                           cwd=downloaded, check=True)
 
     def test_existing_releases_and_tags_are_not_overwritten(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
