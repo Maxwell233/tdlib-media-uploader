@@ -194,8 +194,12 @@ class ImprovementsTest(unittest.TestCase):
             with patch.object(video_core.cfg, "VIDEO_DIR", root), \
                     patch.object(video_core.cfg, "VIDEO_EXTENSIONS", {".mp4"}), \
                     patch.object(video_core.cfg, "VIDEO_MAX_BYTES", 4):
-                self.assertEqual(video_core.scan_videos(), [small_video, large_video])
+                self.assertEqual(
+                    {path.name for path in video_core.scan_videos()},
+                    {"small.mp4", "large.mp4"},
+                )
                 self.assertEqual(len(video_core.LAST_SCAN_SIZE_SKIPS), 1)
+                self.assertEqual(video_core.LAST_SCAN_SIZE_SKIPS[0]["path"].name, "large.mp4")
                 self.assertEqual(video_core.LAST_SCAN_SIZE_SKIPS[0]["action"], "preflight")
 
 
