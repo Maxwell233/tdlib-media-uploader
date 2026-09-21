@@ -139,6 +139,9 @@ caption_include_filenames = false
 caption_include_filename_numbers = true
 
 generate_thumbnail = true
+# 视频缩略图截图时间，单位秒，GUI 支持 0.01 秒精度。
+# 修改此值后，如已有缩略图缓存，需要在 GUI 中执行“仅清理视频封面”。
+thumbnail_timestamp_seconds = 1.00
 thumb_max_edge = 320
 thumb_target_kib = 80
 
@@ -161,6 +164,8 @@ caption_include_filenames = false
 caption_include_filename_numbers = true
 album_caption_separator = " · "
 generate_thumbnail = true
+# 混合上传中的视频使用该截图时间，单位秒，支持 0.01 秒精度；未配置时继承 [video]。
+thumbnail_timestamp_seconds = 1.00
 verify_media_before_upload = false
 reset_state = false
 

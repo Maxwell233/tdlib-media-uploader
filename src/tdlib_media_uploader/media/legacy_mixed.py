@@ -508,6 +508,11 @@ def _mixed_input_video(item, caption, cancel_event=None):
     # builder owns readiness, staging, metadata and thumbnail shape.
     kwargs = {
         "generate_thumbnail": getattr(cfg, "MIXED_GENERATE_THUMBNAIL", True),
+        "thumbnail_timestamp_seconds": getattr(
+            cfg,
+            "MIXED_THUMBNAIL_TIMESTAMP_SECONDS",
+            getattr(cfg, "VIDEO_THUMBNAIL_TIMESTAMP_SECONDS", 1.0),
+        ),
     }
     if cancel_event is not None:
         kwargs["cancel_event"] = cancel_event

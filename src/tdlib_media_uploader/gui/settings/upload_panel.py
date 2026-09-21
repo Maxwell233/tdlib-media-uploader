@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -181,10 +182,14 @@ class UploadPanel(SettingsPanel):
         f4.setSpacing(10)
         self.video_thumbnail = QCheckBox("生成视频缩略图")
         f4.addRow("缩略图", self.video_thumbnail)
+        self.video_thumbnail_timestamp = self._thumbnail_timestamp_spin()
+        f4.addRow("截图时间", self.video_thumbnail_timestamp)
         self.video_validate_media = QCheckBox("上传前验证全部媒体可读性")
         f4.addRow("预检验证", self.video_validate_media)
 
         self.video_thumbnail.toggled.connect(self._check_dirty)
+        self.video_thumbnail.toggled.connect(self._update_video_thumbnail_fields)
+        self.video_thumbnail_timestamp.valueChanged.connect(self._check_dirty)
         self.video_validate_media.toggled.connect(self._check_dirty)
 
         l4.addLayout(f4)
@@ -342,11 +347,15 @@ class UploadPanel(SettingsPanel):
 
         self.mixed_thumbnail = QCheckBox("视频生成缩略图")
         f3.addRow("缩略图", self.mixed_thumbnail)
+        self.mixed_thumbnail_timestamp = self._thumbnail_timestamp_spin()
+        f3.addRow("截图时间", self.mixed_thumbnail_timestamp)
 
         self.mixed_validate_media = QCheckBox("上传前验证全部媒体可读性")
         f3.addRow("预检验证", self.mixed_validate_media)
 
         self.mixed_thumbnail.toggled.connect(self._check_dirty)
+        self.mixed_thumbnail.toggled.connect(self._update_mixed_thumbnail_fields)
+        self.mixed_thumbnail_timestamp.valueChanged.connect(self._check_dirty)
         self.mixed_validate_media.toggled.connect(self._check_dirty)
 
         l3.addLayout(f3)
@@ -355,6 +364,23 @@ class UploadPanel(SettingsPanel):
         layout.addStretch(1)
         scroll.setWidget(container)
         return scroll
+
+    @staticmethod
+    def _thumbnail_timestamp_spin() -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+        spin.setRange(0.0, 7 * 24 * 60 * 60)
+        spin.setDecimals(2)
+        spin.setSingleStep(0.01)
+        spin.setSuffix(" 秒")
+        spin.setValue(1.0)
+        return spin
+
+    def _update_video_thumbnail_fields(self):
+        self.video_thumbnail_timestamp.setEnabled(self.video_thumbnail.isChecked())
+
+    def _update_mixed_thumbnail_fields(self):
+        self.mixed_thumbnail_timestamp.setEnabled(self.mixed_thumbnail.isChecked())
 
     # ------------------ LOAD & DIRTY ------------------
     def load(self):
@@ -381,6 +407,9 @@ class UploadPanel(SettingsPanel):
         self.video_filename_numbers.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS", True)))
         self.video_separator.setText(str(_cfg("VIDEO_ALBUM_CAPTION_SEPARATOR", " · ")))
         self.video_thumbnail.setChecked(bool(_cfg("VIDEO_GENERATE_THUMBNAIL", True)))
+        self.video_thumbnail_timestamp.setValue(
+            float(_cfg("VIDEO_THUMBNAIL_TIMESTAMP_SECONDS", 1.0))
+        )
         self.video_validate_media.setChecked(
             bool(_cfg("VIDEO_VERIFY_ALL_METADATA", _cfg("VIDEO_VALIDATE_MEDIA", False)))
         )
@@ -412,11 +441,16 @@ class UploadPanel(SettingsPanel):
         self.mixed_filename_numbers.setChecked(bool(_cfg("MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS", True)))
         self.mixed_separator.setText(str(_cfg("MIXED_ALBUM_CAPTION_SEPARATOR", " · ")))
         self.mixed_thumbnail.setChecked(bool(_cfg("MIXED_GENERATE_THUMBNAIL", True)))
+        self.mixed_thumbnail_timestamp.setValue(
+            float(_cfg("MIXED_THUMBNAIL_TIMESTAMP_SECONDS", 1.0))
+        )
         self.mixed_validate_media.setChecked(
             bool(_cfg("MIXED_VERIFY_MEDIA", _cfg("MIXED_VALIDATE_MEDIA", False)))
         )
 
         self.blockSignals(False)
+        self._update_video_thumbnail_fields()
+        self._update_mixed_thumbnail_fields()
         self._initial_values = self._current_values_dict()
         self.mark_clean()
 
@@ -433,6 +467,7 @@ class UploadPanel(SettingsPanel):
             "video_filename_numbers": self.video_filename_numbers.isChecked(),
             "video_separator": self.video_separator.text(),
             "video_thumbnail": self.video_thumbnail.isChecked(),
+            "video_thumbnail_timestamp": self.video_thumbnail_timestamp.value(),
             "video_validate_media": self.video_validate_media.isChecked(),
             "image_sort": self.image_sort.currentData(),
             "image_album": self.image_album.value(),
@@ -448,6 +483,7 @@ class UploadPanel(SettingsPanel):
             "mixed_filename_numbers": self.mixed_filename_numbers.isChecked(),
             "mixed_separator": self.mixed_separator.text(),
             "mixed_thumbnail": self.mixed_thumbnail.isChecked(),
+            "mixed_thumbnail_timestamp": self.mixed_thumbnail_timestamp.value(),
             "mixed_validate_media": self.mixed_validate_media.isChecked(),
         }
 
@@ -492,6 +528,10 @@ class UploadPanel(SettingsPanel):
             ("video", "caption_include_filename_numbers"): self.video_filename_numbers.isChecked(),
             ("video", "album_caption_separator"): self.video_separator.text(),
             ("video", "generate_thumbnail"): self.video_thumbnail.isChecked(),
+            ("video", "thumbnail_timestamp_seconds"): round(
+                self.video_thumbnail_timestamp.value(),
+                2,
+            ),
             ("video", "verify_all_metadata_before_upload"): self.video_validate_media.isChecked(),
         })
 
@@ -513,6 +553,10 @@ class UploadPanel(SettingsPanel):
             ("mixed", "caption_include_filename_numbers"): self.mixed_filename_numbers.isChecked(),
             ("mixed", "album_caption_separator"): self.mixed_separator.text(),
             ("mixed", "generate_thumbnail"): self.mixed_thumbnail.isChecked(),
+            ("mixed", "thumbnail_timestamp_seconds"): round(
+                self.mixed_thumbnail_timestamp.value(),
+                2,
+            ),
             ("mixed", "verify_media_before_upload"): self.mixed_validate_media.isChecked(),
         })
         return values

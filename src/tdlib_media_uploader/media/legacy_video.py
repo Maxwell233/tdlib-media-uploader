@@ -6,6 +6,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -1345,7 +1346,63 @@ def video_info(path: Path, cancel_event=None):
     return result
 
 
-def build_thumbnail(path: Path, cancel_event=None):
+def _thumbnail_timestamp_seconds(value=None) -> float:
+    """Normalize a thumbnail seek position to the application's 10 ms unit."""
+
+    raw = (
+        getattr(cfg, "VIDEO_THUMBNAIL_TIMESTAMP_SECONDS", 1.0)
+        if value is None
+        else value
+    )
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("视频缩略图截图时间必须是数字。") from exc
+    if not math.isfinite(seconds) or seconds < 0:
+        raise RuntimeError("视频缩略图截图时间必须是大于等于 0 的有限数字。")
+    try:
+        return round(seconds * 100) / 100
+    except (OverflowError, ValueError) as exc:
+        raise RuntimeError("视频缩略图截图时间数值过大。") from exc
+
+
+def _thumbnail_warning(message: str) -> None:
+    warning = getattr(UI, "warning", None)
+    if callable(warning):
+        try:
+            warning(message)
+        except Exception:
+            pass
+
+
+def build_thumbnail(
+    path: Path,
+    cancel_event=None,
+    *,
+    timestamp_seconds=None,
+    duration=None,
+):
+    """Create or reuse a cached thumbnail at the requested video timestamp."""
+
+    timestamp = _thumbnail_timestamp_seconds(timestamp_seconds)
+    if duration is not None:
+        try:
+            duration_value = float(duration)
+        except (TypeError, ValueError):
+            duration_value = None
+        if (
+            duration_value is not None
+            and math.isfinite(duration_value)
+            and duration_value >= 0
+            and timestamp >= duration_value
+            and timestamp != 0.0
+        ):
+            _thumbnail_warning(
+                f"视频缩略图截图时间 {timestamp:.2f} 秒已到达或超过视频时长 "
+                f"{duration_value:.2f} 秒，已回退到 0.00 秒：{path}"
+            )
+            timestamp = 0.0
+
     THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     stat = path.stat()
     cache_key = hashlib.sha1(
@@ -1385,7 +1442,7 @@ def build_thumbnail(path: Path, cancel_event=None):
         try:
             command = [
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                    "-ss", str(second), "-i", display_path(path), "-frames:v", "1",
+                    "-ss", f"{second:.2f}", "-i", display_path(path), "-frames:v", "1",
                     "-vf", "scale=640:640:force_original_aspect_ratio=decrease",
                     "-q:v", "3", str(temp_path),
                 ]
@@ -1409,7 +1466,18 @@ def build_thumbnail(path: Path, cancel_event=None):
             last_error = f"{type(exc).__name__}: {exc}"
             return False
 
-    if not extract(1.0) and not extract(0.0):
+    attempts = [timestamp]
+    if timestamp != 0.0:
+        attempts.append(0.0)
+    extracted = False
+    for second in attempts:
+        if extract(second):
+            extracted = True
+            break
+        if _cancel_requested(cancel_event):
+            break
+
+    if not extracted:
         detail = f"；FFmpeg：{last_error[:500]}" if last_error else ""
         try:
             temp_path.unlink(missing_ok=True)
@@ -1443,7 +1511,10 @@ def prepare_video(path: Path, cancel_event=None):
         else video_info(path, cancel_event=cancel_event)
     )
     if cfg.VIDEO_GENERATE_THUMBNAIL:
-        build_thumbnail(path, cancel_event)
+        if cancel_event is None:
+            build_thumbnail(path, duration=info.get("duration"))
+        else:
+            build_thumbnail(path, cancel_event, duration=info.get("duration"))
     return info
 
 
@@ -1604,7 +1675,14 @@ def build_video_contents(items, caption: str, ui=None, cancel_event=None):
     return contents, valid_items, skipped
 
 
-def input_video(item, caption: str, cancel_event=None, *, generate_thumbnail=None):
+def input_video(
+    item,
+    caption: str,
+    cancel_event=None,
+    *,
+    generate_thumbnail=None,
+    thumbnail_timestamp_seconds=None,
+):
     """Build one TDLib video content object for standalone and mixed albums.
 
     Mixed uploads use the same payload builder as standalone video uploads;
@@ -1633,7 +1711,11 @@ def input_video(item, caption: str, cancel_event=None, *, generate_thumbnail=Non
             cancel_event=cancel_event,
         )
         STAGED_UPLOAD_PATHS[stable_path(path)] = source_path
-    info = video_info(source_path)
+    info = (
+        video_info(source_path)
+        if cancel_event is None
+        else video_info(source_path, cancel_event=cancel_event)
+    )
     thumbnail = None
     thumbnail_enabled = (
         cfg.VIDEO_GENERATE_THUMBNAIL
@@ -1641,10 +1723,21 @@ def input_video(item, caption: str, cancel_event=None, *, generate_thumbnail=Non
         else bool(generate_thumbnail)
     )
     if thumbnail_enabled:
+        thumbnail_kwargs = {
+            "timestamp_seconds": thumbnail_timestamp_seconds,
+            "duration": info.get("duration"),
+        }
         if cancel_event is None:
-            thumb_path, thumb_width, thumb_height = build_thumbnail(source_path)
+            thumb_path, thumb_width, thumb_height = build_thumbnail(
+                source_path,
+                **thumbnail_kwargs,
+            )
         else:
-            thumb_path, thumb_width, thumb_height = build_thumbnail(source_path, cancel_event)
+            thumb_path, thumb_width, thumb_height = build_thumbnail(
+                source_path,
+                cancel_event,
+                **thumbnail_kwargs,
+            )
         thumbnail = {
             "@type": "inputThumbnail",
             "thumbnail": {"@type": "inputFileLocal", "path": display_path(thumb_path)},

@@ -72,7 +72,16 @@ Telegram 限制在扫描阶段生效：普通账号视频单文件上限约 2 GB
 
 从 [ExifTool 官网](https://exiftool.org/) 下载对应平台版本。Windows 将程序放到 `tools/exiftool.exe`；macOS 可将可执行文件放到 `tools/exiftool` 并执行 `chmod +x tools/exiftool`。若附带 `exiftool_files`，一起放入 `tools/`；也可在设置中指定工具路径。
 
-视频封面默认开启，可以在视频配置中关闭。便携包自带构建时校验的 LGPL FFmpeg；后台调用工具时会隐藏 Windows 控制台窗口。
+视频封面默认开启，可以在视频配置中关闭。`thumbnail_timestamp_seconds` 控制视频缩略图从视频第几秒截图，支持精确到 0.01 秒，例如：
+
+```toml
+[video]
+thumbnail_timestamp_seconds = 1.25
+```
+
+混合上传也可在 `[mixed]` 中设置同名字段；未填写时继承 `[video]` 的值。视频缩略图保存在本地缓存中。如果某个视频以前已经生成过封面，修改截图时间后可能仍会看到原来的图片；程序不会自动删除旧缓存。修改截图时间后，如需让已经缓存过的视频使用新的截图位置，请进入“设置 → 存储与缓存”，执行现有的“仅清理视频封面”功能，然后重新扫描或上传。无需清理上传状态、视频断点、混合状态、Telegram 登录数据或所有缓存。
+
+便携包自带构建时校验的 LGPL FFmpeg；后台调用工具时会隐藏 Windows 控制台窗口。
 
 ## 断点、停止与缓存
 

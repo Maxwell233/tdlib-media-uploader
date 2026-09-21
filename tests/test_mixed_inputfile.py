@@ -30,7 +30,12 @@ class MixedInputFileRegressionTest(unittest.TestCase):
                 patch.object(mixed_core.cfg, "MIXED_GENERATE_THUMBNAIL", False):
             result = mixed_core._mixed_input_video(item, "caption")
         self.assertIs(result, expected)
-        builder.assert_called_once_with(item, "caption", generate_thumbnail=False)
+        builder.assert_called_once_with(
+            item,
+            "caption",
+            generate_thumbnail=False,
+            thumbnail_timestamp_seconds=mixed_core.cfg.MIXED_THUMBNAIL_TIMESTAMP_SECONDS,
+        )
 
     def test_mixed_photo_and_video_payloads_keep_required_input_files(self):
         with tempfile.TemporaryDirectory() as directory:

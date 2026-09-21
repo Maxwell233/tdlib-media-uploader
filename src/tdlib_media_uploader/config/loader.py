@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
-import tomllib
+import math
 import os
 import sys
+import tomllib
 from pathlib import Path
 
 from .paths import (
@@ -207,6 +208,24 @@ def _bounded_float(section, key: str, default: float, minimum: float, maximum: f
             f"config.toml 中的 {key} 必须在 {minimum}~{maximum} 范围内。"
         )
     return value
+
+
+def _thumbnail_timestamp_seconds(section, key: str, default: float = 1.0) -> float:
+    """Read a finite, non-negative thumbnail timestamp at centisecond precision."""
+
+    try:
+        value = float(section.get(key, default))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"config.toml 中的 {key} 必须是数字。") from exc
+    if not math.isfinite(value) or value < 0:
+        raise RuntimeError(
+            f"config.toml 中的 {key} 必须是大于等于 0 的有限数字。"
+        )
+    try:
+        centiseconds = round(value * 100)
+    except (OverflowError, ValueError) as exc:
+        raise RuntimeError(f"config.toml 中的 {key} 数值过大。") from exc
+    return centiseconds / 100
 
 
 telegram = _section("telegram")
@@ -447,6 +466,12 @@ VIDEO_GENERATE_THUMBNAIL = bool(
     )
 )
 
+VIDEO_THUMBNAIL_TIMESTAMP_SECONDS = _thumbnail_timestamp_seconds(
+    video,
+    "thumbnail_timestamp_seconds",
+    1.0,
+)
+
 VIDEO_THUMB_MAX_EDGE = int(
     video.get(
         "thumb_max_edge",
@@ -676,6 +701,11 @@ MIXED_ALBUM_CAPTION_SEPARATOR = str(
 )
 MIXED_GENERATE_THUMBNAIL = bool(
     mixed.get("generate_thumbnail", VIDEO_GENERATE_THUMBNAIL)
+)
+MIXED_THUMBNAIL_TIMESTAMP_SECONDS = _thumbnail_timestamp_seconds(
+    mixed,
+    "thumbnail_timestamp_seconds",
+    VIDEO_THUMBNAIL_TIMESTAMP_SECONDS,
 )
 MIXED_VERIFY_MEDIA = bool(
     mixed.get("verify_media_before_upload", mixed.get("validate_media", False))
