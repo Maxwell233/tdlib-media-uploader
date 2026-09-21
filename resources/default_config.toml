@@ -93,7 +93,14 @@ exiftool_path = 'tools/exiftool'
 # Telegram 视频单文件上限约为普通账号 2 GB、Premium 4 GB；程序按
 # 4000/8000 个 512 KiB 分片计算精确字节边界，扫描和发送前都会检查。
 
-extensions = [".mp4", ".mov", ".m4v"]
+# 常见 FFmpeg/TDLib 视频容器；程序也会兼容旧配置并自动纳入这些扩展名。
+extensions = [
+  ".3g2", ".3gp", ".3gpp", ".asf", ".avi", ".divx", ".dv", ".f4v",
+  ".flv", ".h264", ".hevc", ".m2ts", ".m2v", ".m4v", ".mjpeg",
+  ".mjpg", ".mkv", ".mod", ".mov", ".mp4", ".mpe", ".mpeg", ".mpg",
+  ".mts", ".mxf", ".nut", ".ogm", ".ogv", ".qt", ".rm", ".rmvb",
+  ".ts", ".vob", ".webm", ".wmv", ".y4m"
+]
 
 # 日期优先级：EXIF 信息 →（可选）媒体创建日期 → 文件修改日期。
 # ExifTool 仍使用一次批量扫描；缺少 EXIF 的视频才会用 FFmpeg 读取媒体日期。
@@ -220,7 +227,13 @@ exiftool_retries = 2
 
 # 图片上传页“编辑目标与配置”窗口可直接修改本段媒体选项。
 
-extensions = [".jpg", ".jpeg", ".png", ".webp"]
+# Pillow 支持的常见静态图片格式；GIF/APNG 不在此处，因为本程序发送 Photo。
+extensions = [
+  ".avif", ".blp", ".bmp", ".dib", ".eps", ".icns", ".ico", ".im",
+  ".j2c", ".j2k", ".jp2", ".jpc", ".jpf", ".jpx", ".jpe", ".jpeg",
+  ".jpg", ".msp", ".pbm", ".pcx", ".pgm", ".png", ".pnm", ".ppm",
+  ".sgi", ".tga", ".tif", ".tiff", ".webp", ".xbm", ".xpm"
+]
 
 album_size = 10
 

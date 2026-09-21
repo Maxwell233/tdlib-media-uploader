@@ -117,7 +117,11 @@ def apply_size_limits(paths: list[Path], kind: str) -> tuple[list[Path], list[di
         snapshot = BASIC_SCAN_SNAPSHOTS.get(stable_path(path))
         size = int(snapshot[0]) if snapshot is not None else path_size(str(path))
         if size > limit:
-            action = "compress" if media_kind == "image" and compress_images else "skip"
+            action = (
+                "compress" if media_kind == "image" and compress_images
+                else "preflight" if media_kind == "video"
+                else "skip"
+            )
             skipped.append({
                 "path": path,
                 "media_kind": media_kind,

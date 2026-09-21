@@ -358,6 +358,17 @@ VIDEO_EXTENSIONS = _extensions(
         "extensions"
     )
 )
+# TDLib accepts a local InputFile for a video and lets the media stack inspect
+# the actual stream. Keep the common FFmpeg containers enabled for old
+# config.toml files too, so an older extension list cannot hide a valid video
+# before FFmpeg/TDLib gets a chance to validate it.
+VIDEO_EXTENSIONS.update({
+    ".3g2", ".3gp", ".3gpp", ".asf", ".avi", ".divx", ".dv", ".f4v",
+    ".flv", ".h264", ".hevc", ".m2ts", ".m2v", ".m4v", ".mjpeg",
+    ".mjpg", ".mkv", ".mod", ".mov", ".mp4", ".mpe", ".mpeg", ".mpg",
+    ".mts", ".mxf", ".nut", ".ogm", ".ogv", ".qt", ".rm", ".rmvb",
+    ".ts", ".vob", ".webm", ".wmv", ".y4m",
+})
 
 VIDEO_SORT_MODE = str(
     video.get(
@@ -515,6 +526,15 @@ IMAGE_EXTENSIONS = _extensions(
         "extensions"
     )
 )
+# These are image formats understood by the Pillow build shipped with the
+# application. Animated formats such as GIF/APNG are intentionally excluded:
+# this uploader sends inputMessagePhoto, not inputMessageAnimation.
+IMAGE_EXTENSIONS.update({
+    ".avif", ".blp", ".bmp", ".dib", ".eps", ".icns", ".ico", ".im",
+    ".j2c", ".j2k", ".jp2", ".jpc", ".jpf", ".jpx", ".jpe", ".jpeg",
+    ".jpg", ".msp", ".pbm", ".pcx", ".pgm", ".png", ".pnm", ".ppm",
+    ".sgi", ".tga", ".tif", ".tiff", ".webp", ".xbm", ".xpm",
+})
 
 IMAGE_ALBUM_SIZE = int(
     image.get(

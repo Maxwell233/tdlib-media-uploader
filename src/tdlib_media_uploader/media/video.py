@@ -592,9 +592,19 @@ class VideoStrategy:
 
             warnings = [str(value) for value in getattr(self.legacy, "LAST_SCAN_WARNINGS", ())]
             errors = [str(value) for value in getattr(self.legacy, "LAST_SCAN_ERRORS", ())]
-            for record in getattr(self.legacy, "LAST_SCAN_SIZE_SKIPS", ()) or ():
+            size_records = getattr(self.legacy, "LAST_SCAN_SIZE_SKIPS", ()) or ()
+            for record in size_records:
                 if isinstance(record, Mapping) and record.get("reason"):
                     warnings.append(str(record["reason"]))
+            preflight_count = sum(
+                1 for record in size_records
+                if isinstance(record, Mapping) and record.get("action") == "preflight"
+            )
+            if preflight_count:
+                warnings.append(
+                    f"已扫描到 {preflight_count} 个超过 Telegram 视频上限的文件，"
+                    "这些文件将在上传前跳过。"
+                )
 
             metadata, metadata_errors = self._metadata_index(
                 paths,

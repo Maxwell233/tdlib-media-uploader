@@ -287,6 +287,7 @@ class TelegramSendResultTest(unittest.TestCase):
         self.assertEqual(result.succeeded_ids, (11,))
         self.assertEqual(result.failed_ids, (-2,))
         self.assertEqual(result.pending_ids, ())
+        self.assertEqual(result.error, "TDLib error 400: forbidden")
 
     def test_timeout_and_incomplete_album_are_unknown(self):
         timeout = map_send_result(

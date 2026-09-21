@@ -199,14 +199,18 @@ def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
             "size": size,
             "limit": limit,
             "category": "size",
-            "action": "compress" if compress else "skip",
+            "action": (
+                "compress" if compress
+                else "preflight" if media_kind == "video"
+                else "skip"
+            ),
             "media_kind": media_kind,
             "reason": (
                 f"文件大小 {format_size(size)} 超过 Telegram "
                 f"{'视频' if media_kind == 'video' else 'Photo'} 上限 {limit_label}"
             ),
         })
-        if not compress:
+        if not compress and media_kind != "video":
             return None
     return {
         "path": path,
@@ -483,6 +487,7 @@ def report_scan_size_skips(skipped, ui=None):
         return
     target = ui or UI
     rejected = [record for record in skipped if record.get("action") == "skip"]
+    preflight = [record for record in skipped if record.get("action") == "preflight"]
     compressing = [record for record in skipped if record.get("action") == "compress"]
     if rejected:
         target.warning(
@@ -494,10 +499,15 @@ def report_scan_size_skips(skipped, ui=None):
             f"扫描提醒：发现 {len(compressing)} 个超限图片；"
             "上传时将尝试用 FFmpeg 生成临时压缩副本。"
         )
+    if preflight:
+        target.warning(
+            f"扫描到 {len(preflight)} 个超过 Telegram 视频上限的混合媒体；"
+            "它们会显示在扫描结果中，但会在上传前安全跳过。"
+        )
     for record in skipped:
         target.log(
             f"扫描混合媒体大小检查：{record['path']}\n"
-            f"处理：{'上传时压缩' if record.get('action') == 'compress' else '跳过'}\n"
+            f"处理：{'上传时压缩' if record.get('action') == 'compress' else '上传前跳过' if record.get('action') == 'preflight' else '扫描时跳过'}\n"
             f"原因：{record.get('reason', '')}"
         )
 

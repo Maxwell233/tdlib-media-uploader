@@ -328,12 +328,12 @@ def scan_videos(cancel_event=None) -> list[Path]:
                 "size": size,
                 "limit": cfg.VIDEO_MAX_BYTES,
                 "category": "size",
+                "action": "preflight",
                 "reason": (
                     f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
                     f"{video_limit_text(cfg.VIDEO_MAX_BYTES)}"
                 ),
             })
-            continue
         if size > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288):
             LAST_SCAN_PREMIUM_REQUIRED.append({
                 "path": path,
@@ -1596,18 +1596,27 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
 
 
 def report_scan_size_skips(skipped, ui=None) -> None:
-    """Report files rejected during directory scanning."""
+    """Report size decisions while keeping every discovered video visible."""
 
     if not skipped:
         return
     target = ui or UI
-    target.warning(
-        f"扫描时跳过 {len(skipped)} 个超过约 4 GB 上限的视频；"
-        "这些文件未加入上传计划。"
-    )
+    scan_skipped = [record for record in skipped if record.get("action") == "skip"]
+    preflight = [record for record in skipped if record.get("action") == "preflight"]
+    if scan_skipped:
+        target.warning(
+            f"扫描时跳过 {len(scan_skipped)} 个超过约 4 GB 上限的视频；"
+            "这些文件未加入上传计划。"
+        )
+    if preflight:
+        target.warning(
+            f"扫描到 {len(preflight)} 个超过约 4 GB 上限的视频；"
+            "它们会显示在扫描结果中，但会在上传前安全跳过。"
+        )
     for record in skipped:
         target.log(
             f"扫描跳过视频：{record['path']}\n"
+            f"处理：{'上传前跳过' if record.get('action') == 'preflight' else '扫描时跳过'}\n"
             f"原因：{record['reason']}"
         )
 

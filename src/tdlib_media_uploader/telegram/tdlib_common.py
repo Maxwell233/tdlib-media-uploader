@@ -70,6 +70,59 @@ class SendResultUnknown(TimeoutError):
         self.result = result
 
 
+def _send_failure_text(value) -> str | None:
+    """Extract the actual TDLib error from a failed-send update/message."""
+
+    if not isinstance(value, dict):
+        return None
+    error = value.get("error")
+    if not isinstance(error, dict):
+        sending_state = value.get("sending_state")
+        if isinstance(sending_state, dict):
+            error = sending_state.get("error")
+    if not isinstance(error, dict):
+        message = value.get("message")
+        if isinstance(message, dict):
+            nested_state = message.get("sending_state")
+            if isinstance(nested_state, dict):
+                error = nested_state.get("error")
+            if not isinstance(error, dict):
+                error = message.get("error")
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    message = error.get("message")
+    if code is not None and message:
+        return f"TDLib error {code}: {message}"
+    if message:
+        return str(message)
+    if code is not None:
+        return f"TDLib error {code}"
+    return None
+
+
+def _send_failure_summary(result) -> str:
+    """Format failed-send details without changing old result requirements."""
+
+    if not isinstance(result, dict):
+        return ""
+    details = result.get("failed_errors") or []
+    values = []
+    for detail in details:
+        if isinstance(detail, dict):
+            message_id = detail.get("message_id")
+            error = detail.get("error")
+            if error:
+                values.append(
+                    f"消息 {message_id}: {error}" if message_id is not None else str(error)
+                )
+        elif detail:
+            values.append(str(detail))
+    if not values and result.get("error"):
+        values.append(str(result["error"]))
+    return "；".join(dict.fromkeys(values))
+
+
 def verify_tdjson_version() -> str:
     try:
         installed = importlib.metadata.version("tdjson")
@@ -963,6 +1016,13 @@ class TDJsonClient:
         pending_ids = []
         succeeded_ids = []
         failed_ids = []
+        failed_errors = []
+
+        def record_failure(message_id, value):
+            error = _send_failure_text(value)
+            if error:
+                failed_errors.append({"message_id": message_id, "error": error})
+
         for message in messages:
             message_id = message.get("id")
             sending_state = message.get("sending_state")
@@ -971,15 +1031,19 @@ class TDJsonClient:
                 continue
             if sending_state.get("@type") == "messageSendingStateFailed":
                 failed_ids.append(message_id)
+                record_failure(message_id, message)
                 continue
             pending_ids.append(message_id)
 
         def result_payload(pending=None):
-            return {
+            result = {
                 "succeeded": list(succeeded_ids),
                 "failed": list(failed_ids),
                 "pending": list(pending or []),
             }
+            if failed_errors:
+                result["failed_errors"] = list(failed_errors)
+            return result
 
         if not pending_ids:
             return result_payload()
@@ -1002,8 +1066,8 @@ class TDJsonClient:
                         continue
                     status, update = event
                     if status == "failed":
-                        error_obj = update.get("error", {})
                         failed_ids.append(old_id)
+                        record_failure(old_id, update)
                         results[old_id] = update
                     else:
                         new_id = update.get("message", {}).get("id") or old_id
@@ -1483,8 +1547,16 @@ class TDJsonClient:
             failed = list(result.get("failed", []))
             pending = list(result.get("pending", []))
             if failed or pending or len(succeeded) != len(messages):
+                failure_detail = _send_failure_summary(result)
                 if journal_active:
                     status = FAILED if not succeeded and not pending and failed else UNKNOWN
+                    journal_error = (
+                        "Album 内消息全部失败"
+                        if status == FAILED
+                        else "Album 内消息结果不完整"
+                    )
+                    if failure_detail:
+                        journal_error += f"：{failure_detail}"
                     journal.update(
                         selected_kind,
                         album_key,
@@ -1493,12 +1565,15 @@ class TDJsonClient:
                         succeeded_ids=succeeded,
                         failed_ids=failed,
                         pending_ids=pending,
-                        error="Album 内消息结果不完整" if status == UNKNOWN else "Album 内消息全部失败",
+                        error=journal_error,
                         target=journal_target,
                     )
                     journal_terminal = True
                 if not succeeded and not pending:
-                    raise SendResultFailed("Album 内消息全部发送失败", result)
+                    message = "Album 内消息全部发送失败"
+                    if failure_detail:
+                        message += f"：{failure_detail}"
+                    raise SendResultFailed(message, result)
                 raise SendResultUnknown(
                     "Album 仅部分消息确认，已标记 UNKNOWN，暂不自动重试。", result
                 )

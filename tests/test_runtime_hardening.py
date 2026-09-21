@@ -78,8 +78,8 @@ class V190HardeningTest(unittest.TestCase):
                 rejected = mixed_core._item_for_path(
                     path, "Group", (app_config.VIDEO_PREMIUM_MAX_BYTES + 1, 100)
                 )
-            self.assertIsNone(rejected)
-            self.assertEqual(mixed_core.LAST_SCAN_SIZE_SKIPS[-1]["action"], "skip")
+            self.assertIsNotNone(rejected)
+            self.assertEqual(mixed_core.LAST_SCAN_SIZE_SKIPS[-1]["action"], "preflight")
 
     def test_album_key_includes_source_root_scope(self):
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:

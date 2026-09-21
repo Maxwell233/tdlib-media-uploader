@@ -96,6 +96,16 @@ class ThumbnailTimestampConfigTest(unittest.TestCase):
         )
         self.assertEqual(template["video"]["thumbnail_timestamp_seconds"], 1.0)
         self.assertEqual(template["mixed"]["thumbnail_timestamp_seconds"], 1.0)
+        self.assertIn(".wmv", template["video"]["extensions"])
+
+    def test_existing_config_inherits_wmv_video_support(self):
+        self.assertIn(".wmv", cfg.VIDEO_EXTENSIONS)
+        self.assertIn(".wmv", cfg.MIXED_VIDEO_EXTENSIONS)
+
+    def test_existing_config_inherits_common_tdlib_media_extensions(self):
+        for extension in (".mkv", ".webm", ".avi", ".tiff"):
+            with self.subTest(extension=extension):
+                self.assertIn(extension, cfg.VIDEO_EXTENSIONS if extension != ".tiff" else cfg.IMAGE_EXTENSIONS)
 
     def test_config_service_persists_centisecond_values_in_both_sections(self):
         with tempfile.TemporaryDirectory() as directory:

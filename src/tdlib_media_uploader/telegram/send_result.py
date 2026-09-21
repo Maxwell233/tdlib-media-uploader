@@ -68,6 +68,7 @@ class _MessageRecord:
     old_id: int | None
     state: str
     resolved_id: int | None
+    error: str | None = None
 
 
 def _as_id(value: Any) -> int | None:
@@ -77,6 +78,37 @@ def _as_id(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _error_text(value: Any) -> str | None:
+    """Return a compact TDLib error description from an update/message."""
+
+    if not isinstance(value, Mapping):
+        return None
+    error = value.get("error")
+    if not isinstance(error, Mapping):
+        sending_state = value.get("sending_state")
+        if isinstance(sending_state, Mapping):
+            error = sending_state.get("error")
+    if not isinstance(error, Mapping):
+        message = value.get("message")
+        if isinstance(message, Mapping):
+            nested_state = message.get("sending_state")
+            if isinstance(nested_state, Mapping):
+                error = nested_state.get("error")
+            if not isinstance(error, Mapping):
+                error = message.get("error")
+    if not isinstance(error, Mapping):
+        return None
+    code = error.get("code")
+    message = error.get("message")
+    if code is not None and message:
+        return f"TDLib error {code}: {message}"
+    if message:
+        return str(message)
+    if code is not None:
+        return f"TDLib error {code}"
+    return None
 
 
 def message_state(message: Any) -> str:
@@ -108,6 +140,7 @@ def _records(messages: Iterable[Any]) -> list[_MessageRecord]:
                 old_id=message_id,
                 state=state,
                 resolved_id=message_id if state == "succeeded" else None,
+                error=_error_text(message),
             )
         )
     return values
@@ -134,6 +167,7 @@ def _apply_updates(records: list[_MessageRecord], updates: Iterable[Any]) -> Non
         elif update_type == "updateMessageSendFailed":
             record.state = "failed"
             record.resolved_id = None
+            record.error = _error_text(update) or record.error
 
 
 def _ids(records: Iterable[_MessageRecord], state: str) -> tuple[int, ...]:
@@ -200,9 +234,19 @@ def map_send_result(
         expected,
         forced_unknown=forced_unknown,
     )
-    if error and not forced_unknown and not records:
+    observed_error = error or next(
+        (record.error for record in records if record.error),
+        None,
+    )
+    if observed_error and not forced_unknown and not records:
         status = BatchStatus.UNKNOWN if submitted else BatchStatus.FAILED
-    return SendResult(status, succeeded, failed, pending, str(error) if error else None)
+    return SendResult(
+        status,
+        succeeded,
+        failed,
+        pending,
+        str(observed_error) if observed_error else None,
+    )
 
 
 def classify_exception(

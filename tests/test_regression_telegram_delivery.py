@@ -66,6 +66,37 @@ class ImprovementsTest(unittest.TestCase):
             self.assertEqual(record["status"], FAILED)
 
 
+    def test_tdlib_send_failure_preserves_update_error(self):
+        from tdlib_media_uploader.telegram import tdlib_common
+
+        client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
+        client.cancel_event = threading.Event()
+        client._config = SimpleNamespace(TDLIB_MESSAGE_SEND_TIMEOUT=1)
+        client.send_events = {
+            -17: (
+                "failed",
+                {
+                    "@type": "updateMessageSendFailed",
+                    "old_message_id": -17,
+                    "error": {"code": 400, "message": "VIDEO_CONTENT_TYPE_INVALID"},
+                },
+            )
+        }
+        client.send_condition = threading.Condition()
+
+        result = client.wait_for_send_results(
+            [{
+                "id": -17,
+                "sending_state": {"@type": "messageSendingStatePending"},
+            }]
+        )
+        self.assertEqual(result["failed"], [-17])
+        self.assertEqual(
+            result["failed_errors"],
+            [{"message_id": -17, "error": "TDLib error 400: VIDEO_CONTENT_TYPE_INVALID"}],
+        )
+
+
     def test_forum_target_identity_ignores_irrelevant_channel_id(self):
         from tdlib_media_uploader.core.upload_journal import normalize_target
 

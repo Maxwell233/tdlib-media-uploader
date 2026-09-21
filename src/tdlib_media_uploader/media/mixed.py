@@ -425,6 +425,7 @@ class MixedMediaStrategy:
         ]
         size_skips = list(getattr(legacy, "LAST_SCAN_SIZE_SKIPS", ()))
         rejected = [record for record in size_skips if record.get("action") == "skip"]
+        preflight = [record for record in size_skips if record.get("action") == "preflight"]
         compressing = [record for record in size_skips if record.get("action") == "compress"]
         if rejected:
             warnings.append(
@@ -435,6 +436,11 @@ class MixedMediaStrategy:
             warnings.append(
                 f"扫描提醒：发现 {len(compressing)} 个超限图片；"
                 "上传时将尝试用 FFmpeg 生成临时压缩副本。"
+            )
+        if preflight:
+            warnings.append(
+                f"已扫描到 {len(preflight)} 个超过 Telegram 视频上限的混合媒体，"
+                "这些文件将在上传前跳过。"
             )
         ignored = list(getattr(legacy, "LAST_SCAN_IGNORED_ROOT_MEDIA", ()))
         if ignored:
