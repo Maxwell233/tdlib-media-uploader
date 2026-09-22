@@ -207,7 +207,7 @@ class ImprovementsTest(unittest.TestCase):
         self.assertEqual(path_utils._entry_suffix(".hidden"), "")
         self.assertEqual(path_utils._entry_suffix("photo.jpg"), ".jpg")
 
-    def test_video_scanner_accepts_wmv_case_insensitively(self):
+    def test_video_scanner_ignores_document_only_extensions(self):
         from tdlib_media_uploader.media import legacy_video as core
 
         with tempfile.TemporaryDirectory() as directory:
@@ -215,10 +215,11 @@ class ImprovementsTest(unittest.TestCase):
             nested = root / "nested"
             nested.mkdir()
             (nested / "clip.WMV").write_bytes(b"video")
+            (nested / "clip.MP4").write_bytes(b"video")
             with patch.object(core.cfg, "VIDEO_DIR", root), \
-                    patch.object(core.cfg, "VIDEO_EXTENSIONS", {".mp4", ".wmv"}), \
+                    patch.object(core.cfg, "VIDEO_EXTENSIONS", {".mp4"}), \
                     patch.object(core.cfg, "VIDEO_MAX_BYTES", 100), \
                     patch.object(core.cfg, "VIDEO_READ_DATES", False), \
                     patch.object(core.cfg, "VIDEO_SORT_MODE", "name"):
                 paths = core.scan_videos()
-            self.assertEqual([path.name for path in paths], ["clip.WMV"])
+            self.assertEqual([path.name for path in paths], ["clip.MP4"])

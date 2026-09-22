@@ -141,7 +141,7 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 - 代理支持 SOCKS5、HTTP、MTProto，默认关闭并使用直连。SOCKS5/HTTP 可填写用户名与密码；MTProto 需要 Secret。代理由 TDLib 配置，无需额外代理库。
 - `[scan]` 集中控制网络目录扫描：`stability_checks_local/network` 与对应间隔分别控制本地和网络盘的连续稳定检查，旧的 `stability_checks`/`stability_interval_seconds` 仍作为回退；`discovery_attempts` 和两个 delay 控制目录发现阶段的有限重试，`readiness_attempts` 是暂时不可读时的重试次数，`read_probe_bytes` 是头尾读探针大小；`io_workers_local` 与 `io_workers_network` 分别限制本地和 SMB/NAS 的 I/O 并发。扫描会跳过符号链接和 Windows junction，按下“停止”可取消目录遍历；正在进行的系统文件调用会在返回后响应取消。
 - `[process]` 集中设置 ExifTool、FFmpeg 日期/媒体信息、封面和图片压缩的单次超时，以及 ExifTool 批次大小和重试次数。ExifTool 只读取 Python 扫描确认的显式文件列表，不会再次递归扫描目录；空输出、非法 JSON、超时和不完整批次会自动重试并二分隔离，单个问题文件不会让整批失败。
-- `[image].extensions` 与 `[video].extensions` 必须互不重复；发现冲突时程序会在启动时明确提示，避免混合模式把同一个扩展名误判成图片或视频。默认配置已覆盖常见 FFmpeg 视频容器（包括 `.mp4`、`.mov`、`.mkv`、`.webm`、`.wmv` 等）和 Pillow 静态图片格式（包括 `.jpg`、`.png`、`.webp`、`.bmp`、`.tif/.tiff`、`.avif` 等）；旧配置也会自动继承这些扩展名。最终能否上传仍以本地 FFmpeg/Pillow 的实际解码能力和 Telegram 对媒体内容的校验为准，GIF/APNG 不会作为 Photo 扫描。
+- `[image].extensions` 与 `[video].extensions` 必须互不重复；发现冲突时程序会在启动时明确提示，避免混合模式把同一个扩展名误判成图片或视频。当前默认只扫描能直接进入 Telegram 媒体消息的格式：视频为 `.mp4`，图片为 `.jpg`、`.jpeg`、`.png`。MP4 容器内的 H.264/H.265（HEVC）视频均可保留在视频上传链路中；程序不会仅凭编码名称把 H.265 拦截。AVI、MKV、MOV、WMV、裸 `.hevc` 等容器或编码流，以及 WebP、BMP、TIFF、GIF、APNG 等图片格式，不在 Photo/Video 扫描列表中，避免被 Telegram 当作文件发送。旧配置中的这些扩展名会被启动时过滤掉；如需发送它们，请使用 Telegram 的文件方式或先转换为 MP4/JPEG/PNG。
 
 支持本地目录及 `\\server\share\...` 网络目录。扫描时不可读取的项目会跳过并提示；网络恢复后可重新扫描。扫描结果中的暂时不可读文件会标记为可重试的 deferred 项目；上传前会再次检查文件仍存在、可读且未在扫描后发生变化。
 

@@ -96,16 +96,26 @@ class ThumbnailTimestampConfigTest(unittest.TestCase):
         )
         self.assertEqual(template["video"]["thumbnail_timestamp_seconds"], 1.0)
         self.assertEqual(template["mixed"]["thumbnail_timestamp_seconds"], 1.0)
-        self.assertIn(".wmv", template["video"]["extensions"])
+        self.assertEqual(template["video"]["extensions"], [".mp4"])
+        self.assertEqual(
+            set(template["image"]["extensions"]),
+            {".jpg", ".jpeg", ".png"},
+        )
 
-    def test_existing_config_inherits_wmv_video_support(self):
-        self.assertIn(".wmv", cfg.VIDEO_EXTENSIONS)
-        self.assertIn(".wmv", cfg.MIXED_VIDEO_EXTENSIONS)
+    def test_existing_config_filters_document_only_video_extensions(self):
+        self.assertEqual(cfg.VIDEO_EXTENSIONS, {".mp4"})
+        self.assertEqual(cfg.MIXED_VIDEO_EXTENSIONS, {".mp4"})
+        for extension in (".wmv", ".mkv", ".mov", ".hevc"):
+            self.assertNotIn(extension, cfg.VIDEO_EXTENSIONS)
 
-    def test_existing_config_inherits_common_tdlib_media_extensions(self):
-        for extension in (".mkv", ".webm", ".avi", ".tiff"):
+    def test_existing_config_filters_non_native_image_extensions(self):
+        self.assertEqual(cfg.IMAGE_EXTENSIONS, {".jpg", ".jpeg", ".png"})
+        for extension in (".webp", ".bmp", ".tiff", ".avif", ".gif"):
             with self.subTest(extension=extension):
-                self.assertIn(extension, cfg.VIDEO_EXTENSIONS if extension != ".tiff" else cfg.IMAGE_EXTENSIONS)
+                self.assertNotIn(extension, cfg.IMAGE_EXTENSIONS)
+
+    def test_mp4_container_remains_supported_for_h265_video(self):
+        self.assertIn(".mp4", cfg.VIDEO_EXTENSIONS)
 
     def test_config_service_persists_centisecond_values_in_both_sections(self):
         with tempfile.TemporaryDirectory() as directory:
