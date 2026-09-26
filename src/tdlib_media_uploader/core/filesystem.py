@@ -260,78 +260,77 @@ def _cancelled(cancel_token=None, cancel_event=None) -> bool:
     return is_cancelled(cancel_token, cancel_event)
 
 
+_PERMANENT_FS_ERRORS = {
+    code
+    for code in (
+        getattr(errno, "EACCES", None),
+        getattr(errno, "EPERM", None),
+        getattr(errno, "EINVAL", None),
+        getattr(errno, "ENAMETOOLONG", None),
+        getattr(errno, "ENOTDIR", None),
+    )
+    if code is not None
+}
+_TRANSIENT_FS_ERRORS = {
+    code
+    for code in (
+        getattr(errno, "ETIMEDOUT", None),
+        getattr(errno, "ECONNRESET", None),
+        getattr(errno, "ECONNABORTED", None),
+        getattr(errno, "ENETUNREACH", None),
+        getattr(errno, "EHOSTUNREACH", None),
+        getattr(errno, "ENOTCONN", None),
+        getattr(errno, "EAGAIN", None),
+        getattr(errno, "EBUSY", None),
+        getattr(errno, "ESTALE", None),
+        getattr(errno, "EIO", None),
+    )
+    if code is not None
+}
+_TRANSIENT_FS_WIN_ERRORS = {21, 32, 33, 53, 64, 121, 1231, 1236, 1450, 995}
+_TRANSIENT_FS_MARKERS = (
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "try again",
+    "connection reset",
+    "connection aborted",
+    "network is unreachable",
+    "network path",
+    "sharing violation",
+    "resource busy",
+    "stale file",
+    "network name",
+    "device not ready",
+    "再试",
+    "暂时不可用",
+    "网络",
+    "连接重置",
+    "共享冲突",
+)
+
+
 def is_transient_fs_error(exc: BaseException) -> bool:
     """Classify errors for bounded retry; permanent errors fail immediately."""
 
     if not isinstance(exc, OSError):
         return False
-    permanent = {
-        code
-        for code in (
-            getattr(errno, "EACCES", None),
-            getattr(errno, "EPERM", None),
-            getattr(errno, "EINVAL", None),
-            getattr(errno, "ENAMETOOLONG", None),
-            getattr(errno, "ENOTDIR", None),
-        )
-        if code is not None
-    }
-    if getattr(exc, "errno", None) in permanent:
+
+    # ⚡ Bolt: Use module-level constants instead of rebuilding sets dynamically per-call
+    # to eliminate redundant allocations inside tight file iteration loops.
+    err_code = getattr(exc, "errno", None)
+    if err_code in _PERMANENT_FS_ERRORS:
         return False
-    transient = {
-        code
-        for code in (
-            getattr(errno, "ETIMEDOUT", None),
-            getattr(errno, "ECONNRESET", None),
-            getattr(errno, "ECONNABORTED", None),
-            getattr(errno, "ENETUNREACH", None),
-            getattr(errno, "EHOSTUNREACH", None),
-            getattr(errno, "ENOTCONN", None),
-            getattr(errno, "EAGAIN", None),
-            getattr(errno, "EBUSY", None),
-            getattr(errno, "ESTALE", None),
-            getattr(errno, "EIO", None),
-        )
-        if code is not None
-    }
-    if getattr(exc, "errno", None) in transient:
+    if err_code in _TRANSIENT_FS_ERRORS:
         return True
-    if getattr(exc, "winerror", None) in {
-        21,
-        32,
-        33,
-        53,
-        64,
-        121,
-        1231,
-        1236,
-        1450,
-        995,
-    }:
+
+    if getattr(exc, "winerror", None) in _TRANSIENT_FS_WIN_ERRORS:
         return True
+
     text = str(exc).casefold()
-    markers = (
-        "timed out",
-        "timeout",
-        "temporarily unavailable",
-        "try again",
-        "connection reset",
-        "connection aborted",
-        "network is unreachable",
-        "network path",
-        "sharing violation",
-        "resource busy",
-        "stale file",
-        "network name",
-        "device not ready",
-        "再试",
-        "暂时不可用",
-        "网络",
-        "连接重置",
-        "共享冲突",
-    )
-    if any(marker in text for marker in markers):
+    if any(marker in text for marker in _TRANSIENT_FS_MARKERS):
         return True
+
     # Unknown platform-specific OSErrors remain retryable, but the caller's
     # attempt limit guarantees termination.
     return True
