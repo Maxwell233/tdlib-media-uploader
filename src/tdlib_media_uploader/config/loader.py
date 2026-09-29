@@ -530,6 +530,14 @@ VIDEO_RESET_STATE = bool(
     )
 )
 
+VIDEO_PREFETCH_NEXT_ALBUM = bool(
+    video.get(
+        "prefetch_next_album",
+        True,
+    )
+)
+PREFETCH_NEXT_ALBUM = VIDEO_PREFETCH_NEXT_ALBUM
+
 
 # 图片
 IMAGE_EXTENSIONS = _media_extensions(

@@ -155,6 +155,9 @@ verify_all_metadata_before_upload = false
 # 仅在需要清空视频断点时临时改为 true
 reset_state = false
 
+# 上传当前组时是否后台提前准备/扫描下一组（最多提前1组，避免占用过多资源）
+prefetch_next_album = true
+
 
 [mixed]
 
