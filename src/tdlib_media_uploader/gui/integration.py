@@ -890,15 +890,25 @@ def _run_v2_upload(
             metadata={
                 "caption_limit": int(caption_limit),
                 "caption_length_limit": int(caption_limit),
+                "prefetch_next": bool(
+                    getattr(
+                        config,
+                        "VIDEO_PREFETCH_NEXT_ALBUM" if normalized == "video" else "PREFETCH_NEXT_ALBUM",
+                        getattr(config, "PREFETCH_NEXT_ALBUM", True),
+                    )
+                ),
             },
         )
         if engine_factory is None:
             engine_factory = UploadEngine
-        engine = engine_factory(
+        engine = _call_supported(
+            engine_factory,
+            (),
             sender=sender,
             state=state_adapter,
             journal=journal,
             preflight=context.preflight,
+            prefetch_next=context.metadata.get("prefetch_next"),
         )
         return engine.run(
             strategy,

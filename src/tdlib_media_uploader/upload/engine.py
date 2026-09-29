@@ -12,10 +12,12 @@ TDLib implementations without making this package import GUI code.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
 import inspect
 import json
 from pathlib import Path
+import threading
 from typing import Any, Protocol
 
 from ..contracts import CancelToken, EventSink, MediaStrategy, UploadContext
@@ -115,6 +117,51 @@ class _NeverCancelToken:
 class _NullEventSink:
     def emit(self, event) -> None:
         return None
+
+
+class _PrefetchEventSink:
+    """EventSink wrapper for background prefetch that filters out ProgressEvent.
+
+    This ensures that background preparation (preflight/probing) of the next album
+    does not overwrite or interfere with the active album's upload progress display.
+    """
+
+    def __init__(self, target_sink: EventSink | None):
+        self.target_sink = target_sink
+
+    def emit(self, event: Any) -> None:
+        if isinstance(event, ProgressEvent):
+            return
+        if self.target_sink is not None:
+            emit = getattr(self.target_sink, "emit", None)
+            if callable(emit):
+                try:
+                    emit(event)
+                except Exception:
+                    pass
+
+
+class _PrefetchCancelToken:
+    """Cancel background preparation on either run cancellation or safe stop."""
+
+    def __init__(self, parent: CancelToken | None):
+        self.parent = parent
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    def is_cancelled(self) -> bool:
+        return (
+            self._cancelled.is_set()
+            or _is_cancel_requested(self.parent)
+            or _stop_after_current_requested(self.parent)
+        )
+
+    def raise_if_cancelled(self) -> None:
+        if self.is_cancelled():
+            raise UploadCancelled("后台预取已取消")
+
 
 
 def _stable_target(target: Mapping[str, Any] | None) -> str:
@@ -249,6 +296,29 @@ class _ObservedSend:
     failed_ids: tuple[int, ...] = ()
     pending_ids: tuple[int, ...] = ()
     error: str | None = None
+
+
+@dataclass(slots=True)
+class _PreparedBatch:
+    plan: AlbumPlan
+    effective_plan: AlbumPlan | None = None
+    send_plan: AlbumPlan | None = None
+    contents: Sequence[Mapping[str, Any]] = ()
+    ready_items: tuple[MediaItem, ...] = ()
+    batch_deferred: tuple[MediaItem, ...] = ()
+    plan_deferred: tuple[MediaItem, ...] = ()
+    build_deferred: tuple[MediaItem, ...] = ()
+    build_failed: tuple[MediaItem, ...] = ()
+    preflight_failed: tuple[MediaItem, ...] = ()
+    preflight_deferred: tuple[MediaItem, ...] = ()
+    extra_failed_items: tuple[MediaItem, ...] = ()
+    errors: list[str] = field(default_factory=list)
+    skipped: bool = False
+    cancelled: bool = False
+    ambiguous: bool = False
+    confirmed_recovery_failed: bool = False
+    batch_result: UploadBatchResult | None = None
+
 
 
 def _normalize_status(value: Any) -> BatchStatus | None:
@@ -435,6 +505,7 @@ class UploadEngine:
         preflight: Callable[..., Any] | Any | None = None,
         state_factory: Callable[[UploadContext], Any] | None = None,
         journal_factory: Callable[[UploadContext], Any] | None = None,
+        prefetch_next: bool | None = None,
     ):
         self.sender = sender
         self.state = state
@@ -443,6 +514,7 @@ class UploadEngine:
         self.preflight = preflight
         self.state_factory = state_factory
         self.journal_factory = journal_factory
+        self.prefetch_next = prefetch_next
 
     def _context(
         self,
@@ -661,6 +733,351 @@ class UploadEngine:
             raise ValueError("策略生成的 Telegram 内容数量必须与 ready_items 数量一致")
         return contents, ready, deferred, failed, errors
 
+    def _prepare_plan(
+        self,
+        strategy: Any,
+        plan: AlbumPlan,
+        run_context: UploadContext,
+        state: Any,
+        journal: Any,
+        token: CancelToken | None,
+        sink: EventSink | None,
+        kind: str,
+    ) -> _PreparedBatch:
+        # Strategy adapters may emit through context.event_sink instead of the
+        # explicit event_sink argument. Keep both paths isolated for prefetch.
+        run_context = replace(
+            run_context,
+            cancel_token=token if token is not None else run_context.cancel_token,
+            event_sink=sink if sink is not None else run_context.event_sink,
+        )
+        if _stop_after_current_requested(token) or _is_cancel_requested(token):
+            return _PreparedBatch(plan=plan, cancelled=True)
+
+        plan_deferred: tuple[MediaItem, ...] = ()
+        try:
+            validate_plan(plan)
+            try:
+                unresolved = self._journal_call(
+                    journal,
+                    "unresolved",
+                    kind,
+                    plan.key,
+                    target=run_context.target,
+                )
+            except Exception as journal_error:
+                message = (
+                    f"Album {plan.key} 上传日志读取失败：{journal_error}；"
+                    "为避免重复上传已阻止自动重试"
+                )
+                self._log(sink, "ERROR", message)
+                return _PreparedBatch(
+                    plan=plan,
+                    ambiguous=True,
+                    errors=[message],
+                    batch_result=UploadBatchResult(plan.key, BatchStatus.UNKNOWN, error=message),
+                )
+            overlap_check = getattr(journal, "unresolved_for_items", None)
+            if unresolved is None and callable(overlap_check):
+                unresolved = overlap_check(
+                    kind,
+                    [_item_payload(item) for item in plan.pending_items],
+                    target=run_context.target,
+                )
+            if unresolved is not None:
+                protected_key = str(unresolved.get("album_key") or plan.key)
+                status = str(unresolved.get("status", "UNKNOWN")).upper()
+                if status == CONFIRMED:
+                    from .reconciliation import ReconciliationService
+
+                    try:
+                        repaired = ReconciliationService(journal).recover_confirmed(
+                            kind,
+                            protected_key,
+                            target=run_context.target,
+                            state=state,
+                            record=unresolved,
+                        )
+                    except Exception as recovery_error:
+                        message = f"Album {plan.key} CONFIRMED 断点恢复失败：{recovery_error}"
+                        self._log(sink, "ERROR", message)
+                        return _PreparedBatch(
+                            plan=plan,
+                            confirmed_recovery_failed=True,
+                            errors=[message],
+                            batch_result=UploadBatchResult(
+                                plan.key,
+                                BatchStatus.CONFIRMED,
+                                error=message,
+                            ),
+                        )
+                    if repaired:
+                        self._log(sink, "INFO", f"Album {plan.key} 已恢复本地断点并清理保护记录")
+                        if protected_key == plan.key:
+                            return _PreparedBatch(plan=plan, skipped=True)
+                        unresolved = None
+                message = (
+                    f"Album {protected_key} 的发送状态为 {status}，"
+                    "为避免重复上传已阻止自动重试"
+                )
+                if unresolved is not None:
+                    self._log(sink, "WARNING", message)
+                    return _PreparedBatch(
+                        plan=plan,
+                        ambiguous=True,
+                        errors=[message],
+                        batch_result=UploadBatchResult(plan.key, BatchStatus.UNKNOWN, error=message),
+                    )
+            pending = tuple(
+                item for item in plan.pending_items if not self._state_completed(state, item)
+            )
+            current_plan = restrict_plan(plan, pending)
+        except Exception as error:
+            message = f"Album {getattr(plan, 'key', '<unknown>')} 状态检查失败：{error}"
+            return _PreparedBatch(
+                plan=plan,
+                errors=[message],
+                extra_failed_items=tuple(getattr(plan, "pending_items", ())),
+                batch_result=UploadBatchResult(
+                    album_key=str(getattr(plan, "key", "<unknown>")),
+                    status=BatchStatus.FAILED,
+                    error=message,
+                ),
+            )
+
+        if not current_plan.pending_items:
+            return _PreparedBatch(plan=plan, skipped=True)
+
+        preflight_failed: tuple[MediaItem, ...] = ()
+        preflight_deferred: tuple[MediaItem, ...] = ()
+        checker = run_context.preflight
+        if checker is not None:
+            try:
+                current_plan, preflight_result = preflight_plan(
+                    current_plan,
+                    checker,
+                    context=run_context,
+                    cancel_token=token,
+                    event_sink=sink,
+                )
+            except Exception as error:
+                if _is_cancel_error(error, token):
+                    return _PreparedBatch(plan=plan, cancelled=True)
+                message = f"Album {plan.key} 预检失败：{error}"
+                return _PreparedBatch(
+                    plan=plan,
+                    errors=[message],
+                    extra_failed_items=tuple(plan.pending_items),
+                    batch_result=UploadBatchResult(plan.key, BatchStatus.FAILED, error=message),
+                )
+            plan_deferred = preflight_result.deferred_items
+            preflight_deferred = plan_deferred
+            preflight_failed = preflight_result.failed_items
+            if preflight_result.cancelled:
+                return _PreparedBatch(
+                    plan=plan,
+                    cancelled=True,
+                    plan_deferred=plan_deferred,
+                    preflight_failed=preflight_failed,
+                    preflight_deferred=preflight_deferred,
+                )
+            if preflight_result.failed_items:
+                reason = "; ".join(
+                    reason
+                    for path, reason in preflight_result.reasons
+                    if any(str(item.path) == path for item in preflight_result.failed_items)
+                ) or "预检失败"
+                if not current_plan.pending_items:
+                    return _PreparedBatch(
+                        plan=plan,
+                        plan_deferred=plan_deferred,
+                        preflight_failed=preflight_failed,
+                        preflight_deferred=preflight_deferred,
+                        batch_result=UploadBatchResult(
+                            plan.key,
+                            BatchStatus.FAILED,
+                            error=reason,
+                            deferred_items=preflight_result.deferred_items,
+                        ),
+                    )
+            if not current_plan.pending_items:
+                return _PreparedBatch(
+                    plan=plan,
+                    skipped=True,
+                    plan_deferred=plan_deferred,
+                    preflight_failed=preflight_failed,
+                    preflight_deferred=preflight_deferred,
+                )
+
+        ready_items = tuple(current_plan.pending_items)
+        batch_deferred = tuple(plan_deferred)
+        effective_plan = current_plan
+        if run_context.stager is not None:
+            try:
+                effective_plan = self._stage(run_context.stager, current_plan, run_context)
+            except Exception as error:
+                if _is_cancel_error(error, token) or _stop_after_current_requested(token):
+                    cleanup_errors: list[str] = []
+                    try:
+                        self._cleanup(
+                            run_context.stager,
+                            current_plan,
+                            run_context,
+                            confirmed=False,
+                        )
+                    except Exception as cleanup_error:
+                        cleanup_errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
+                    return _PreparedBatch(
+                        plan=plan,
+                        cancelled=True,
+                        errors=cleanup_errors,
+                        plan_deferred=plan_deferred,
+                        preflight_failed=preflight_failed,
+                        preflight_deferred=preflight_deferred,
+                    )
+                message = f"Album {plan.key} 暂存失败：{error}"
+                return _PreparedBatch(
+                    plan=plan,
+                    errors=[message],
+                    extra_failed_items=ready_items,
+                    plan_deferred=plan_deferred,
+                    preflight_failed=preflight_failed,
+                    preflight_deferred=preflight_deferred,
+                    batch_result=UploadBatchResult(
+                        plan.key,
+                        BatchStatus.FAILED,
+                        error=message,
+                        deferred_items=plan_deferred,
+                    ),
+                )
+
+        errors: list[str] = []
+        try:
+            _check_cancel(token)
+            built_contents = _call_supported(
+                getattr(strategy, "build_contents"),
+                (effective_plan,),
+                cancel_token=token,
+                event_sink=sink,
+                context=run_context,
+            )
+            (
+                contents,
+                ready_items,
+                build_deferred,
+                build_failed,
+                build_errors,
+            ) = self._normalize_content_result(built_contents, effective_plan)
+            batch_deferred = tuple((*plan_deferred, *build_deferred))
+            for build_error in build_errors:
+                errors.append(f"Album {plan.key} 内容构建提示：{build_error}")
+            if not ready_items:
+                if run_context.stager is not None:
+                    try:
+                        self._cleanup(
+                            run_context.stager,
+                            effective_plan,
+                            run_context,
+                            confirmed=False,
+                        )
+                    except Exception as cleanup_error:
+                        errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
+                if build_failed:
+                    message = "; ".join(build_errors) or "内容构建失败"
+                    errors.append(f"Album {plan.key} 内容构建失败：{message}")
+                    return _PreparedBatch(
+                        plan=plan,
+                        errors=errors,
+                        batch_deferred=batch_deferred,
+                        plan_deferred=plan_deferred,
+                        build_deferred=build_deferred,
+                        build_failed=build_failed,
+                        preflight_failed=preflight_failed,
+                        preflight_deferred=preflight_deferred,
+                        batch_result=UploadBatchResult(
+                            plan.key,
+                            BatchStatus.FAILED,
+                            error=message,
+                            deferred_items=batch_deferred,
+                        ),
+                    )
+                return _PreparedBatch(
+                    plan=plan,
+                    skipped=True,
+                    errors=errors,
+                    batch_deferred=batch_deferred,
+                    plan_deferred=plan_deferred,
+                    build_deferred=build_deferred,
+                    build_failed=build_failed,
+                    preflight_failed=preflight_failed,
+                    preflight_deferred=preflight_deferred,
+                )
+            if not contents:
+                raise ValueError("不能发送空的 Telegram Album")
+        except Exception as error:
+            if _is_cancel_error(error, token):
+                if run_context.stager is not None:
+                    try:
+                        self._cleanup(
+                            run_context.stager,
+                            effective_plan,
+                            run_context,
+                            confirmed=False,
+                        )
+                    except Exception as cleanup_error:
+                        errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
+                return _PreparedBatch(plan=plan, cancelled=True, errors=errors)
+            message = f"Album {plan.key} 内容构建失败：{error}"
+            errors.append(message)
+            if run_context.stager is not None:
+                try:
+                    self._cleanup(
+                        run_context.stager,
+                        effective_plan,
+                        run_context,
+                        confirmed=False,
+                    )
+                except Exception as cleanup_error:
+                    errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
+            return _PreparedBatch(
+                plan=plan,
+                errors=errors,
+                extra_failed_items=ready_items,
+                plan_deferred=plan_deferred,
+                preflight_failed=preflight_failed,
+                preflight_deferred=preflight_deferred,
+                batch_result=UploadBatchResult(plan.key, BatchStatus.FAILED, error=message),
+            )
+
+        if _stop_after_current_requested(token) or _is_cancel_requested(token):
+            if run_context.stager is not None:
+                try:
+                    self._cleanup(
+                        run_context.stager,
+                        effective_plan,
+                        run_context,
+                        confirmed=False,
+                    )
+                except Exception as cleanup_error:
+                    errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
+            return _PreparedBatch(plan=plan, cancelled=True, errors=errors)
+
+        send_plan = restrict_plan(effective_plan, ready_items)
+        return _PreparedBatch(
+            plan=plan,
+            effective_plan=effective_plan,
+            send_plan=send_plan,
+            contents=contents,
+            ready_items=ready_items,
+            batch_deferred=batch_deferred,
+            plan_deferred=plan_deferred,
+            build_deferred=build_deferred,
+            build_failed=build_failed,
+            preflight_failed=preflight_failed,
+            preflight_deferred=preflight_deferred,
+            errors=errors,
+        )
+
     def run(
         self,
         strategy: MediaStrategy,
@@ -794,190 +1211,83 @@ class UploadEngine:
                 scanned_items=scanned_items,
             )
 
-        for plan in plans:
-            if _stop_after_current_requested(token):
-                cancelled = True
-                break
-            plan_deferred: tuple[MediaItem, ...] = ()
-            try:
-                validate_plan(plan)
-                try:
-                    unresolved = self._journal_call(
-                        journal,
-                        "unresolved",
-                        kind,
-                        plan.key,
-                        target=run_context.target,
-                    )
-                except Exception as journal_error:
-                    message = (
-                        f"Album {plan.key} 上传日志读取失败：{journal_error}；"
-                        "为避免重复上传已阻止自动重试"
-                    )
-                    self._log(sink, "ERROR", message)
-                    errors.append(message)
-                    batches.append(
-                        UploadBatchResult(plan.key, BatchStatus.UNKNOWN, error=message)
-                    )
-                    ambiguous = True
-                    continue
-                overlap_check = getattr(journal, "unresolved_for_items", None)
-                if unresolved is None and callable(overlap_check):
-                    unresolved = overlap_check(
-                        kind, [_item_payload(item) for item in plan.pending_items],
-                        target=run_context.target,
-                    )
-                if unresolved is not None:
-                    protected_key = str(unresolved.get("album_key") or plan.key)
-                    status = str(unresolved.get("status", "UNKNOWN")).upper()
-                    if status == CONFIRMED:
-                        from .reconciliation import ReconciliationService
+        prefetch_enabled = (
+            self.prefetch_next
+            if self.prefetch_next is not None
+            else bool(run_context.metadata.get("prefetch_next", False))
+        )
+        executor = ThreadPoolExecutor(max_workers=1) if prefetch_enabled else None
+        prefetch_future: Future[_PreparedBatch] | None = None
+        prefetch_cancel_token: _PrefetchCancelToken | None = None
+        prefetched_plan_index: int | None = None
 
-                        try:
-                            repaired = ReconciliationService(journal).recover_confirmed(
-                                kind,
-                                protected_key,
-                                target=run_context.target,
-                                state=state,
-                                record=unresolved,
-                            )
-                        except Exception as recovery_error:
-                            message = f"Album {plan.key} CONFIRMED 断点恢复失败：{recovery_error}"
-                            self._log(sink, "ERROR", message)
-                            errors.append(message)
-                            confirmed_recovery_failed = True
-                            batches.append(
-                                UploadBatchResult(
-                                    plan.key,
-                                    BatchStatus.CONFIRMED,
-                                    error=message,
-                                )
-                            )
-                            continue
-                        if repaired:
-                            self._log(sink, "INFO", f"Album {plan.key} 已恢复本地断点并清理保护记录")
-                            if protected_key == plan.key:
-                                continue
-                            unresolved = None
-                    message = (
-                        f"Album {protected_key} 的发送状态为 {status}，"
-                        "为避免重复上传已阻止自动重试"
-                    )
-                    if unresolved is not None:
-                        self._log(sink, "WARNING", message)
-                        errors.append(message)
-                        batches.append(UploadBatchResult(plan.key, BatchStatus.UNKNOWN, error=message))
-                        ambiguous = True
-                        continue
-                pending = tuple(
-                    item for item in plan.pending_items if not self._state_completed(state, item)
-                )
-                current_plan = restrict_plan(plan, pending)
-            except Exception as error:
-                message = f"Album {getattr(plan, 'key', '<unknown>')} 状态检查失败：{error}"
-                errors.append(message)
-                batches.append(
-                    UploadBatchResult(
-                        album_key=str(getattr(plan, "key", "<unknown>")),
-                        status=BatchStatus.FAILED,
-                        error=message,
-                    )
-                )
-                failed_items.extend(tuple(getattr(plan, "pending_items", ())))
-                continue
-
-            if not current_plan.pending_items:
-                continue
-
-            checker = run_context.preflight
-            if checker is not None:
-                try:
-                    current_plan, preflight_result = preflight_plan(
-                        current_plan,
-                        checker,
-                        context=run_context,
-                        cancel_token=token,
-                        event_sink=sink,
-                    )
-                except Exception as error:
-                    if _is_cancel_error(error, token):
-                        cancelled = True
-                        break
-                    message = f"Album {plan.key} 预检失败：{error}"
-                    errors.append(message)
-                    failed_items.extend(plan.pending_items)
-                    batches.append(
-                        UploadBatchResult(plan.key, BatchStatus.FAILED, error=message)
-                    )
-                    continue
-                plan_deferred = preflight_result.deferred_items
-                deferred_items.extend(plan_deferred)
-                failed_items.extend(preflight_result.failed_items)
-                if preflight_result.cancelled:
+        try:
+            for plan_index, plan in enumerate(plans):
+                if _stop_after_current_requested(token):
                     cancelled = True
                     break
-                if preflight_result.failed_items:
-                    reason = "; ".join(
-                        reason
-                        for path, reason in preflight_result.reasons
-                        if any(str(item.path) == path for item in preflight_result.failed_items)
-                    ) or "预检失败"
-                    if not current_plan.pending_items:
-                        batches.append(
-                            UploadBatchResult(
-                                plan.key,
-                                BatchStatus.FAILED,
-                                error=reason,
-                                deferred_items=preflight_result.deferred_items,
-                            )
-                        )
+
+                if prefetch_future is not None and prefetched_plan_index == plan_index:
+                    try:
+                        prep = prefetch_future.result()
+                    except Exception as exc:
+                        message = f"Album {plan.key} 预加载异常：{exc}"
+                        errors.append(message)
+                        batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
+                        failed_items.extend(getattr(plan, "pending_items", ()))
+                        prefetch_future = None
+                        prefetched_plan_index = None
                         continue
-                if not current_plan.pending_items:
-                    continue
-
-            ready_items = tuple(current_plan.pending_items)
-            batch_deferred = tuple(plan_deferred)
-            effective_plan = current_plan
-            if run_context.stager is not None:
-                try:
-                    effective_plan = self._stage(run_context.stager, current_plan, run_context)
-                except Exception as error:
-                    message = f"Album {plan.key} 暂存失败：{error}"
-                    errors.append(message)
-                    failed_items.extend(ready_items)
-                    batches.append(
-                        UploadBatchResult(
-                            plan.key,
-                            BatchStatus.FAILED,
-                            error=message,
-                            deferred_items=plan_deferred,
-                        )
+                    finally:
+                        prefetch_future = None
+                        prefetch_cancel_token = None
+                        prefetched_plan_index = None
+                else:
+                    prep = self._prepare_plan(
+                        strategy,
+                        plan,
+                        run_context,
+                        state,
+                        journal,
+                        token,
+                        sink,
+                        kind,
                     )
+
+                errors.extend(prep.errors)
+                failed_items.extend(prep.extra_failed_items)
+                failed_items.extend(prep.preflight_failed)
+                failed_items.extend(prep.build_failed)
+                deferred_items.extend(prep.plan_deferred)
+                deferred_items.extend(prep.build_deferred)
+
+                if prep.ambiguous:
+                    ambiguous = True
+                if prep.confirmed_recovery_failed:
+                    confirmed_recovery_failed = True
+
+                if prep.cancelled:
+                    cancelled = True
+                    break
+
+                if prep.batch_result is not None:
+                    batches.append(prep.batch_result)
                     continue
 
-            try:
-                _check_cancel(token)
-                built_contents = _call_supported(
-                    getattr(strategy, "build_contents"),
-                    (effective_plan,),
-                    cancel_token=token,
-                    event_sink=sink,
-                    context=run_context,
-                )
-                (
-                    contents,
-                    ready_items,
-                    build_deferred,
-                    build_failed,
-                    build_errors,
-                ) = self._normalize_content_result(built_contents, effective_plan)
-                batch_deferred = tuple((*plan_deferred, *build_deferred))
-                deferred_items.extend(build_deferred)
-                failed_items.extend(build_failed)
-                for build_error in build_errors:
-                    errors.append(f"Album {plan.key} 内容构建提示：{build_error}")
-                if not ready_items:
-                    if run_context.stager is not None:
+                if prep.skipped:
+                    continue
+
+                effective_plan = prep.effective_plan
+                send_plan = prep.send_plan
+                contents = prep.contents
+                ready_items = prep.ready_items
+                batch_deferred = prep.batch_deferred
+
+                if not ready_items or send_plan is None or not contents:
+                    continue
+
+                if _stop_after_current_requested(token):
+                    if run_context.stager is not None and effective_plan is not None:
                         try:
                             self._cleanup(
                                 run_context.stager,
@@ -987,87 +1297,263 @@ class UploadEngine:
                             )
                         except Exception as cleanup_error:
                             errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
-                    if build_failed:
-                        message = "; ".join(build_errors) or "内容构建失败"
-                        errors.append(f"Album {plan.key} 内容构建失败：{message}")
-                        batches.append(
-                            UploadBatchResult(
-                                plan.key,
-                                BatchStatus.FAILED,
-                                error=message,
-                                deferred_items=batch_deferred,
+                    cancelled = True
+                    break
+
+                if run_context.sender is None:
+                    message = "UploadEngine 未配置 sender，未发起 Telegram 请求"
+                    errors.append(f"Album {plan.key} {message}")
+                    failed_items.extend(ready_items)
+                    batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
+                    if run_context.stager is not None and effective_plan is not None:
+                        try:
+                            self._cleanup(
+                                run_context.stager,
+                                effective_plan,
+                                run_context,
+                                confirmed=False,
                             )
-                        )
+                        except Exception as cleanup_error:
+                            errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
                     continue
-                if not contents:
-                    raise ValueError("不能发送空的 Telegram Album")
-            except Exception as error:
-                if _is_cancel_error(error, token):
-                    cancelled = True
-                    break
-                message = f"Album {plan.key} 内容构建失败：{error}"
-                errors.append(message)
-                failed_items.extend(ready_items)
-                if run_context.stager is not None:
+
+                try:
+                    _check_cancel(token)
+                    self._journal_call(
+                        journal,
+                        "prepare",
+                        kind,
+                        plan.key,
+                        [_item_payload(item) for item in ready_items],
+                        target=run_context.target,
+                    )
+                except Exception as error:
+                    if _is_cancel_error(error, token):
+                        cancelled = True
+                        break
+                    message = f"Album {plan.key} 无法写入 PREPARED 日志：{error}"
+                    errors.append(message)
+                    failed_items.extend(ready_items)
+                    batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
+                    if run_context.stager is not None and effective_plan is not None:
+                        try:
+                            self._cleanup(
+                                run_context.stager,
+                                effective_plan,
+                                run_context,
+                                confirmed=False,
+                            )
+                        except Exception as cleanup_error:
+                            errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
+                    continue
+
+                if _is_cancel_requested(token) or _stop_after_current_requested(token):
+                    # The sender has not been called yet, so the PREPARED guard is
+                    # safe to remove.  If deletion itself fails, retain the guard
+                    # and let the next run fail closed instead of risking resend.
                     try:
-                        self._cleanup(
-                            run_context.stager,
-                            effective_plan,
-                            run_context,
-                            confirmed=False,
+                        self._journal_call(
+                            journal,
+                            "finalize",
+                            kind,
+                            plan.key,
+                            target=run_context.target,
                         )
                     except Exception as cleanup_error:
-                        errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
-                batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
-                continue
-
-            if _stop_after_current_requested(token):
-                if run_context.stager is not None:
-                    try:
-                        self._cleanup(
-                            run_context.stager,
-                            effective_plan,
-                            run_context,
-                            confirmed=False,
-                        )
-                    except Exception as cleanup_error:
-                        errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
-                cancelled = True
-                break
-
-            send_plan = restrict_plan(effective_plan, ready_items)
-
-            if run_context.sender is None:
-                message = "UploadEngine 未配置 sender，未发起 Telegram 请求"
-                errors.append(f"Album {plan.key} {message}")
-                failed_items.extend(ready_items)
-                batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
-                continue
-
-            try:
-                _check_cancel(token)
-                self._journal_call(
-                    journal,
-                    "prepare",
-                    kind,
-                    plan.key,
-                    [_item_payload(item) for item in ready_items],
-                    target=run_context.target,
-                )
-            except Exception as error:
-                if _is_cancel_error(error, token):
+                        errors.append(f"Album {plan.key} 停止前清理 PREPARED 日志失败：{cleanup_error}")
+                    if run_context.stager is not None and effective_plan is not None:
+                        try:
+                            self._cleanup(
+                                run_context.stager,
+                                effective_plan,
+                                run_context,
+                                confirmed=False,
+                            )
+                        except Exception as cleanup_error:
+                            errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
                     cancelled = True
                     break
-                message = f"Album {plan.key} 无法写入 PREPARED 日志：{error}"
-                errors.append(message)
-                failed_items.extend(ready_items)
-                batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
-                continue
 
-            if _is_cancel_requested(token) or _stop_after_current_requested(token):
-                # The sender has not been called yet, so the PREPARED guard is
-                # safe to remove.  If deletion itself fails, retain the guard
-                # and let the next run fail closed instead of risking resend.
+                if executor is not None and plan_index + 1 < len(plans):
+                    if not (_is_cancel_requested(token) or _stop_after_current_requested(token)):
+                        prefetch_sink = _PrefetchEventSink(sink)
+                        prefetch_cancel_token = _PrefetchCancelToken(token)
+                        prefetch_context = replace(
+                            run_context,
+                            cancel_token=prefetch_cancel_token,
+                            event_sink=prefetch_sink,
+                        )
+                        next_plan = plans[plan_index + 1]
+                        prefetch_future = executor.submit(
+                            self._prepare_plan,
+                            strategy,
+                            next_plan,
+                            prefetch_context,
+                            state,
+                            journal,
+                            prefetch_cancel_token,
+                            prefetch_sink,
+                            kind,
+                        )
+                        prefetched_plan_index = plan_index + 1
+
+                observed: _ObservedSend
+                try:
+                    raw_result = self._send(run_context.sender, contents, send_plan, run_context)
+                    observed = _normalize_send_result(raw_result, len(ready_items))
+                    if _is_cancel_requested(token) and observed.status is not BatchStatus.CONFIRMED:
+                        cancelled = True
+                        observed = replace(
+                            observed,
+                            status=BatchStatus.UNKNOWN,
+                            error=observed.error or "发送后取消，结果无法确认",
+                        )
+                except Exception as error:
+                    sender_cancelled = _is_cancel_error(error, token)
+                    if sender_cancelled:
+                        cancelled = True
+                    submitted = getattr(error, "submitted", None)
+                    status = BatchStatus.FAILED if submitted is False else BatchStatus.UNKNOWN
+                    delivery = getattr(error, "result", None)
+                    if isinstance(delivery, Mapping):
+                        observed = _normalize_send_result(delivery, len(ready_items))
+                        observed = replace(observed, error=str(error) or observed.error)
+                    else:
+                        observed = _ObservedSend(status, error=str(error) or status.value)
+
+                if observed.status is BatchStatus.FAILED:
+                    try:
+                        self._journal_call(
+                            journal,
+                            "failed",
+                            kind,
+                            plan.key,
+                            observed.error or "Album 发送失败",
+                            target=run_context.target,
+                        )
+                    except Exception as journal_error:
+                        errors.append(f"Album {plan.key} FAILED 日志写入失败：{journal_error}")
+                    failed_items.extend(ready_items)
+                    if observed.error:
+                        errors.append(f"Album {plan.key} 发送失败：{observed.error}")
+                    batches.append(
+                        UploadBatchResult(
+                            plan.key,
+                            BatchStatus.FAILED,
+                            message_ids=observed.message_ids,
+                            error=observed.error,
+                            deferred_items=batch_deferred,
+                        )
+                    )
+                    continue
+
+                try:
+                    if observed.status is not BatchStatus.PREPARED and (
+                        observed.message_ids or observed.status is not BatchStatus.UNKNOWN
+                    ):
+                        self._journal_call(
+                            journal,
+                            "submitted",
+                            kind,
+                            plan.key,
+                            observed.message_ids,
+                            target=run_context.target,
+                        )
+                    if observed.status is BatchStatus.UNKNOWN:
+                        self._journal_call(
+                            journal,
+                            "update",
+                            kind,
+                            plan.key,
+                            UNKNOWN,
+                            error=observed.error or "Album 发送结果无法确认",
+                            succeeded_ids=observed.succeeded_ids,
+                            failed_ids=observed.failed_ids,
+                            pending_ids=observed.pending_ids,
+                            target=run_context.target,
+                        )
+                    elif observed.status is BatchStatus.PREPARED:
+                        self._journal_call(
+                            journal,
+                            "update",
+                            kind,
+                            plan.key,
+                            BatchStatus.PREPARED.value,
+                            error=observed.error or "发送器仍处于 PREPARED",
+                            target=run_context.target,
+                        )
+                except Exception as journal_error:
+                    message = f"Album {plan.key} 发送日志状态不完整：{journal_error}"
+                    errors.append(message)
+                    batches.append(
+                        UploadBatchResult(
+                            plan.key,
+                            BatchStatus.UNKNOWN,
+                            message_ids=observed.message_ids,
+                            error=message,
+                        )
+                    )
+                    ambiguous = True
+                    if cancelled:
+                        break
+                    continue
+
+                if observed.status is not BatchStatus.CONFIRMED:
+                    message = observed.error or "Album 发送结果无法确认"
+                    errors.append(f"Album {plan.key} 发送结果未确认：{message}")
+                    batches.append(
+                        UploadBatchResult(
+                            plan.key,
+                            observed.status,
+                            message_ids=observed.message_ids,
+                            error=message,
+                        )
+                    )
+                    ambiguous = True
+                    continue
+
+                try:
+                    self._journal_call(
+                        journal,
+                        "mark_confirmed",
+                        kind,
+                        plan.key,
+                        observed.succeeded_ids or observed.message_ids,
+                        target=run_context.target,
+                    )
+                except Exception as journal_error:
+                    message = f"Album {plan.key} 无法写入 CONFIRMED 日志：{journal_error}"
+                    errors.append(message)
+                    batches.append(
+                        UploadBatchResult(
+                            plan.key,
+                            BatchStatus.UNKNOWN,
+                            message_ids=observed.message_ids,
+                            error=message,
+                        )
+                    )
+                    ambiguous = True
+                    continue
+
+                ids = observed.succeeded_ids or observed.message_ids
+                try:
+                    self._state_mark_completed(state, ready_items, ids)
+                except Exception as state_error:
+                    # CONFIRMED remains durable and blocks a duplicate until the
+                    # checkpoint can be repaired; do not finalize this journal.
+                    message = f"Album {plan.key} 状态保存失败：{state_error}"
+                    errors.append(message)
+                    batches.append(
+                        UploadBatchResult(
+                            plan.key,
+                            BatchStatus.CONFIRMED,
+                            message_ids=ids,
+                            confirmed_items=ready_items,
+                            error=message,
+                        )
+                    )
+                    continue
+
                 try:
                     self._journal_call(
                         journal,
@@ -1076,207 +1562,63 @@ class UploadEngine:
                         plan.key,
                         target=run_context.target,
                     )
+                    if run_context.stager is not None:
+                        self._cleanup(
+                            run_context.stager,
+                            effective_plan,
+                            run_context,
+                            confirmed=True,
+                        )
                 except Exception as cleanup_error:
-                    errors.append(f"Album {plan.key} 停止前清理 PREPARED 日志失败：{cleanup_error}")
-                cancelled = True
-                break
-
-            observed: _ObservedSend
-            try:
-                raw_result = self._send(run_context.sender, contents, send_plan, run_context)
-                observed = _normalize_send_result(raw_result, len(ready_items))
-                if _is_cancel_requested(token) and observed.status is not BatchStatus.CONFIRMED:
-                    cancelled = True
-                    observed = replace(
-                        observed,
-                        status=BatchStatus.UNKNOWN,
-                        error=observed.error or "发送后取消，结果无法确认",
-                    )
-            except Exception as error:
-                sender_cancelled = _is_cancel_error(error, token)
-                if sender_cancelled:
-                    cancelled = True
-                submitted = getattr(error, "submitted", None)
-                status = BatchStatus.FAILED if submitted is False else BatchStatus.UNKNOWN
-                delivery = getattr(error, "result", None)
-                if isinstance(delivery, Mapping):
-                    observed = _normalize_send_result(delivery, len(ready_items))
-                    observed = replace(observed, error=str(error) or observed.error)
-                else:
-                    observed = _ObservedSend(status, error=str(error) or status.value)
-
-            if observed.status is BatchStatus.FAILED:
-                try:
-                    self._journal_call(
-                        journal,
-                        "failed",
-                        kind,
-                        plan.key,
-                        observed.error or "Album 发送失败",
-                        target=run_context.target,
-                    )
-                except Exception as journal_error:
-                    errors.append(f"Album {plan.key} FAILED 日志写入失败：{journal_error}")
-                failed_items.extend(ready_items)
-                if observed.error:
-                    errors.append(f"Album {plan.key} 发送失败：{observed.error}")
-                batches.append(
-                    UploadBatchResult(
-                        plan.key,
-                        BatchStatus.FAILED,
-                        message_ids=observed.message_ids,
-                        error=observed.error,
-                        deferred_items=batch_deferred,
-                    )
-                )
-                continue
-
-            try:
-                if observed.status is not BatchStatus.PREPARED and (
-                    observed.message_ids or observed.status is not BatchStatus.UNKNOWN
-                ):
-                    self._journal_call(
-                        journal,
-                        "submitted",
-                        kind,
-                        plan.key,
-                        observed.message_ids,
-                        target=run_context.target,
-                    )
-                if observed.status is BatchStatus.UNKNOWN:
-                    self._journal_call(
-                        journal,
-                        "update",
-                        kind,
-                        plan.key,
-                        UNKNOWN,
-                        error=observed.error or "Album 发送结果无法确认",
-                        succeeded_ids=observed.succeeded_ids,
-                        failed_ids=observed.failed_ids,
-                        pending_ids=observed.pending_ids,
-                        target=run_context.target,
-                    )
-                elif observed.status is BatchStatus.PREPARED:
-                    self._journal_call(
-                        journal,
-                        "update",
-                        kind,
-                        plan.key,
-                        BatchStatus.PREPARED.value,
-                        error=observed.error or "发送器仍处于 PREPARED",
-                        target=run_context.target,
-                    )
-            except Exception as journal_error:
-                message = f"Album {plan.key} 发送日志状态不完整：{journal_error}"
-                errors.append(message)
-                batches.append(
-                    UploadBatchResult(
-                        plan.key,
-                        BatchStatus.UNKNOWN,
-                        message_ids=observed.message_ids,
-                        error=message,
-                    )
-                )
-                ambiguous = True
-                if cancelled:
-                    break
-                continue
-
-            if observed.status is not BatchStatus.CONFIRMED:
-                message = observed.error or "Album 发送结果无法确认"
-                errors.append(f"Album {plan.key} 发送结果未确认：{message}")
-                batches.append(
-                    UploadBatchResult(
-                        plan.key,
-                        observed.status,
-                        message_ids=observed.message_ids,
-                        error=message,
-                    )
-                )
-                ambiguous = True
-                continue
-
-            try:
-                self._journal_call(
-                    journal,
-                    "mark_confirmed",
-                    kind,
-                    plan.key,
-                    observed.succeeded_ids or observed.message_ids,
-                    target=run_context.target,
-                )
-            except Exception as journal_error:
-                message = f"Album {plan.key} 无法写入 CONFIRMED 日志：{journal_error}"
-                errors.append(message)
-                batches.append(
-                    UploadBatchResult(
-                        plan.key,
-                        BatchStatus.UNKNOWN,
-                        message_ids=observed.message_ids,
-                        error=message,
-                    )
-                )
-                ambiguous = True
-                continue
-
-            ids = observed.succeeded_ids or observed.message_ids
-            try:
-                self._state_mark_completed(state, ready_items, ids)
-            except Exception as state_error:
-                # CONFIRMED remains durable and blocks a duplicate until the
-                # checkpoint can be repaired; do not finalize this journal.
-                message = f"Album {plan.key} 状态保存失败：{state_error}"
-                errors.append(message)
+                    # The send and state checkpoint are complete.  Keep the
+                    # successful batch but surface cleanup/finalization failure.
+                    errors.append(f"Album {plan.key} 收尾失败：{cleanup_error}")
                 batches.append(
                     UploadBatchResult(
                         plan.key,
                         BatchStatus.CONFIRMED,
                         message_ids=ids,
                         confirmed_items=ready_items,
-                        error=message,
                     )
                 )
-                continue
-
-            try:
-                self._journal_call(
-                    journal,
-                    "finalize",
-                    kind,
-                    plan.key,
-                    target=run_context.target,
+                confirmed_count += 1
+                self._emit(
+                    sink,
+                    ProgressEvent(
+                        kind=kind,
+                        phase="upload",
+                        completed=confirmed_count,
+                        total=len(plans),
+                        path=str(ready_items[-1].path),
+                        message=f"Album {plan.key} 已确认",
+                    ),
                 )
-                if run_context.stager is not None:
-                    self._cleanup(
-                        run_context.stager,
-                        effective_plan,
-                        run_context,
-                        confirmed=True,
-                    )
-            except Exception as cleanup_error:
-                # The send and state checkpoint are complete.  Keep the
-                # successful batch but surface cleanup/finalization failure.
-                errors.append(f"Album {plan.key} 收尾失败：{cleanup_error}")
-            batches.append(
-                UploadBatchResult(
-                    plan.key,
-                    BatchStatus.CONFIRMED,
-                    message_ids=ids,
-                    confirmed_items=ready_items,
-                )
-            )
-            confirmed_count += 1
-            self._emit(
-                sink,
-                ProgressEvent(
-                    kind=kind,
-                    phase="upload",
-                    completed=confirmed_count,
-                    total=len(plans),
-                    path=str(ready_items[-1].path),
-                    message=f"Album {plan.key} 已确认",
-                ),
-            )
+        finally:
+            if executor is not None:
+                if prefetch_future is not None:
+                    if not prefetch_future.done():
+                        if prefetch_cancel_token is not None:
+                            prefetch_cancel_token.cancel()
+                        prefetch_future.cancel()
+                    try:
+                        unconsumed = prefetch_future.result(timeout=5)
+                        if (
+                            unconsumed is not None
+                            and unconsumed.effective_plan is not None
+                            and run_context.stager is not None
+                        ):
+                            try:
+                                self._cleanup(
+                                    run_context.stager,
+                                    unconsumed.effective_plan,
+                                    run_context,
+                                    confirmed=False,
+                                )
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                executor.shutdown(wait=True, cancel_futures=True)
 
         if cancelled:
             return UploadRunResult(
