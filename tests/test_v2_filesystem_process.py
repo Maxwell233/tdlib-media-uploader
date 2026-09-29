@@ -308,6 +308,20 @@ class ConcurrencyExtractionTest(unittest.TestCase):
                     )
                 )
 
+    def test_concurrency_token_cancels_sleep_promptly_during_wait(self):
+        token = concurrency.CancellationToken()
+        start = time.monotonic()
+        timer = threading.Timer(0.02, token.cancel)
+        timer.start()
+        try:
+            result = concurrency.cancelable_sleep(5.0, cancel_token=token)
+            elapsed = time.monotonic() - start
+            self.assertFalse(result)
+            self.assertLess(elapsed, 1.0)
+        finally:
+            timer.cancel()
+
+
 
 class ProcessRunnerExtractionTest(unittest.TestCase):
     def _run(self, script, **kwargs):

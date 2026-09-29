@@ -12,6 +12,7 @@ import importlib
 import inspect
 from pathlib import Path
 import threading
+import time
 from typing import Any
 
 from ..core.logging import write_exception
@@ -65,6 +66,7 @@ class ScanWorker(QThread):
         self.kind = _require_kind(kind)
         self.scan_runner = scan_runner
         self.cancel_event = threading.Event()
+        self._last_progress_emit = 0.0
 
     def request_stop(self):
         """Request cancellation without terminating the worker thread."""
@@ -76,7 +78,19 @@ class ScanWorker(QThread):
         self.request_stop()
 
     def _report_progress(self, payload: dict):
-        self.progress_changed.emit(self.kind, payload)
+        now = time.monotonic()
+        completed = payload.get("completed") if isinstance(payload, Mapping) else None
+        total = payload.get("total") if isinstance(payload, Mapping) else None
+        is_boundary = (
+            completed is None
+            or total is None
+            or completed == 0
+            or completed >= total
+            or self._last_progress_emit == 0.0
+        )
+        if is_boundary or (now - self._last_progress_emit) >= 0.04:
+            self._last_progress_emit = now
+            self.progress_changed.emit(self.kind, payload)
 
     def run(self):
         try:

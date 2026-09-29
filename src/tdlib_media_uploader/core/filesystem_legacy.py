@@ -311,7 +311,11 @@ def cancelable_sleep(seconds: float, cancel_event=None, *, quantum: float = 0.05
         if _cancelled(cancel_event):
             return False
         delay = min(float(quantum), remaining)
-        time.sleep(delay)
+        if cancel_event is not None and hasattr(cancel_event, "wait"):
+            if cancel_event.wait(delay):
+                return False
+        else:
+            time.sleep(delay)
         remaining -= delay
     return not _cancelled(cancel_event)
 

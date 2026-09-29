@@ -638,6 +638,12 @@ class TDJsonClient:
         # is the supported way to abort the in-flight transfer; send it here
         # immediately instead of waiting for the worker's finally block.
         self._send_close_now()
+        with self.pending_lock:
+            for waiter in self.pending.values():
+                try:
+                    waiter.put_nowait(None)
+                except queue.Full:
+                    pass
         with self.send_condition:
             self.send_condition.notify_all()
 
@@ -681,7 +687,10 @@ class TDJsonClient:
                 if remaining <= 0:
                     raise TimeoutError(f"TDLib 请求超时：{query.get('@type')}")
                 try:
-                    response = waiter.get(timeout=min(1.0, remaining))
+                    response = waiter.get(timeout=min(0.2, remaining))
+                    if response is None:
+                        self._raise_if_cancelled()
+                        continue
                     break
                 except queue.Empty:
                     self._raise_if_cancelled()
@@ -928,7 +937,8 @@ class TDJsonClient:
                 if exc.code == 404:
                     return self._try_get_chat(self.config.CHAT_ID)
                 raise
-            time.sleep(0.05)
+            if self.cancel_event.wait(0.05):
+                self._raise_if_cancelled()
             chat = self._try_get_chat(self.config.CHAT_ID)
             if chat is not None:
                 self.ui.success(f"已在{label}中找到目标聊天（第 {index} 批）。")

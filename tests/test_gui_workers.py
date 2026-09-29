@@ -33,6 +33,23 @@ class Phase8GuiWorkersTest(unittest.TestCase):
         self.assertEqual(calls[0][0], "image")
         self.assertFalse(calls[0][2].is_set())
 
+    def test_scan_worker_throttles_high_frequency_progress(self):
+        emitted = []
+
+        def scan_runner(kind, *, progress_callback, cancel_event):
+            for i in range(100):
+                progress_callback({"phase": "scan", "completed": i, "total": 100})
+            progress_callback({"phase": "scan", "completed": 100, "total": 100})
+            return {"kind": kind, "cancelled": False, "items": []}
+
+        worker = ScanWorker("image", scan_runner=scan_runner)
+        worker.progress_changed.connect(lambda kind, payload: emitted.append(payload))
+        worker.run()
+
+        self.assertLess(len(emitted), 30)
+        self.assertEqual(emitted[0]["completed"], 0)
+        self.assertEqual(emitted[-1]["completed"], 100)
+
     def test_upload_worker_passes_boundary_dependencies_and_maps_result(self):
         calls = []
         messages = []

@@ -260,3 +260,28 @@ class ImprovementsTest(unittest.TestCase):
             self.assertTrue(write.called)
             self.assertIn("源文件可读取", write.call_args.args[1])
             self.assertTrue(client.ui.messages)
+
+    def test_tdjson_client_cancel_unblocks_pending_request_promptly(self):
+        from tdlib_media_uploader.telegram import tdlib_common
+
+        client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
+        client._config = SimpleNamespace(TDLIB_REQUEST_TIMEOUT=10)
+        client.cancel_event = threading.Event()
+        client.close_lock = threading.Lock()
+        client.close_sent = False
+        client.send_raw = lambda _q: None
+        client.pending = {}
+        client.pending_lock = threading.Lock()
+        client.send_condition = threading.Condition()
+
+        start = time.monotonic()
+        timer = threading.Timer(0.02, client.cancel)
+        timer.start()
+        try:
+            with self.assertRaises(tdlib_common.TDLibCancelled):
+                client.request({"@type": "getMe"})
+            elapsed = time.monotonic() - start
+            self.assertLess(elapsed, 0.5)
+        finally:
+            timer.cancel()
+

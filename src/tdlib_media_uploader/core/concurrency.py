@@ -57,9 +57,16 @@ def cancelable_sleep(
         if is_cancelled(cancel_token, cancel_event):
             return False
         delay = min(step, remaining)
-        # Event.wait avoids a needless full sleep when a legacy event is used.
+        # Event.wait avoids a needless full sleep when a legacy event or token is used.
         if cancel_event is not None and hasattr(cancel_event, "wait"):
-            cancel_event.wait(delay)
+            if cancel_event.wait(delay):
+                return False
+        elif cancel_token is not None and hasattr(cancel_token, "wait"):
+            if cancel_token.wait(delay):
+                return False
+        elif cancel_token is not None and hasattr(getattr(cancel_token, "event", None), "wait"):
+            if cancel_token.event.wait(delay):
+                return False
         else:
             time.sleep(delay)
         remaining -= delay
