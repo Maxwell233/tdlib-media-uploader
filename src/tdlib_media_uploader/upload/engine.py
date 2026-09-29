@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, replace
 import inspect
 import json
 from pathlib import Path
+import threading
 from typing import Any, Protocol
 
 from ..contracts import CancelToken, EventSink, MediaStrategy, UploadContext
@@ -138,6 +139,28 @@ class _PrefetchEventSink:
                     emit(event)
                 except Exception:
                     pass
+
+
+class _PrefetchCancelToken:
+    """Cancel background preparation on either run cancellation or safe stop."""
+
+    def __init__(self, parent: CancelToken | None):
+        self.parent = parent
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    def is_cancelled(self) -> bool:
+        return (
+            self._cancelled.is_set()
+            or _is_cancel_requested(self.parent)
+            or _stop_after_current_requested(self.parent)
+        )
+
+    def raise_if_cancelled(self) -> None:
+        if self.is_cancelled():
+            raise UploadCancelled("后台预取已取消")
 
 
 
@@ -721,6 +744,13 @@ class UploadEngine:
         sink: EventSink | None,
         kind: str,
     ) -> _PreparedBatch:
+        # Strategy adapters may emit through context.event_sink instead of the
+        # explicit event_sink argument. Keep both paths isolated for prefetch.
+        run_context = replace(
+            run_context,
+            cancel_token=token if token is not None else run_context.cancel_token,
+            event_sink=sink if sink is not None else run_context.event_sink,
+        )
         if _stop_after_current_requested(token) or _is_cancel_requested(token):
             return _PreparedBatch(plan=plan, cancelled=True)
 
@@ -886,6 +916,25 @@ class UploadEngine:
             try:
                 effective_plan = self._stage(run_context.stager, current_plan, run_context)
             except Exception as error:
+                if _is_cancel_error(error, token) or _stop_after_current_requested(token):
+                    cleanup_errors: list[str] = []
+                    try:
+                        self._cleanup(
+                            run_context.stager,
+                            current_plan,
+                            run_context,
+                            confirmed=False,
+                        )
+                    except Exception as cleanup_error:
+                        cleanup_errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
+                    return _PreparedBatch(
+                        plan=plan,
+                        cancelled=True,
+                        errors=cleanup_errors,
+                        plan_deferred=plan_deferred,
+                        preflight_failed=preflight_failed,
+                        preflight_deferred=preflight_deferred,
+                    )
                 message = f"Album {plan.key} 暂存失败：{error}"
                 return _PreparedBatch(
                     plan=plan,
@@ -1169,6 +1218,7 @@ class UploadEngine:
         )
         executor = ThreadPoolExecutor(max_workers=1) if prefetch_enabled else None
         prefetch_future: Future[_PreparedBatch] | None = None
+        prefetch_cancel_token: _PrefetchCancelToken | None = None
         prefetched_plan_index: int | None = None
 
         try:
@@ -1190,6 +1240,7 @@ class UploadEngine:
                         continue
                     finally:
                         prefetch_future = None
+                        prefetch_cancel_token = None
                         prefetched_plan_index = None
                 else:
                     prep = self._prepare_plan(
@@ -1326,15 +1377,21 @@ class UploadEngine:
                 if executor is not None and plan_index + 1 < len(plans):
                     if not (_is_cancel_requested(token) or _stop_after_current_requested(token)):
                         prefetch_sink = _PrefetchEventSink(sink)
+                        prefetch_cancel_token = _PrefetchCancelToken(token)
+                        prefetch_context = replace(
+                            run_context,
+                            cancel_token=prefetch_cancel_token,
+                            event_sink=prefetch_sink,
+                        )
                         next_plan = plans[plan_index + 1]
                         prefetch_future = executor.submit(
                             self._prepare_plan,
                             strategy,
                             next_plan,
-                            run_context,
+                            prefetch_context,
                             state,
                             journal,
-                            token,
+                            prefetch_cancel_token,
                             prefetch_sink,
                             kind,
                         )
@@ -1540,6 +1597,8 @@ class UploadEngine:
             if executor is not None:
                 if prefetch_future is not None:
                     if not prefetch_future.done():
+                        if prefetch_cancel_token is not None:
+                            prefetch_cancel_token.cancel()
                         prefetch_future.cancel()
                     try:
                         unconsumed = prefetch_future.result(timeout=5)

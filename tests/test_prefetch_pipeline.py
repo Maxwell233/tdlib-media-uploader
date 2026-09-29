@@ -181,6 +181,140 @@ class PrefetchPipelineTest(unittest.TestCase):
         # State must only have album-1 items completed
         self.assertEqual(len(state.completed), 1)
 
+    def test_safe_stop_cancels_running_prefetch_and_cleans_staging(self):
+        token = _Token()
+        prefetch_cancelled = threading.Event()
+        prefetch_fallback = threading.Event()
+
+        class BlockingStrategy(_PipelinedStrategy):
+            def build_contents(self, plan, *, cancel_token, event_sink, context=None):
+                if plan.key != "album-2":
+                    return super().build_contents(
+                        plan,
+                        cancel_token=cancel_token,
+                        event_sink=event_sink,
+                        context=context,
+                    )
+
+                self.prep_events[plan.key].set()
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    if cancel_token.is_cancelled():
+                        prefetch_cancelled.set()
+                        raise UploadCancelled("预取收到安全停止")
+                    time.sleep(0.005)
+
+                # Bound the test even if cancellation stops being propagated.
+                prefetch_fallback.set()
+                return super().build_contents(
+                    plan,
+                    cancel_token=cancel_token,
+                    event_sink=event_sink,
+                    context=context,
+                )
+
+        strategy = BlockingStrategy(count=3)
+        staged: list[str] = []
+        cleaned: list[tuple[str, bool]] = []
+
+        class MockStager:
+            def stage(self, plan, context):
+                staged.append(plan.key)
+                return plan
+
+            def cleanup(self, plan, context, *, confirmed=False):
+                cleaned.append((plan.key, confirmed))
+
+        def on_send(plan_key: str):
+            if plan_key == "album-1":
+                self.assertTrue(strategy.prep_events["album-2"].wait(timeout=2.0))
+                token.safe_event.set()
+
+        sender = _BlockingSender(on_send_callback=on_send)
+        state = MemoryStateStore()
+        journal = MemoryJournalStore()
+        engine = UploadEngine(
+            sender=sender,
+            state=state,
+            journal=journal,
+            stager=MockStager(),
+            prefetch_next=True,
+        )
+
+        result = engine.run(strategy, source_root=Path("/media"), target={}, cancel_token=token)
+
+        self.assertEqual(result.status, RUN_CANCELLED)
+        self.assertTrue(prefetch_cancelled.is_set(), "running prefetch did not observe safe stop")
+        self.assertFalse(prefetch_fallback.is_set(), "safe stop waited for prefetch's fallback timeout")
+        self.assertEqual(sender.calls, ["album-1"])
+        self.assertEqual(journal.records, {})
+        self.assertEqual(len(state.completed), 1)
+        self.assertIn("album-2", staged)
+        self.assertIn(("album-2", False), cleaned)
+
+    def test_prefetch_context_filters_strategy_progress_but_forwards_logs(self):
+        upload_active = threading.Event()
+        upload_started = threading.Event()
+        preflight_done = threading.Event()
+        leaked_progress: list[ProgressEvent] = []
+        forwarded_logs: list[LogEvent] = []
+        lock = threading.Lock()
+
+        class RecordingSink:
+            def emit(self, event):
+                with lock:
+                    if upload_active.is_set() and isinstance(event, ProgressEvent):
+                        leaked_progress.append(event)
+                    if upload_active.is_set() and isinstance(event, LogEvent):
+                        forwarded_logs.append(event)
+
+        class ContextAwareStrategy(_PipelinedStrategy):
+            def preflight_item(self, item, *, context=None):
+                if item.path.name == "2.mp4":
+                    if not upload_started.wait(timeout=2.0):
+                        raise AssertionError("album 1 send did not start before prefetch callback")
+                    # This mirrors VideoStrategy's legacy callback path through
+                    # context.event_sink, which bypassed the explicit sink.
+                    context.event_sink.emit(
+                        ProgressEvent(
+                            kind="video",
+                            phase="upload",
+                            completed=1,
+                            total=1,
+                            path=str(item.path),
+                        )
+                    )
+                    context.event_sink.emit(LogEvent(level="WARNING", message="prefetch warning"))
+                    preflight_done.set()
+                return {"status": "READY"}
+
+        strategy = ContextAwareStrategy(count=2)
+        sink = RecordingSink()
+
+        def on_send(plan_key: str):
+            if plan_key == "album-1":
+                upload_active.set()
+                upload_started.set()
+                self.assertTrue(preflight_done.wait(timeout=2.0))
+                upload_active.clear()
+
+        sender = _BlockingSender(on_send_callback=on_send)
+        context = UploadContext(
+            source_root=Path("/media"),
+            target={},
+            cancel_token=_Token(),
+            event_sink=sink,
+            preflight=strategy.preflight_item,
+        )
+        engine = UploadEngine(sender=sender, prefetch_next=True)
+
+        result = engine.run(strategy, context=context)
+
+        self.assertEqual(result.status, RUN_COMPLETED)
+        self.assertEqual(sender.calls, ["album-1", "album-2"])
+        self.assertEqual(leaked_progress, [])
+        self.assertTrue(any(log.message == "prefetch warning" for log in forwarded_logs))
+
     def test_staging_cleanup_on_safe_stop(self):
         strategy = _PipelinedStrategy(count=3)
         token = _Token()
