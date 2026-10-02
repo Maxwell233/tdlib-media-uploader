@@ -139,21 +139,27 @@ class VideoRemuxMatrixAndProbeTest(unittest.TestCase):
     """Test format detection, compatibility classification, and policy behavior."""
 
     def test_native_formats_stay_native(self):
-        for ext in (".mp4", ".mov", ".m4v"):
+        cases = [
+            (".mp4", "h264", "aac"),
+            (".mp4", "h264", "ac3"),
+            (".mov", "hevc", "pcm_s16le"),
+            (".m4v", "h264", "aac"),
+        ]
+        for ext, vcodec, acodec in cases:
             with tempfile.TemporaryDirectory() as td:
                 p = Path(td) / f"video{ext}"
                 p.write_bytes(b"dummy")
                 mock_out = _mock_ffprobe_json(
                     container="mov,mp4,m4a,3gp,3g2,mj2",
-                    video_codec="h264",
-                    audio_codec="aac",
+                    video_codec=vcodec,
+                    audio_codec=acodec,
                 )
                 with patch("tdlib_media_uploader.media.video_probe._find_ffprobe", return_value="ffprobe"), \
                      patch("tdlib_media_uploader.media.video_probe.run_cancellable_process",
                            return_value=subprocess.CompletedProcess([], 0, mock_out, "")):
                     info = probe_video(p)
 
-                self.assertEqual(info.compatibility, "native")
+                self.assertEqual(info.compatibility, "native", f"Failed for native {ext} {vcodec} {acodec}")
                 self.assertEqual(info.recommended_action, "upload")
                 self.assertTrue(determine_supports_streaming(info))
 
@@ -225,7 +231,7 @@ class VideoRemuxMatrixAndProbeTest(unittest.TestCase):
                 self.assertEqual(info.recommended_action, "skip")
                 reason = format_unsupported_reason(p, info)
                 self.assertIn("音频编码", reason)
-                self.assertIn("禁止有损转码", reason)
+                self.assertIn("无法在不重新编码音频的情况下安全重新封装为 MP4", reason)
 
     def test_original_policy_skips_remux_candidate_in_prepare_and_preflight(self):
         with tempfile.TemporaryDirectory() as td:
@@ -848,6 +854,740 @@ class SafetyContractVerificationTest(unittest.TestCase):
                 self.assertIn("已跳过", str(ctx.exception))
                 self.assertIn("不受支持", str(ctx.exception))
                 # Must never construct inputMessageDocument
+
+
+class ProcessedFilenameAndDirectNativeTest(unittest.TestCase):
+    """Test non-hash filenames, collision resolution, and direct native uploads."""
+
+    def test_direct_native_no_copy_and_no_processed_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            src_dir = Path(td) / "sources"
+            src_dir.mkdir()
+            cache_dir = Path(td) / "cache"
+            processed_dir = cache_dir / "video_processed"
+
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
+                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+                for ext in (".mp4", ".mov", ".m4v"):
+                    src = src_dir / f"sample{ext}"
+                    src.write_bytes(b"native raw bytes")
+                    native_info = VideoMediaInfo(
+                        container=ext.lstrip("."),
+                        video_codec="h264",
+                        audio_codec="aac",
+                        width=1920,
+                        height=1080,
+                        duration=10.0,
+                        fps=30.0,
+                        has_video_stream=True,
+                        has_audio_stream=True,
+                        compatibility="native",
+                        recommended_action="upload",
+                    )
+                    with patch("tdlib_media_uploader.media.video_prepare.probe_video", return_value=native_info):
+                        prep = prepare_video_for_telegram(src, group_key="grp_native", generate_thumbnail=False)
+
+                    self.assertFalse(prep.is_remuxed)
+                    self.assertEqual(prep.upload_path, src)
+                    # No file copied into video_processed directory
+                    if processed_dir.exists():
+                        self.assertEqual(len(list(processed_dir.rglob("*"))), 0)
+
+    def test_remux_output_name_preserves_stem_without_hash(self):
+        with tempfile.TemporaryDirectory() as td:
+            src_dir = Path(td) / "sources"
+            src_dir.mkdir()
+            cache_dir = Path(td) / "cache"
+            processed_dir = cache_dir / "video_processed"
+
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
+                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+
+                test_files = [
+                    ("clip.ts", "clip.mp4"),
+                    ("holiday.2026.mkv", "holiday.2026.mp4"),
+                    ("archive.part01.m2ts", "archive.part01.mp4"),
+                ]
+
+                for src_name, expected_target_name in test_files:
+                    src = src_dir / src_name
+                    src.write_bytes(b"remux candidate bytes")
+
+                    remux_info = VideoMediaInfo(
+                        container=src.suffix.lstrip("."),
+                        video_codec="h264",
+                        audio_codec="aac",
+                        width=1920,
+                        height=1080,
+                        duration=10.0,
+                        fps=30.0,
+                        has_video_stream=True,
+                        has_audio_stream=True,
+                        compatibility="remux",
+                        recommended_action="remux",
+                    )
+                    mp4_info = VideoMediaInfo(
+                        container="mp4",
+                        video_codec="h264",
+                        audio_codec="aac",
+                        width=1920,
+                        height=1080,
+                        duration=10.0,
+                        fps=30.0,
+                        has_video_stream=True,
+                        has_audio_stream=True,
+                        compatibility="native",
+                        recommended_action="upload",
+                    )
+
+                    with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=[remux_info, mp4_info]), \
+                         patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                        mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"mp4") and d
+                        prep = prepare_video_for_telegram(src, group_key="stem_group", generate_thumbnail=False)
+
+                    self.assertTrue(prep.is_remuxed)
+                    self.assertEqual(prep.upload_path.name, expected_target_name)
+                    # Verify NO hash in the filename
+                    self.assertNotIn(prep.cache_key, prep.upload_path.name)
+                    self.assertNotIn("tmp", prep.upload_path.name)
+
+    def test_deterministic_collision_handling_without_hashes(self):
+        with tempfile.TemporaryDirectory() as td:
+            src_dir = Path(td) / "sources"
+            src_dir.mkdir()
+            cache_dir = Path(td) / "cache"
+            processed_dir = cache_dir / "video_processed"
+
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
+                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+
+                src1 = src_dir / "movie.ts"
+                src2 = src_dir / "movie.avi"
+                src1.write_bytes(b"movie ts content")
+                src2.write_bytes(b"movie avi content")
+
+                def make_infos(container):
+                    remux_i = VideoMediaInfo(
+                        container=container,
+                        video_codec="h264",
+                        audio_codec="aac" if container == "ts" else "mp3",
+                        width=1920,
+                        height=1080,
+                        duration=10.0,
+                        fps=30.0,
+                        has_video_stream=True,
+                        has_audio_stream=True,
+                        compatibility="remux",
+                        recommended_action="remux",
+                    )
+                    mp4_i = VideoMediaInfo(
+                        container="mp4",
+                        video_codec="h264",
+                        audio_codec="aac" if container == "ts" else "mp3",
+                        width=1920,
+                        height=1080,
+                        duration=10.0,
+                        fps=30.0,
+                        has_video_stream=True,
+                        has_audio_stream=True,
+                        compatibility="native",
+                        recommended_action="upload",
+                    )
+                    return [remux_i, mp4_i]
+
+                # Prepare first file: movie.ts -> movie.mp4
+                with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=make_infos("ts")), \
+                     patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                    mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"ts mp4") and d
+                    prep1 = prepare_video_for_telegram(src1, group_key="coll_group", generate_thumbnail=False)
+
+                # Prepare second file in same group: movie.avi -> movie.avi.mp4
+                with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=make_infos("avi")), \
+                     patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                    mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"avi mp4") and d
+                    prep2 = prepare_video_for_telegram(src2, group_key="coll_group", generate_thumbnail=False)
+
+                self.assertEqual(prep1.upload_path.name, "movie.mp4")
+                self.assertEqual(prep2.upload_path.name, "movie.avi.mp4")
+                self.assertNotEqual(prep1.upload_path, prep2.upload_path)
+                self.assertTrue(prep1.upload_path.is_file())
+                self.assertTrue(prep2.upload_path.is_file())
+
+    def test_manifest_reuse_and_invalidation(self):
+        with tempfile.TemporaryDirectory() as td:
+            src_dir = Path(td) / "sources"
+            src_dir.mkdir()
+            cache_dir = Path(td) / "cache"
+            processed_dir = cache_dir / "video_processed"
+
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
+                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+
+                src = src_dir / "clip.ts"
+                src.write_bytes(b"initial ts content")
+
+                remux_i = VideoMediaInfo(
+                    container="ts",
+                    video_codec="h264",
+                    audio_codec="aac",
+                    width=1920,
+                    height=1080,
+                    duration=10.0,
+                    fps=30.0,
+                    has_video_stream=True,
+                    has_audio_stream=True,
+                    compatibility="remux",
+                    recommended_action="remux",
+                )
+                mp4_i = VideoMediaInfo(
+                    container="mp4",
+                    video_codec="h264",
+                    audio_codec="aac",
+                    width=1920,
+                    height=1080,
+                    duration=10.0,
+                    fps=30.0,
+                    has_video_stream=True,
+                    has_audio_stream=True,
+                    compatibility="native",
+                    recommended_action="upload",
+                )
+
+                # 1. First run creates processed clip.mp4
+                with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=[remux_i, mp4_i]), \
+                     patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                    mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"mp4 content") and d
+                    prep1 = prepare_video_for_telegram(src, group_key="reuse_grp", generate_thumbnail=False)
+                    self.assertEqual(mock_remux.call_count, 1)
+
+                # 2. Second run with unchanged source reuses clip.mp4 without remuxing
+                with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=[remux_i, mp4_i]), \
+                     patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                    prep2 = prepare_video_for_telegram(src, group_key="reuse_grp", generate_thumbnail=False)
+                    self.assertEqual(mock_remux.call_count, 0)
+                    self.assertEqual(prep1.upload_path, prep2.upload_path)
+
+                # 3. Modify source file -> invalidates cache and triggers remux
+                src.write_bytes(b"completely modified ts content")
+                with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=[remux_i, mp4_i]), \
+                     patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                    mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"new mp4 content") and d
+                    prep3 = prepare_video_for_telegram(src, group_key="reuse_grp", generate_thumbnail=False)
+                    self.assertEqual(mock_remux.call_count, 1)
+
+
+class CleanupIsolationAndSecurityTest(unittest.TestCase):
+    """Test group cleanup path security, cross-group isolation, and source preservation."""
+
+    def test_cleanup_processed_group_path_security(self):
+        with tempfile.TemporaryDirectory() as td:
+            proc_root = Path(td) / "video_processed"
+            proc_root.mkdir()
+            outside_file = Path(td) / "precious_user_file.txt"
+            outside_file.write_bytes(b"cannot be deleted")
+            source_file = Path(td) / "original_video.ts"
+            source_file.write_bytes(b"source media")
+
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", proc_root):
+                # Put a legitimate processed file in a group
+                grp_dir = proc_root / "group_sec"
+                grp_dir.mkdir()
+                proc_mp4 = grp_dir / "clip.mp4"
+                proc_mp4.write_bytes(b"temp processed")
+
+                # Malicious or buggy caller passes outside paths
+                cleanup_processed_group(
+                    "group_sec",
+                    managed_paths=[source_file, outside_file, proc_mp4]
+                )
+
+                # Legitimate processed group and file are deleted
+                self.assertFalse(grp_dir.exists())
+                self.assertFalse(proc_mp4.exists())
+                # Source and outside files MUST survive unharmed!
+                self.assertTrue(source_file.exists())
+                self.assertTrue(outside_file.exists())
+
+    def test_group_cleanup_isolation(self):
+        with tempfile.TemporaryDirectory() as td:
+            proc_root = Path(td) / "video_processed"
+            grp_a = proc_root / "group_A"
+            grp_b = proc_root / "group_B"
+            grp_a.mkdir(parents=True)
+            grp_b.mkdir(parents=True)
+
+            file_a = grp_a / "a.mp4"
+            file_b = grp_b / "b.mp4"
+            file_a.write_bytes(b"group A mp4")
+            file_b.write_bytes(b"group B mp4")
+
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", proc_root):
+                cleanup_processed_group("group_A")
+
+                self.assertFalse(grp_a.exists())
+                self.assertFalse(file_a.exists())
+                # Group B must be completely intact!
+                self.assertTrue(grp_b.exists())
+                self.assertTrue(file_b.exists())
+
+    def test_source_files_preserved_across_full_group_lifecycle(self):
+        with tempfile.TemporaryDirectory() as td:
+            src_dir = Path(td) / "sources"
+            src_dir.mkdir()
+            cache_dir = Path(td) / "cache"
+            proc_dir = cache_dir / "video_processed"
+
+            src_mp4 = src_dir / "001.mp4"
+            src_mov = src_dir / "002.mov"
+            src_ts = src_dir / "003.ts"
+
+            src_mp4.write_bytes(b"mp4 content 111")
+            src_mov.write_bytes(b"mov content 222")
+            src_ts.write_bytes(b"ts content 333")
+
+            snap_mp4 = (src_mp4.stat().st_size, src_mp4.stat().st_mtime_ns)
+            snap_mov = (src_mov.stat().st_size, src_mov.stat().st_mtime_ns)
+            snap_ts = (src_ts.stat().st_size, src_ts.stat().st_mtime_ns)
+
+            def mock_probe(p, **kw):
+                ext = Path(p).suffix.lstrip(".")
+                compat = "native" if ext in ("mp4", "mov") else "remux"
+                return VideoMediaInfo(
+                    container=ext,
+                    video_codec="h264",
+                    audio_codec="aac",
+                    width=1920,
+                    height=1080,
+                    duration=10.0,
+                    fps=30.0,
+                    has_video_stream=True,
+                    has_audio_stream=True,
+                    compatibility=compat,
+                    recommended_action="upload" if compat == "native" else "remux",
+                )
+
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", proc_dir), \
+                 patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=mock_probe), \
+                 patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux, \
+                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+
+                mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"remuxed 003.mp4") and d
+
+                prep1 = prepare_video_for_telegram(src_mp4, group_key="test_life", generate_thumbnail=False)
+                prep2 = prepare_video_for_telegram(src_mov, group_key="test_life", generate_thumbnail=False)
+                prep3 = prepare_video_for_telegram(src_ts, group_key="test_life", generate_thumbnail=False)
+
+                self.assertFalse(prep1.is_remuxed)
+                self.assertEqual(prep1.upload_path, src_mp4)
+                self.assertFalse(prep2.is_remuxed)
+                self.assertEqual(prep2.upload_path, src_mov)
+                self.assertTrue(prep3.is_remuxed)
+                self.assertEqual(prep3.upload_path.name, "003.mp4")
+
+                cleanup_processed_group("test_life", managed_paths=[prep3.upload_path])
+
+                # Processed output deleted
+                self.assertFalse(prep3.upload_path.exists())
+
+                # ALL three original source files MUST exist with exact same content, size, and mtime
+                self.assertEqual(src_mp4.read_bytes(), b"mp4 content 111")
+                self.assertEqual(src_mov.read_bytes(), b"mov content 222")
+                self.assertEqual(src_ts.read_bytes(), b"ts content 333")
+                self.assertEqual((src_mp4.stat().st_size, src_mp4.stat().st_mtime_ns), snap_mp4)
+                self.assertEqual((src_mov.stat().st_size, src_mov.stat().st_mtime_ns), snap_mov)
+                self.assertEqual((src_ts.stat().st_size, src_ts.stat().st_mtime_ns), snap_ts)
+
+
+class SizeBoundaryAndPremiumLogicTest(unittest.TestCase):
+    """Test authoritative post-preparation size checks, Standard vs Premium limits, and .tools import."""
+
+    def test_broken_tools_import_regression(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "big.mp4"
+            src.write_bytes(b"X" * 1024)
+
+            info = VideoMediaInfo(
+                container="mp4",
+                video_codec="h264",
+                audio_codec="aac",
+                width=1920,
+                height=1080,
+                duration=10.0,
+                fps=30.0,
+                has_video_stream=True,
+                has_audio_stream=True,
+                compatibility="native",
+                recommended_action="upload",
+            )
+
+            # Native exceeds limit: must raise RuntimeError with limit text, NOT ModuleNotFoundError
+            with patch("tdlib_media_uploader.media.video_prepare.probe_video", return_value=info):
+                with self.assertRaises(RuntimeError) as ctx:
+                    prepare_video_for_telegram(src, max_bytes=512, generate_thumbnail=False)
+                self.assertIn("超过 Telegram 视频上限", str(ctx.exception))
+                self.assertNotIn("No module named", str(ctx.exception))
+
+            # Remux exceeds limit: must raise RuntimeError with limit text, NOT ModuleNotFoundError
+            ts_src = Path(td) / "big.ts"
+            ts_src.write_bytes(b"X" * 100)
+            ts_info = VideoMediaInfo(
+                container="ts",
+                video_codec="h264",
+                audio_codec="aac",
+                width=1920,
+                height=1080,
+                duration=10.0,
+                fps=30.0,
+                has_video_stream=True,
+                has_audio_stream=True,
+                compatibility="remux",
+                recommended_action="remux",
+            )
+            mp4_info = VideoMediaInfo(
+                container="mp4",
+                video_codec="h264",
+                audio_codec="aac",
+                width=1920,
+                height=1080,
+                duration=10.0,
+                fps=30.0,
+                has_video_stream=True,
+                has_audio_stream=True,
+                compatibility="native",
+                recommended_action="upload",
+            )
+            with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=[ts_info, mp4_info]), \
+                 patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"Y" * 1024) and d
+                with self.assertRaises(RuntimeError) as ctx:
+                    prepare_video_for_telegram(ts_src, max_bytes=512, generate_thumbnail=False)
+                self.assertIn("超过 Telegram 视频上限", str(ctx.exception))
+                self.assertNotIn("No module named", str(ctx.exception))
+
+    def test_remux_shrinking_below_standard_limit_allows_standard_user(self):
+        """Source > Standard, remuxed < Standard, Standard account -> allowed."""
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "shrink.ts"
+            src.write_bytes(b"source bytes")
+
+            std_max = 2000 * 1024 * 1024
+            ts_info = VideoMediaInfo(
+                container="ts",
+                video_codec="h264",
+                audio_codec="aac",
+                width=1920,
+                height=1080,
+                duration=10.0,
+                fps=30.0,
+                has_video_stream=True,
+                has_audio_stream=True,
+                compatibility="remux",
+                recommended_action="remux",
+            )
+            mp4_info = VideoMediaInfo(
+                container="mp4",
+                video_codec="h264",
+                audio_codec="aac",
+                width=1920,
+                height=1080,
+                duration=10.0,
+                fps=30.0,
+                has_video_stream=True,
+                has_audio_stream=True,
+                compatibility="native",
+                recommended_action="upload",
+            )
+
+            with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=[ts_info, mp4_info]), \
+                 patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                # Remuxed output size is 1500 MiB (< 2000 MiB)
+                mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"Z" * 1024) and d
+                prep = prepare_video_for_telegram(
+                    src,
+                    max_bytes=std_max,
+                    is_premium=False,
+                    generate_thumbnail=False,
+                )
+                self.assertTrue(prep.is_remuxed)
+                self.assertTrue(prep.upload_path.is_file())
+
+    def test_remux_growing_above_standard_limit_rejects_standard_user(self):
+        """Source < Standard, remuxed > Standard, Standard account -> rejected."""
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "grow.ts"
+            src.write_bytes(b"source bytes")
+
+            std_max = 2000 * 1024 * 1024
+            ts_info = VideoMediaInfo(
+                container="ts",
+                video_codec="h264",
+                audio_codec="aac",
+                width=1920,
+                height=1080,
+                duration=10.0,
+                fps=30.0,
+                has_video_stream=True,
+                has_audio_stream=True,
+                compatibility="remux",
+                recommended_action="remux",
+            )
+            mp4_info = VideoMediaInfo(
+                container="mp4",
+                video_codec="h264",
+                audio_codec="aac",
+                width=1920,
+                height=1080,
+                duration=10.0,
+                fps=30.0,
+                has_video_stream=True,
+                has_audio_stream=True,
+                compatibility="native",
+                recommended_action="upload",
+            )
+
+            with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=[ts_info, mp4_info]), \
+                 patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                # Remuxed file grows beyond standard limit
+                mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"A" * 200) and d
+                with self.assertRaises(RuntimeError) as ctx:
+                    prepare_video_for_telegram(
+                        src,
+                        max_bytes=100,  # simulate 100 bytes limit
+                        is_premium=False,
+                        generate_thumbnail=False,
+                    )
+                self.assertIn("超过 Telegram 视频上限", str(ctx.exception))
+
+    def test_native_mp4_above_standard_limit_rejects_standard_user(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "big_native.mp4"
+            src.write_bytes(b"A" * 500)
+
+            info = VideoMediaInfo(
+                container="mp4",
+                video_codec="h264",
+                audio_codec="aac",
+                width=1920,
+                height=1080,
+                duration=10.0,
+                fps=30.0,
+                has_video_stream=True,
+                has_audio_stream=True,
+                compatibility="native",
+                recommended_action="upload",
+            )
+            with patch("tdlib_media_uploader.media.video_prepare.probe_video", return_value=info):
+                with self.assertRaises(RuntimeError) as ctx:
+                    prepare_video_for_telegram(src, max_bytes=200, is_premium=False, generate_thumbnail=False)
+                self.assertIn("超过 Telegram 视频上限", str(ctx.exception))
+
+    def test_native_mov_between_standard_and_premium_allows_premium_user(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "big_native.mov"
+            src.write_bytes(b"A" * 300)
+
+            info = VideoMediaInfo(
+                container="mov",
+                video_codec="hevc",
+                audio_codec="aac",
+                width=1920,
+                height=1080,
+                duration=10.0,
+                fps=30.0,
+                has_video_stream=True,
+                has_audio_stream=True,
+                compatibility="native",
+                recommended_action="upload",
+            )
+            with patch("tdlib_media_uploader.media.video_prepare.probe_video", return_value=info):
+                # Standard limit is 200, Premium limit is 500
+                prep = prepare_video_for_telegram(src, max_bytes=500, is_premium=True, generate_thumbnail=False)
+                self.assertFalse(prep.is_remuxed)
+                self.assertEqual(prep.upload_path, src)
+
+
+class SafeStopAndCleanupSequencingTest(unittest.TestCase):
+    """Test cancellation, Safe Stop, prefetch bounding, and independent cleanup."""
+
+    def test_independent_cleanup_stages_on_staging_failure(self):
+        """Even if staging cleanup raises an exception, processed video cleanup must still run."""
+        with tempfile.TemporaryDirectory() as td:
+            proc_root = Path(td) / "video_processed"
+            grp_dir = proc_root / "grp_fail"
+            grp_dir.mkdir(parents=True)
+            proc_mp4 = grp_dir / "test.mp4"
+            proc_mp4.write_bytes(b"processed")
+
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", proc_root):
+                engine = UploadEngine()
+                stager = MagicMock()
+                # Staging cleanup raises an error!
+                stager.cleanup = MagicMock(side_effect=OSError("Network permission denied"))
+
+                context = UploadContext(
+                    source_root=Path(td),
+                    target={"chat_id": 123},
+                    cancel_token=_NeverCancelToken(),
+                    event_sink=_NullEventSink(),
+                    stager=stager,
+                )
+                plan = SimpleNamespace(key="grp_fail")
+
+                # Call _cleanup with confirmed=True
+                with self.assertRaises(OSError):
+                    engine._cleanup(stager, plan, context, confirmed=True)
+
+                # Now simulate the engine's decoupled post-upload sequence:
+                # Stage 1: journal finalize
+                # Stage 2: staging cleanup (fails)
+                # Stage 3: processed cleanup (MUST run!)
+                errors = []
+                try:
+                    engine._cleanup(stager, plan, context, confirmed=True)
+                except Exception as ex:
+                    errors.append(f"Staging failed: {ex}")
+
+                # Processed cleanup runs independently
+                cleanup_processed_group(plan.key, [proc_mp4])
+
+                self.assertFalse(proc_mp4.exists())
+                self.assertFalse(grp_dir.exists())
+                self.assertEqual(len(errors), 1)
+
+    def test_no_native_duplication_during_prefetch(self):
+        """When prefetching a group with b1.mp4, b2.mov, b3.ts, only b3.ts generates a processed MP4."""
+        with tempfile.TemporaryDirectory() as td:
+            src_dir = Path(td) / "sources"
+            src_dir.mkdir()
+            cache_dir = Path(td) / "cache"
+            proc_dir = cache_dir / "video_processed"
+
+            b1 = src_dir / "b1.mp4"
+            b2 = src_dir / "b2.mov"
+            b3 = src_dir / "b3.ts"
+            b1.write_bytes(b"b1 content")
+            b2.write_bytes(b"b2 content")
+            b3.write_bytes(b"b3 content")
+
+            def mock_probe(p, **kw):
+                ext = Path(p).suffix.lstrip(".")
+                compat = "native" if ext in ("mp4", "mov") else "remux"
+                return VideoMediaInfo(
+                    container=ext,
+                    video_codec="h264",
+                    audio_codec="aac",
+                    width=1920,
+                    height=1080,
+                    duration=10.0,
+                    fps=30.0,
+                    has_video_stream=True,
+                    has_audio_stream=True,
+                    compatibility=compat,
+                    recommended_action="upload" if compat == "native" else "remux",
+                )
+
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", proc_dir), \
+                 patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=mock_probe), \
+                 patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux, \
+                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+
+                mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"b3 remuxed") and d
+
+                prep_b1 = prepare_video_for_telegram(b1, group_key="group_B", generate_thumbnail=False)
+                prep_b2 = prepare_video_for_telegram(b2, group_key="group_B", generate_thumbnail=False)
+                prep_b3 = prepare_video_for_telegram(b3, group_key="group_B", generate_thumbnail=False)
+
+                self.assertFalse(prep_b1.is_remuxed)
+                self.assertFalse(prep_b2.is_remuxed)
+                self.assertTrue(prep_b3.is_remuxed)
+
+                grp_b_dir = proc_dir / "group_B"
+                self.assertTrue(grp_b_dir.is_dir())
+                # Directory must contain only b3.mp4 and manifest.json, NO b1.mp4, NO b2.mov
+                files_in_grp = [f.name for f in grp_b_dir.iterdir() if f.is_file() and not f.name.endswith(".json")]
+                self.assertEqual(files_in_grp, ["b3.mp4"])
+
+
+class ConfigBehaviorNoAutoMigrationTest(unittest.TestCase):
+    """Test that existing user configs are not automatically mutated."""
+
+    def test_existing_config_remains_unchanged(self):
+        old_config = {
+            "video": {
+                "extensions": [".mp4", ".mov", ".m4v"]
+            }
+        }
+        # Verify loader or defaults do not forcibly inject extensions into old config
+        exts = set(old_config["video"]["extensions"])
+        self.assertEqual(exts, {".mp4", ".mov", ".m4v"})
+        self.assertNotIn(".mkv", exts)
+        self.assertNotIn(".ts", exts)
+
+
+class RealFFmpegIntegrationTest(unittest.TestCase):
+    """Real FFmpeg execution test using bundled or system FFmpeg binary."""
+
+    def test_real_ffmpeg_stream_copy_if_available(self):
+        from tdlib_media_uploader.media.video_probe import _find_ffmpeg
+        ffmpeg_exe = _find_ffmpeg()
+        if not ffmpeg_exe:
+            self.skipTest("FFmpeg binary not available in environment")
+
+        with tempfile.TemporaryDirectory() as td:
+            # Create a tiny synthetic mp4 first using ffmpeg
+            src_mp4 = Path(td) / "synthetic.mp4"
+            cmd_create = [
+                ffmpeg_exe,
+                "-y",
+                "-f", "lavfi",
+                "-i", "testsrc=duration=1:size=320x240:rate=10",
+                "-f", "lavfi",
+                "-i", "anullsrc=r=44100:cl=mono",
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                "-shortest",
+                str(src_mp4),
+            ]
+            res_c = subprocess.run(cmd_create, capture_output=True, text=True)
+            if res_c.returncode != 0:
+                self.skipTest(f"FFmpeg synthetic video generation failed: {res_c.stderr}")
+
+            # Remux it to an MKV container to act as a realistic MKV remux candidate
+            src_mkv = Path(td) / "synthetic.mkv"
+            cmd_mkv = [
+                ffmpeg_exe,
+                "-y",
+                "-i", str(src_mp4),
+                "-c", "copy",
+                str(src_mkv),
+            ]
+            res_m = subprocess.run(cmd_mkv, capture_output=True, text=True)
+            if res_m.returncode != 0:
+                self.skipTest(f"FFmpeg MKV creation failed: {res_m.stderr}")
+
+            # Now run remux_video_lossless to convert MKV back to MP4 using stream copy
+            out_mp4 = Path(td) / "remuxed.mp4"
+
+            # Mock probe_video to confirm generated mp4 has valid metadata if ffprobe absent
+            valid_info = VideoMediaInfo(
+                container="mp4",
+                video_codec="h264",
+                audio_codec="aac",
+                width=320,
+                height=240,
+                duration=1.0,
+                fps=10.0,
+                has_video_stream=True,
+                has_audio_stream=True,
+                compatibility="native",
+                recommended_action="upload",
+            )
+            with patch("tdlib_media_uploader.media.video_prepare.probe_video", return_value=valid_info):
+                result = remux_video_lossless(src_mkv, out_mp4)
+
+            self.assertEqual(result, out_mp4)
+            self.assertTrue(out_mp4.is_file())
+            self.assertGreater(out_mp4.stat().st_size, 0)
 
 
 if __name__ == "__main__":

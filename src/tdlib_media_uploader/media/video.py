@@ -901,6 +901,13 @@ class VideoStrategy:
         ui = _StrategyUI(event_sink, self.kind)
         caption = self._caption_for(plan, legacy_items, context)
 
+        is_premium = None
+        if context is not None:
+            if isinstance(context.metadata, Mapping):
+                is_premium = context.metadata.get("is_premium")
+            if is_premium is None and getattr(context, "sender", None) is not None:
+                is_premium = getattr(getattr(context.sender, "client", None), "is_premium", None)
+
         with self._legacy_root(source_root, plan.pending_items):
             value = _call_supported(
                 builder,
@@ -908,6 +915,7 @@ class VideoStrategy:
                 ui=ui,
                 cancel_event=cancel_event,
                 group_key=plan.key,
+                is_premium=is_premium,
             )
         _check_cancel(cancel_token)
         normalized = self._normalize_contents(value, plan, source_root)

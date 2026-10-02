@@ -735,6 +735,13 @@ class MixedMediaStrategy:
         caption = self._caption_for_items(plan, plan.pending_items, context=context)
         cancel_event = _LegacyCancelEvent(cancel_token)
         ui = _EventUI(event_sink)
+        is_premium = None
+        if context is not None:
+            if isinstance(context.metadata, Mapping):
+                is_premium = context.metadata.get("is_premium")
+            if is_premium is None and getattr(context, "sender", None) is not None:
+                is_premium = getattr(getattr(context.sender, "client", None), "is_premium", None)
+
         with self._legacy_scope(Path(plan.source_root)):
             result = _call_compatible(
                 getattr(self._legacy, "build_mixed_contents"),
@@ -742,6 +749,7 @@ class MixedMediaStrategy:
                 ui=ui,
                 cancel_event=cancel_event,
                 group_key=plan.key,
+                is_premium=is_premium,
             )
             _raise_if_cancelled(cancel_token)
         return self._normalize_contents(result, plan, context=context)

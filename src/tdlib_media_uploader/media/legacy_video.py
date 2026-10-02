@@ -1647,7 +1647,15 @@ def report_skipped_videos(skipped, ui=None, *, final=False) -> None:
     )
 
 
-def build_video_contents(items, caption: str, ui=None, cancel_event=None, group_key: str | None = None):
+def build_video_contents(
+    items,
+    caption: str,
+    ui=None,
+    cancel_event=None,
+    group_key: str | None = None,
+    max_bytes: int | None = None,
+    is_premium: bool | None = None,
+):
     """Build an Album while isolating files that became unreadable later."""
 
     target = ui or UI
@@ -1662,6 +1670,10 @@ def build_video_contents(items, caption: str, ui=None, cancel_event=None, group_
                 video_kwargs["group_key"] = group_key
             if cancel_event is not None:
                 video_kwargs["cancel_event"] = cancel_event
+            if max_bytes is not None:
+                video_kwargs["max_bytes"] = max_bytes
+            if is_premium is not None:
+                video_kwargs["is_premium"] = is_premium
             contents.append(input_video(item, item_caption, **video_kwargs))
             valid_items.append(item)
         except Exception as exc:
@@ -1693,6 +1705,8 @@ def input_video(
     generate_thumbnail=None,
     thumbnail_timestamp_seconds=None,
     group_key: str | None = None,
+    max_bytes: int | None = None,
+    is_premium: bool | None = None,
 ):
     """Build one TDLib video content object for standalone and mixed albums.
 
@@ -1742,7 +1756,8 @@ def input_video(
         cancel_event=cancel_event,
         generate_thumbnail=thumbnail_enabled,
         thumbnail_timestamp_seconds=thumbnail_timestamp_seconds,
-        max_bytes=cfg.VIDEO_MAX_BYTES,
+        max_bytes=max_bytes,
+        is_premium=is_premium,
         info=info,
     )
     info = prep.info
@@ -2183,9 +2198,16 @@ def _main_impl():
         client.refresh_account_limits()
         caption_limit = int(getattr(client, "caption_length_limit", None) or 1024)
         if client.is_premium is not True:
+            policy = str(
+                getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", getattr(cfg, "VIDEO_TRANSCODE_POLICY", "remux"))
+            ).strip().lower()
             premium_items = [
                 item for item in pending_items
                 if item.get("requires_premium")
+                and not (
+                    Path(item["path"]).suffix.lstrip(".").lower() in {"mkv", "avi", "ts", "mts", "m2ts"}
+                    and policy != "original"
+                )
             ]
             if premium_items:
                 UI.warning(
@@ -2232,17 +2254,17 @@ def _main_impl():
                     include_filename_numbers(),
                     max_chars=caption_limit,
                 )
-                if cancel_event is None:
-                    contents, ready_items, runtime_skipped = build_video_contents(
-                        album_items,
-                        label,
-                    )
-                else:
-                    contents, ready_items, runtime_skipped = build_video_contents(
-                        album_items,
-                        label,
-                        cancel_event=cancel_event,
-                    )
+                build_kwargs = {
+                    "is_premium": client.is_premium,
+                    "group_key": plan.get("group_key") or plan.get("month_key") or "default",
+                }
+                if cancel_event is not None:
+                    build_kwargs["cancel_event"] = cancel_event
+                contents, ready_items, runtime_skipped = build_video_contents(
+                    album_items,
+                    label,
+                    **build_kwargs,
+                )
                 if runtime_skipped:
                     skipped_items.extend(runtime_skipped)
                     progress.skip_items([record["item"] for record in runtime_skipped])

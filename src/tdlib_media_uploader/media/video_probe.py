@@ -94,7 +94,18 @@ def _find_ffmpeg() -> str | None:
         if candidate.is_file():
             return str(candidate.resolve())
 
-    return shutil.which("ffmpeg")
+    which_ffmpeg = shutil.which("ffmpeg")
+    if which_ffmpeg:
+        return which_ffmpeg
+
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and Path(exe).is_file():
+            return str(Path(exe).resolve())
+    except Exception:
+        pass
+    return None
 
 
 def _find_ffprobe() -> str | None:
@@ -199,6 +210,13 @@ def format_unsupported_reason(path: Path, info: VideoMediaInfo) -> str:
         cause = f"视频媒体属性异常（{info.width}x{info.height}，时长 {info.duration:.2f}s）或文件损坏"
     elif info.video_codec in ("unknown", ""):
         cause = "未找到 ffprobe，无法验证视频编码兼容性"
+    elif (
+        info.container in ("mkv", "avi", "ts", "mts", "m2ts")
+        and info.video_codec in {"h264", "avc", "avc1", "hevc", "h265", "hev1", "hvc1"}
+        and info.has_audio_stream
+        and info.audio_codec not in {"aac", "mp3"}
+    ):
+        cause = f"视频流可兼容，但音频编码 {audio_codec_label} 无法在不重新编码音频的情况下安全重新封装为 MP4"
     elif info.has_audio_stream and info.audio_codec not in {"aac", "mp3"}:
         cause = f"音频编码（{audio_codec_label}）不受支持（仅支持 AAC、MP3 或无音轨），且禁止有损转码"
     elif info.compatibility == "unsupported" and info.container not in (
@@ -372,7 +390,7 @@ def _probe_with_ffprobe(
     is_video_compat = is_h264 or is_hevc
     is_audio_compat = (not has_audio_stream) or (audio_codec in {"aac", "mp3"})
 
-    if is_native_container and is_video_compat and is_audio_compat:
+    if is_native_container and is_video_compat:
         compatibility = "native"
         recommended_action = "upload"
     elif is_remux_container and is_video_compat and is_audio_compat:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -25,6 +26,7 @@ from ..config import loader as cfg
 from ..config.paths import THUMBNAIL_CACHE_DIR, VIDEO_PROCESSED_CACHE_DIR
 from ..core.filesystem import stable_path
 from ..core.filesystem_legacy import display_path, run_cancellable_process
+from .legacy_video import build_thumbnail, format_size, video_limit_text
 from .video_probe import (
     VideoMediaInfo,
     _find_ffmpeg,
@@ -33,6 +35,8 @@ from .video_probe import (
     format_unsupported_reason,
     probe_video,
 )
+
+MANIFEST_FILE_NAME = "manifest.json"
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,9 @@ class PreparedVideo:
     thumbnail_height: int = 0
     is_remuxed: bool = False
     cache_key: str | None = None
+    output_size: int = 0
+    source_signature: str | None = None
+    working_path: Path | None = None
 
 
 def safe_group_key(group_key: str) -> str:
@@ -71,10 +78,68 @@ def get_video_process_cache_key(
     policy_version: str = "v2",
     target_container: str = "mp4",
 ) -> str:
-    """Generate deterministic cache key for a processed video file."""
+    """Generate deterministic internal cache signature for a video file."""
     abs_path = stable_path(Path(path))
     payload = f"{abs_path}|{size}|{mtime_ns}|{policy_version}|{target_container}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _load_group_manifest(group_dir: Path) -> dict[str, Any]:
+    """Read the internal manifest file from a group's processed directory."""
+    manifest_path = group_dir / MANIFEST_FILE_NAME
+    if manifest_path.is_file():
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+    return {"version": 1, "outputs": {}}
+
+
+def _save_group_manifest(group_dir: Path, manifest: dict[str, Any]) -> None:
+    """Safely persist the internal manifest for reuse after interruption."""
+    try:
+        group_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = group_dir / MANIFEST_FILE_NAME
+        temp_path = group_dir / f"{MANIFEST_FILE_NAME}.tmp.{uuid.uuid4().hex}"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, ensure_ascii=False)
+        temp_path.replace(manifest_path)
+    except Exception:
+        pass
+
+
+def resolve_processed_filename(orig_path: Path, group_dir: Path, manifest: dict[str, Any]) -> str:
+    """Determine a deterministic non-hash output filename for a remuxed video.
+
+    Standard naming: <stem>.mp4 (e.g. clip.ts -> clip.mp4).
+    Collision handling: If <stem>.mp4 is already recorded in the group manifest for a
+    different source file (e.g. movie.avi and movie.ts), deterministically append the
+    original suffix: <stem><ext>.mp4 (e.g. movie.ts.mp4 and movie.avi.mp4).
+    """
+    stable_src = stable_path(orig_path)
+    outputs = manifest.setdefault("outputs", {})
+
+    base_name = f"{orig_path.stem}.mp4"
+    entry = outputs.get(base_name)
+    if entry is None or entry.get("source_path") == stable_src:
+        return base_name
+
+    ext_suffix = orig_path.suffix.lower()
+    collision_name = f"{orig_path.stem}{ext_suffix}.mp4"
+    coll_entry = outputs.get(collision_name)
+    if coll_entry is None or coll_entry.get("source_path") == stable_src:
+        return collision_name
+
+    idx = 2
+    while True:
+        tie_name = f"{orig_path.stem}{ext_suffix}_{idx}.mp4"
+        t_entry = outputs.get(tie_name)
+        if t_entry is None or t_entry.get("source_path") == stable_src:
+            return tie_name
+        idx += 1
 
 
 def remux_video_lossless(
@@ -180,15 +245,21 @@ def prepare_video_for_telegram(
     generate_thumbnail: bool = True,
     thumbnail_timestamp_seconds: float | None = None,
     max_bytes: int | None = None,
+    is_premium: bool | None = None,
     info: Any | None = None,
 ) -> PreparedVideo:
     """Prepare a video file for Telegram upload.
 
     Handles native videos (MP4/MOV/M4V) and remux candidates (MKV/AVI/TS/MTS/M2TS).
+    For native videos:
+    - Directly uses working/source path without creating copies in processed cache.
+    - Decoupled thumbnail generated directly from source file.
     For remux candidates:
     - Remuxes losslessly to temporary MP4 under VIDEO_PROCESSED_CACHE_DIR / <group_key>/
-    - Decouples thumbnail identity to original source file
-    - Validates processed output metadata and size
+    - Output filename preserves source stem (<stem>.mp4) or appends suffix on collision.
+    - Interrupted / repeated runs reuse existing validated MP4 if source unchanged.
+    - Decouples thumbnail identity to original source file.
+    - Validates processed output metadata and size against effective limit.
     Source files are never modified.
     """
     w_path = Path(working_path)
@@ -207,13 +278,20 @@ def prepare_video_for_telegram(
     if compat in {"invalid", "unsupported"}:
         raise RuntimeError(format_unsupported_reason(orig_path, info))
 
-    effective_max = max_bytes if max_bytes is not None else getattr(cfg, "VIDEO_MAX_BYTES", 2000 * 1024 * 1024)
+    if max_bytes is not None:
+        effective_max = max_bytes
+    elif is_premium is True:
+        effective_max = getattr(cfg, "VIDEO_PREMIUM_MAX_BYTES", 8000 * 524_288)
+    elif is_premium is False:
+        effective_max = getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)
+    else:
+        effective_max = getattr(cfg, "VIDEO_MAX_BYTES", 4000 * 524_288)
 
-    # 1. Native / legacy format
+    # 1. Native / legacy format (MP4, MOV, M4V)
     if compat in {"native", "legacy"}:
         size = w_path.stat().st_size
         if size > effective_max:
-            from .tools import format_size, video_limit_text
+            from .legacy_video import format_size, video_limit_text
             raise RuntimeError(
                 f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
                 f"{video_limit_text(effective_max)}"
@@ -243,6 +321,12 @@ def prepare_video_for_telegram(
                     **thumb_kwargs,
                 )
 
+        if not orig_path.is_file():
+            native_st = w_path.stat()
+        else:
+            native_st = orig_path.stat()
+        source_sig = get_video_process_cache_key(orig_path, native_st.st_size, native_st.st_mtime_ns)
+
         return PreparedVideo(
             source_path=orig_path,
             upload_path=w_path,
@@ -252,9 +336,12 @@ def prepare_video_for_telegram(
             thumbnail_height=th,
             is_remuxed=False,
             cache_key=None,
+            output_size=size,
+            source_signature=source_sig,
+            working_path=w_path,
         )
 
-    # 2. Remux candidate
+    # 2. Remux candidate (MKV, AVI, TS, MTS, M2TS)
     if info.compatibility == "remux":
         policy = str(
             getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", getattr(cfg, "VIDEO_TRANSCODE_POLICY", "remux"))
@@ -264,7 +351,6 @@ def prepare_video_for_telegram(
                 f"视频格式为 {info.container.upper()}，当前策略配置为 original（仅允许原生格式），已跳过：{orig_path.name}"
             )
 
-        # Check source exists
         if not orig_path.is_file():
             st = w_path.stat()
         else:
@@ -274,39 +360,53 @@ def prepare_video_for_telegram(
         safe_group = safe_group_key(group_key)
         group_dir = VIDEO_PROCESSED_CACHE_DIR / safe_group
         group_dir.mkdir(parents=True, exist_ok=True)
-        final_mp4 = group_dir / f"{cache_key}.mp4"
 
-        # Check existing cached remux output
+        manifest = _load_group_manifest(group_dir)
+        target_filename = resolve_processed_filename(orig_path, group_dir, manifest)
+        final_mp4 = group_dir / target_filename
+
         processed_path: Path
         processed_info: VideoMediaInfo
+        can_reuse = False
+
         if final_mp4.is_file() and final_mp4.stat().st_size > 0:
-            try:
-                cached_info = probe_video(final_mp4, cancel_event=cancel_event)
-                if cached_info.compatibility in {"native", "legacy"} and cached_info.has_video_stream:
-                    processed_path = final_mp4
-                    processed_info = cached_info
-                else:
-                    final_mp4.unlink(missing_ok=True)
-                    processed_path = remux_video_lossless(w_path, final_mp4, cancel_event=cancel_event)
-                    processed_info = probe_video(processed_path, cancel_event=cancel_event)
-            except Exception:
-                final_mp4.unlink(missing_ok=True)
-                processed_path = remux_video_lossless(w_path, final_mp4, cancel_event=cancel_event)
-                processed_info = probe_video(processed_path, cancel_event=cancel_event)
-        else:
+            entry = manifest.get("outputs", {}).get(target_filename)
+            if (
+                entry is not None
+                and entry.get("source_path") == stable_path(orig_path)
+                and entry.get("size") == st.st_size
+                and entry.get("mtime_ns") == st.st_mtime_ns
+                and entry.get("policy") == "remux-v2"
+            ):
+                try:
+                    cached_info = probe_video(final_mp4, cancel_event=cancel_event)
+                    if cached_info.compatibility in {"native", "legacy"} and cached_info.has_video_stream:
+                        processed_path = final_mp4
+                        processed_info = cached_info
+                        can_reuse = True
+                except Exception:
+                    pass
+
+        if not can_reuse:
+            final_mp4.unlink(missing_ok=True)
             processed_path = remux_video_lossless(w_path, final_mp4, cancel_event=cancel_event)
             processed_info = probe_video(processed_path, cancel_event=cancel_event)
+            manifest.setdefault("outputs", {})[target_filename] = {
+                "source_path": stable_path(orig_path),
+                "size": st.st_size,
+                "mtime_ns": st.st_mtime_ns,
+                "policy": "remux-v2",
+            }
+            _save_group_manifest(group_dir, manifest)
 
-        # Verify remuxed file size
         p_size = processed_path.stat().st_size
         if p_size > effective_max:
-            from .tools import format_size, video_limit_text
+            from .legacy_video import format_size, video_limit_text
             raise RuntimeError(
                 f"重新封装后的文件大小 {format_size(p_size)} 超过 Telegram 视频上限 "
                 f"{video_limit_text(effective_max)}"
             )
 
-        # Decoupled thumbnail: extract from processed MP4, cache under original source identity
         thumb_path, tw, th = None, 0, 0
         if generate_thumbnail:
             from .legacy_video import build_thumbnail
@@ -336,6 +436,9 @@ def prepare_video_for_telegram(
             thumbnail_height=th,
             is_remuxed=True,
             cache_key=cache_key,
+            output_size=p_size,
+            source_signature=cache_key,
+            working_path=w_path,
         )
 
     # Any other status is unsupported
@@ -346,20 +449,28 @@ def cleanup_processed_group(group_key: str, managed_paths: Sequence[Path] | None
     """Clean up processed videos for a confirmed group.
 
     Deletes the group directory under VIDEO_PROCESSED_CACHE_DIR and unlinks any
-    specified managed paths. Preserves thumbnail cache intact.
+    specified managed paths that are strictly contained within VIDEO_PROCESSED_CACHE_DIR.
+    Source files, thumbnail cache, and other directories are strictly preserved.
     """
+    root = VIDEO_PROCESSED_CACHE_DIR.resolve()
     safe_group = safe_group_key(group_key)
-    group_dir = VIDEO_PROCESSED_CACHE_DIR / safe_group
-    if group_dir.is_dir():
-        try:
+    group_dir = (VIDEO_PROCESSED_CACHE_DIR / safe_group).resolve()
+
+    try:
+        group_dir.relative_to(root)
+        if group_dir != root and group_dir.is_dir():
             shutil.rmtree(group_dir, ignore_errors=True)
-        except OSError:
-            pass
+    except (ValueError, OSError):
+        pass
+
     if managed_paths:
         for p in managed_paths:
             try:
-                Path(p).unlink(missing_ok=True)
-            except OSError:
+                candidate = Path(p).resolve()
+                candidate.relative_to(root)
+                if candidate != root and candidate.is_file():
+                    candidate.unlink(missing_ok=True)
+            except (ValueError, OSError):
                 pass
 
 
@@ -368,44 +479,65 @@ def clear_all_processed_videos() -> int:
 
     Returns the number of deleted files.
     """
-    if not VIDEO_PROCESSED_CACHE_DIR.is_dir():
+    root = VIDEO_PROCESSED_CACHE_DIR.resolve()
+    if not root.is_dir():
         return 0
     count = 0
-    for root, dirs, files in os.walk(VIDEO_PROCESSED_CACHE_DIR, topdown=False):
+    for dirpath, dirs, files in os.walk(root, topdown=False):
+        d_p = Path(dirpath).resolve()
+        try:
+            d_p.relative_to(root)
+        except ValueError:
+            continue
         for f in files:
+            p = d_p / f
             try:
-                (Path(root) / f).unlink(missing_ok=True)
-                count += 1
-            except OSError:
+                p.relative_to(root)
+                if p != root:
+                    p.unlink(missing_ok=True)
+                    count += 1
+            except (ValueError, OSError):
                 pass
         for d in dirs:
+            sub = d_p / d
             try:
-                (Path(root) / d).rmdir()
-            except OSError:
+                sub.relative_to(root)
+                if sub != root:
+                    sub.rmdir()
+            except (ValueError, OSError):
                 pass
     return count
 
 
 def cleanup_stale_processed_videos(max_age_seconds: float = 86400 * 7) -> int:
     """Remove orphaned processed video files older than max_age_seconds."""
-    if not VIDEO_PROCESSED_CACHE_DIR.is_dir():
+    root = VIDEO_PROCESSED_CACHE_DIR.resolve()
+    if not root.is_dir():
         return 0
     cutoff = time.time() - max_age_seconds
     removed = 0
-    for root, dirs, files in os.walk(VIDEO_PROCESSED_CACHE_DIR, topdown=False):
+    for dirpath, dirs, files in os.walk(root, topdown=False):
+        d_p = Path(dirpath).resolve()
+        try:
+            d_p.relative_to(root)
+        except ValueError:
+            continue
         for f in files:
-            p = Path(root) / f
+            p = d_p / f
             try:
-                if p.stat().st_mtime < cutoff:
+                p.relative_to(root)
+                if p != root and p.stat().st_mtime < cutoff:
                     p.unlink(missing_ok=True)
                     removed += 1
-            except OSError:
+            except (ValueError, OSError):
                 pass
         for d in dirs:
-            p = Path(root) / d
+            sub = d_p / d
             try:
-                p.rmdir()
-            except OSError:
+                sub.relative_to(root)
+                if sub != root:
+                    sub.rmdir()
+            except (ValueError, OSError):
                 pass
     return removed
 
@@ -418,5 +550,6 @@ __all__ = [
     "get_video_process_cache_key",
     "prepare_video_for_telegram",
     "remux_video_lossless",
+    "resolve_processed_filename",
     "safe_group_key",
 ]

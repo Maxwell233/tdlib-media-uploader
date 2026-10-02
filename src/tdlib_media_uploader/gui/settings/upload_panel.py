@@ -181,9 +181,14 @@ class UploadPanel(SettingsPanel):
         f4 = QFormLayout()
         f4.setSpacing(10)
         self.video_compat_policy = QComboBox()
-        self.video_compat_policy.addItem("兼容重新封装（remux，推荐）：MKV/AVI/TS 等无损流复制为 MP4", "remux")
+        self.video_compat_policy.addItem("兼容重新封装（remux，推荐）：MKV/AVI/TS 等临时无损重新封装为 MP4", "remux")
         self.video_compat_policy.addItem("仅原生格式（original）：仅允许 MP4/MOV/M4V 直接上传", "original")
-        f4.addRow("格式兼容策略", self.video_compat_policy)
+        self.video_compat_policy.setToolTip(
+            "MP4、MOV、M4V 等原生兼容视频将直接使用原文件上传；\n"
+            "对符合条件的 MKV、AVI、TS、MTS、M2TS，将临时无损重新封装为 MP4。\n"
+            "原文件不会被修改。"
+        )
+        f4.addRow("视频兼容处理", self.video_compat_policy)
 
         self.video_thumbnail = QCheckBox("生成视频缩略图")
         f4.addRow("缩略图", self.video_thumbnail)

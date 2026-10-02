@@ -1068,16 +1068,27 @@ class UploadEngine:
         managed_paths: list[Path] = []
         try:
             from ..media.video_prepare import safe_group_key
-            group_dir = VIDEO_PROCESSED_CACHE_DIR / safe_group_key(plan.key)
-            if group_dir.is_dir():
-                for p in group_dir.iterdir():
-                    if p.is_file() and not p.name.startswith("."):
-                        managed_paths.append(p)
+            root = VIDEO_PROCESSED_CACHE_DIR.resolve()
+            group_dir = (VIDEO_PROCESSED_CACHE_DIR / safe_group_key(plan.key)).resolve()
+            try:
+                group_dir.relative_to(root)
+                if group_dir != root and group_dir.is_dir():
+                    for p in group_dir.iterdir():
+                        if p.is_file() and not p.name.startswith("."):
+                            managed_paths.append(p)
+            except ValueError:
+                pass
             for c in contents:
                 if isinstance(c, Mapping) and c.get("@type") == "inputMessageVideo":
-                    vp = Path(str(c.get("video", {}).get("path", "")))
-                    if vp.is_file() and str(vp).startswith(str(VIDEO_PROCESSED_CACHE_DIR)) and vp not in managed_paths:
-                        managed_paths.append(vp)
+                    raw_vp = c.get("video", {}).get("path", "")
+                    if raw_vp:
+                        vp = Path(str(raw_vp)).resolve()
+                        try:
+                            vp.relative_to(root)
+                            if vp != root and vp.is_file() and vp not in managed_paths:
+                                managed_paths.append(vp)
+                        except ValueError:
+                            pass
         except Exception:
             pass
 
@@ -1615,20 +1626,26 @@ class UploadEngine:
                         plan.key,
                         target=run_context.target,
                     )
-                    if run_context.stager is not None:
+                except Exception as cleanup_error:
+                    errors.append(f"Album {plan.key} 日志确认失败：{cleanup_error}")
+
+                if run_context.stager is not None:
+                    try:
                         self._cleanup(
                             run_context.stager,
                             effective_plan,
                             run_context,
                             confirmed=True,
                         )
-                    if prep.managed_processed_paths:
+                    except Exception as cleanup_error:
+                        errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
+
+                if prep.managed_processed_paths:
+                    try:
                         from ..media.video_prepare import cleanup_processed_group
                         cleanup_processed_group(plan.key, prep.managed_processed_paths)
-                except Exception as cleanup_error:
-                    # The send and state checkpoint are complete.  Keep the
-                    # successful batch but surface cleanup/finalization failure.
-                    errors.append(f"Album {plan.key} 收尾失败：{cleanup_error}")
+                    except Exception as cleanup_error:
+                        errors.append(f"Album {plan.key} 临时视频清理失败：{cleanup_error}")
                 batches.append(
                     UploadBatchResult(
                         plan.key,

@@ -705,7 +705,13 @@ def _premium_checker(strategy: Any, client: Any):
     def check(item: MediaItem, *, context=None):
         metadata = item.metadata if isinstance(item.metadata, Mapping) else {}
         if item.media_kind == "video" and metadata.get("requires_premium"):
-            if getattr(client, "is_premium", None) is not True:
+            from ..config import loader as cfg
+            ext = Path(item.path).suffix.lstrip(".").lower()
+            policy = str(
+                getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", getattr(cfg, "VIDEO_TRANSCODE_POLICY", "remux"))
+            ).strip().lower()
+            is_remux_candidate = ext in {"mkv", "avi", "ts", "mts", "m2ts"} and policy != "original"
+            if not is_remux_candidate and getattr(client, "is_premium", None) is not True:
                 return {
                     "status": "FAILED",
                     "reason": "视频超过约 2 GB，需要 Telegram Premium 才能上传",
@@ -888,6 +894,7 @@ def _run_v2_upload(
             sender=sender,
             preflight=_premium_checker(strategy, client),
             metadata={
+                "is_premium": getattr(client, "is_premium", None),
                 "caption_limit": int(caption_limit),
                 "caption_length_limit": int(caption_limit),
                 "prefetch_next": bool(
