@@ -92,6 +92,8 @@ def _load_group_manifest(group_dir: Path) -> dict[str, Any]:
             with open(manifest_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
+                    if not isinstance(data.get("outputs"), dict):
+                        data["outputs"] = {}
                     return data
         except Exception:
             pass
@@ -142,20 +144,17 @@ def resolve_processed_filename(orig_path: Path, group_dir: Path, manifest: dict[
             if k_fold.startswith(stem_fold) and k_fold.endswith(".mp4"):
                 return actual_k
 
-    # 2. Map existing non-temporary disk files in group_dir: {folded: actual_disk_name}
+    # 2. Reserve every existing disk entry, including hidden files and directories.
+    # A source stem can legitimately contain '.tmp.' or start with '.', so these
+    # names cannot be discarded when deciding whether an MP4 slot is free.
     disk_by_fold: dict[str, str] = {}
     if group_dir.is_dir():
         try:
             for p in group_dir.iterdir():
-                if (
-                    p.is_file()
-                    and not p.name.startswith(".")
-                    and ".tmp." not in p.name
-                    and p.name != MANIFEST_FILE_NAME
-                ):
+                if p.name != MANIFEST_FILE_NAME:
                     disk_by_fold[p.name.casefold()] = p.name
-        except OSError:
-            pass
+        except OSError as exc:
+            raise RuntimeError(f"无法检查已处理视频目录，已停止分配文件名：{group_dir}") from exc
 
     # 3. Candidate generator:
     # Candidate 0: <stem>.mp4

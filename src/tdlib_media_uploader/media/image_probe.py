@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageOps
+from PIL import Image
 
 TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024**2
 TELEGRAM_PHOTO_TARGET_BYTES = int(9.5 * 1024**2)
@@ -92,15 +92,18 @@ def probe_image(path: Path | str) -> ImageMediaInfo:
                 or (raw_img.mode == "P" and "transparency" in raw_img.info)
             )
 
-            # Apply EXIF transpose to obtain real post-orientation geometry
-            transposed = ImageOps.exif_transpose(raw_img)
-            width, height = transposed.size
+            # Decode once to reject truncated/corrupt input, without allocating a
+            # second full-size image just to inspect its oriented dimensions.
+            raw_img.load()
+            width, height = raw_img.size
+            exif = raw_img.getexif() if hasattr(raw_img, "getexif") else None
+            orientation = exif.get(0x0112) if exif else 1
+            if orientation in (5, 6, 7, 8):
+                width, height = height, width
 
             if width <= 0 or height <= 0:
                 raise RuntimeError(f"图片尺寸异常：{file_path.name}")
 
-            exif = raw_img.getexif() if hasattr(raw_img, "getexif") else None
-            orientation = exif.get(0x0112) if exif else 1
             exif_rotated = orientation not in (None, 1)
     except Exception as exc:
         raise RuntimeError(f"无法读取图片：{file_path.name}\n{type(exc).__name__}: {exc}") from exc

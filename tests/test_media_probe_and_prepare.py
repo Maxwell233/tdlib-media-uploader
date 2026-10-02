@@ -440,6 +440,82 @@ class VideoProbeAndPayloadTest(unittest.TestCase):
 class ImageProbeAndPrepareTest(unittest.TestCase):
     """Test image media probe, normalization, and preparation for Telegram Photo."""
 
+    def test_probe_respects_all_exif_orientations(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "oriented.jpg"
+            for orientation in range(1, 9):
+                with self.subTest(orientation=orientation):
+                    exif = Image.Exif()
+                    exif[0x0112] = orientation
+                    Image.new("RGB", (120, 80), "blue").save(path, exif=exif)
+                    info = probe_image(path)
+                    self.assertEqual((info.width, info.height),
+                                     (80, 120) if orientation >= 5 else (120, 80))
+                    self.assertEqual(info.telegram_compatible, orientation == 1)
+
+    def test_header_readable_truncated_cache_is_regenerated(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "source.bmp"
+            Image.new("RGB", (400, 300), "blue").save(path)
+            source_bytes = path.read_bytes()
+            with patch("tdlib_media_uploader.media.image_prepare.IMAGE_COMPRESSION_CACHE_DIR", root / "cache"):
+                prepared = prepare_image_for_telegram(path)
+                original = prepared.upload_path.read_bytes()
+                prepared.upload_path.write_bytes(original[:-32])
+                with Image.open(prepared.upload_path) as image:
+                    self.assertEqual(image.size, (400, 300))
+                repaired = prepare_image_for_telegram(path)
+                self.assertEqual(repaired.upload_path, prepared.upload_path)
+                with Image.open(repaired.upload_path) as image:
+                    image.load()
+                self.assertEqual(path.read_bytes(), source_bytes)
+
+    def test_cached_image_with_invalid_geometry_is_regenerated(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "source.bmp"
+            Image.new("RGB", (400, 300), "blue").save(path)
+            with patch("tdlib_media_uploader.media.image_prepare.IMAGE_COMPRESSION_CACHE_DIR", root / "cache"):
+                prepared = prepare_image_for_telegram(path)
+                Image.new("RGB", (3000, 100), "red").save(prepared.upload_path, "JPEG")
+                repaired = prepare_image_for_telegram(path)
+                self.assertEqual((repaired.output_width, repaired.output_height), (400, 300))
+
+    def test_cancelled_native_and_cached_images_are_not_returned(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            event = threading.Event()
+            with patch("tdlib_media_uploader.media.image_prepare.IMAGE_COMPRESSION_CACHE_DIR", root / "cache"):
+                for suffix in ("jpg", "bmp"):
+                    with self.subTest(suffix=suffix):
+                        path = root / f"source.{suffix}"
+                        Image.new("RGB", (400, 300), "blue").save(path)
+                        prepared = prepare_image_for_telegram(path)
+                        before = prepared.upload_path.read_bytes()
+                        event.set()
+                        with self.assertRaises(TimeoutError):
+                            prepare_image_for_telegram(path, cancel_event=event)
+                        self.assertEqual(prepared.upload_path.read_bytes(), before)
+                        event.clear()
+
+    def test_cancel_during_encoding_does_not_publish_cache(self):
+        from tdlib_media_uploader.media.image_prepare import encode_jpeg_under_limit
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "source.bmp"
+            Image.new("RGB", (400, 300), "blue").save(path)
+            event = threading.Event()
+            def cancel_after_encoding(*args, **kwargs):
+                result = encode_jpeg_under_limit(*args, **kwargs)
+                event.set()
+                return result
+            with patch("tdlib_media_uploader.media.image_prepare.IMAGE_COMPRESSION_CACHE_DIR", root / "cache"), \
+                 patch("tdlib_media_uploader.media.image_prepare.encode_jpeg_under_limit", side_effect=cancel_after_encoding):
+                with self.assertRaises(TimeoutError):
+                    prepare_image_for_telegram(path, cancel_event=event)
+                self.assertFalse(list((root / "cache").iterdir()))
+
     def test_standard_jpeg_untouched(self):
         with tempfile.TemporaryDirectory() as td:
             img_path = Path(td) / "standard.jpg"

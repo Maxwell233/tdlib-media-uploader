@@ -240,7 +240,9 @@ class ImprovementsTest(unittest.TestCase):
                 self.assertEqual(skipped, [])
 
                 payload = core.input_photo(original, "测试")
-                compress.assert_called_once_with(original)
+                compress.assert_called_once()
+                self.assertEqual(compress.call_args.args, (original,))
+                self.assertEqual(compress.call_args.kwargs["source_info"].format, "JPEG")
                 self.assertEqual(payload["photo"]["@type"], "inputFileLocal")
                 self.assertEqual(Path(payload["photo"]["path"]), compressed)
 
