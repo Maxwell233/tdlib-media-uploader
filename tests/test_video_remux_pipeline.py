@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import threading
@@ -1012,6 +1013,234 @@ class ProcessedFilenameAndDirectNativeTest(unittest.TestCase):
                 self.assertNotEqual(prep1.upload_path, prep2.upload_path)
                 self.assertTrue(prep1.upload_path.is_file())
                 self.assertTrue(prep2.upload_path.is_file())
+
+    def test_case_insensitive_collision_movie_ts_and_movie_avi(self):
+        """Case-insensitive collision: Movie.ts and movie.avi in the same group.
+
+        - Must get two different processed paths
+        - Both processed files must exist simultaneously
+        - Second preparation must not delete or overwrite the first
+        - Filenames must not contain hashes
+        """
+        with tempfile.TemporaryDirectory() as td:
+            src_dir = Path(td) / "sources"
+            src_dir.mkdir()
+            cache_dir = Path(td) / "cache"
+            processed_dir = cache_dir / "video_processed"
+
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
+                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+
+                src1 = src_dir / "Movie.ts"
+                src2 = src_dir / "movie.avi"
+                src1.write_bytes(b"Movie.ts initial content")
+                src2.write_bytes(b"movie.avi initial content")
+
+                def make_infos(container):
+                    remux_i = VideoMediaInfo(
+                        container=container,
+                        video_codec="h264",
+                        audio_codec="aac" if container == "ts" else "mp3",
+                        width=1920,
+                        height=1080,
+                        duration=10.0,
+                        fps=30.0,
+                        has_video_stream=True,
+                        has_audio_stream=True,
+                        compatibility="remux",
+                        recommended_action="remux",
+                    )
+                    mp4_i = VideoMediaInfo(
+                        container="mp4",
+                        video_codec="h264",
+                        audio_codec="aac" if container == "ts" else "mp3",
+                        width=1920,
+                        height=1080,
+                        duration=10.0,
+                        fps=30.0,
+                        has_video_stream=True,
+                        has_audio_stream=True,
+                        compatibility="native",
+                        recommended_action="upload",
+                    )
+                    return [remux_i, mp4_i]
+
+                # Prepare first: Movie.ts -> Movie.mp4
+                with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=make_infos("ts")), \
+                     patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                    mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"Movie.ts content") and d
+                    prep1 = prepare_video_for_telegram(src1, group_key="case_group", generate_thumbnail=False)
+
+                # Prepare second: movie.avi -> movie.avi.mp4 (must detect Movie.mp4 casefold collision!)
+                with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=make_infos("avi")), \
+                     patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                    mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"movie.avi content") and d
+                    prep2 = prepare_video_for_telegram(src2, group_key="case_group", generate_thumbnail=False)
+
+                self.assertEqual(prep1.upload_path.name, "Movie.mp4")
+                self.assertEqual(prep2.upload_path.name, "movie.avi.mp4")
+                self.assertNotEqual(prep1.upload_path.name.casefold(), prep2.upload_path.name.casefold())
+
+                # Both processed files must exist simultaneously
+                self.assertTrue(prep1.upload_path.is_file())
+                self.assertTrue(prep2.upload_path.is_file())
+
+                # Verify first file was NOT overwritten or unlinked
+                self.assertEqual(prep1.upload_path.read_bytes(), b"Movie.ts content")
+                self.assertEqual(prep2.upload_path.read_bytes(), b"movie.avi content")
+
+                # Verify no hash in filenames
+                self.assertNotIn("tmp", prep1.upload_path.name)
+                self.assertNotIn("tmp", prep2.upload_path.name)
+                self.assertFalse(re.search(r"[a-f0-9]{32,}", prep1.upload_path.name))
+                self.assertFalse(re.search(r"[a-f0-9]{32,}", prep2.upload_path.name))
+
+    def test_case_insensitive_three_sources_unique(self):
+        """Case-insensitive collision across 3 files: MOVIE.ts, movie.avi, Movie.mkv.
+
+        - Three sources must get three non-colliding processed filenames
+        - Filenames must be mutually unique under case-insensitive semantics
+        """
+        with tempfile.TemporaryDirectory() as td:
+            src_dir = Path(td) / "sources"
+            src_dir.mkdir()
+            cache_dir = Path(td) / "cache"
+            processed_dir = cache_dir / "video_processed"
+
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
+                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+
+                src1 = src_dir / "MOVIE.ts"
+                src2 = src_dir / "movie.avi"
+                src3 = src_dir / "Movie.mkv"
+                src1.write_bytes(b"MOVIE.ts")
+                src2.write_bytes(b"movie.avi")
+                src3.write_bytes(b"Movie.mkv")
+
+                def make_infos(container):
+                    remux_i = VideoMediaInfo(
+                        container=container,
+                        video_codec="h264",
+                        audio_codec="aac" if container in ("ts", "mkv") else "mp3",
+                        width=1920,
+                        height=1080,
+                        duration=10.0,
+                        fps=30.0,
+                        has_video_stream=True,
+                        has_audio_stream=True,
+                        compatibility="remux",
+                        recommended_action="remux",
+                    )
+                    mp4_i = VideoMediaInfo(
+                        container="mp4",
+                        video_codec="h264",
+                        audio_codec="aac" if container in ("ts", "mkv") else "mp3",
+                        width=1920,
+                        height=1080,
+                        duration=10.0,
+                        fps=30.0,
+                        has_video_stream=True,
+                        has_audio_stream=True,
+                        compatibility="native",
+                        recommended_action="upload",
+                    )
+                    return [remux_i, mp4_i]
+
+                # Prepare 1
+                with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=make_infos("ts")), \
+                     patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                    mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"1") and d
+                    prep1 = prepare_video_for_telegram(src1, group_key="three_group", generate_thumbnail=False)
+
+                # Prepare 2
+                with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=make_infos("avi")), \
+                     patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                    mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"2") and d
+                    prep2 = prepare_video_for_telegram(src2, group_key="three_group", generate_thumbnail=False)
+
+                # Prepare 3
+                with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=make_infos("mkv")), \
+                     patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                    mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"3") and d
+                    prep3 = prepare_video_for_telegram(src3, group_key="three_group", generate_thumbnail=False)
+
+                names = [prep1.upload_path.name, prep2.upload_path.name, prep3.upload_path.name]
+                folded_names = [n.casefold() for n in names]
+
+                self.assertEqual(len(set(folded_names)), 3, f"Filenames are not case-insensitively unique: {names}")
+                self.assertEqual(names[0], "MOVIE.mp4")
+                self.assertEqual(names[1], "movie.avi.mp4")
+                self.assertEqual(names[2], "Movie.mkv.mp4")
+
+                self.assertTrue(prep1.upload_path.is_file())
+                self.assertTrue(prep2.upload_path.is_file())
+                self.assertTrue(prep3.upload_path.is_file())
+
+    def test_manifest_disk_inconsistency_collision_detected(self):
+        """Manifest vs Disk inconsistency: Disk already has Movie.mp4, manifest missing entry.
+
+        - New source requests movie.avi (would prefer movie.mp4 if only checking manifest)
+        - Must detect disk conflict and choose new safe filename (movie.avi.mp4)
+        - Must NOT unlink or overwrite existing Movie.mp4 on disk
+        """
+        with tempfile.TemporaryDirectory() as td:
+            src_dir = Path(td) / "sources"
+            src_dir.mkdir()
+            cache_dir = Path(td) / "cache"
+            processed_dir = cache_dir / "video_processed"
+            grp_dir = processed_dir / "disk_incon_group"
+            grp_dir.mkdir(parents=True)
+
+            # Pre-populate disk with Movie.mp4, BUT manifest is completely empty / missing entry!
+            existing_disk_file = grp_dir / "Movie.mp4"
+            existing_disk_file.write_bytes(b"PRE_EXISTING_DISK_CONTENT")
+
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
+                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+
+                src = src_dir / "movie.avi"
+                src.write_bytes(b"new movie avi")
+
+                remux_i = VideoMediaInfo(
+                    container="avi",
+                    video_codec="h264",
+                    audio_codec="mp3",
+                    width=1920,
+                    height=1080,
+                    duration=10.0,
+                    fps=30.0,
+                    has_video_stream=True,
+                    has_audio_stream=True,
+                    compatibility="remux",
+                    recommended_action="remux",
+                )
+                mp4_i = VideoMediaInfo(
+                    container="mp4",
+                    video_codec="h264",
+                    audio_codec="mp3",
+                    width=1920,
+                    height=1080,
+                    duration=10.0,
+                    fps=30.0,
+                    has_video_stream=True,
+                    has_audio_stream=True,
+                    compatibility="native",
+                    recommended_action="upload",
+                )
+
+                with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=[remux_i, mp4_i]), \
+                     patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
+                    mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"new remux content") and d
+                    prep = prepare_video_for_telegram(src, group_key="disk_incon_group", generate_thumbnail=False)
+
+                # The new file must detect collision with Movie.mp4 on disk and choose movie.avi.mp4
+                self.assertEqual(prep.upload_path.name, "movie.avi.mp4")
+                self.assertTrue(prep.upload_path.is_file())
+                self.assertEqual(prep.upload_path.read_bytes(), b"new remux content")
+
+                # The pre-existing Movie.mp4 must NOT have been unlinked or overwritten
+                self.assertTrue(existing_disk_file.is_file())
+                self.assertEqual(existing_disk_file.read_bytes(), b"PRE_EXISTING_DISK_CONTENT")
 
     def test_manifest_reuse_and_invalidation(self):
         with tempfile.TemporaryDirectory() as td:

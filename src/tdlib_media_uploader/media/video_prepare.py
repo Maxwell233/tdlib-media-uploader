@@ -115,31 +115,88 @@ def resolve_processed_filename(orig_path: Path, group_dir: Path, manifest: dict[
     """Determine a deterministic non-hash output filename for a remuxed video.
 
     Standard naming: <stem>.mp4 (e.g. clip.ts -> clip.mp4).
-    Collision handling: If <stem>.mp4 is already recorded in the group manifest for a
-    different source file (e.g. movie.avi and movie.ts), deterministically append the
-    original suffix: <stem><ext>.mp4 (e.g. movie.ts.mp4 and movie.avi.mp4).
+    Collision handling: If <stem>.mp4 is already recorded or exists on disk for a
+    different source file, deterministically append original suffix / index:
+    <stem><ext>.mp4, <stem><ext>_2.mp4, etc.
+
+    Collision checks are case-insensitive across all platforms (using casefold),
+    considering both manifest entries and existing disk files in group_dir,
+    while allowing the same source file to stably reuse its existing target name.
     """
     stable_src = stable_path(orig_path)
     outputs = manifest.setdefault("outputs", {})
 
-    base_name = f"{orig_path.stem}.mp4"
-    entry = outputs.get(base_name)
-    if entry is None or entry.get("source_path") == stable_src:
-        return base_name
+    # 1. Map manifest outputs by casefolded filename: {folded: (actual_key, entry)}
+    manifest_by_fold: dict[str, tuple[str, Mapping[str, Any]]] = {}
+    if isinstance(outputs, Mapping):
+        for k, v in outputs.items():
+            if isinstance(k, str) and isinstance(v, Mapping):
+                manifest_by_fold[k.casefold()] = (k, v)
 
-    ext_suffix = orig_path.suffix.lower()
-    collision_name = f"{orig_path.stem}{ext_suffix}.mp4"
-    coll_entry = outputs.get(collision_name)
-    if coll_entry is None or coll_entry.get("source_path") == stable_src:
-        return collision_name
+    # If this source already has an output recorded in manifest, check if it can be stably reused.
+    stem_fold = orig_path.stem.casefold()
+    for actual_k, entry in manifest_by_fold.values():
+        if entry.get("source_path") == stable_src:
+            k_fold = actual_k.casefold()
+            # Stably reuse if it matches stem prefix and ends with .mp4 (no legacy hashes)
+            if k_fold.startswith(stem_fold) and k_fold.endswith(".mp4"):
+                return actual_k
 
-    idx = 2
-    while True:
-        tie_name = f"{orig_path.stem}{ext_suffix}_{idx}.mp4"
-        t_entry = outputs.get(tie_name)
-        if t_entry is None or t_entry.get("source_path") == stable_src:
-            return tie_name
-        idx += 1
+    # 2. Map existing non-temporary disk files in group_dir: {folded: actual_disk_name}
+    disk_by_fold: dict[str, str] = {}
+    if group_dir.is_dir():
+        try:
+            for p in group_dir.iterdir():
+                if (
+                    p.is_file()
+                    and not p.name.startswith(".")
+                    and ".tmp." not in p.name
+                    and p.name != MANIFEST_FILE_NAME
+                ):
+                    disk_by_fold[p.name.casefold()] = p.name
+        except OSError:
+            pass
+
+    # 3. Candidate generator:
+    # Candidate 0: <stem>.mp4
+    # Candidate 1: <stem><ext>.mp4
+    # Candidate 2+: <stem><ext>_<idx>.mp4
+    def _candidates():
+        stem = orig_path.stem
+        ext = orig_path.suffix.lower()
+        yield f"{stem}.mp4"
+        yield f"{stem}{ext}.mp4"
+        idx = 2
+        while True:
+            yield f"{stem}{ext}_{idx}.mp4"
+            idx += 1
+
+    seen_folds: set[str] = set()
+    for cand_name in _candidates():
+        cand_fold = cand_name.casefold()
+        if cand_fold in seen_folds:
+            continue
+        seen_folds.add(cand_fold)
+
+        manifest_match = manifest_by_fold.get(cand_fold)
+        disk_match = disk_by_fold.get(cand_fold)
+
+        if manifest_match is not None:
+            actual_key, entry = manifest_match
+            if entry.get("source_path") == stable_src:
+                return actual_key
+            # Recorded for another source -> collision!
+            continue
+
+        if disk_match is not None:
+            # File exists on disk but manifest does not confirm it belongs to this source.
+            # Avoid unlinking or overwriting this file -> collision!
+            continue
+
+        # Neither manifest nor disk has this slot -> free!
+        return cand_name
+
+    return f"{orig_path.stem}.mp4"
 
 
 def remux_video_lossless(
@@ -370,7 +427,14 @@ def prepare_video_for_telegram(
         can_reuse = False
 
         if final_mp4.is_file() and final_mp4.stat().st_size > 0:
-            entry = manifest.get("outputs", {}).get(target_filename)
+            outputs = manifest.get("outputs", {})
+            entry = outputs.get(target_filename)
+            if entry is None and isinstance(outputs, Mapping):
+                tf_fold = target_filename.casefold()
+                for k, v in outputs.items():
+                    if isinstance(k, str) and k.casefold() == tf_fold:
+                        entry = v
+                        break
             if (
                 entry is not None
                 and entry.get("source_path") == stable_path(orig_path)
@@ -391,7 +455,15 @@ def prepare_video_for_telegram(
             final_mp4.unlink(missing_ok=True)
             processed_path = remux_video_lossless(w_path, final_mp4, cancel_event=cancel_event)
             processed_info = probe_video(processed_path, cancel_event=cancel_event)
-            manifest.setdefault("outputs", {})[target_filename] = {
+            outputs = manifest.setdefault("outputs", {})
+            tf_fold = target_filename.casefold()
+            stale_keys = [
+                k for k in outputs.keys()
+                if isinstance(k, str) and k.casefold() == tf_fold and k != target_filename
+            ]
+            for sk in stale_keys:
+                del outputs[sk]
+            outputs[target_filename] = {
                 "source_path": stable_path(orig_path),
                 "size": st.st_size,
                 "mtime_ns": st.st_mtime_ns,
