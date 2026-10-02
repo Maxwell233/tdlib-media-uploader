@@ -187,6 +187,8 @@ class FinalAuditRegressionTest(unittest.TestCase):
             self.assertNotIn(("video", "validate_media"), upload_values)
             self.assertNotIn(("image", "validate_media"), upload_values)
             self.assertNotIn(("mixed", "validate_media"), upload_values)
+            self.assertNotIn(("image", "compress_oversize"), upload_values)
+            self.assertFalse(hasattr(upload, "image_compress"))
 
             advanced_values = advanced.collect_values()
             self.assertIn(

@@ -802,5 +802,51 @@ class MixedMediaIntegrationTest(unittest.TestCase):
             self.assertEqual(skipped, [])
 
 
+class ImageNormalizationConfigAndGuiRegressionTest(unittest.TestCase):
+    """Verify GUI settings and config compatibility for image normalization."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_default_config_does_not_contain_compress_oversize(self):
+        from tdlib_media_uploader.config.paths import TEMPLATE_CONFIG_PATH
+        content = TEMPLATE_CONFIG_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("compress_oversize", content)
+
+    def test_loader_backward_compatibility_with_old_compress_oversize(self):
+        import importlib
+        import tdlib_media_uploader.config.paths as paths
+        from tdlib_media_uploader.config import loader as cfg_loader
+
+        base_toml = paths.TEMPLATE_CONFIG_PATH.read_text(encoding="utf-8")
+        old_toml = base_toml.replace("[image]\n", "[image]\ncompress_oversize = false\n")
+
+        with tempfile.TemporaryDirectory() as td:
+            temp_config = Path(td) / "config.toml"
+            temp_config.write_text(old_toml, encoding="utf-8")
+            with patch.object(paths, "CONFIG_PATH", temp_config):
+                # Reload loader with old config containing compress_oversize = false
+                importlib.reload(cfg_loader)
+                try:
+                    self.assertFalse(cfg_loader.IMAGE_COMPRESS_OVERSIZE)
+                finally:
+                    # Restore default loader state
+                    with patch.object(paths, "CONFIG_PATH", paths.TEMPLATE_CONFIG_PATH):
+                        importlib.reload(cfg_loader)
+
+    def test_upload_panel_has_no_checkbox_and_does_not_write_compress_oversize(self):
+        from tdlib_media_uploader.gui.settings.upload_panel import UploadPanel
+        panel = UploadPanel()
+        try:
+            self.assertFalse(hasattr(panel, "image_compress"))
+            self.assertTrue(hasattr(panel, "image_validate_media"))
+            values = panel.collect_values()
+            self.assertNotIn(("image", "compress_oversize"), values)
+        finally:
+            panel.deleteLater()
+
+
 if __name__ == "__main__":
     unittest.main()

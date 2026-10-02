@@ -186,12 +186,12 @@ def _extensions(values):
     return result
 
 
-# The uploader passes the original local path directly to TDLib's
-# inputMessageVideo/inputMessagePhoto constructors; it does not transcode
-# arbitrary containers before sending. Keep the scanner limited to formats
-# that Telegram treats as native media messages. H.265/HEVC remains allowed
-# when it is stored in an MP4 container; codec filtering here would reject
-# valid files based on an assumption that is not true for all Telegram clients.
+# Video extensions are limited to containers that can stay in the
+# inputMessageVideo path without automatic transcoding.
+#
+# Image extensions may include supported decodable source formats because
+# non-native static images can be normalized into a Telegram Photo-compatible
+# cached JPEG before upload.
 SUPPORTED_VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".m4v"})
 SUPPORTED_IMAGE_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
@@ -638,6 +638,8 @@ IMAGE_RESET_STATE = bool(
     )
 )
 
+# Deprecated compatibility option.
+# Image normalization is now automatic for supported static image formats.
 IMAGE_COMPRESS_OVERSIZE = bool(
     image.get(
         "compress_oversize",
