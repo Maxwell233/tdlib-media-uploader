@@ -18,6 +18,7 @@ from ..config.paths import (
     STAGING_CACHE_DIR,
     THUMBNAIL_CACHE_DIR,
     UPLOAD_INFLIGHT_DIR,
+    VIDEO_PROCESSED_CACHE_DIR,
     VIDEO_STATE_DIR,
 )
 from ..core.filesystem_legacy import is_link_or_junction
@@ -29,6 +30,7 @@ CACHE_TARGETS: dict[str, tuple[str, Path]] = {
     "image_state": ("图片上传状态", IMAGE_STATE_DIR),
     "mixed_state": ("混合上传状态", MIXED_STATE_DIR),
     "thumb_cache": ("视频封面缓存", THUMBNAIL_CACHE_DIR),
+    "video_processed": ("已处理视频缓存", VIDEO_PROCESSED_CACHE_DIR),
     "image_compression": ("图片压缩缓存", IMAGE_COMPRESSION_CACHE_DIR),
     "video_album_captions": ("视频 Album 标题", CAPTIONS_DIR / "video.json"),
     "image_album_captions": ("图片 Album 标题", CAPTIONS_DIR / "image.json"),

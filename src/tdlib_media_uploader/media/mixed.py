@@ -741,6 +741,7 @@ class MixedMediaStrategy:
                 (legacy_items, caption),
                 ui=ui,
                 cancel_event=cancel_event,
+                group_key=plan.key,
             )
             _raise_if_cancelled(cancel_token)
         return self._normalize_contents(result, plan, context=context)

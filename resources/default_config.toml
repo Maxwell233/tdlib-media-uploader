@@ -93,10 +93,11 @@ exiftool_path = 'tools/exiftool'
 # Telegram 视频单文件上限约为普通账号 2 GB、Premium 4 GB；程序按
 # 4000/8000 个 512 KiB 分片计算精确字节边界，扫描和发送前都会检查。
 
-# 以视频消息发送的视频文件。容器支持 MP4、MOV、M4V；内部编码推荐 H.264 或 H.265/HEVC。
-# 不支持的编码（如 ProRes、Animation 等）会在上传前跳过，不会自动转码也不会降级为文件。
+# 以视频消息发送的视频文件。容器原生支持 MP4、MOV、M4V；
+# 对 MKV、AVI、TS、MTS、M2TS 等格式，在内部编码兼容（H.264/HEVC，音频 AAC/MP3 或无音轨）时，
+# 将自动无损重新封装（remux stream-copy）为临时 MP4 后上传，原文件始终不修改。
 extensions = [
-  ".mp4", ".mov", ".m4v"
+  ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".ts", ".mts", ".m2ts"
 ]
 
 # 日期优先级：EXIF 信息 →（可选）媒体创建日期 → 文件修改日期。
@@ -157,6 +158,14 @@ reset_state = false
 
 # 上传当前组时是否后台提前准备/扫描下一组（最多提前1组，避免占用过多资源）
 prefetch_next_album = true
+
+# 视频兼容处理策略：
+# "remux"（默认）：遇到兼容的非 MP4 容器（MKV、AVI、TS、MTS、M2TS 等），
+#   当内部编码兼容（视频 H.264/HEVC，音频 AAC/MP3 或无音轨）时，
+#   自动调用 FFmpeg 进行无损流复制（-c copy）封装为临时 MP4 发送；
+# "original"：禁止自动封装，只允许原生兼容的 MP4/MOV/M4V 直接上传，其他格式跳过并提示。
+# 注：旧版 transcode_policy 配置将自动平滑兼容映射。
+compatibility_policy = "remux"
 
 
 [mixed]

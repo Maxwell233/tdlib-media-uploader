@@ -1345,6 +1345,7 @@ def build_thumbnail(
     *,
     timestamp_seconds=None,
     duration=None,
+    logical_path: Path | None = None,
 ):
     """Create or reuse a cached thumbnail at the requested video timestamp."""
 
@@ -1368,9 +1369,10 @@ def build_thumbnail(
             timestamp = 0.0
 
     THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    stat = path.stat()
+    identity_path = Path(logical_path if logical_path is not None else path)
+    stat = identity_path.stat()
     cache_key = hashlib.sha1(
-        f"{stable_path(path)}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
+        f"{stable_path(identity_path)}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
     ).hexdigest()
     final_path = THUMB_CACHE_DIR / f"{cache_key}.jpg"
     temp_path = THUMB_CACHE_DIR / f"{cache_key}.tmp.jpg"
@@ -1521,11 +1523,18 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
                 else prepare_video(path, cancel_event)
             )
             if getattr(info, "compatibility", "native") not in {"native", "legacy"}:
-                raise RuntimeError(
-                    format_unsupported_reason(path, info)
-                    if isinstance(info, VideoMediaInfo)
-                    else f"当前编码不在直接 Telegram Video 支持范围内，已跳过：{path.name}"
-                )
+                policy = getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", "remux")
+                if getattr(info, "compatibility", "") == "remux":
+                    if policy == "original":
+                        raise RuntimeError(
+                            f"视频格式为 {info.container.upper()}，当前策略配置为 original（仅允许原生格式），已跳过：{path.name}"
+                        )
+                else:
+                    raise RuntimeError(
+                        format_unsupported_reason(path, info)
+                        if isinstance(info, VideoMediaInfo)
+                        else f"当前编码不在直接 Telegram Video 支持范围内，已跳过：{path.name}"
+                    )
             return None
         except TimeoutError as exc:
             if _cancel_requested(cancel_event) or "取消" in str(exc) or "cancelled" in str(exc).lower():
@@ -1638,7 +1647,7 @@ def report_skipped_videos(skipped, ui=None, *, final=False) -> None:
     )
 
 
-def build_video_contents(items, caption: str, ui=None, cancel_event=None):
+def build_video_contents(items, caption: str, ui=None, cancel_event=None, group_key: str | None = None):
     """Build an Album while isolating files that became unreadable later."""
 
     target = ui or UI
@@ -1648,10 +1657,12 @@ def build_video_contents(items, caption: str, ui=None, cancel_event=None):
     for item in items:
         try:
             item_caption = caption if not valid_items else ""
-            if cancel_event is None:
-                contents.append(input_video(item, item_caption))
-            else:
-                contents.append(input_video(item, item_caption, cancel_event))
+            video_kwargs = {}
+            if group_key is not None:
+                video_kwargs["group_key"] = group_key
+            if cancel_event is not None:
+                video_kwargs["cancel_event"] = cancel_event
+            contents.append(input_video(item, item_caption, **video_kwargs))
             valid_items.append(item)
         except Exception as exc:
             path = item["path"]
@@ -1681,6 +1692,7 @@ def input_video(
     *,
     generate_thumbnail=None,
     thumbnail_timestamp_seconds=None,
+    group_key: str | None = None,
 ):
     """Build one TDLib video content object for standalone and mixed albums.
 
@@ -1710,53 +1722,46 @@ def input_video(
             cancel_event=cancel_event,
         )
         STAGED_UPLOAD_PATHS[stable_path(path)] = source_path
+
     info = (
         video_info(source_path)
         if cancel_event is None
         else video_info(source_path, cancel_event=cancel_event)
     )
-    if getattr(info, "compatibility", "native") not in {"native", "legacy"}:
-        raise RuntimeError(
-            format_unsupported_reason(source_path, info)
-            if isinstance(info, VideoMediaInfo)
-            else f"当前编码不在直接 Telegram Video 支持范围内：{source_path.name}"
-        )
+    thumbnail_enabled = (
+        cfg.VIDEO_GENERATE_THUMBNAIL
+        if generate_thumbnail is None
+        else bool(generate_thumbnail)
+    )
+    actual_group_key = group_key or item.get("group_key") or item.get("album_key") or "default"
+    from .video_prepare import prepare_video_for_telegram
+    prep = prepare_video_for_telegram(
+        working_path=source_path,
+        original_path=path,
+        group_key=str(actual_group_key),
+        cancel_event=cancel_event,
+        generate_thumbnail=thumbnail_enabled,
+        thumbnail_timestamp_seconds=thumbnail_timestamp_seconds,
+        max_bytes=cfg.VIDEO_MAX_BYTES,
+        info=info,
+    )
+    info = prep.info
     supports_streaming = (
         determine_supports_streaming(info)
         if isinstance(info, VideoMediaInfo)
         else bool(info.get("supports_streaming", True))
     )
     thumbnail = None
-    thumbnail_enabled = (
-        cfg.VIDEO_GENERATE_THUMBNAIL
-        if generate_thumbnail is None
-        else bool(generate_thumbnail)
-    )
-    if thumbnail_enabled:
-        thumbnail_kwargs = {
-            "timestamp_seconds": thumbnail_timestamp_seconds,
-            "duration": info.get("duration"),
-        }
-        if cancel_event is None:
-            thumb_path, thumb_width, thumb_height = build_thumbnail(
-                source_path,
-                **thumbnail_kwargs,
-            )
-        else:
-            thumb_path, thumb_width, thumb_height = build_thumbnail(
-                source_path,
-                cancel_event,
-                **thumbnail_kwargs,
-            )
+    if thumbnail_enabled and prep.thumbnail_path is not None:
         thumbnail = {
             "@type": "inputThumbnail",
-            "thumbnail": {"@type": "inputFileLocal", "path": display_path(thumb_path)},
-            "width": int(thumb_width),
-            "height": int(thumb_height),
+            "thumbnail": {"@type": "inputFileLocal", "path": display_path(prep.thumbnail_path)},
+            "width": int(prep.thumbnail_width),
+            "height": int(prep.thumbnail_height),
         }
     return {
         "@type": "inputMessageVideo",
-        "video": {"@type": "inputFileLocal", "path": display_path(source_path)},
+        "video": {"@type": "inputFileLocal", "path": display_path(prep.upload_path)},
         "thumbnail": thumbnail,
         "cover": None,
         "start_timestamp": 0,

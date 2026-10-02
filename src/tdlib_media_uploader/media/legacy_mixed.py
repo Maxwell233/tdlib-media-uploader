@@ -414,12 +414,19 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
                     else video_core.video_info(path, cancel_event=cancel_event)
                 )
                 if getattr(v_info, "compatibility", "native") not in {"native", "legacy"}:
-                    from .video_probe import VideoMediaInfo, format_unsupported_reason
-                    raise RuntimeError(
-                        format_unsupported_reason(path, v_info)
-                        if isinstance(v_info, VideoMediaInfo)
-                        else f"当前编码不在直接 Telegram Video 支持范围内，已跳过：{path.name}"
-                    )
+                    policy = getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", "remux")
+                    if getattr(v_info, "compatibility", "") == "remux":
+                        if policy == "original":
+                            raise RuntimeError(
+                                f"视频格式为 {v_info.container.upper()}，当前策略配置为 original（仅允许原生格式），已跳过：{path.name}"
+                            )
+                    else:
+                        from .video_probe import VideoMediaInfo, format_unsupported_reason
+                        raise RuntimeError(
+                            format_unsupported_reason(path, v_info)
+                            if isinstance(v_info, VideoMediaInfo)
+                            else f"当前编码不在直接 Telegram Video 支持范围内，已跳过：{path.name}"
+                        )
             else:
                 img_info = image_core.probe_image(path)
                 if img_info.animated:
@@ -549,7 +556,7 @@ def report_scan_size_skips(skipped, ui=None):
         )
 
 
-def _mixed_input_video(item, caption, cancel_event=None):
+def _mixed_input_video(item, caption, cancel_event=None, group_key: str | None = None):
     # Keep one authoritative TDLib video payload implementation.  Mixed
     # orchestration still owns grouping/captions/state, while the shared
     # builder owns readiness, staging, metadata and thumbnail shape.
@@ -561,12 +568,14 @@ def _mixed_input_video(item, caption, cancel_event=None):
             getattr(cfg, "VIDEO_THUMBNAIL_TIMESTAMP_SECONDS", 1.0),
         ),
     }
+    if group_key is not None:
+        kwargs["group_key"] = group_key
     if cancel_event is not None:
         kwargs["cancel_event"] = cancel_event
     return video_core.input_video(item, caption, **kwargs)
 
 
-def build_mixed_contents(items, caption: str, ui=None, cancel_event=None):
+def build_mixed_contents(items, caption: str, ui=None, cancel_event=None, group_key: str | None = None):
     target = ui or UI
     image_core.UI = target
     video_core.UI = target
@@ -578,11 +587,12 @@ def build_mixed_contents(items, caption: str, ui=None, cancel_event=None):
         try:
             if media_kind == "video":
                 item_caption = caption if not valid else ""
-                content = (
-                    _mixed_input_video(item, item_caption, cancel_event)
-                    if cancel_event is not None
-                    else _mixed_input_video(item, item_caption)
-                )
+                video_kwargs = {}
+                if group_key is not None:
+                    video_kwargs["group_key"] = group_key
+                if cancel_event is not None:
+                    video_kwargs["cancel_event"] = cancel_event
+                content = _mixed_input_video(item, item_caption, **video_kwargs)
             elif media_kind == "image":
                 expected_size = item.get("scan_size")
                 expected_mtime_ns = item.get("scan_mtime_ns")

@@ -907,6 +907,7 @@ class VideoStrategy:
                 (legacy_items, caption),
                 ui=ui,
                 cancel_event=cancel_event,
+                group_key=plan.key,
             )
         _check_cancel(cancel_token)
         normalized = self._normalize_contents(value, plan, source_root)

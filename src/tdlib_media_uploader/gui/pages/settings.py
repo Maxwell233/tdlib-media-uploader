@@ -41,6 +41,7 @@ class SettingsPage(QWidget):
     open_scan_tools = Signal()
     clear_all_requested = Signal()
     clear_thumb_requested = Signal()
+    clear_video_processed_requested = Signal()
     config_saved = Signal()
 
     SETTINGS_CATEGORIES = (
@@ -123,6 +124,9 @@ class SettingsPage(QWidget):
         # Forward storage panel signals
         self.storage_panel.clear_all_requested.connect(self.clear_all_requested.emit)
         self.storage_panel.clear_thumb_requested.connect(self.clear_thumb_requested.emit)
+        self.storage_panel.clear_video_processed_requested.connect(
+            self.clear_video_processed_requested.emit
+        )
 
         # Bottom right action bar
         actions_bar = QHBoxLayout()

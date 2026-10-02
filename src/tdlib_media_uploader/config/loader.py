@@ -186,13 +186,12 @@ def _extensions(values):
     return result
 
 
-# Video extensions are limited to containers that can stay in the
-# inputMessageVideo path without automatic transcoding.
-#
-# Image extensions may include supported decodable source formats because
-# non-native static images can be normalized into a Telegram Photo-compatible
-# cached JPEG before upload.
-SUPPORTED_VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".m4v"})
+# Video extensions include native containers (MP4, MOV, M4V) as well as
+# supported remux candidates (MKV, AVI, TS, MTS, M2TS) that can be losslessly
+# stream-copied into a temporary MP4 without re-encoding video or audio.
+NATIVE_VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".m4v"})
+REMUX_VIDEO_EXTENSIONS = frozenset({".mkv", ".avi", ".ts", ".mts", ".m2ts"})
+SUPPORTED_VIDEO_EXTENSIONS = frozenset(NATIVE_VIDEO_EXTENSIONS | REMUX_VIDEO_EXTENSIONS)
 SUPPORTED_IMAGE_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 )
@@ -540,13 +539,17 @@ VIDEO_PREFETCH_NEXT_ALBUM = bool(
 )
 PREFETCH_NEXT_ALBUM = VIDEO_PREFETCH_NEXT_ALBUM
 
-VIDEO_TRANSCODE_POLICY = str(
-    video.get("transcode_policy", "original")
+VIDEO_COMPATIBILITY_POLICY = str(
+    video.get("compatibility_policy", video.get("transcode_policy", "remux"))
 ).strip().lower()
-if VIDEO_TRANSCODE_POLICY not in {"original", "remux", "transcode"}:
-    raise RuntimeError(
-        '[video].transcode_policy 只能是 "original"、"remux" 或 "transcode"。'
-    )
+if VIDEO_COMPATIBILITY_POLICY not in {"remux", "original"}:
+    if VIDEO_COMPATIBILITY_POLICY == "transcode":
+        VIDEO_COMPATIBILITY_POLICY = "remux"
+    else:
+        raise RuntimeError(
+            '[video].compatibility_policy 只能是 "remux" 或 "original"。'
+        )
+VIDEO_TRANSCODE_POLICY = VIDEO_COMPATIBILITY_POLICY
 
 
 # 图片

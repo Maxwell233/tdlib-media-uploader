@@ -89,10 +89,11 @@ thumbnail_timestamp_seconds = 1.25
 
 文件路径、大小或修改时间变化后，会被视为新文件。V1.9.1 将状态、标题、登录数据库、缓存、历史和日志统一保存到 `data/`，三种模式分别使用 `data/state/video`、`data/state/image`、`data/state/mixed`。
 
-“设置与诊断”提供两类清理：
+“设置与诊断”提供三类清理：
 
 - **仅清理视频封面**：删除 `data/cache/thumbnails` 的生成文件，之后需要时重新生成。
-- **清理所有**：清空状态、标题、封面、任务历史、未确认记录、暂存副本和运行日志。保留 `data/config.toml` 及 Telegram 登录数据库。清理断点后重新上传可能产生重复消息。
+- **仅清理已处理视频**：删除 `data/cache/video_processed` 中暂存的重新封装视频文件。
+- **清理所有**：清空状态、标题、封面、任务历史、未确认记录、已处理视频、暂存副本和运行日志。保留 `data/config.toml` 及 Telegram 登录数据库。清理断点后重新上传可能产生重复消息。
 
 也可在相应媒体配置中临时设置 `reset_state = true`；运行一次后务必改回 `false`。
 
@@ -141,7 +142,7 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 - 代理支持 SOCKS5、HTTP、MTProto，默认关闭并使用直连。SOCKS5/HTTP 可填写用户名与密码；MTProto 需要 Secret。代理由 TDLib 配置，无需额外代理库。
 - `[scan]` 集中控制网络目录扫描：`stability_checks_local/network` 与对应间隔分别控制本地和网络盘的连续稳定检查，旧的 `stability_checks`/`stability_interval_seconds` 仍作为回退；`discovery_attempts` 和两个 delay 控制目录发现阶段的有限重试，`readiness_attempts` 是暂时不可读时的重试次数，`read_probe_bytes` 是头尾读探针大小；`io_workers_local` 与 `io_workers_network` 分别限制本地和 SMB/NAS 的 I/O 并发。扫描会跳过符号链接和 Windows junction，按下“停止”可取消目录遍历；正在进行的系统文件调用会在返回后响应取消。
 - `[process]` 集中设置 ExifTool、FFmpeg 日期/媒体信息、封面和图片压缩的单次超时，以及 ExifTool 批次大小和重试次数。ExifTool 只读取 Python 扫描确认的显式文件列表，不会再次递归扫描目录；空输出、非法 JSON、超时和不完整批次会自动重试并二分隔离，单个问题文件不会让整批失败。
-- `[image].extensions` 与 `[video].extensions` 必须互不重复；发现冲突时程序会在启动时明确提示，避免混合模式把同一个扩展名误判成图片或视频。默认支持的视频格式包括 `.mp4`、`.mov`、`.m4v`，程序通过 FFprobe 进行容器与编码探测，直接支持 H.264 与 HEVC/H.265 编码的视频以 `inputMessageVideo` 上传，不支持的编码（如 ProRes、Animation、无视频流等）会在预检阶段跳过并输出详细诊断信息，默认禁止自动转码且不降级为 Document。默认支持的图片格式包括 `.jpg`、`.jpeg`、`.png`、`.webp`（仅静态）、`.bmp`、`.tif`、`.tiff`；BMP、TIFF 和静态 WebP 会在缓存中转为 JPEG，带透明通道的图片会自动与配置的背景色（默认 `#FFFFFF`）复合，长宽比超过 20 的长图默认进行居中画布填充（`pad`）。AVI、MKV、WMV、GIF、APNG 等格式不在默认媒体列表中。旧配置中的这些扩展名会被启动时过滤掉；如需发送它们，请使用 Telegram 的文件方式或先进行转换。
+- `[image].extensions` 与 `[video].extensions` 必须互不重复；发现冲突时程序会在启动时明确提示，避免混合模式把同一个扩展名误判成图片或视频。默认支持的视频格式包括原生格式 `.mp4`、`.mov`、`.m4v`，以及待封装格式 `.mkv`、`.avi`、`.ts`、`.mts`、`.m2ts`。程序通过 FFprobe 进行统一的容器与音视频流探测：对原生格式直接以 `inputMessageVideo` 上传；对 MKV/AVI/TS/MTS/M2TS 等待封装格式，在 `[video].compatibility_policy = "remux"`（默认）下，若视频为 H.264 或 HEVC/H.265 且音频为 AAC/MP3 或无音轨，将在流水线准备阶段使用 FFmpeg 流复制（`-c copy`、`-movflags +faststart`）无损封装为 MP4 临时副本，原文件永不修改，绝不进行视频/音频转码，亦绝不静默降级为 Document。若配置为 `"original"`，则跳过非原生格式。上传采用严格的当前组发送 + 下一组并发准备（Lookahead = 1）流水线，处理后视频在整组发送并持久化后立即清理（异常/停止时保留以支持断点续传），磁盘占用严格受限。封面提取自处理后视频，但缓存键与原始源文件身份解耦绑定。默认支持的图片格式包括 `.jpg`、`.jpeg`、`.png`、`.webp`（仅静态）、`.bmp`、`.tif`、`.tiff`；BMP、TIFF 和静态 WebP 会在缓存中转为 JPEG，带透明通道的图片会自动与配置的背景色（默认 `#FFFFFF`）复合，长宽比超过 20 的长图默认进行居中画布填充（`pad`）。WMV、WebM、GIF、APNG 等格式不在默认媒体列表中。旧配置中的这些扩展名会被启动时过滤掉；如需发送它们，请使用 Telegram 的文件方式或先进行转换。
 
 支持本地目录及 `\\server\share\...` 网络目录。扫描时不可读取的项目会跳过并提示；网络恢复后可重新扫描。扫描结果中的暂时不可读文件会标记为可重试的 deferred 项目；上传前会再次检查文件仍存在、可读且未在扫描后发生变化。
 
