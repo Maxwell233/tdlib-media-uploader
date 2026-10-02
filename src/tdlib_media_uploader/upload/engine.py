@@ -20,6 +20,7 @@ from pathlib import Path
 import threading
 from typing import Any, Protocol
 
+from ..config.paths import VIDEO_PROCESSED_CACHE_DIR
 from ..contracts import CancelToken, EventSink, MediaStrategy, UploadContext
 from ..core.identity import canonical_target
 from ..core.models import (
@@ -318,6 +319,8 @@ class _PreparedBatch:
     ambiguous: bool = False
     confirmed_recovery_failed: bool = False
     batch_result: UploadBatchResult | None = None
+    managed_processed_paths: tuple[Path, ...] = ()
+    source_snapshots: tuple[tuple[Path, int, int], ...] = ()
 
 
 
@@ -1062,6 +1065,41 @@ class UploadEngine:
                     errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
             return _PreparedBatch(plan=plan, cancelled=True, errors=errors)
 
+        managed_paths: list[Path] = []
+        try:
+            from ..media.video_prepare import safe_group_key
+            root = VIDEO_PROCESSED_CACHE_DIR.resolve()
+            group_dir = (VIDEO_PROCESSED_CACHE_DIR / safe_group_key(plan.key)).resolve()
+            try:
+                group_dir.relative_to(root)
+                if group_dir != root and group_dir.is_dir():
+                    for p in group_dir.iterdir():
+                        if p.is_file() and not p.name.startswith("."):
+                            managed_paths.append(p)
+            except ValueError:
+                pass
+            for c in contents:
+                if isinstance(c, Mapping) and c.get("@type") == "inputMessageVideo":
+                    raw_vp = c.get("video", {}).get("path", "")
+                    if raw_vp:
+                        vp = Path(str(raw_vp)).resolve()
+                        try:
+                            vp.relative_to(root)
+                            if vp != root and vp.is_file() and vp not in managed_paths:
+                                managed_paths.append(vp)
+                        except ValueError:
+                            pass
+        except Exception:
+            pass
+
+        source_snapshots: list[tuple[Path, int, int]] = []
+        for item in ready_items:
+            try:
+                st = item.path.stat()
+                source_snapshots.append((item.path, st.st_size, st.st_mtime_ns))
+            except OSError:
+                pass
+
         send_plan = restrict_plan(effective_plan, ready_items)
         return _PreparedBatch(
             plan=plan,
@@ -1076,6 +1114,8 @@ class UploadEngine:
             preflight_failed=preflight_failed,
             preflight_deferred=preflight_deferred,
             errors=errors,
+            managed_processed_paths=tuple(managed_paths),
+            source_snapshots=tuple(source_snapshots),
         )
 
     def run(
@@ -1230,6 +1270,30 @@ class UploadEngine:
                 if prefetch_future is not None and prefetched_plan_index == plan_index:
                     try:
                         prep = prefetch_future.result()
+                        is_stale = False
+                        if prep.source_snapshots:
+                            for item_path, snap_size, snap_mtime in prep.source_snapshots:
+                                try:
+                                    curr = item_path.stat()
+                                    if curr.st_size != snap_size or curr.st_mtime_ns != snap_mtime:
+                                        is_stale = True
+                                        break
+                                except OSError:
+                                    is_stale = True
+                                    break
+                        if is_stale:
+                            from ..media.video_prepare import cleanup_processed_group
+                            cleanup_processed_group(prep.plan.key, prep.managed_processed_paths)
+                            prep = self._prepare_plan(
+                                strategy,
+                                plan,
+                                run_context,
+                                state,
+                                journal,
+                                token,
+                                sink,
+                                kind,
+                            )
                     except Exception as exc:
                         message = f"Album {plan.key} 预加载异常：{exc}"
                         errors.append(message)
@@ -1562,17 +1626,26 @@ class UploadEngine:
                         plan.key,
                         target=run_context.target,
                     )
-                    if run_context.stager is not None:
+                except Exception as cleanup_error:
+                    errors.append(f"Album {plan.key} 日志确认失败：{cleanup_error}")
+
+                if run_context.stager is not None:
+                    try:
                         self._cleanup(
                             run_context.stager,
                             effective_plan,
                             run_context,
                             confirmed=True,
                         )
-                except Exception as cleanup_error:
-                    # The send and state checkpoint are complete.  Keep the
-                    # successful batch but surface cleanup/finalization failure.
-                    errors.append(f"Album {plan.key} 收尾失败：{cleanup_error}")
+                    except Exception as cleanup_error:
+                        errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
+
+                if prep.managed_processed_paths:
+                    try:
+                        from ..media.video_prepare import cleanup_processed_group
+                        cleanup_processed_group(plan.key, prep.managed_processed_paths)
+                    except Exception as cleanup_error:
+                        errors.append(f"Album {plan.key} 临时视频清理失败：{cleanup_error}")
                 batches.append(
                     UploadBatchResult(
                         plan.key,

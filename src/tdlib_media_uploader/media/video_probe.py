@@ -35,6 +35,8 @@ class VideoMediaInfo(Mapping[str, Any]):
     fps: float | None
     has_video_stream: bool
     compatibility: str
+    has_audio_stream: bool = False
+    recommended_action: str = "skip"
 
     def __getitem__(self, key: str) -> Any:
         try:
@@ -53,12 +55,14 @@ class VideoMediaInfo(Mapping[str, Any]):
                 "duration",
                 "fps",
                 "has_video_stream",
+                "has_audio_stream",
                 "compatibility",
+                "recommended_action",
             )
         )
 
     def __len__(self) -> int:
-        return 9
+        return 11
 
 
 def _hidden_subprocess_kwargs() -> dict:
@@ -90,7 +94,18 @@ def _find_ffmpeg() -> str | None:
         if candidate.is_file():
             return str(candidate.resolve())
 
-    return shutil.which("ffmpeg")
+    which_ffmpeg = shutil.which("ffmpeg")
+    if which_ffmpeg:
+        return which_ffmpeg
+
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and Path(exe).is_file():
+            return str(Path(exe).resolve())
+    except Exception:
+        pass
+    return None
 
 
 def _find_ffprobe() -> str | None:
@@ -161,16 +176,23 @@ ISO_BMFF_FORMAT_NAMES = frozenset({
     "mp42",
 })
 
+REMUX_FORMAT_NAMES = frozenset({
+    "matroska",
+    "webm",
+    "avi",
+    "mpegts",
+})
+
 
 def determine_supports_streaming(info: Any) -> bool:
     """Determine whether the video can declare supports_streaming for Telegram.
 
     Note: This is a Telegram metadata flag indicating streaming playback intent,
     not a verification or guarantee of faststart/moov atom placement.
-    Only native or legacy-fallback MP4, MOV, and M4V containers declare supports_streaming.
+    Native, remuxed, or legacy-fallback MP4, MOV, and M4V containers declare supports_streaming.
     """
     if isinstance(info, VideoMediaInfo):
-        return info.compatibility in {"native", "legacy"}
+        return info.compatibility in {"native", "legacy", "remux"}
     if isinstance(info, Mapping):
         return bool(info.get("supports_streaming", True))
     return True
@@ -188,7 +210,18 @@ def format_unsupported_reason(path: Path, info: VideoMediaInfo) -> str:
         cause = f"视频媒体属性异常（{info.width}x{info.height}，时长 {info.duration:.2f}s）或文件损坏"
     elif info.video_codec in ("unknown", ""):
         cause = "未找到 ffprobe，无法验证视频编码兼容性"
-    elif info.compatibility == "unsupported" and info.container not in ("mp4", "mov", "m4v"):
+    elif (
+        info.container in ("mkv", "avi", "ts", "mts", "m2ts")
+        and info.video_codec in {"h264", "avc", "avc1", "hevc", "h265", "hev1", "hvc1"}
+        and info.has_audio_stream
+        and info.audio_codec not in {"aac", "mp3"}
+    ):
+        cause = f"视频流可兼容，但音频编码 {audio_codec_label} 无法在不重新编码音频的情况下安全重新封装为 MP4"
+    elif info.has_audio_stream and info.audio_codec not in {"aac", "mp3"}:
+        cause = f"音频编码（{audio_codec_label}）不受支持（仅支持 AAC、MP3 或无音轨），且禁止有损转码"
+    elif info.compatibility == "unsupported" and info.container not in (
+        "mp4", "mov", "m4v", "mkv", "avi", "ts", "mts", "m2ts"
+    ):
         cause = f"文件格式（{container_label}）与扩展名不匹配或非受支持容器"
     else:
         cause = "当前编码不在直接 Telegram Video 支持范围内"
@@ -295,11 +328,14 @@ def _probe_with_ffprobe(
             duration=0.0,
             fps=None,
             has_video_stream=False,
+            has_audio_stream=audio_stream is not None,
             compatibility="invalid",
+            recommended_action="error",
         )
 
     video_codec = str(video_stream.get("codec_name") or "").lower()
     audio_codec = str(audio_stream.get("codec_name") or "").lower() if audio_stream else None
+    has_audio_stream = audio_stream is not None
 
     try:
         width = int(video_stream.get("width") or 0)
@@ -317,11 +353,14 @@ def _probe_with_ffprobe(
     format_name = str(format_info.get("format_name") or "").lower()
     format_names = {part.strip().lower() for part in format_name.split(",") if part.strip()}
     is_iso_bmff = bool(format_names & ISO_BMFF_FORMAT_NAMES)
+    is_remux_container = bool(format_names & REMUX_FORMAT_NAMES) or (ext in {"mkv", "avi", "ts", "mts", "m2ts"})
 
     if is_iso_bmff and ext in {"mp4", "mov", "m4v"}:
         container = ext
     elif is_iso_bmff:
         container = "mp4" if "mp4" in format_names else ("mov" if "mov" in format_names else (ext or format_name.split(",")[0]))
+    elif ext in {"mkv", "avi", "ts", "mts", "m2ts"}:
+        container = ext
     else:
         container = format_name.split(",")[0] or ext
 
@@ -335,20 +374,34 @@ def _probe_with_ffprobe(
             duration=duration,
             fps=fps,
             has_video_stream=True,
+            has_audio_stream=has_audio_stream,
             compatibility="invalid",
+            recommended_action="error",
         )
 
     # Native codecs: H.264 / AVC and H.265 / HEVC in ISO-BMFF / QuickTime container
     is_h264 = video_codec in {"h264", "avc", "avc1"}
     is_hevc = video_codec in {"hevc", "h265", "hev1", "hvc1"}
     is_native_container = is_iso_bmff and (ext in {"mp4", "mov", "m4v"})
+    is_mkv = ext == "mkv" and bool(format_names & {"matroska", "webm"})
+    is_avi = ext == "avi" and bool(format_names & {"avi"})
+    is_ts = ext in {"ts", "mts", "m2ts"} and bool(format_names & {"mpegts"})
+    is_remux_container = is_mkv or is_avi or is_ts
+    is_video_compat = is_h264 or is_hevc
+    is_audio_compat = (not has_audio_stream) or (audio_codec in {"aac", "mp3"})
 
-    if is_native_container and (is_h264 or is_hevc):
+    if is_native_container and is_video_compat:
         compatibility = "native"
+        recommended_action = "upload"
+    elif is_remux_container and is_video_compat and is_audio_compat:
+        compatibility = "remux"
+        recommended_action = "remux"
     elif container == "webm" and video_codec in {"vp8", "vp9"}:
         compatibility = "experimental"
+        recommended_action = "skip"
     else:
         compatibility = "unsupported"
+        recommended_action = "skip"
 
     return VideoMediaInfo(
         container=container,
@@ -359,7 +412,9 @@ def _probe_with_ffprobe(
         duration=duration,
         fps=fps,
         has_video_stream=True,
+        has_audio_stream=has_audio_stream,
         compatibility=compatibility,
+        recommended_action=recommended_action,
     )
 
 
@@ -384,7 +439,9 @@ def _fallback_probe_without_ffprobe(
             duration=0.0,
             fps=None,
             has_video_stream=True,
+            has_audio_stream=False,
             compatibility="unsupported",
+            recommended_action="skip",
         )
 
     try:
@@ -408,7 +465,9 @@ def _fallback_probe_without_ffprobe(
             duration=0.0,
             fps=None,
             has_video_stream=False,
+            has_audio_stream=False,
             compatibility="invalid",
+            recommended_action="error",
         )
     finally:
         if "reader" in locals() and reader is not None:
@@ -430,7 +489,9 @@ def _fallback_probe_without_ffprobe(
             duration=0.0,
             fps=fps,
             has_video_stream=False,
+            has_audio_stream=False,
             compatibility="invalid",
+            recommended_action="error",
         )
 
     width, height = int(size[0]), int(size[1])
@@ -444,7 +505,9 @@ def _fallback_probe_without_ffprobe(
             duration=duration,
             fps=fps,
             has_video_stream=True,
+            has_audio_stream=False,
             compatibility="invalid",
+            recommended_action="error",
         )
 
     return VideoMediaInfo(
@@ -456,7 +519,9 @@ def _fallback_probe_without_ffprobe(
         duration=duration,
         fps=fps,
         has_video_stream=True,
+        has_audio_stream=False,
         compatibility="legacy",
+        recommended_action="upload",
     )
 
 

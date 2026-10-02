@@ -414,12 +414,19 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
                     else video_core.video_info(path, cancel_event=cancel_event)
                 )
                 if getattr(v_info, "compatibility", "native") not in {"native", "legacy"}:
-                    from .video_probe import VideoMediaInfo, format_unsupported_reason
-                    raise RuntimeError(
-                        format_unsupported_reason(path, v_info)
-                        if isinstance(v_info, VideoMediaInfo)
-                        else f"当前编码不在直接 Telegram Video 支持范围内，已跳过：{path.name}"
-                    )
+                    policy = getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", "remux")
+                    if getattr(v_info, "compatibility", "") == "remux":
+                        if policy == "original":
+                            raise RuntimeError(
+                                f"视频格式为 {v_info.container.upper()}，当前策略配置为 original（仅允许原生格式），已跳过：{path.name}"
+                            )
+                    else:
+                        from .video_probe import VideoMediaInfo, format_unsupported_reason
+                        raise RuntimeError(
+                            format_unsupported_reason(path, v_info)
+                            if isinstance(v_info, VideoMediaInfo)
+                            else f"当前编码不在直接 Telegram Video 支持范围内，已跳过：{path.name}"
+                        )
             else:
                 img_info = image_core.probe_image(path)
                 if img_info.animated:
@@ -549,7 +556,14 @@ def report_scan_size_skips(skipped, ui=None):
         )
 
 
-def _mixed_input_video(item, caption, cancel_event=None):
+def _mixed_input_video(
+    item,
+    caption,
+    cancel_event=None,
+    group_key: str | None = None,
+    max_bytes: int | None = None,
+    is_premium: bool | None = None,
+):
     # Keep one authoritative TDLib video payload implementation.  Mixed
     # orchestration still owns grouping/captions/state, while the shared
     # builder owns readiness, staging, metadata and thumbnail shape.
@@ -561,12 +575,26 @@ def _mixed_input_video(item, caption, cancel_event=None):
             getattr(cfg, "VIDEO_THUMBNAIL_TIMESTAMP_SECONDS", 1.0),
         ),
     }
+    if group_key is not None:
+        kwargs["group_key"] = group_key
     if cancel_event is not None:
         kwargs["cancel_event"] = cancel_event
+    if max_bytes is not None:
+        kwargs["max_bytes"] = max_bytes
+    if is_premium is not None:
+        kwargs["is_premium"] = is_premium
     return video_core.input_video(item, caption, **kwargs)
 
 
-def build_mixed_contents(items, caption: str, ui=None, cancel_event=None):
+def build_mixed_contents(
+    items,
+    caption: str,
+    ui=None,
+    cancel_event=None,
+    group_key: str | None = None,
+    max_bytes: int | None = None,
+    is_premium: bool | None = None,
+):
     target = ui or UI
     image_core.UI = target
     video_core.UI = target
@@ -578,11 +606,16 @@ def build_mixed_contents(items, caption: str, ui=None, cancel_event=None):
         try:
             if media_kind == "video":
                 item_caption = caption if not valid else ""
-                content = (
-                    _mixed_input_video(item, item_caption, cancel_event)
-                    if cancel_event is not None
-                    else _mixed_input_video(item, item_caption)
-                )
+                video_kwargs = {}
+                if group_key is not None:
+                    video_kwargs["group_key"] = group_key
+                if cancel_event is not None:
+                    video_kwargs["cancel_event"] = cancel_event
+                if max_bytes is not None:
+                    video_kwargs["max_bytes"] = max_bytes
+                if is_premium is not None:
+                    video_kwargs["is_premium"] = is_premium
+                content = _mixed_input_video(item, item_caption, **video_kwargs)
             elif media_kind == "image":
                 expected_size = item.get("scan_size")
                 expected_mtime_ns = item.get("scan_mtime_ns")
@@ -862,7 +895,17 @@ def _main_impl():
         client.refresh_account_limits()
         caption_limit = int(getattr(client, "caption_length_limit", None) or 1024)
         if client.is_premium is not True:
-            premium_items = [item for item in pending if item.get("requires_premium")]
+            policy = str(
+                getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", getattr(cfg, "VIDEO_TRANSCODE_POLICY", "remux"))
+            ).strip().lower()
+            premium_items = [
+                item for item in pending
+                if item.get("requires_premium")
+                and not (
+                    Path(item["path"]).suffix.lstrip(".").lower() in {"mkv", "avi", "ts", "mts", "m2ts"}
+                    and policy != "original"
+                )
+            ]
             if premium_items:
                 UI.warning(
                     f"已跳过 {len(premium_items)} 个超过约 2 GB 的视频：Telegram Premium 才允许上传。"
@@ -894,14 +937,15 @@ def _main_impl():
                 cfg.MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS,
                 max_chars=caption_limit,
             )
-            if cancel_event is None:
-                contents, ready, runtime_skipped = build_mixed_contents(
-                    album_items, label, UI
-                )
-            else:
-                contents, ready, runtime_skipped = build_mixed_contents(
-                    album_items, label, UI, cancel_event
-                )
+            build_kwargs = {
+                "is_premium": client.is_premium,
+                "group_key": plan.get("group_key") or plan.get("album_key") or "default",
+            }
+            if cancel_event is not None:
+                build_kwargs["cancel_event"] = cancel_event
+            contents, ready, runtime_skipped = build_mixed_contents(
+                album_items, label, UI, **build_kwargs
+            )
             if runtime_skipped:
                 skipped.extend(runtime_skipped)
                 progress.skip_items([record["item"] for record in runtime_skipped])

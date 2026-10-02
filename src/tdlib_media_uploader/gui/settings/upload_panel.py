@@ -180,6 +180,16 @@ class UploadPanel(SettingsPanel):
         card4, l4 = self.create_card("上传前处理")
         f4 = QFormLayout()
         f4.setSpacing(10)
+        self.video_compat_policy = QComboBox()
+        self.video_compat_policy.addItem("兼容重新封装（remux，推荐）：MKV/AVI/TS 等临时无损重新封装为 MP4", "remux")
+        self.video_compat_policy.addItem("仅原生格式（original）：仅允许 MP4/MOV/M4V 直接上传", "original")
+        self.video_compat_policy.setToolTip(
+            "MP4、MOV、M4V 等原生兼容视频将直接使用原文件上传；\n"
+            "对符合条件的 MKV、AVI、TS、MTS、M2TS，将临时无损重新封装为 MP4。\n"
+            "原文件不会被修改。"
+        )
+        f4.addRow("视频兼容处理", self.video_compat_policy)
+
         self.video_thumbnail = QCheckBox("生成视频缩略图")
         f4.addRow("缩略图", self.video_thumbnail)
         self.video_thumbnail_timestamp = self._thumbnail_timestamp_spin()
@@ -187,6 +197,7 @@ class UploadPanel(SettingsPanel):
         self.video_validate_media = QCheckBox("上传前验证全部媒体可读性")
         f4.addRow("预检验证", self.video_validate_media)
 
+        self.video_compat_policy.currentIndexChanged.connect(self._check_dirty)
         self.video_thumbnail.toggled.connect(self._check_dirty)
         self.video_thumbnail.toggled.connect(self._update_video_thumbnail_fields)
         self.video_thumbnail_timestamp.valueChanged.connect(self._check_dirty)
@@ -418,6 +429,13 @@ class UploadPanel(SettingsPanel):
         self.video_validate_media.setChecked(
             bool(_cfg("VIDEO_VERIFY_ALL_METADATA", _cfg("VIDEO_VALIDATE_MEDIA", False)))
         )
+        compat_policy = str(
+            _cfg("VIDEO_COMPATIBILITY_POLICY", _cfg("VIDEO_TRANSCODE_POLICY", "remux"))
+        ).strip().lower()
+        if compat_policy == "transcode":
+            compat_policy = "remux"
+        idx = self.video_compat_policy.findData(compat_policy)
+        self.video_compat_policy.setCurrentIndex(idx if idx >= 0 else 0)
         self._update_video_date_fields()
 
         # 2. Image
@@ -473,6 +491,7 @@ class UploadPanel(SettingsPanel):
             "video_thumbnail": self.video_thumbnail.isChecked(),
             "video_thumbnail_timestamp": self.video_thumbnail_timestamp.value(),
             "video_validate_media": self.video_validate_media.isChecked(),
+            "video_compat_policy": self.video_compat_policy.currentData(),
             "image_sort": self.image_sort.currentData(),
             "image_album": self.image_album.value(),
             "image_numbering": self.image_numbering.isChecked(),
@@ -536,6 +555,7 @@ class UploadPanel(SettingsPanel):
                 2,
             ),
             ("video", "verify_all_metadata_before_upload"): self.video_validate_media.isChecked(),
+            ("video", "compatibility_policy"): self.video_compat_policy.currentData() or "remux",
         })
 
         values.update({

@@ -30,6 +30,7 @@ class StoragePanel(SettingsPanel):
 
     clear_all_requested = Signal()
     clear_thumb_requested = Signal()
+    clear_video_processed_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -108,6 +109,11 @@ class StoragePanel(SettingsPanel):
         clear_thumb.setIcon(get_svg_icon("delete", 14, 14))
         clear_thumb.clicked.connect(lambda: self.clear_thumb_requested.emit())
 
+        clear_video_processed = QPushButton("仅清理已处理视频")
+        clear_video_processed.setObjectName("secondaryButton")
+        clear_video_processed.setIcon(get_svg_icon("delete", 14, 14))
+        clear_video_processed.clicked.connect(lambda: self.clear_video_processed_requested.emit())
+
         clear_all = QPushButton("清理所有缓存与断点")
         clear_all.setObjectName("dangerButton")
         clear_all.setIcon(get_svg_icon("delete", 14, 14, color="#ffffff"))
@@ -115,6 +121,7 @@ class StoragePanel(SettingsPanel):
 
         cache_buttons.addWidget(calc_cache)
         cache_buttons.addWidget(clear_thumb)
+        cache_buttons.addWidget(clear_video_processed)
         cache_buttons.addWidget(clear_all)
         cache_buttons.addStretch(1)
         cache_layout.addLayout(cache_buttons)

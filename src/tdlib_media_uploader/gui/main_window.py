@@ -340,6 +340,9 @@ class MainWindow(QMainWindow):
         self.settings_page.open_scan_tools.connect(self._edit_scan_tools)
         self.settings_page.clear_all_requested.connect(self._clear_all_cache)
         self.settings_page.clear_thumb_requested.connect(self._clear_thumb_cache)
+        self.settings_page.clear_video_processed_requested.connect(
+            self._clear_video_processed_cache
+        )
         self.settings_page.config_saved.connect(self._on_settings_saved)
 
         self.statusBar().showMessage("就绪")
@@ -766,6 +769,19 @@ class MainWindow(QMainWindow):
         )
         if answer == QMessageBox.StandardButton.Yes:
             self._finish_cache_clear(("thumb_cache",), reset_scan=False)
+
+    def _clear_video_processed_cache(self):
+        if not self._cache_operation_allowed():
+            return
+        answer = QMessageBox.question(
+            self,
+            "确认清理已处理视频缓存",
+            "只清空临时重新封装的已处理视频缓存，不影响原文件、视频封面缓存、上传状态和历史记录。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._finish_cache_clear(("video_processed",), reset_scan=False)
 
     def _edit_target(self, kind: str = "video"):
         kind = _require_kind(kind)
