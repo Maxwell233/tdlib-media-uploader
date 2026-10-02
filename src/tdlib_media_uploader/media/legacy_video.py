@@ -1520,14 +1520,32 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
                 if cancel_event is None
                 else prepare_video(path, cancel_event)
             )
-            if getattr(info, "compatibility", "native") != "native":
+            if getattr(info, "compatibility", "native") not in {"native", "legacy"}:
                 raise RuntimeError(
                     format_unsupported_reason(path, info)
                     if isinstance(info, VideoMediaInfo)
                     else f"当前编码不在直接 Telegram Video 支持范围内，已跳过：{path.name}"
                 )
             return None
+        except TimeoutError as exc:
+            if _cancel_requested(cancel_event) or "取消" in str(exc) or "cancelled" in str(exc).lower():
+                raise
+            readiness_record = _readiness_record(exc)
+            record = {
+                "item": item,
+                "path": path,
+                "reason": f"{type(exc).__name__}: {exc}" if "\n" not in str(exc) else str(exc),
+                "category": (
+                    readiness_record["category"] if readiness_record
+                    else "deferred"
+                ),
+            }
+            if readiness_record:
+                record.update(readiness_record)
+            return record
         except Exception as exc:
+            if _cancel_requested(cancel_event):
+                raise TimeoutError("视频预检已取消")
             readiness_record = _readiness_record(exc)
             record = {
                 "item": item,
@@ -1556,7 +1574,7 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
             1,
         ):
             if _cancel_requested(cancel_event):
-                break
+                raise TimeoutError("视频预检已取消")
             if getattr(cfg, "VIDEO_VERIFY_ALL_METADATA", False):
                 target.info(f"预检视频 {index}/{total} · {items[index-1]['path'].name}")
             if result:
@@ -1697,7 +1715,7 @@ def input_video(
         if cancel_event is None
         else video_info(source_path, cancel_event=cancel_event)
     )
-    if getattr(info, "compatibility", "native") != "native":
+    if getattr(info, "compatibility", "native") not in {"native", "legacy"}:
         raise RuntimeError(
             format_unsupported_reason(source_path, info)
             if isinstance(info, VideoMediaInfo)

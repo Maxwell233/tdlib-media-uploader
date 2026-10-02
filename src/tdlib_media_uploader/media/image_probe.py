@@ -39,6 +39,10 @@ class ImageMediaInfo(Mapping[str, Any]):
     needs_aspect_fix: bool
     telegram_compatible: bool
 
+    @property
+    def needs_normalization(self) -> bool:
+        return not self.telegram_compatible
+
     def __getitem__(self, key: str) -> Any:
         try:
             return getattr(self, key)

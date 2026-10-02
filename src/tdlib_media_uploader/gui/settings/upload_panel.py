@@ -269,8 +269,8 @@ class UploadPanel(SettingsPanel):
         f3 = QFormLayout()
         f3.setSpacing(10)
 
-        self.image_compress = QCheckBox("图片超过 10 MiB 时自动使用 FFmpeg 压缩临时副本")
-        f3.addRow("超限压缩", self.image_compress)
+        self.image_compress = QCheckBox("图片超过 10 MiB 或需兼容转换时自动安全规范化临时副本（原文件不修改）")
+        f3.addRow("安全规范化", self.image_compress)
 
         self.image_validate_media = QCheckBox("上传前验证全部图片可读性")
         f3.addRow("预检验证", self.image_validate_media)

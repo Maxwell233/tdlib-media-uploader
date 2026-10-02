@@ -148,13 +148,29 @@ def _parse_duration(value: Any) -> float:
         return 0.0
 
 
+ISO_BMFF_FORMAT_NAMES = frozenset({
+    "mov",
+    "mp4",
+    "m4a",
+    "3gp",
+    "3g2",
+    "mj2",
+    "quicktime",
+    "isom",
+    "mp41",
+    "mp42",
+})
+
+
 def determine_supports_streaming(info: Any) -> bool:
     """Determine whether the video can declare supports_streaming for Telegram.
 
-    Only native MP4, MOV, and M4V containers without remuxing declare supports_streaming.
+    Note: This is a Telegram metadata flag indicating streaming playback intent,
+    not a verification or guarantee of faststart/moov atom placement.
+    Only native or legacy-fallback MP4, MOV, and M4V containers declare supports_streaming.
     """
     if isinstance(info, VideoMediaInfo):
-        return info.compatibility == "native"
+        return info.compatibility in {"native", "legacy"}
     if isinstance(info, Mapping):
         return bool(info.get("supports_streaming", True))
     return True
@@ -172,6 +188,8 @@ def format_unsupported_reason(path: Path, info: VideoMediaInfo) -> str:
         cause = f"视频媒体属性异常（{info.width}x{info.height}，时长 {info.duration:.2f}s）或文件损坏"
     elif info.video_codec in ("unknown", ""):
         cause = "未找到 ffprobe，无法验证视频编码兼容性"
+    elif info.compatibility == "unsupported" and info.container not in ("mp4", "mov", "m4v"):
+        cause = f"文件格式（{container_label}）与扩展名不匹配或非受支持容器"
     else:
         cause = "当前编码不在直接 Telegram Video 支持范围内"
 
@@ -216,6 +234,8 @@ def _probe_with_ffprobe(
             cancel_event=cancel_event,
             **process_kwargs,
         )
+    except TimeoutError:
+        raise
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError(f"读取视频媒体信息超时：{file_path.name}") from exc
     except Exception as exc:
@@ -295,7 +315,15 @@ def _probe_with_ffprobe(
     )
 
     format_name = str(format_info.get("format_name") or "").lower()
-    container = ext if ext else format_name.split(",")[0]
+    format_names = {part.strip().lower() for part in format_name.split(",") if part.strip()}
+    is_iso_bmff = bool(format_names & ISO_BMFF_FORMAT_NAMES)
+
+    if is_iso_bmff and ext in {"mp4", "mov", "m4v"}:
+        container = ext
+    elif is_iso_bmff:
+        container = "mp4" if "mp4" in format_names else ("mov" if "mov" in format_names else (ext or format_name.split(",")[0]))
+    else:
+        container = format_name.split(",")[0] or ext
 
     if width <= 1 or height <= 1 or duration <= 0:
         return VideoMediaInfo(
@@ -310,10 +338,10 @@ def _probe_with_ffprobe(
             compatibility="invalid",
         )
 
-    # Native codecs: H.264 / AVC and H.265 / HEVC
+    # Native codecs: H.264 / AVC and H.265 / HEVC in ISO-BMFF / QuickTime container
     is_h264 = video_codec in {"h264", "avc", "avc1"}
     is_hevc = video_codec in {"hevc", "h265", "hev1", "hvc1"}
-    is_native_container = container in {"mp4", "mov", "m4v"}
+    is_native_container = is_iso_bmff and (ext in {"mp4", "mov", "m4v"})
 
     if is_native_container and (is_h264 or is_hevc):
         compatibility = "native"
@@ -421,14 +449,14 @@ def _fallback_probe_without_ffprobe(
 
     return VideoMediaInfo(
         container="mp4",
-        video_codec="h264",
+        video_codec="unknown",
         audio_codec=None,
         width=width,
         height=height,
         duration=duration,
         fps=fps,
         has_video_stream=True,
-        compatibility="native",
+        compatibility="legacy",
     )
 
 

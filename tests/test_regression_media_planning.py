@@ -177,9 +177,12 @@ class ImprovementsTest(unittest.TestCase):
                     patch.object(image_core.cfg, "IMAGE_EXTENSIONS", {".jpg"}), \
                     patch.object(image_core.cfg, "IMAGE_MAX_BYTES", 4), \
                     patch.object(image_core.cfg, "IMAGE_COMPRESS_OVERSIZE", False):
-                self.assertEqual(image_core.scan_images(), [small_image])
+                self.assertEqual(
+                    {path.name for path in image_core.scan_images()},
+                    {"large.jpg", "small.jpg"},
+                )
                 self.assertEqual(len(image_core.LAST_SCAN_SIZE_SKIPS), 1)
-                self.assertEqual(image_core.LAST_SCAN_SIZE_SKIPS[0]["action"], "skip")
+                self.assertEqual(image_core.LAST_SCAN_SIZE_SKIPS[0]["action"], "normalize")
 
             with patch.object(image_core.cfg, "IMAGE_DIR", root), \
                     patch.object(image_core.cfg, "IMAGE_EXTENSIONS", {".jpg"}), \
@@ -189,7 +192,7 @@ class ImprovementsTest(unittest.TestCase):
                     {path.name for path in image_core.scan_images()},
                     {"large.jpg", "small.jpg"},
                 )
-                self.assertEqual(image_core.LAST_SCAN_SIZE_SKIPS[0]["action"], "compress")
+                self.assertEqual(image_core.LAST_SCAN_SIZE_SKIPS[0]["action"], "normalize")
 
             with patch.object(video_core.cfg, "VIDEO_DIR", root), \
                     patch.object(video_core.cfg, "VIDEO_EXTENSIONS", {".mp4"}), \

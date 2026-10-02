@@ -215,15 +215,13 @@ def scan_images(cancel_event=None) -> list[Path]:
                 "size": size,
                 "limit": cfg.IMAGE_MAX_BYTES,
                 "category": "size",
-                "action": "compress" if cfg.IMAGE_COMPRESS_OVERSIZE else "skip",
+                "action": "normalize",
                 "reason": (
                     f"文件大小 {format_size(size)} 超过 Telegram Photo 上限 "
-                    f"{format_size(cfg.IMAGE_MAX_BYTES)}"
+                    f"{format_size(cfg.IMAGE_MAX_BYTES)}，将在上传前规范化"
                 ),
             }
             LAST_SCAN_SIZE_SKIPS.append(record)
-            if not cfg.IMAGE_COMPRESS_OVERSIZE:
-                continue
         accepted.append(path)
         IMAGE_SCAN_SNAPSHOTS[stable_path(path)] = snapshot
     images = accepted
@@ -344,13 +342,6 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
             )
             raise_for_file_readiness(path, readiness)
             size = readiness.snapshot.size
-            if size > cfg.IMAGE_MAX_BYTES and not cfg.IMAGE_COMPRESS_OVERSIZE:
-                reason = (
-                    f"文件大小 {format_size(size)} 超过 Telegram Photo 上限 "
-                    f"{format_size(cfg.IMAGE_MAX_BYTES)}"
-                )
-                raise RuntimeError(reason)
-
             IMAGE_UPLOAD_PATHS.pop(stable_path(path), None)
             info = probe_image(path)
             if info.animated:
@@ -365,10 +356,27 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
                 raise RuntimeError(
                     f"图片长宽比（{ratio:.2f}）超过限制 {TELEGRAM_PHOTO_MAX_ASPECT_RATIO}，且配置为跳过：{path.name}"
                 )
-            if size > cfg.IMAGE_MAX_BYTES:
+            if info.needs_normalization or size > cfg.IMAGE_MAX_BYTES:
                 return {"path": path, "oversize": True}
             return None
+        except TimeoutError as exc:
+            if (cancel_event is not None and cancel_event.is_set()) or "取消" in str(exc) or "cancelled" in str(exc).lower():
+                raise
+            readiness_record = _readiness_record(exc)
+            record = {
+                "path": path,
+                "reason": f"{type(exc).__name__}: {exc}",
+                "category": (
+                    readiness_record["category"] if readiness_record
+                    else "deferred"
+                ),
+            }
+            if readiness_record:
+                record.update(readiness_record)
+            return record
         except Exception as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TimeoutError("图片预检已取消")
             readiness_record = _readiness_record(exc)
             record = {
                 "path": path,
@@ -395,10 +403,10 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
             1,
         ):
             if cancel_event is not None and cancel_event.is_set():
-                break
+                raise TimeoutError("图片预检已取消")
             if result and result.get("oversize"):
                 target.info(
-                    f"预检发现超限图片，将在上传时使用 FFmpeg 压缩：{relative_name(result['path'])}"
+                    f"预检发现需规范化图片，将在上传时生成兼容副本：{relative_name(result['path'])}"
                 )
             elif result:
                 skipped.append(result)
@@ -441,12 +449,12 @@ def report_scan_size_skips(skipped, ui=None) -> None:
     if not skipped:
         return
     target = ui or UI
-    compressing = [record for record in skipped if record.get("action") == "compress"]
+    compressing = [record for record in skipped if record.get("action") in {"compress", "normalize"}]
     rejected = [record for record in skipped if record.get("action") == "skip"]
     if compressing:
         target.warning(
-            f"扫描提醒：发现 {len(compressing)} 个超过 10 MiB 的图片；"
-            "上传时将尝试用 FFmpeg 生成临时压缩副本。"
+            f"扫描提醒：发现 {len(compressing)} 个需规范化图片；"
+            "上传时将自动规范化生成临时副本（原文件不修改）。"
         )
     if rejected:
         target.warning(
@@ -456,7 +464,7 @@ def report_scan_size_skips(skipped, ui=None) -> None:
     for record in skipped:
         target.log(
             f"扫描图片大小检查：{record['path']}\n"
-            f"处理：{'上传时压缩' if record.get('action') == 'compress' else '跳过'}\n"
+            f"处理：{'上传时规范化' if record.get('action') in {'compress', 'normalize'} else '跳过'}\n"
             f"原因：{record['reason']}"
         )
 
@@ -495,40 +503,21 @@ def input_photo(
             cancel_event=cancel_event,
         )
         STAGED_UPLOAD_PATHS[stable_path(path)] = source_path
-    extreme_aspect_policy = getattr(cfg, "IMAGE_EXTREME_ASPECT_POLICY", "pad")
-    transparency_background = getattr(cfg, "IMAGE_TRANSPARENCY_BACKGROUND", "#FFFFFF")
-    if snapshot[0] > cfg.IMAGE_MAX_BYTES and cfg.IMAGE_COMPRESS_OVERSIZE:
-        original_size = snapshot[0]
-        UI.warning(
-            f"图片开始上传，正在生成临时压缩副本：{relative_name(path)}"
-        )
+    info = probe_image(source_path)
+    if info.needs_normalization or snapshot[0] > cfg.IMAGE_MAX_BYTES:
         source_path = compress_image(
             source_path,
             cancel_event,
         ) if cancel_event is not None else compress_image(source_path)
         IMAGE_UPLOAD_PATHS[stable_path(path)] = source_path
-        UI.info(
-            f"图片压缩完成：{relative_name(path)} · "
-            f"{format_size(original_size)} → {format_size(source_path.stat().st_size)}；原文件未修改"
-        )
+        if source_path.stat().st_size != snapshot[0]:
+            UI.info(
+                f"图片规范化完成：{relative_name(path)} · "
+                f"{format_size(snapshot[0])} → {format_size(source_path.stat().st_size)}；原文件未修改"
+            )
         width, height = image_info(source_path)
-    elif snapshot[0] > cfg.IMAGE_MAX_BYTES:
-        raise RuntimeError(
-            f"文件大小 {format_size(snapshot[0])} 超过 Telegram Photo 上限 "
-            f"{format_size(cfg.IMAGE_MAX_BYTES)}"
-        )
     else:
-        prepared = prepare_image_for_telegram(
-            source_path,
-            cancel_event=cancel_event,
-            aspect_policy=extreme_aspect_policy,
-            background=transparency_background,
-        )
-        if prepared.transformed:
-            source_path = prepared.upload_path
-            IMAGE_UPLOAD_PATHS[stable_path(path)] = source_path
-        width = prepared.output_width
-        height = prepared.output_height
+        width, height = info.width, info.height
     return {
         "@type": "inputMessagePhoto",
         "photo": {"@type": "inputFileLocal", "path": display_path(source_path)},

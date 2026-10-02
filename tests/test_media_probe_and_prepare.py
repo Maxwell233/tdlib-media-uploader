@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
@@ -241,7 +242,9 @@ class VideoProbeAndPayloadTest(unittest.TestCase):
                  patch("imageio_ffmpeg.read_frames", return_value=FakeReader()):
                 mp4_info = probe_video(mp4_path)
 
-            self.assertEqual(mp4_info.compatibility, "native")
+            self.assertEqual(mp4_info.compatibility, "legacy")
+            self.assertEqual(mp4_info.video_codec, "unknown")
+            self.assertTrue(determine_supports_streaming(mp4_info))
             self.assertEqual(mp4_info.width, 1280)
             self.assertEqual(mp4_info.height, 720)
 
@@ -251,6 +254,88 @@ class VideoProbeAndPayloadTest(unittest.TestCase):
 
             self.assertEqual(mov_info.compatibility, "unsupported")
             self.assertIn("未找到 ffprobe", format_unsupported_reason(mov_path, mov_info))
+
+    def test_container_validation_mkv_renamed_to_mov_is_unsupported(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "fake.mov"
+            path.write_bytes(b"dummy")
+            # FFprobe reports matroska,webm container even though file extension is .mov
+            mock_out = _ffprobe_mock_json(
+                container="matroska,webm",
+                video_codec="h264",
+                audio_codec="aac",
+            )
+            with patch("tdlib_media_uploader.media.video_probe._find_ffprobe", return_value="ffprobe"), \
+                 patch("tdlib_media_uploader.media.video_probe.run_cancellable_process",
+                       return_value=subprocess.CompletedProcess([], 0, mock_out, "")):
+                info = probe_video(path)
+
+            self.assertEqual(info.compatibility, "unsupported")
+            self.assertEqual(info.container, "matroska")
+            self.assertFalse(determine_supports_streaming(info))
+            reason = format_unsupported_reason(path, info)
+            self.assertIn("fake.mov", reason)
+
+    def test_probe_video_cancellation_raises_timeout_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "test.mp4"
+            path.write_bytes(b"dummy")
+            with patch("tdlib_media_uploader.media.video_probe._find_ffprobe", return_value="ffprobe"), \
+                 patch("tdlib_media_uploader.media.video_probe.run_cancellable_process",
+                       side_effect=TimeoutError("外部进程已取消")):
+                with self.assertRaises(TimeoutError):
+                    probe_video(path)
+
+    def test_video_preflight_cancellation_preserves_timeout_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            video_file = Path(td) / "test.mp4"
+            video_file.write_bytes(b"dummy")
+            cancel_event = threading.Event()
+            cancel_event.set()
+
+            items = [{"path": video_file}]
+            with patch.object(video_core, "wait_for_file_ready",
+                              return_value=SimpleNamespace(snapshot=SimpleNamespace(size=10, mtime_ns=1, as_tuple=lambda: (10, 1)))), \
+                 patch.object(video_core, "raise_for_file_readiness"):
+                with self.assertRaises(TimeoutError):
+                    video_core.preflight_videos(items, cancel_event=cancel_event)
+
+    def test_legacy_mp4_accepted_in_video_preflight_and_input_video(self):
+        with tempfile.TemporaryDirectory() as td:
+            video_file = Path(td) / "clip.mp4"
+            video_file.write_bytes(b"video data")
+            thumb_file = Path(td) / "thumb.jpg"
+            thumb_file.write_bytes(b"thumb data")
+
+            legacy_info = VideoMediaInfo(
+                container="mp4",
+                video_codec="unknown",
+                audio_codec=None,
+                width=1280,
+                height=720,
+                duration=10.0,
+                fps=30.0,
+                has_video_stream=True,
+                compatibility="legacy",
+            )
+            # 1. preflight accepts legacy MP4 without marking as skipped
+            with patch.object(video_core, "prepare_video", return_value=legacy_info), \
+                 patch.object(video_core, "wait_for_file_ready", return_value=SimpleNamespace(snapshot=SimpleNamespace(size=10, mtime_ns=1, as_tuple=lambda: (10, 1)))), \
+                 patch.object(video_core, "raise_for_file_readiness"):
+                skipped = video_core.preflight_videos([{"path": video_file}])
+            self.assertEqual(skipped, [])
+
+            # 2. input_video creates inputMessageVideo with supports_streaming=True
+            item = {"path": video_file}
+            with patch.object(video_core, "video_info", return_value=legacy_info), \
+                 patch.object(video_core, "wait_for_file_ready", return_value=SimpleNamespace(snapshot=SimpleNamespace(size=10, mtime_ns=1, as_tuple=lambda: (10, 1)))), \
+                 patch.object(video_core, "raise_for_file_readiness"), \
+                 patch.object(video_core, "should_stage", return_value=False), \
+                 patch.object(video_core, "build_thumbnail", return_value=(thumb_file, 320, 180)):
+                payload = video_core.input_video(item, "Caption")
+
+            self.assertEqual(payload["@type"], "inputMessageVideo")
+            self.assertTrue(payload["supports_streaming"])
 
     def test_input_video_payload_structure(self):
         with tempfile.TemporaryDirectory() as td:
@@ -561,6 +646,45 @@ class ImageProbeAndPrepareTest(unittest.TestCase):
             p4 = prepare_image_for_telegram(img_path, max_side=1280)
             self.assertNotEqual(p3.upload_path, p4.upload_path)
 
+    def test_oversize_image_accepted_and_normalized_even_if_compress_oversize_false(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            oversize_bmp = root / "large.bmp"
+            # Create a 2000x2000 BMP (~12 MB)
+            img = Image.new("RGB", (2000, 2000), color="blue")
+            img.save(oversize_bmp, format="BMP")
+            source_size = oversize_bmp.stat().st_size
+            self.assertGreater(source_size, 10 * 1024**2)
+
+            with patch.object(image_core.cfg, "IMAGE_DIR", root), \
+                 patch.object(image_core.cfg, "IMAGE_EXTENSIONS", {".bmp"}), \
+                 patch.object(image_core.cfg, "IMAGE_COMPRESS_OVERSIZE", False):
+                # 1. scan_images() accepts the oversize image
+                scanned = image_core.scan_images()
+                self.assertIn(oversize_bmp, scanned)
+
+                # 2. preflight_images() accepts it (does not raise / does not skip)
+                skipped = image_core.preflight_images([oversize_bmp])
+                self.assertEqual(skipped, [])
+
+                # 3. input_photo() produces inputMessagePhoto pointing to cached JPEG
+                payload = image_core.input_photo(oversize_bmp, "Large BMP")
+                self.assertEqual(payload["@type"], "inputMessagePhoto")
+                upload_path = Path(payload["photo"]["path"])
+                self.assertTrue(upload_path.is_file())
+                self.assertNotEqual(upload_path.resolve(), oversize_bmp.resolve())
+                self.assertLessEqual(upload_path.stat().st_size, TELEGRAM_PHOTO_MAX_BYTES)
+                # 4. Source file is NEVER modified
+                self.assertEqual(oversize_bmp.stat().st_size, source_size)
+
+    def test_encode_jpeg_under_limit_raises_when_unachievable(self):
+        img = Image.new("RGB", (1000, 1000), color="green")
+        # Attempting an impossibly small limit (e.g. 50 bytes) must cleanly raise RuntimeError
+        with self.assertRaises(RuntimeError) as ctx:
+            from tdlib_media_uploader.media.image_prepare import encode_jpeg_under_limit
+            encode_jpeg_under_limit(img, target_bytes=50)
+        self.assertIn("无法将图片规范化至目标大小", str(ctx.exception))
+
 
 class MixedMediaIntegrationTest(unittest.TestCase):
     """Test mixed upload processing containing video and image formats."""
@@ -636,6 +760,46 @@ class MixedMediaIntegrationTest(unittest.TestCase):
 
             self.assertEqual(video_payload["@type"], "inputMessageVideo")
             self.assertTrue(video_payload["supports_streaming"])
+
+    def test_mixed_preflight_cancellation_preserves_timeout_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            group_dir = root / "GroupA"
+            group_dir.mkdir()
+            img_file = group_dir / "pic.jpg"
+            Image.new("RGB", (10, 10)).save(img_file, format="JPEG")
+
+            cancel_event = threading.Event()
+            cancel_event.set()
+            items = [{"path": img_file, "media_kind": "image"}]
+            with patch.object(mixed_core, "wait_for_file_ready",
+                              return_value=SimpleNamespace(snapshot=SimpleNamespace(size=10, mtime_ns=1, as_tuple=lambda: (10, 1)))), \
+                 patch.object(mixed_core, "raise_for_file_readiness"):
+                with self.assertRaises(TimeoutError):
+                    mixed_core.preflight_mixed(items, cancel_event=cancel_event)
+
+    def test_legacy_mp4_accepted_in_mixed_preflight(self):
+        with tempfile.TemporaryDirectory() as td:
+            mp4_file = Path(td) / "clip.mp4"
+            mp4_file.write_bytes(b"data")
+            legacy_info = VideoMediaInfo(
+                container="mp4",
+                video_codec="unknown",
+                audio_codec=None,
+                width=1280,
+                height=720,
+                duration=10.0,
+                fps=30.0,
+                has_video_stream=True,
+                compatibility="legacy",
+            )
+            items = [{"path": mp4_file, "media_kind": "video"}]
+            with patch.object(video_core, "video_info", return_value=legacy_info), \
+                 patch.object(mixed_core, "wait_for_file_ready",
+                              return_value=SimpleNamespace(snapshot=SimpleNamespace(size=10, mtime_ns=1, as_tuple=lambda: (10, 1)))), \
+                 patch.object(mixed_core, "raise_for_file_readiness"):
+                skipped = mixed_core.preflight_mixed(items)
+            self.assertEqual(skipped, [])
 
 
 if __name__ == "__main__":

@@ -641,7 +641,7 @@ IMAGE_RESET_STATE = bool(
 IMAGE_COMPRESS_OVERSIZE = bool(
     image.get(
         "compress_oversize",
-        False,
+        True,
     )
 )
 

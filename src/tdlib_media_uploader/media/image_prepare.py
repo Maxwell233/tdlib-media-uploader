@@ -124,24 +124,26 @@ def encode_jpeg_under_limit(
     if best_data is not None:
         return best_data, img.width, img.height
 
-    # Step 3: If still over target, proportionally downscale resolution
+    # Step 3: If still over target, proportionally downscale resolution and search quality
     current_img = img
-    for scale in (0.8, 0.6, 0.4):
+    for scale in (0.8, 0.6, 0.4, 0.25):
         if _is_cancelled():
             raise TimeoutError("图片编码处理已取消")
         new_w = max(1, int(round(current_img.width * scale)))
         new_h = max(1, int(round(current_img.height * scale)))
         resized = current_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        buf = io.BytesIO()
-        resized.save(buf, format="JPEG", quality=80, optimize=True)
-        data = buf.getvalue()
-        if len(data) <= target_bytes:
-            return data, resized.width, resized.height
+        for q in (80, 60, 40, 20):
+            if _is_cancelled():
+                raise TimeoutError("图片编码处理已取消")
+            buf = io.BytesIO()
+            resized.save(buf, format="JPEG", quality=q, optimize=True)
+            data = buf.getvalue()
+            if len(data) <= target_bytes:
+                return data, resized.width, resized.height
 
-    # Final fallback: lower quality on downscaled image
-    buf = io.BytesIO()
-    resized.save(buf, format="JPEG", quality=50, optimize=True)
-    return buf.getvalue(), resized.width, resized.height
+    raise RuntimeError(
+        f"无法将图片规范化至目标大小（{target_bytes} 字节）以内。"
+    )
 
 
 def prepare_image_for_telegram(
@@ -296,6 +298,10 @@ def prepare_image_for_telegram(
         encoded_bytes, out_w, out_h = encode_jpeg_under_limit(
             img, target_bytes=target_bytes, cancel_event=cancel_event
         )
+        if len(encoded_bytes) > target_bytes:
+            raise RuntimeError(
+                f"规范化后图片大小（{len(encoded_bytes)} 字节）仍超过目标上限（{target_bytes} 字节）"
+            )
 
     # Step 5: Atomically write to cache
     temp_path = cache_path.with_name(f"{cache_path.name}.tmp.{os.getpid()}")
