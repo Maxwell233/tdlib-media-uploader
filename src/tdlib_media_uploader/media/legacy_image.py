@@ -277,13 +277,14 @@ def _compressed_path(path: Path) -> Path:
     return COMPRESSED_IMAGE_DIR / f"{digest}.jpg"
 
 
-def compress_image(path: Path, cancel_event=None) -> Path:
+def compress_image(path: Path, cancel_event=None, *, source_info=None) -> Path:
     """Create a temporary JPEG under the Telegram photo limit."""
     extreme_aspect_policy = getattr(cfg, "IMAGE_EXTREME_ASPECT_POLICY", "pad")
     transparency_background = getattr(cfg, "IMAGE_TRANSPARENCY_BACKGROUND", "#FFFFFF")
     prepared = prepare_image_for_telegram(
         path,
         cancel_event=cancel_event,
+        source_info=source_info,
         aspect_policy=extreme_aspect_policy,
         background=transparency_background,
     )
@@ -508,7 +509,8 @@ def input_photo(
         source_path = compress_image(
             source_path,
             cancel_event,
-        ) if cancel_event is not None else compress_image(source_path)
+            source_info=info,
+        ) if cancel_event is not None else compress_image(source_path, source_info=info)
         IMAGE_UPLOAD_PATHS[stable_path(path)] = source_path
         if source_path.stat().st_size != snapshot[0]:
             UI.info(

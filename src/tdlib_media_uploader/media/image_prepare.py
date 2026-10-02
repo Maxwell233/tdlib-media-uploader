@@ -95,6 +95,9 @@ def encode_jpeg_under_limit(
     def _is_cancelled():
         return cancel_event is not None and cancel_event.is_set()
 
+    if _is_cancelled():
+        raise TimeoutError("图片编码处理已取消")
+
     # Step 1: Try high quality (~92)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=92, optimize=True)
@@ -164,6 +167,9 @@ def prepare_image_for_telegram(
     When transformation is required, produces a cached normalized JPEG.
     Never modifies source files.
     """
+    if cancel_event is not None and cancel_event.is_set():
+        raise TimeoutError("图片准备已取消")
+
     if extreme_aspect_policy is not None:
         aspect_policy = extreme_aspect_policy
     if transparency_background is not None:
@@ -171,6 +177,9 @@ def prepare_image_for_telegram(
     source_path = Path(path).resolve()
     if source_info is None:
         source_info = probe_image(source_path)
+
+    if cancel_event is not None and cancel_event.is_set():
+        raise TimeoutError("图片准备已取消")
 
     if source_info.animated:
         raise RuntimeError("检测到动画图片，不会自动转换为静态 Photo。")
@@ -220,7 +229,18 @@ def prepare_image_for_telegram(
         if 0 < cache_stat.st_size <= target_bytes:
             try:
                 with Image.open(cache_path) as cached_img:
+                    cached_img.load()
                     w, h = cached_img.size
+                    if (
+                        cached_img.format != "JPEG"
+                        or min(w, h) <= 0
+                        or max(w, h) > max_side
+                        or w + h > TELEGRAM_PHOTO_MAX_DIMENSION_SUM
+                        or max(w / h, h / w) > TELEGRAM_PHOTO_MAX_ASPECT_RATIO
+                    ):
+                        raise ValueError("缓存图片不符合当前尺寸或格式限制")
+                if cancel_event is not None and cancel_event.is_set():
+                    raise TimeoutError("图片准备已取消")
                 return PreparedImage(
                     source_path=source_path,
                     upload_path=cache_path,
@@ -231,6 +251,8 @@ def prepare_image_for_telegram(
                     output_size=cache_stat.st_size,
                     transformed=True,
                 )
+            except TimeoutError:
+                raise
             except Exception:
                 cache_path.unlink(missing_ok=True)
 
@@ -304,6 +326,8 @@ def prepare_image_for_telegram(
             )
 
     # Step 5: Atomically write to cache
+    if cancel_event is not None and cancel_event.is_set():
+        raise TimeoutError("图片准备已取消")
     temp_path = cache_path.with_name(f"{cache_path.name}.tmp.{os.getpid()}")
     try:
         temp_path.write_bytes(encoded_bytes)

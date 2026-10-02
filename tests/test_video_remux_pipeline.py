@@ -16,6 +16,7 @@ Validates:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -858,6 +859,44 @@ class SafetyContractVerificationTest(unittest.TestCase):
 
 
 class ProcessedFilenameAndDirectNativeTest(unittest.TestCase):
+    def test_malformed_manifest_outputs_preserve_existing_disk_files(self):
+        from tdlib_media_uploader.media.video_prepare import _load_group_manifest, resolve_processed_filename
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            existing = root / "Movie.mp4"
+            existing.write_bytes(b"existing video")
+            for outputs in (None, [], "invalid"):
+                with self.subTest(outputs=outputs):
+                    (root / "manifest.json").write_text(json.dumps({"outputs": outputs}))
+                    manifest = _load_group_manifest(root)
+                    filename = resolve_processed_filename(root / "movie.ts", root, manifest)
+                    self.assertEqual(filename, "movie.ts.mp4")
+                    self.assertEqual(existing.read_bytes(), b"existing video")
+
+    def test_disk_collisions_include_hidden_tmp_named_files_and_directories(self):
+        from tdlib_media_uploader.media.video_prepare import resolve_processed_filename
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for stem in (".movie", "movie.tmp.clip", "directory"):
+                with self.subTest(stem=stem):
+                    occupied = root / f"{stem}.mp4"
+                    if stem == "directory":
+                        occupied.mkdir()
+                    else:
+                        occupied.write_bytes(b"existing video must be preserved")
+                    filename = resolve_processed_filename(root / f"{stem}.avi", root,
+                                                          {"version": 1, "outputs": {}})
+                    self.assertEqual(filename, f"{stem}.avi.mp4")
+                    self.assertTrue(occupied.exists())
+
+    def test_unreadable_processed_directory_blocks_filename_allocation(self):
+        from tdlib_media_uploader.media.video_prepare import resolve_processed_filename
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with patch.object(Path, "iterdir", side_effect=OSError("unreadable directory")):
+                with self.assertRaises(RuntimeError):
+                    resolve_processed_filename(root / "movie.ts", root, {"outputs": {}})
+
     """Test non-hash filenames, collision resolution, and direct native uploads."""
 
     def test_direct_native_no_copy_and_no_processed_files(self):
@@ -1754,69 +1793,73 @@ class ConfigBehaviorNoAutoMigrationTest(unittest.TestCase):
 
 
 class RealFFmpegIntegrationTest(unittest.TestCase):
-    """Real FFmpeg execution test using bundled or system FFmpeg binary."""
+    """Exercise shipped tools without requiring an H.264 encoder or mocking probes."""
+
+    def setUp(self):
+        from tdlib_media_uploader.media.video_probe import _find_ffmpeg, _find_ffprobe
+        self.ffmpeg = _find_ffmpeg()
+        if not self.ffmpeg or not _find_ffprobe():
+            self.skipTest("FFmpeg and FFprobe binaries not available in environment")
+        self.fixture = PROJECT_ROOT / "tests" / "fixtures" / "remux_h264_aac.mp4"
+
+    def _make_container(self, destination, container):
+        subprocess.run(
+            [self.ffmpeg, "-y", "-v", "error", "-i", str(self.fixture),
+             "-c", "copy", "-f", container, str(destination)],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+
+    def _decoded_video_hash(self, path):
+        result = subprocess.run(
+            [self.ffmpeg, "-v", "error", "-i", str(path), "-map", "0:v:0",
+             "-fps_mode", "passthrough", "-f", "hash", "-hash", "sha256", "-"],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        return result.stdout.strip()
 
     def test_real_ffmpeg_stream_copy_if_available(self):
-        from tdlib_media_uploader.media.video_probe import _find_ffmpeg
-        ffmpeg_exe = _find_ffmpeg()
-        if not ffmpeg_exe:
-            self.skipTest("FFmpeg binary not available in environment")
-
         with tempfile.TemporaryDirectory() as td:
-            # Create a tiny synthetic mp4 first using ffmpeg
-            src_mp4 = Path(td) / "synthetic.mp4"
-            cmd_create = [
-                ffmpeg_exe,
-                "-y",
-                "-f", "lavfi",
-                "-i", "testsrc=duration=1:size=320x240:rate=10",
-                "-f", "lavfi",
-                "-i", "anullsrc=r=44100:cl=mono",
-                "-c:v", "libx264",
-                "-c:a", "aac",
-                "-shortest",
-                str(src_mp4),
-            ]
-            res_c = subprocess.run(cmd_create, capture_output=True, text=True)
-            if res_c.returncode != 0:
-                self.skipTest(f"FFmpeg synthetic video generation failed: {res_c.stderr}")
+            root = Path(td)
+            cache = root / "processed"
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", cache):
+                for suffix, container in (("mkv", "matroska"), ("avi", "avi"),
+                                          ("ts", "mpegts"), ("mts", "mpegts"),
+                                          ("m2ts", "mpegts")):
+                    with self.subTest(container=suffix):
+                        source = root / f"sample.{suffix}"
+                        self._make_container(source, container)
+                        before = hashlib.sha256(source.read_bytes()).hexdigest()
+                        prepared = prepare_video_for_telegram(
+                            source, group_key=suffix, generate_thumbnail=False,
+                        )
+                        self.assertTrue(prepared.is_remuxed)
+                        self.assertEqual(prepared.upload_path, cache / suffix / "sample.mp4")
+                        self.assertEqual(prepared.info.compatibility, "native")
+                        self.assertEqual(prepared.info.video_codec, "h264")
+                        self.assertEqual(prepared.info.audio_codec, "aac")
+                        self.assertEqual((prepared.info.width, prepared.info.height), (64, 48))
+                        self.assertGreater(prepared.info.duration, 0)
+                        self.assertEqual(self._decoded_video_hash(source),
+                                         self._decoded_video_hash(prepared.upload_path))
+                        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), before)
+                        self.assertFalse(list(cache.rglob("*.tmp.*")))
 
-            # Remux it to an MKV container to act as a realistic MKV remux candidate
-            src_mkv = Path(td) / "synthetic.mkv"
-            cmd_mkv = [
-                ffmpeg_exe,
-                "-y",
-                "-i", str(src_mp4),
-                "-c", "copy",
-                str(src_mkv),
-            ]
-            res_m = subprocess.run(cmd_mkv, capture_output=True, text=True)
-            if res_m.returncode != 0:
-                self.skipTest(f"FFmpeg MKV creation failed: {res_m.stderr}")
-
-            # Now run remux_video_lossless to convert MKV back to MP4 using stream copy
-            out_mp4 = Path(td) / "remuxed.mp4"
-
-            # Mock probe_video to confirm generated mp4 has valid metadata if ffprobe absent
-            valid_info = VideoMediaInfo(
-                container="mp4",
-                video_codec="h264",
-                audio_codec="aac",
-                width=320,
-                height=240,
-                duration=1.0,
-                fps=10.0,
-                has_video_stream=True,
-                has_audio_stream=True,
-                compatibility="native",
-                recommended_action="upload",
-            )
-            with patch("tdlib_media_uploader.media.video_prepare.probe_video", return_value=valid_info):
-                result = remux_video_lossless(src_mkv, out_mp4)
-
-            self.assertEqual(result, out_mp4)
-            self.assertTrue(out_mp4.is_file())
-            self.assertGreater(out_mp4.stat().st_size, 0)
+    def test_real_native_containers_use_original_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cache = root / "processed"
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", cache):
+                for suffix, container in (("mp4", "mp4"), ("mov", "mov"), ("m4v", "mp4")):
+                    with self.subTest(container=suffix):
+                        source = root / f"native.{suffix}"
+                        self._make_container(source, container)
+                        before = source.read_bytes()
+                        prepared = prepare_video_for_telegram(source, generate_thumbnail=False)
+                        self.assertEqual(prepared.upload_path, source)
+                        self.assertFalse(prepared.is_remuxed)
+                        self.assertEqual(prepared.info.compatibility, "native")
+                        self.assertEqual(source.read_bytes(), before)
+                        self.assertFalse(cache.exists())
 
 
 if __name__ == "__main__":
