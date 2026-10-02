@@ -188,7 +188,6 @@ def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
     size, mtime_ns = snapshot
     limit = cfg.VIDEO_MAX_BYTES if media_kind == "video" else cfg.IMAGE_MAX_BYTES
     if size > limit:
-        compress = media_kind == "image" and cfg.IMAGE_COMPRESS_OVERSIZE
         limit_label = (
             video_core.video_limit_text(limit)
             if media_kind == "video"
@@ -200,9 +199,8 @@ def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
             "limit": limit,
             "category": "size",
             "action": (
-                "compress" if compress
-                else "preflight" if media_kind == "video"
-                else "skip"
+                "normalize" if media_kind == "image"
+                else "preflight"
             ),
             "media_kind": media_kind,
             "reason": (
@@ -210,7 +208,7 @@ def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
                 f"{'视频' if media_kind == 'video' else 'Photo'} 上限 {limit_label}"
             ),
         })
-        if not compress and media_kind != "video":
+        if media_kind != "image" and media_kind != "video":
             return None
     return {
         "path": path,
@@ -410,26 +408,65 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
             if item.get("media_kind") == "video":
                 if snapshot[0] > cfg.VIDEO_MAX_BYTES:
                     raise RuntimeError("文件大小超过 Telegram 视频上限")
-                # Metadata validation is enough for the scan. Thumbnail
-                # generation is deferred to the upload path and therefore is
-                # performed at most once per video.
-                if cancel_event is None:
+                v_info = (
                     video_core.video_info(path)
-                else:
-                    video_core.video_info(path, cancel_event=cancel_event)
+                    if cancel_event is None
+                    else video_core.video_info(path, cancel_event=cancel_event)
+                )
+                if getattr(v_info, "compatibility", "native") not in {"native", "legacy"}:
+                    from .video_probe import VideoMediaInfo, format_unsupported_reason
+                    raise RuntimeError(
+                        format_unsupported_reason(path, v_info)
+                        if isinstance(v_info, VideoMediaInfo)
+                        else f"当前编码不在直接 Telegram Video 支持范围内，已跳过：{path.name}"
+                    )
             else:
-                if snapshot[0] > cfg.IMAGE_MAX_BYTES and not cfg.IMAGE_COMPRESS_OVERSIZE:
-                    raise RuntimeError("文件大小超过 Telegram Photo 上限")
-                image_core.image_info(path)
+                img_info = image_core.probe_image(path)
+                if img_info.animated:
+                    raise RuntimeError(f"检测到动画图片，不会自动转换为静态 Photo：{path.name}")
+                extreme_aspect_policy = getattr(cfg, "IMAGE_EXTREME_ASPECT_POLICY", "pad")
+                if img_info.needs_aspect_fix and extreme_aspect_policy == "skip":
+                    from .image_probe import TELEGRAM_PHOTO_MAX_ASPECT_RATIO
+                    ratio = (
+                        max(img_info.width / img_info.height, img_info.height / img_info.width)
+                        if img_info.width and img_info.height
+                        else 0.0
+                    )
+                    raise RuntimeError(
+                        f"图片长宽比（{ratio:.2f}）超过限制 {TELEGRAM_PHOTO_MAX_ASPECT_RATIO}，且配置为跳过：{path.name}"
+                    )
             return None
-        except Exception as exc:
-            text = str(exc)
-            category = "size" if "超过 Telegram" in text else "deferred" if _deferred(exc) else "unreadable"
+        except TimeoutError as exc:
+            if (cancel_event is not None and cancel_event.is_set()) or "取消" in str(exc) or "cancelled" in str(exc).lower():
+                raise
             readiness_record = _readiness_record(exc)
             record = {
                 "item": item,
                 "path": path,
-                "reason": f"{type(exc).__name__}: {exc}",
+                "reason": f"{type(exc).__name__}: {exc}" if "\n" not in str(exc) else str(exc),
+                "category": (
+                    readiness_record["category"] if readiness_record
+                    else "deferred"
+                ),
+            }
+            if readiness_record:
+                record.update(readiness_record)
+            return record
+        except Exception as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TimeoutError("混合预检已取消")
+            text = str(exc)
+            category = (
+                "size" if "超过 Telegram" in text
+                else "unsupported" if "不在直接 Telegram Video 支持范围内" in text or "已跳过" in text
+                else "deferred" if _deferred(exc)
+                else "unreadable"
+            )
+            readiness_record = _readiness_record(exc)
+            record = {
+                "item": item,
+                "path": path,
+                "reason": f"{type(exc).__name__}: {exc}" if "\n" not in text else text,
                 "category": readiness_record["category"] if readiness_record else category,
             }
             if readiness_record:
@@ -447,7 +484,7 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
             1,
         ):
             if cancel_event is not None and cancel_event.is_set():
-                break
+                raise TimeoutError("混合预检已取消")
             if result:
                 skipped.append(result)
                 target.warning(f"跳过无法读取的混合媒体：{relative_name(result['path'])}")
@@ -488,7 +525,7 @@ def report_scan_size_skips(skipped, ui=None):
     target = ui or UI
     rejected = [record for record in skipped if record.get("action") == "skip"]
     preflight = [record for record in skipped if record.get("action") == "preflight"]
-    compressing = [record for record in skipped if record.get("action") == "compress"]
+    compressing = [record for record in skipped if record.get("action") in {"compress", "normalize"}]
     if rejected:
         target.warning(
             f"扫描时跳过 {len(rejected)} 个超过 Telegram 限制的混合媒体；"
@@ -496,8 +533,8 @@ def report_scan_size_skips(skipped, ui=None):
         )
     if compressing:
         target.warning(
-            f"扫描提醒：发现 {len(compressing)} 个超限图片；"
-            "上传时将尝试用 FFmpeg 生成临时压缩副本。"
+            f"扫描提醒：发现 {len(compressing)} 个需规范化图片；"
+            "上传时将自动规范化生成临时副本（原文件不修改）。"
         )
     if preflight:
         target.warning(
@@ -507,7 +544,7 @@ def report_scan_size_skips(skipped, ui=None):
     for record in skipped:
         target.log(
             f"扫描混合媒体大小检查：{record['path']}\n"
-            f"处理：{'上传时压缩' if record.get('action') == 'compress' else '上传前跳过' if record.get('action') == 'preflight' else '扫描时跳过'}\n"
+            f"处理：{'上传时规范化' if record.get('action') in {'compress', 'normalize'} else '上传前跳过' if record.get('action') == 'preflight' else '扫描时跳过'}\n"
             f"原因：{record.get('reason', '')}"
         )
 

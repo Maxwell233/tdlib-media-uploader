@@ -269,16 +269,21 @@ class UploadPanel(SettingsPanel):
         f3 = QFormLayout()
         f3.setSpacing(10)
 
-        self.image_compress = QCheckBox("图片超过 10 MiB 时自动使用 FFmpeg 压缩临时副本")
-        f3.addRow("超限压缩", self.image_compress)
-
         self.image_validate_media = QCheckBox("上传前验证全部图片可读性")
         f3.addRow("预检验证", self.image_validate_media)
 
-        self.image_compress.toggled.connect(self._check_dirty)
         self.image_validate_media.toggled.connect(self._check_dirty)
 
         l3.addLayout(f3)
+
+        image_hint = QLabel(
+            "支持的静态图片在格式、尺寸、长宽比或文件大小不符合 Telegram Photo 要求时，"
+            "会自动生成兼容的缓存副本后上传，原文件不会被修改。"
+        )
+        image_hint.setObjectName("mutedLabel")
+        image_hint.setWordWrap(True)
+        l3.addWidget(image_hint)
+
         layout.addWidget(card3)
 
         layout.addStretch(1)
@@ -426,7 +431,6 @@ class UploadPanel(SettingsPanel):
         self.image_numbering.setChecked(bool(_cfg("IMAGE_ALBUM_NUMBERING", True)))
         self.image_separator.setText(str(_cfg("IMAGE_ALBUM_CAPTION_SEPARATOR", " · ")))
         self.image_filenames.setChecked(bool(_cfg("IMAGE_CAPTION_INCLUDE_FILENAMES", False)))
-        self.image_compress.setChecked(bool(_cfg("IMAGE_COMPRESS_OVERSIZE", False)))
         self.image_validate_media.setChecked(
             bool(_cfg("IMAGE_VERIFY_ALL_IMAGES", _cfg("IMAGE_VALIDATE_MEDIA", False)))
         )
@@ -474,7 +478,6 @@ class UploadPanel(SettingsPanel):
             "image_numbering": self.image_numbering.isChecked(),
             "image_separator": self.image_separator.text(),
             "image_filenames": self.image_filenames.isChecked(),
-            "image_compress": self.image_compress.isChecked(),
             "image_validate_media": self.image_validate_media.isChecked(),
             "mixed_sort": self.mixed_sort.currentData(),
             "mixed_album": self.mixed_album.value(),
@@ -541,7 +544,6 @@ class UploadPanel(SettingsPanel):
             ("image", "album_numbering"): self.image_numbering.isChecked(),
             ("image", "album_caption_separator"): self.image_separator.text(),
             ("image", "caption_include_filenames"): self.image_filenames.isChecked(),
-            ("image", "compress_oversize"): self.image_compress.isChecked(),
             ("image", "verify_all_images_before_upload"): self.image_validate_media.isChecked(),
         })
 

@@ -320,7 +320,7 @@ def scan_result(
         warning = "；".join(scan_warnings) + (f"；{warning}" if warning else "")
     rejected = [record for record in scan_size_skips if record.get("action", "skip") == "skip"]
     preflight_size = [record for record in scan_size_skips if record.get("action") == "preflight"]
-    compressing = [record for record in scan_size_skips if record.get("action") == "compress"]
+    compressing = [record for record in scan_size_skips if record.get("action") in {"compress", "normalize"}]
     if rejected:
         warning = (
             f"扫描时跳过 {len(rejected)} 个超过 Telegram 限制的项目"
@@ -328,7 +328,7 @@ def scan_result(
         )
     if compressing:
         warning = (
-            f"发现 {len(compressing)} 个超限图片，将在上传时使用 FFmpeg 压缩临时副本"
+            f"发现 {len(compressing)} 个需规范化图片，将在上传时规范化生成临时副本（原文件不修改）"
             + (f"；{warning}" if warning else "")
         )
     if preflight_size:

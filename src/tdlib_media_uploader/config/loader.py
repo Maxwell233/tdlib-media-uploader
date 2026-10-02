@@ -186,14 +186,16 @@ def _extensions(values):
     return result
 
 
-# The uploader passes the original local path directly to TDLib's
-# inputMessageVideo/inputMessagePhoto constructors; it does not transcode
-# arbitrary containers before sending. Keep the scanner limited to formats
-# that Telegram treats as native media messages. H.265/HEVC remains allowed
-# when it is stored in an MP4 container; codec filtering here would reject
-# valid files based on an assumption that is not true for all Telegram clients.
-SUPPORTED_VIDEO_EXTENSIONS = frozenset({".mp4"})
-SUPPORTED_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png"})
+# Video extensions are limited to containers that can stay in the
+# inputMessageVideo path without automatic transcoding.
+#
+# Image extensions may include supported decodable source formats because
+# non-native static images can be normalized into a Telegram Photo-compatible
+# cached JPEG before upload.
+SUPPORTED_VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".m4v"})
+SUPPORTED_IMAGE_EXTENSIONS = frozenset(
+    {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+)
 
 
 def _media_extensions(values, supported: frozenset[str]) -> set[str]:
@@ -538,6 +540,14 @@ VIDEO_PREFETCH_NEXT_ALBUM = bool(
 )
 PREFETCH_NEXT_ALBUM = VIDEO_PREFETCH_NEXT_ALBUM
 
+VIDEO_TRANSCODE_POLICY = str(
+    video.get("transcode_policy", "original")
+).strip().lower()
+if VIDEO_TRANSCODE_POLICY not in {"original", "remux", "transcode"}:
+    raise RuntimeError(
+        '[video].transcode_policy 只能是 "original"、"remux" 或 "transcode"。'
+    )
+
 
 # 图片
 IMAGE_EXTENSIONS = _media_extensions(
@@ -628,12 +638,26 @@ IMAGE_RESET_STATE = bool(
     )
 )
 
+# Deprecated compatibility option.
+# Image normalization is now automatic for supported static image formats.
 IMAGE_COMPRESS_OVERSIZE = bool(
     image.get(
         "compress_oversize",
-        False,
+        True,
     )
 )
+
+IMAGE_EXTREME_ASPECT_POLICY = str(
+    image.get("extreme_aspect_policy", "pad")
+).strip().lower()
+if IMAGE_EXTREME_ASPECT_POLICY not in {"pad", "skip"}:
+    raise RuntimeError(
+        '[image].extreme_aspect_policy 只能是 "pad" 或 "skip"。'
+    )
+
+IMAGE_TRANSPARENCY_BACKGROUND = str(
+    image.get("transparency_background", "#FFFFFF")
+).strip() or "#FFFFFF"
 
 
 # 扫描/媒体读取的共享 I/O 参数。新配置按本地/网络盘分别设置；旧配置

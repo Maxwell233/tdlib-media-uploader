@@ -96,21 +96,24 @@ class ThumbnailTimestampConfigTest(unittest.TestCase):
         )
         self.assertEqual(template["video"]["thumbnail_timestamp_seconds"], 1.0)
         self.assertEqual(template["mixed"]["thumbnail_timestamp_seconds"], 1.0)
-        self.assertEqual(template["video"]["extensions"], [".mp4"])
+        self.assertEqual(template["video"]["extensions"], [".mp4", ".mov", ".m4v"])
         self.assertEqual(
             set(template["image"]["extensions"]),
-            {".jpg", ".jpeg", ".png"},
+            {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"},
         )
 
     def test_existing_config_filters_document_only_video_extensions(self):
-        self.assertEqual(cfg.VIDEO_EXTENSIONS, {".mp4"})
-        self.assertEqual(cfg.MIXED_VIDEO_EXTENSIONS, {".mp4"})
-        for extension in (".wmv", ".mkv", ".mov", ".hevc"):
+        self.assertEqual(cfg.VIDEO_EXTENSIONS, {".mp4", ".mov", ".m4v"})
+        self.assertEqual(cfg.MIXED_VIDEO_EXTENSIONS, {".mp4", ".mov", ".m4v"})
+        for extension in (".wmv", ".mkv", ".avi", ".hevc"):
             self.assertNotIn(extension, cfg.VIDEO_EXTENSIONS)
 
     def test_existing_config_filters_non_native_image_extensions(self):
-        self.assertEqual(cfg.IMAGE_EXTENSIONS, {".jpg", ".jpeg", ".png"})
-        for extension in (".webp", ".bmp", ".tiff", ".avif", ".gif"):
+        self.assertEqual(
+            cfg.IMAGE_EXTENSIONS,
+            {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"},
+        )
+        for extension in (".avif", ".gif", ".apng", ".heic"):
             with self.subTest(extension=extension):
                 self.assertNotIn(extension, cfg.IMAGE_EXTENSIONS)
 

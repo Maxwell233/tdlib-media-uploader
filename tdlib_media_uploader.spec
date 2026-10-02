@@ -39,7 +39,8 @@ def is_embedded_ffmpeg(item) -> bool:
     for value in item[:2]:
         path = Path(str(value))
         parts = {part.lower() for part in path.parts}
-        if "ffmpeg" in path.name.lower() and (
+        lower_name = path.name.lower()
+        if ("ffmpeg" in lower_name or "ffprobe" in lower_name) and (
             path.suffix.lower() == ".exe"
             or "binaries" in parts
             or "imageio_ffmpeg" in parts
@@ -68,9 +69,14 @@ binaries = []
 packaged_ffmpeg = PROJECT_DIR / "tools" / "ffmpeg" / (
     "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
 )
+packaged_ffprobe = PROJECT_DIR / "tools" / "ffmpeg" / (
+    "ffprobe.exe" if os.name == "nt" else "ffprobe"
+)
 packaged_ffmpeg_license = PROJECT_DIR / "tools" / "ffmpeg" / "LICENSE.txt"
 if packaged_ffmpeg.is_file():
     binaries.append((str(packaged_ffmpeg), "tools/ffmpeg"))
+if packaged_ffprobe.is_file():
+    binaries.append((str(packaged_ffprobe), "tools/ffmpeg"))
 if packaged_ffmpeg_license.is_file():
     datas.append((str(packaged_ffmpeg_license), "tools/ffmpeg"))
 ffmpeg_build_info = PROJECT_DIR / "tools" / "ffmpeg" / "BUILD_INFO.txt"
@@ -138,6 +144,9 @@ PACKAGE_HIDDENIMPORTS = [
     "tdlib_media_uploader.media.image",
     "tdlib_media_uploader.media.mixed",
     "tdlib_media_uploader.media.video",
+    "tdlib_media_uploader.media.video_probe",
+    "tdlib_media_uploader.media.image_probe",
+    "tdlib_media_uploader.media.image_prepare",
     "tdlib_media_uploader.media.legacy_image",
     "tdlib_media_uploader.media.legacy_mixed",
     "tdlib_media_uploader.media.legacy_video",

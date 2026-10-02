@@ -83,7 +83,7 @@ class AdvancedPanel(SettingsPanel):
         self.ffmpeg_label.setObjectName("valueLabel")
         tool_form.addRow("FFmpeg", self.ffmpeg_label)
 
-        tool_hint = QLabel("ExifTool 用于提取照片与视频拍摄日期；FFmpeg 用于封面提取与超限压缩。")
+        tool_hint = QLabel("ExifTool 用于提取照片与视频拍摄日期；FFmpeg 用于封面提取与媒体探测。")
         tool_hint.setObjectName("mutedLabel")
         tool_hint.setWordWrap(True)
         tool_layout.addLayout(tool_form)

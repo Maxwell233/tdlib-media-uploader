@@ -68,7 +68,7 @@ class ScanToolsDialog(QDialog):
             field("exiftool_path", _cfg("EXIFTOOL_PATH", default_exiftool)),
         )
         tool_hint = QLabel(
-            "ExifTool 用于高精度提取照片/视频拍摄日期；FFmpeg 用于视频封面提取和超限压缩。\n"
+            "ExifTool 用于高精度提取照片/视频拍摄日期；FFmpeg 用于视频封面提取与媒体探测。\n"
             "路径留空时将自动使用随发布包提供的默认工具。"
         )
         tool_hint.setObjectName("mutedLabel")

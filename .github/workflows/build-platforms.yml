@@ -64,6 +64,7 @@ jobs:
           $ffmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$ffmpegTag/$ffmpegArchiveName"
           $ffmpegStage = Join-Path $projectDir "tools\ffmpeg"
           $ffmpegPath = Join-Path $ffmpegStage "ffmpeg.exe"
+          $ffprobePath = Join-Path $ffmpegStage "ffprobe.exe"
           $ffmpegLicensePath = Join-Path $ffmpegStage "LICENSE.txt"
           $ffmpegTemp = Join-Path $env:RUNNER_TEMP "tdlib-media-uploader-ffmpeg"
           $archivePath = Join-Path $ffmpegTemp $ffmpegArchiveName
@@ -83,12 +84,14 @@ jobs:
 
             Expand-Archive -LiteralPath $archivePath -DestinationPath $extractPath -Force
             $sourceFfmpeg = Get-ChildItem -LiteralPath $extractPath -Filter "ffmpeg.exe" -File -Recurse | Select-Object -First 1
+            $sourceFfprobe = Get-ChildItem -LiteralPath $extractPath -Filter "ffprobe.exe" -File -Recurse | Select-Object -First 1
             $sourceLicense = Get-ChildItem -LiteralPath $extractPath -Filter "LICENSE.txt" -File -Recurse | Select-Object -First 1
-            if ($null -eq $sourceFfmpeg -or $null -eq $sourceLicense) {
-              throw "FFmpeg 压缩包缺少 ffmpeg.exe 或 LICENSE.txt"
+            if ($null -eq $sourceFfmpeg -or $null -eq $sourceFfprobe -or $null -eq $sourceLicense) {
+              throw "FFmpeg 压缩包缺少 ffmpeg.exe、ffprobe.exe 或 LICENSE.txt"
             }
             New-Item -ItemType Directory -Force -Path $ffmpegStage | Out-Null
             Copy-Item -LiteralPath $sourceFfmpeg.FullName -Destination $ffmpegPath -Force
+            Copy-Item -LiteralPath $sourceFfprobe.FullName -Destination $ffprobePath -Force
             Copy-Item -LiteralPath $sourceLicense.FullName -Destination $ffmpegLicensePath -Force
           }
           finally {
@@ -158,9 +161,10 @@ jobs:
             }
           }
           $ffmpeg = Get-ChildItem -LiteralPath "dist\TDLib Media Uploader" -Filter "ffmpeg.exe" -File -Recurse | Select-Object -First 1
+          $ffprobe = Get-ChildItem -LiteralPath "dist\TDLib Media Uploader" -Filter "ffprobe.exe" -File -Recurse | Select-Object -First 1
           $ffmpegLicense = Get-ChildItem -LiteralPath "dist\TDLib Media Uploader" -Filter "LICENSE.txt" -File -Recurse | Select-Object -First 1
-          if ($null -eq $ffmpeg -or $null -eq $ffmpegLicense) {
-            throw "LGPL FFmpeg or its license file was not included in the portable build"
+          if ($null -eq $ffmpeg -or $null -eq $ffprobe -or $null -eq $ffmpegLicense) {
+            throw "LGPL FFmpeg/FFprobe or license file was not included in the portable build"
           }
           $ffmpegVersion = (& $ffmpeg.FullName "-version" 2>&1 | Out-String)
           if ($LASTEXITCODE -ne 0 -or $ffmpegVersion -match "--enable-gpl" -or $ffmpegVersion -match "--enable-nonfree") {
@@ -248,11 +252,14 @@ jobs:
 
           ensure_lgpl_ffmpeg() {
             local ffmpeg_path="$FFMPEG_STAGE_DIR/ffmpeg"
+            local ffprobe_path="$FFMPEG_STAGE_DIR/ffprobe"
             local license_path="$FFMPEG_STAGE_DIR/LICENSE.txt"
             local version_output=""
-            if [[ -x "$ffmpeg_path" && -f "$license_path" ]] && grep -q "GNU LESSER GENERAL PUBLIC LICENSE" "$license_path"; then
+            local probe_output=""
+            if [[ -x "$ffmpeg_path" && -x "$ffprobe_path" && -f "$license_path" ]] && grep -q "GNU LESSER GENERAL PUBLIC LICENSE" "$license_path"; then
               version_output="$("$ffmpeg_path" -version 2>&1 || true)"
-              if [[ "$version_output" != *"--enable-gpl"* && "$version_output" != *"--enable-nonfree"* && "$(file -b "$ffmpeg_path")" == *"arm64"* ]]; then
+              probe_output="$("$ffprobe_path" -version 2>&1 || true)"
+              if [[ "$version_output" != *"--enable-gpl"* && "$version_output" != *"--enable-nonfree"* && "$(file -b "$ffmpeg_path")" == *"arm64"* && "$probe_output" != *"--enable-gpl"* && "$probe_output" != *"--enable-nonfree"* && "$(file -b "$ffprobe_path")" == *"arm64"* ]]; then
                 return
               fi
             fi
@@ -280,13 +287,14 @@ jobs:
             mkdir -p "$install_dir"
             (
               cd "$source_dir"
-              ./configure --prefix="$install_dir" --disable-debug --disable-doc --disable-ffplay --disable-ffprobe --disable-gpl --disable-nonfree --enable-version3 --enable-static --disable-shared
+              ./configure --prefix="$install_dir" --disable-debug --disable-doc --disable-ffplay --disable-gpl --disable-nonfree --enable-version3 --enable-static --disable-shared
               make -j"$(sysctl -n hw.ncpu)"
               make install
             )
             grep -q "GNU LESSER GENERAL PUBLIC LICENSE" "$source_dir/COPYING.LGPLv3"
             mkdir -p "$FFMPEG_STAGE_DIR"
             cp "$install_dir/bin/ffmpeg" "$ffmpeg_path"
+            cp "$install_dir/bin/ffprobe" "$ffprobe_path"
             cp "$source_dir/COPYING.LGPLv3" "$license_path"
             cat > "$FFMPEG_STAGE_DIR/BUILD_INFO.txt" <<EOF
           FFmpeg version: ${FFMPEG_VERSION}
@@ -324,6 +332,11 @@ jobs:
           FFMPEG_OUTPUT="$("$PACKAGED_FFMPEG" -version 2>&1 || true)"
           [[ "$FFMPEG_OUTPUT" != *"--enable-gpl"* && "$FFMPEG_OUTPUT" != *"--enable-nonfree"* ]]
           [[ "$(file -b "$PACKAGED_FFMPEG")" == *"arm64"* ]]
+          PACKAGED_FFPROBE="$(find "$APP_PATH" -type f -name ffprobe -perm -111 -print -quit)"
+          test -n "$PACKAGED_FFPROBE"
+          FFPROBE_OUTPUT="$("$PACKAGED_FFPROBE" -version 2>&1 || true)"
+          [[ "$FFPROBE_OUTPUT" != *"--enable-gpl"* && "$FFPROBE_OUTPUT" != *"--enable-nonfree"* ]]
+          [[ "$(file -b "$PACKAGED_FFPROBE")" == *"arm64"* ]]
           for notice in LICENSE ATTRIBUTION THIRD_PARTY_LICENSES.md; do
             cp "$PROJECT_DIR/$notice" "$APP_PATH/Contents/Resources/$notice" 2>/dev/null || cp "$PROJECT_DIR/$notice" "$APP_PATH/$notice"
           done
@@ -367,6 +380,11 @@ jobs:
           file "$FFMPEG" | grep -q arm64
           "$FFMPEG" -version | tee ffmpeg-version.txt
           ! grep -q -- "--enable-gpl\|--enable-nonfree" ffmpeg-version.txt
+          FFPROBE="$(find "$APP" -type f -name ffprobe -perm -111 -print -quit)"
+          test -n "$FFPROBE"
+          file "$FFPROBE" | grep -q arm64
+          "$FFPROBE" -version | tee ffprobe-version.txt
+          ! grep -q -- "--enable-gpl\|--enable-nonfree" ffprobe-version.txt
           for notice in LICENSE ATTRIBUTION THIRD_PARTY_LICENSES.md; do
             test -f "$APP/Contents/Resources/$notice" || test -f "$APP/$notice"
           done

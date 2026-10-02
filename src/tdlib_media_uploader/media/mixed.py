@@ -434,8 +434,8 @@ class MixedMediaStrategy:
             )
         if compressing:
             warnings.append(
-                f"扫描提醒：发现 {len(compressing)} 个超限图片；"
-                "上传时将尝试用 FFmpeg 生成临时压缩副本。"
+                f"扫描提醒：发现 {len(compressing)} 个需规范化图片；"
+                "上传时将自动规范化生成临时副本（原文件不修改）。"
             )
         if preflight:
             warnings.append(
