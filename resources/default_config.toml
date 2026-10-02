@@ -93,10 +93,10 @@ exiftool_path = 'tools/exiftool'
 # Telegram 视频单文件上限约为普通账号 2 GB、Premium 4 GB；程序按
 # 4000/8000 个 512 KiB 分片计算精确字节边界，扫描和发送前都会检查。
 
-# 以视频消息发送的 MPEG-4 视频。MP4 容器内可使用 H.264 或 H.265/HEVC；
-# 其它容器/裸编码流可能被 Telegram 按文件发送，因此不会被扫描。
+# 以视频消息发送的视频文件。容器支持 MP4、MOV、M4V；内部编码推荐 H.264 或 H.265/HEVC。
+# 不支持的编码（如 ProRes、Animation 等）会在上传前跳过，不会自动转码也不会降级为文件。
 extensions = [
-  ".mp4"
+  ".mp4", ".mov", ".m4v"
 ]
 
 # 日期优先级：EXIF 信息 →（可选）媒体创建日期 → 文件修改日期。
@@ -225,13 +225,18 @@ exiftool_retries = 2
 
 [image]
 
-# 图片上传页“编辑目标与配置”窗口可直接修改本段媒体选项。
-
-# Telegram Photo 消息使用 JPEG 或 PNG；GIF/APNG/WebP 等不在此处，
-# 因为本程序发送 inputMessagePhoto，而不是 Animation/Sticker。
+# 输入支持 JPEG、PNG、WebP、BMP、TIFF；
+# 程序会检查尺寸、长宽比和大小，自动缩放、补白、转码或压缩后作为 Telegram Photo 上传。原文件永不修改。
+# 动画图片（animated WebP/GIF/APNG）不会自动转换为静态图，会在上传前跳过。
 extensions = [
-  ".jpg", ".jpeg", ".png"
+  ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"
 ]
+
+# 极端长宽比（比值 > 20）处理策略："pad"（补白边居中，不裁切）或 "skip"（跳过该图片）。默认 "pad"。
+extreme_aspect_policy = "pad"
+
+# 带透明通道（RGBA/LA）图片转为 JPEG 时的背景填充色，十六进制格式。默认白色 "#FFFFFF"。
+transparency_background = "#FFFFFF"
 
 album_size = 10
 

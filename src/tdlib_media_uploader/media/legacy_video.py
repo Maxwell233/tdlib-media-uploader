@@ -55,6 +55,13 @@ from ..config import loader as cfg
 from ..telegram.tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
 from ..config.paths import APP_DATA_DIR, RESOURCE_DIR, VIDEO_STATE_DIR, THUMBNAIL_CACHE_DIR
 from ..upload.staging import cleanup_staging, remove_staged_file, should_stage, stage_file
+from .video_probe import (
+    VideoMediaInfo,
+    _find_ffprobe as _find_probe_binary,
+    determine_supports_streaming,
+    format_unsupported_reason,
+    probe_video,
+)
 
 PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = VIDEO_STATE_DIR
@@ -148,16 +155,7 @@ def _find_ffmpeg_override() -> str | None:
 
 
 def _find_ffprobe() -> str | None:
-    configured = os.environ.get("TDLIB_FFPROBE_EXE", "").strip()
-    if configured and Path(configured).is_file():
-        return str(Path(configured).resolve())
-    if _FFMPEG_OVERRIDE:
-        sibling = Path(_FFMPEG_OVERRIDE).with_name(
-            "ffprobe.exe" if os.name == "nt" else "ffprobe"
-        )
-        if sibling.is_file():
-            return str(sibling.resolve())
-    return shutil.which("ffprobe")
+    return _find_probe_binary()
 
 
 _FFMPEG_OVERRIDE = _find_ffmpeg_override()
@@ -1295,55 +1293,21 @@ def video_info(path: Path, cancel_event=None):
         cached = _VIDEO_INFO_CACHE.get(key)
     if cached is not None:
         return cached
-    reader = None
-    try:
-        reader = imageio_ffmpeg.read_frames(display_path(path))
-        metadata = (
-            _next_frame_metadata(
-                reader,
-                timeout=_process_timeout("FFMPEG_INFO_TIMEOUT_SECONDS", FFMPEG_INFO_TIMEOUT_SECONDS),
-            )
-            if cancel_event is None
-            else _next_frame_metadata(
-                reader,
-                timeout=_process_timeout("FFMPEG_INFO_TIMEOUT_SECONDS", FFMPEG_INFO_TIMEOUT_SECONDS),
-                cancel_event=cancel_event,
-            )
-        )
-    except StopIteration as exc:
-        raise RuntimeError(f"视频没有可读取的媒体流：{path}") from exc
-    except TimeoutError:
-        # Preserve the transient category so preflight can defer a network
-        # timeout and retry it on the next run instead of marking it damaged.
-        raise
-    except Exception as exc:
+
+    info = probe_video(
+        path,
+        cancel_event=cancel_event,
+        timeout=_process_timeout(
+            "FFMPEG_INFO_TIMEOUT_SECONDS", FFMPEG_INFO_TIMEOUT_SECONDS
+        ),
+    )
+    if info.compatibility == "invalid":
         raise RuntimeError(
-            f"无法读取视频媒体信息：{path}\n"
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
-    finally:
-        if reader is not None:
-            try:
-                reader.close()
-            except Exception:
-                pass
-    size = metadata.get("size") or metadata.get("source_size")
-    duration = float(metadata.get("duration") or 0)
-    if not size or len(size) != 2:
-        raise RuntimeError(f"FFmpeg 无法读取分辨率：{path.name}")
-    if duration <= 0:
-        duration = (
-            _probe_video_duration(path)
-            if cancel_event is None
-            else _probe_video_duration(path, cancel_event=cancel_event)
+            f"视频媒体属性异常：{path.name} | {info.width}x{info.height} | {info.duration:.3f}s"
         )
-    width, height = int(size[0]), int(size[1])
-    if width <= 1 or height <= 1 or duration <= 0:
-        raise RuntimeError(f"视频媒体属性异常：{path.name} | {width}x{height} | {duration:.3f}s")
-    result = {"width": width, "height": height, "duration": duration}
     with _VIDEO_INFO_CACHE_LOCK:
-        _VIDEO_INFO_CACHE[key] = result
-    return result
+        _VIDEO_INFO_CACHE[key] = info
+    return info
 
 
 def _thumbnail_timestamp_seconds(value=None) -> float:
@@ -1551,19 +1515,27 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
             # Preserve the historical one-argument call for integrations and
             # tests that provide a lightweight preparation hook.  The worker
             # passes cancellation only when a caller requested it.
-            if cancel_event is None:
+            info = (
                 prepare_video(path)
-            else:
-                prepare_video(path, cancel_event)
+                if cancel_event is None
+                else prepare_video(path, cancel_event)
+            )
+            if getattr(info, "compatibility", "native") != "native":
+                raise RuntimeError(
+                    format_unsupported_reason(path, info)
+                    if isinstance(info, VideoMediaInfo)
+                    else f"当前编码不在直接 Telegram Video 支持范围内，已跳过：{path.name}"
+                )
             return None
         except Exception as exc:
             readiness_record = _readiness_record(exc)
             record = {
                 "item": item,
                 "path": path,
-                "reason": f"{type(exc).__name__}: {exc}",
+                "reason": f"{type(exc).__name__}: {exc}" if "\n" not in str(exc) else str(exc),
                 "category": (
                     "size" if "超过 Telegram 视频上限" in str(exc)
+                    else "unsupported" if "不在直接 Telegram Video 支持范围内" in str(exc) or "已跳过" in str(exc)
                     else readiness_record["category"] if readiness_record
                     else "deferred" if isinstance(exc, (OSError, TimeoutError))
                     else "unreadable"
@@ -1725,6 +1697,17 @@ def input_video(
         if cancel_event is None
         else video_info(source_path, cancel_event=cancel_event)
     )
+    if getattr(info, "compatibility", "native") != "native":
+        raise RuntimeError(
+            format_unsupported_reason(source_path, info)
+            if isinstance(info, VideoMediaInfo)
+            else f"当前编码不在直接 Telegram Video 支持范围内：{source_path.name}"
+        )
+    supports_streaming = (
+        determine_supports_streaming(info)
+        if isinstance(info, VideoMediaInfo)
+        else bool(info.get("supports_streaming", True))
+    )
     thumbnail = None
     thumbnail_enabled = (
         cfg.VIDEO_GENERATE_THUMBNAIL
@@ -1763,7 +1746,7 @@ def input_video(
         "duration": int(max(1, round(info["duration"]))),
         "width": int(info["width"]),
         "height": int(info["height"]),
-        "supports_streaming": True,
+        "supports_streaming": supports_streaming,
         "caption": formatted_text(caption),
         "show_caption_above_media": False,
         "self_destruct_type": None,
