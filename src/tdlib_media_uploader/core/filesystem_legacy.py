@@ -546,6 +546,19 @@ def natural_compare(left, right) -> int:
     return -1 if len(a_parts) < len(b_parts) else 1
 
 
+def _natural_sort_key(value: object) -> tuple:
+    parts = []
+    for part in _NATURAL_PART_RE.split(str(value)):
+        if not part:
+            continue
+        if part.isdigit():
+            # Original code: digits have type 1, strings have type 0
+            parts.append((1, int(part), len(part), part))
+        else:
+            parts.append((0, part.casefold(), 0, part))
+    return tuple(parts)
+
+
 def natural_sort(values, *, key=None) -> list:
     """Return a naturally ordered copy of *values*.
 
@@ -553,14 +566,13 @@ def natural_sort(values, *, key=None) -> list:
     for network paths where repeatedly formatting a path is relatively costly.
     """
 
-    key = key or (lambda value: value)
-    decorated = [(key(value), index, value) for index, value in enumerate(values)]
+    key_func = key or (lambda value: value)
+    decorated = []
+    for index, value in enumerate(values):
+        key_val = key_func(value)
+        decorated.append((_natural_sort_key(key_val), str(key_val), index, value))
 
-    def compare(left, right):
-        result = natural_compare(left[0], right[0])
-        return result or (left[1] - right[1])
-
-    return [value for _, _, value in sorted(decorated, key=cmp_to_key(compare))]
+    return [value for _, _, _, value in sorted(decorated)]
 
 
 def _relative_components(path, root=None) -> tuple[str, ...]:
@@ -642,15 +654,16 @@ def media_path_sort(
                 )
             except (OSError, TypeError, ValueError):
                 mtime = 0.0
-        decorated.append((path, mtime, index, value))
 
-    def compare(left, right):
-        if normalized_mode == "mtime" and left[1] != right[1]:
-            return -1 if left[1] < right[1] else 1
-        result = relative_path_compare(left[0], right[0], root)
-        return result or (left[2] - right[2])
+        rel_parts = tuple(_natural_sort_key(c) for c in _relative_components(path, root))
+        raw_str = "/".join(_relative_components(path, root))
 
-    return [value for _, _, _, value in sorted(decorated, key=cmp_to_key(compare))]
+        decorated.append((mtime, rel_parts, raw_str, index, value))
+
+    if normalized_mode == "mtime":
+        return [value for _, _, _, _, value in sorted(decorated, key=lambda x: (x[0], x[1], x[2], x[3]))]
+    else:
+        return [value for _, _, _, _, value in sorted(decorated, key=lambda x: (x[1], x[2], x[3]))]
 
 
 def retry_with_backoff(
