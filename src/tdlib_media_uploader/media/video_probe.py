@@ -7,7 +7,7 @@ for Telegram Video uploads using ffprobe JSON output with safe fallbacks.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
 import os
@@ -37,6 +37,7 @@ class VideoMediaInfo(Mapping[str, Any]):
     compatibility: str
     has_audio_stream: bool = False
     recommended_action: str = "skip"
+    source_snapshot: tuple[int, int] | None = None
 
     def __getitem__(self, key: str) -> Any:
         try:
@@ -535,12 +536,16 @@ def probe_video(
     if not file_path.is_file():
         raise RuntimeError(f"视频文件不存在：{file_path}")
 
+    from ..core.source_snapshot import capture_snapshot, validate_snapshots
+    snapshot = capture_snapshot(file_path)
     ffprobe = _find_ffprobe()
     if not ffprobe:
-        return _fallback_probe_without_ffprobe(
+        result = _fallback_probe_without_ffprobe(
             file_path, cancel_event=cancel_event, timeout=timeout
         )
-
-    return _probe_with_ffprobe(
-        file_path, ffprobe, cancel_event=cancel_event, timeout=timeout
-    )
+    else:
+        result = _probe_with_ffprobe(
+            file_path, ffprobe, cancel_event=cancel_event, timeout=timeout
+        )
+    validate_snapshots((snapshot,))
+    return replace(result, source_snapshot=snapshot[1:])

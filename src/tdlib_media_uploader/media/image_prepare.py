@@ -17,6 +17,7 @@ from typing import Any
 
 from PIL import Image, ImageOps
 
+from ..core.source_snapshot import capture_snapshot, validate_snapshots
 from ..config.paths import IMAGE_COMPRESSION_CACHE_DIR
 from ..core.filesystem import stable_path
 from .image_probe import (
@@ -175,8 +176,12 @@ def prepare_image_for_telegram(
     if transparency_background is not None:
         background = transparency_background
     source_path = Path(path).resolve()
+    source_snapshot = capture_snapshot(source_path)
     if source_info is None:
         source_info = probe_image(source_path)
+    if source_info.source_snapshot is not None:
+        validate_snapshots(((source_path, *source_info.source_snapshot),))
+    validate_snapshots((source_snapshot,))
 
     if cancel_event is not None and cancel_event.is_set():
         raise TimeoutError("图片准备已取消")
@@ -209,8 +214,7 @@ def prepare_image_for_telegram(
         )
 
     # Check cache
-    stat = source_path.stat()
-    source_sig = f"{stable_path(source_path)}|{stat.st_size}|{stat.st_mtime_ns}"
+    source_sig = f"{stable_path(source_path)}|{source_snapshot[1]}|{source_snapshot[2]}"
     cache_key = get_image_cache_key(
         source_sig=source_sig,
         policy_version="image-v2",
@@ -324,6 +328,8 @@ def prepare_image_for_telegram(
             raise RuntimeError(
                 f"规范化后图片大小（{len(encoded_bytes)} 字节）仍超过目标上限（{target_bytes} 字节）"
             )
+
+    validate_snapshots((source_snapshot,))
 
     # Step 5: Atomically write to cache
     if cancel_event is not None and cancel_event.is_set():

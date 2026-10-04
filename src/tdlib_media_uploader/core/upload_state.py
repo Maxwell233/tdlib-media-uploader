@@ -79,9 +79,7 @@ class UploadState:
         prefix = filename_prefix or f"{self.kind}_upload_state"
         self.path = self.state_dir / f"{prefix}_{digest}.json"
         self.lock = threading.RLock()
-        if reset and self.path.exists():
-            self.path.unlink()
-        self.data = self._load()
+        self.data = self._load(reset=reset)
 
     def _new(self):
         return {
@@ -92,8 +90,8 @@ class UploadState:
             "completed": {},
         }
 
-    def _load(self):
-        if not self.path.exists():
+    def _load(self, *, reset=False):
+        if reset or not self.path.exists():
             data = self._new()
             self._save(data)
             return data
@@ -103,6 +101,8 @@ class UploadState:
             raise RuntimeError(f"断点文件读取失败：{self.path}\n{exc}") from exc
         if not isinstance(data, dict) or data.get("version") != self.VERSION:
             raise RuntimeError(f"V1.9 断点文件版本不兼容：{self.path}")
+        if not isinstance(data.get("completed", {}), dict):
+            raise RuntimeError(f"断点文件格式不兼容：{self.path}")
         data.setdefault("completed", {})
         return data
 
@@ -137,6 +137,7 @@ class UploadState:
         ids = list(message_ids or [])
         with self.lock:
             sent_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            records = {}
             for index, raw_item in enumerate(values):
                 item = raw_item if isinstance(raw_item, dict) else {"path": raw_item}
                 path = Path(item["path"])
@@ -159,8 +160,11 @@ class UploadState:
                 for key in ("media_kind", "group_name", "month_key", "date_tag"):
                     if isinstance(item, dict) and item.get(key) is not None:
                         record[key] = item[key]
-                self.data["completed"][signature] = record
-            self._save(self.data)
+                records[signature] = record
+            # Publish the complete Album only after the atomic JSON write succeeds.
+            data = {**self.data, "completed": {**self.data["completed"], **records}}
+            self._save(data)
+            self.data = data
 
 
 __all__ = ["UploadState"]

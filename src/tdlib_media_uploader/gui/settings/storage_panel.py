@@ -28,6 +28,7 @@ from .base import SettingsPanel
 class StoragePanel(SettingsPanel):
     """Panel managing storage directories, application logs, and cache maintenance."""
 
+    cancel_cleanup_requested = Signal()
     clear_all_requested = Signal()
     clear_thumb_requested = Signal()
     clear_video_processed_requested = Signal()
@@ -35,6 +36,7 @@ class StoragePanel(SettingsPanel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cache_worker = None
+        self._cleaning = False
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -119,6 +121,11 @@ class StoragePanel(SettingsPanel):
         clear_all.setIcon(get_svg_icon("delete", 14, 14, color="#ffffff"))
         clear_all.clicked.connect(lambda: self.clear_all_requested.emit())
 
+        self._maintenance_buttons = (calc_cache, clear_thumb, clear_video_processed, clear_all)
+        self.cancel_cleanup = QPushButton("取消清理")
+        self.cancel_cleanup.setVisible(False)
+        self.cancel_cleanup.clicked.connect(self.cancel_cleanup_requested.emit)
+        cache_buttons.addWidget(self.cancel_cleanup)
         cache_buttons.addWidget(calc_cache)
         cache_buttons.addWidget(clear_thumb)
         cache_buttons.addWidget(clear_video_processed)
@@ -132,9 +139,19 @@ class StoragePanel(SettingsPanel):
         scroll.setWidget(container)
         main_layout.addWidget(scroll)
 
+    def set_cleaning(self, active):
+        self._cleaning = active
+        for button in self._maintenance_buttons:
+            button.setEnabled(not active)
+        self.cancel_cleanup.setVisible(active)
+        if active:
+            if self._cache_worker is not None:
+                self._cache_worker.request_stop()
+            self.cache_status.setText("正在清理缓存…")
+
     def refresh_cache_stats(self):
         """Asynchronously compute cache size on a worker thread to avoid freezing UI."""
-        if self._cache_worker is not None and self._cache_worker.isRunning():
+        if self._cleaning or (self._cache_worker is not None and self._cache_worker.isRunning()):
             return
         self.cache_status.setText("正在计算缓存占用…")
         from ..workers import CacheStatsWorker  # noqa: PLC0415
@@ -146,7 +163,8 @@ class StoragePanel(SettingsPanel):
         self._cache_worker.start()
 
     def _on_cache_stats_ready(self, text: str):
-        self.cache_status.setText(text)
+        if not self._cleaning:
+            self.cache_status.setText(text)
 
     def load(self):
         self.mark_clean()

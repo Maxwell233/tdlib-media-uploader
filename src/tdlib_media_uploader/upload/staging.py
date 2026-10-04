@@ -254,6 +254,8 @@ def cleanup_staging(
     staging_base_dir: Path | None = None,
     max_age_seconds: float | None = None,
     remove_empty: bool = False,
+    cancel_event=None,
+    progress=None,
 ) -> None:
     """Remove incomplete and optionally stale staging files.
 
@@ -282,6 +284,8 @@ def cleanup_staging(
     except OSError:
         return
     for directory in children:
+        if cancel_event is not None and cancel_event.is_set():
+            return
         try:
             if (
                 directory.name == MARKER_NAME
@@ -292,6 +296,10 @@ def cleanup_staging(
                 _log_staging_warning(f"跳过链接暂存分片目录：{directory}")
                 continue
             for item in directory.iterdir():
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                if progress is not None:
+                    progress(str(item))
                 if _linked_component(item):
                     _log_staging_warning(f"跳过链接暂存文件：{item}")
                     continue

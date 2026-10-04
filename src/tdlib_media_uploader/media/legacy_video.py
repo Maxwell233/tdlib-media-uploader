@@ -1759,6 +1759,7 @@ def input_video(
         max_bytes=max_bytes,
         is_premium=is_premium,
         info=info,
+        config=cfg,
     )
     info = prep.info
     supports_streaming = (

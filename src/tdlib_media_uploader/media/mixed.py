@@ -12,11 +12,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 import importlib
-import inspect
 from pathlib import Path
 import threading
 from typing import Any
 
+from ..core.compat import call_supported as _call_compatible
 from ..contracts import CancelToken, EventSink, UploadContext
 from ..core.models import (
     AlbumPlan,
@@ -38,29 +38,6 @@ def _load_legacy_module() -> Any:
 
     return importlib.import_module("tdlib_media_uploader.media.legacy_mixed")
 
-
-def _call_compatible(function: Any, args: Sequence[Any] = (), **kwargs: Any) -> Any:
-    """Call a legacy hook while tolerating small embedding fakes."""
-
-    try:
-        signature = inspect.signature(function)
-    except (TypeError, ValueError):
-        return function(*args, **kwargs)
-
-    parameters = signature.parameters
-    positional = list(args)
-    accepted: dict[str, Any] = {}
-    var_keyword = any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
-    for name, value in kwargs.items():
-        parameter = parameters.get(name)
-        if parameter is not None and parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
-            positional.append(value)
-        elif parameter is not None or var_keyword:
-            accepted[name] = value
-    return function(*positional, **accepted)
 
 
 def _is_cancelled(token: CancelToken | None) -> bool:
@@ -215,6 +192,7 @@ class MixedMediaStrategy:
     """Concrete V2 strategy backed by the bundled mixed-media implementation."""
 
     kind = "mixed"
+    validate_source_snapshots = True
 
     def __init__(
         self,
@@ -262,11 +240,11 @@ class MixedMediaStrategy:
         with _LEGACY_SCOPE_LOCK:
             previous = getattr(config, "MIXED_DIR", _MISSING)
             try:
-                if previous is not _MISSING:
+                if previous is not _MISSING and previous != Path(source_root):
                     config.MIXED_DIR = Path(source_root)
                 yield
             finally:
-                if previous is not _MISSING:
+                if previous is not _MISSING and previous != Path(source_root):
                     config.MIXED_DIR = previous
 
     @staticmethod

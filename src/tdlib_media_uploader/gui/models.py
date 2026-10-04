@@ -220,8 +220,9 @@ def scan_result(
     size_of = size_resolver or item_size
     models = tuple(scan.items)
     item_values = [item_dict(item) for item in models]
+    caption_store = caption_store_factory(kind)
     plans = [
-        plan_dict(item, kind, caption_store_factory=caption_store_factory)
+        plan_dict(item, kind, caption_store_factory=lambda _kind: caption_store)
         for item in bundle.plans
     ]
 

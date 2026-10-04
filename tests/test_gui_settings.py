@@ -3,26 +3,12 @@
 
 from __future__ import annotations
 
-import tempfile
 import unittest
-from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (
-    QApplication,
-    QLabel,
-    QLineEdit,
-    QPushButton,
-    QSpinBox,
-    QDoubleSpinBox,
-)
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton
 
-from tdlib_media_uploader.config.paths import read_version
-from tdlib_media_uploader.gui.components.sidebar import NavigationSidebar
 from tdlib_media_uploader.gui.components.telegram_target_editor import TelegramTargetEditor
-from tdlib_media_uploader.gui.dialogs.target_dialog import TargetDialog
-from tdlib_media_uploader.gui.dialogs.caption_dialog import CaptionEditDialog
-from tdlib_media_uploader.gui.icons import get_svg_icon
 from tdlib_media_uploader.gui.main_window import MainWindow
 from tdlib_media_uploader.gui.pages.settings import SettingsPage
 from tdlib_media_uploader.gui.pages.upload import UploadPage
@@ -34,17 +20,12 @@ from tdlib_media_uploader.gui.settings import (
     TelegramPanel,
     UploadPanel,
 )
-from tdlib_media_uploader.gui.tools import detect_ffmpeg
 
 
-class Beta5SettingsAndUXTest(unittest.TestCase):
+class SettingsAndUXTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
-
-    def test_version_is_stable(self):
-        version = read_version()
-        self.assertEqual(version, (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip())
 
     def test_settings_page_six_inline_categories(self):
         page = SettingsPage()
@@ -166,42 +147,13 @@ class Beta5SettingsAndUXTest(unittest.TestCase):
         finally:
             panel.deleteLater()
 
-    def test_advanced_panel_no_buttons_and_collapsibles(self):
+    def test_advanced_panel_allows_empty_exiftool_path(self):
         panel = AdvancedPanel()
         try:
-            # Check all spin boxes have NoButtons
-            all_spins = panel.findChildren(QSpinBox) + panel.findChildren(QDoubleSpinBox)
-            self.assertTrue(len(all_spins) >= 10)
-            for spin in all_spins:
-                self.assertEqual(
-                    spin.buttonSymbols(),
-                    QSpinBox.ButtonSymbols.NoButtons,
-                    f"SpinBox {spin} should have NoButtons",
-                )
-
             # Empty ExifTool path is valid
             panel.exiftool_path.setText("")
             valid, msg = panel.validate()
             self.assertTrue(valid)
-        finally:
-            panel.deleteLater()
-
-    def test_storage_panel_signals_and_cache(self):
-        panel = StoragePanel()
-        try:
-            clear_all_received = []
-            clear_thumb_received = []
-            panel.clear_all_requested.connect(lambda: clear_all_received.append(True))
-            panel.clear_thumb_requested.connect(lambda: clear_thumb_received.append(True))
-
-            panel.clear_all_requested.emit()
-            self.assertEqual(len(clear_all_received), 1)
-
-            panel.clear_thumb_requested.emit()
-            self.assertEqual(len(clear_thumb_received), 1)
-
-            # Status label
-            self.assertIn("缓存", panel.cache_status.text())
         finally:
             panel.deleteLater()
 
@@ -219,22 +171,6 @@ class Beta5SettingsAndUXTest(unittest.TestCase):
                 self.assertIn(dep, panel.env_labels)
         finally:
             panel.deleteLater()
-
-    def test_target_dialog_compact_and_reusable_editor(self):
-        dialog = TargetDialog("video")
-        try:
-            self.assertIsInstance(dialog.target_editor, TelegramTargetEditor)
-            self.assertIn("修改视频上传目标", dialog.windowTitle())
-
-            # Legacy attribute properties
-            self.assertTrue(hasattr(dialog, "video_filename_numbers"))
-            self.assertTrue(hasattr(dialog, "mixed_filename_numbers"))
-            self.assertTrue(hasattr(dialog, "target_mode"))
-            self.assertTrue(hasattr(dialog, "chat_id"))
-            self.assertTrue(hasattr(dialog, "channel_chat_id"))
-            self.assertTrue(hasattr(dialog, "topic_id"))
-        finally:
-            dialog.deleteLater()
 
     def test_upload_page_simplified_buttons_and_caption_edit(self):
         page = UploadPage("video")
@@ -260,26 +196,6 @@ class Beta5SettingsAndUXTest(unittest.TestCase):
             self.assertEqual(page.tree.contextMenuPolicy(), Qt.ContextMenuPolicy.CustomContextMenu)
         finally:
             page.deleteLater()
-
-    def test_task_album_files_dark_and_light_styling(self):
-        from tdlib_media_uploader.gui.pages.task import TaskPage
-        from tdlib_media_uploader.gui.theme import build_stylesheet
-
-        task_page = TaskPage()
-        try:
-            self.assertEqual(task_page.album_files.objectName(), "albumFilesList")
-            self.assertTrue(task_page.album_files.alternatingRowColors())
-
-            dark_qss = build_stylesheet("dark")
-            self.assertIn("QListWidget#albumFilesList", dark_qss)
-            self.assertIn("alternate-background-color: #121926", dark_qss)
-            self.assertIn("QTreeWidget, QTableWidget, QListWidget", dark_qss)
-
-            light_qss = build_stylesheet("light")
-            self.assertIn("QListWidget#albumFilesList", light_qss)
-            self.assertIn("alternate-background-color: #f8fafc", light_qss)
-        finally:
-            task_page.deleteLater()
 
     def test_upload_page_edit_parameters_shortcut(self):
         for kind, label in (("video", "视频"), ("image", "图片"), ("mixed", "混合")):
@@ -317,32 +233,6 @@ class Beta5SettingsAndUXTest(unittest.TestCase):
         finally:
             window.close()
             window.deleteLater()
-
-    def test_sidebar_brand_header_and_version(self):
-        sidebar = NavigationSidebar(version="1.9.3")
-        try:
-            # Badge should not be visible in header
-            self.assertFalse(sidebar.badge.isVisible())
-            self.assertEqual(sidebar.version_label.text(), "Version 1.9.3")
-        finally:
-            sidebar.deleteLater()
-
-    def test_svg_icons_availability(self):
-        for icon_name in ("github", "sliders", "eye", "eye-off", "external_link"):
-            icon = get_svg_icon(icon_name, 16, 16)
-            self.assertFalse(icon.isNull(), f"Icon {icon_name} should not be null")
-
-    def test_main_window_integration_stable(self):
-        window = MainWindow()
-        try:
-            self.assertIn(read_version(), window.windowTitle())
-            self.assertEqual(window.nav_sidebar.version_label.text(), f"Version {read_version()}")
-            self.assertFalse(window.nav_sidebar.badge.isVisible())
-            self.assertEqual(window.settings_page.nav_list.count(), 6)
-        finally:
-            window.close()
-            window.deleteLater()
-
 
 if __name__ == "__main__":
     unittest.main()

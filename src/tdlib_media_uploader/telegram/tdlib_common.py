@@ -545,9 +545,20 @@ def build_tdlib_parameters(device_model: str, config=None) -> dict:
 class TDJsonClient:
     """Small synchronous wrapper around TDLib's JSON interface."""
 
+    _lifecycle_lock = threading.Lock()
+    _active_client = None
+
+    @classmethod
+    def unclosed_instance(cls):
+        with cls._lifecycle_lock:
+            value = TDJsonClient._active_client
+            return value if value is not None and not value.closed_event.is_set() else None
+
     def __init__(self, ui, device_model: str, *, config=None):
+        if TDJsonClient.unclosed_instance() is not None:
+            raise RuntimeError("上一个 TDLib 客户端尚未关闭，请稍后重试。")
         from ..config.snapshot import snapshot_config
-        self._config = snapshot_config(config if config is not None else cfg)
+        self._config = snapshot_config(config if config is not None else cfg, immutable=True)
         self.ui = ui
         self.device_model = device_model
         TDLIB_DATABASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -580,7 +591,7 @@ class TDJsonClient:
             "new_verbosity_level": int(self.config.TDLIB_LOG_VERBOSITY),
         })
 
-        self.client_id = tdjson.td_create_client_id()
+        self.closed_event = threading.Event()
         self.pending: dict[str, queue.Queue] = {}
         self.pending_lock = threading.Lock()
         self.auth_queue: queue.Queue = queue.Queue()
@@ -596,15 +607,26 @@ class TDJsonClient:
         self.is_premium: bool | None = None
         self.caption_length_limit: int | None = None
         self.inflight_journal = InflightJournal()
-        register_client = getattr(self.ui, "register_client", None)
-        if callable(register_client):
-            register_client(self)
         self.receiver_thread = threading.Thread(
             target=self._receiver_loop,
             name="TDLibReceiver",
             daemon=True,
         )
-        self.receiver_thread.start()
+        # All fallible Python setup happens before allocating the native client.
+        with self._lifecycle_lock:
+            previous = TDJsonClient._active_client
+            if previous is not None and not previous.closed_event.is_set():
+                raise RuntimeError("上一个 TDLib 客户端尚未关闭，请稍后重试。")
+            self.client_id = tdjson.td_create_client_id()
+            TDJsonClient._active_client = self
+            self.receiver_thread.start()
+        register_client = getattr(self.ui, "register_client", None)
+        if callable(register_client):
+            try:
+                register_client(self)
+            except Exception:
+                self._send_close_now()
+                raise
 
     @property
     def config(self):
@@ -741,6 +763,9 @@ class TDJsonClient:
                     state = obj.get("authorization_state")
                     if state:
                         self.auth_queue.put(state)
+                        if state.get("@type") == "authorizationStateClosed":
+                            self.stop_event.set()
+                            self.closed_event.set()
                 elif kind == "updateMessageSendSucceeded":
                     old_id = obj.get("old_message_id")
                     with self.send_condition:
@@ -1020,84 +1045,42 @@ class TDJsonClient:
                 pass
 
     def wait_for_send_results(self, messages, timeout: int | None = None):
+        from .send_result import map_send_result
+
         self._raise_if_cancelled()
-        if timeout is None:
-            timeout = self.config.TDLIB_MESSAGE_SEND_TIMEOUT
-        pending_ids = []
-        succeeded_ids = []
-        failed_ids = []
-        failed_errors = []
-
-        def record_failure(message_id, value):
-            error = _send_failure_text(value)
-            if error:
-                failed_errors.append({"message_id": message_id, "error": error})
-
-        for message in messages:
-            message_id = message.get("id")
-            sending_state = message.get("sending_state")
-            if not sending_state:
-                succeeded_ids.append(message_id)
-                continue
-            if sending_state.get("@type") == "messageSendingStateFailed":
-                failed_ids.append(message_id)
-                record_failure(message_id, message)
-                continue
-            pending_ids.append(message_id)
-
-        def result_payload(pending=None):
-            result = {
-                "succeeded": list(succeeded_ids),
-                "failed": list(failed_ids),
-                "pending": list(pending or []),
-            }
-            if failed_errors:
-                result["failed_errors"] = list(failed_errors)
-            return result
-
-        if not pending_ids:
-            return result_payload()
-
+        timeout = self.config.TDLIB_MESSAGE_SEND_TIMEOUT if timeout is None else timeout
         deadline = time.monotonic() + timeout
-        results = {}
+        ids = [message.get("id") for message in messages]
+        updates = {}
         with self.send_condition:
-            while len(results) < len(pending_ids):
-                if getattr(self, "cancel_event", threading.Event()).is_set():
-                    unknown = [value for value in pending_ids if value not in results]
-                    raise SendResultUnknown(
-                        "上传在 Telegram 状态确认前被取消",
-                        result_payload(unknown),
-                    )
-                for old_id in pending_ids:
-                    if old_id in results:
-                        continue
-                    event = self.send_events.get(old_id)
-                    if event is None:
-                        continue
-                    status, update = event
-                    if status == "failed":
-                        failed_ids.append(old_id)
-                        record_failure(old_id, update)
-                        results[old_id] = update
-                    else:
-                        new_id = update.get("message", {}).get("id") or old_id
-                        succeeded_ids.append(new_id)
-                        results[old_id] = update
-                if len(results) >= len(pending_ids):
-                    break
+            while True:
+                for old_id in ids:
+                    event = self.send_events.pop(old_id, None)
+                    if event is not None:
+                        status, update = event
+                        # Legacy embedders may omit fields supplied by TDLib.
+                        updates[old_id] = {**update, "old_message_id": old_id,
+                            "@type": "updateMessageSendSucceeded" if status == "success" else "updateMessageSendFailed"}
+                result = map_send_result(messages, updates.values())
+                payload = {"succeeded": list(result.succeeded_ids),
+                           "failed": list(result.failed_ids), "pending": list(result.pending_ids)}
+                failures = []
+                for value in (*messages, *updates.values()):
+                    error = _send_failure_text(value)
+                    if error:
+                        failures.append({"message_id": value.get("old_message_id", value.get("id")), "error": error})
+                if failures:
+                    payload["failed_errors"] = failures
+                if not result.pending_ids:
+                    if result.status.value == UNKNOWN:
+                        raise SendResultUnknown("Telegram 返回的消息确认不完整", payload)
+                    return payload
+                if self.cancel_event.is_set():
+                    raise SendResultUnknown("上传在 Telegram 状态确认前被取消", payload)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    unknown = [value for value in pending_ids if value not in results]
-                    raise SendResultUnknown(
-                        "等待 Telegram 确认发送成功超时",
-                        result_payload(unknown),
-                    )
+                    raise SendResultUnknown("等待 Telegram 确认发送成功超时", payload)
                 self.send_condition.wait(min(1, remaining))
-
-        for old_id in pending_ids:
-            with self.send_condition:
-                self.send_events.pop(old_id, None)
-        return result_payload()
 
     @staticmethod
     def _item_source(item):
@@ -1210,6 +1193,7 @@ class TDJsonClient:
         journal_items=None,
         target=None,
         on_submitted=None,
+        prepared_media=None,
     ):
         return self._send_contents(
             contents,
@@ -1220,6 +1204,7 @@ class TDJsonClient:
             journal_items=journal_items,
             target=target,
             on_submitted=on_submitted,
+            prepared_media=prepared_media,
         )
 
     @staticmethod
@@ -1461,6 +1446,7 @@ class TDJsonClient:
         journal_items=None,
         target=None,
         on_submitted=None,
+        prepared_media=None,
     ):
         """Send media and persist PREPARED/SUBMITTED/UNKNOWN transitions."""
         journal = getattr(self, "inflight_journal", None)
@@ -1497,6 +1483,8 @@ class TDJsonClient:
         try:
             self._validate_input_message_contents(contents, items=items)
             self._validate_local_input_paths(contents)
+            if prepared_media is not None:
+                prepared_media.validate()
         except Exception as exc:
             self._safe_diagnose_upload_failure(contents, items, exc)
             raise
@@ -1508,6 +1496,8 @@ class TDJsonClient:
                 target=journal_target,
             )
         try:
+            if prepared_media is not None:
+                prepared_media.validate()
             if len(contents) == 1:
                 message = self.request({
                     "@type": "sendMessage",
@@ -1650,18 +1640,13 @@ class TDJsonClient:
             self._safe_diagnose_upload_failure(contents, items, exc)
             raise
 
-    def close(self):
-        try:
-            if self.cancel_event.is_set():
-                self._send_close_now()
-            elif self.close_sent:
-                pass
-            else:
-                self.request({"@type": "close"}, timeout=30)
-                with self.close_lock:
-                    self.close_sent = True
-        except Exception:
-            pass
+    def close(self, timeout: float = 30.0):
+        """Keep receiving until TDLib has flushed and closed its databases."""
+        self._send_close_now()
+        if not self.closed_event.wait(max(0.0, float(timeout))):
+            # The receiver remains alive so a delayed Closed can still arrive.
+            # Surface this failure instead of permitting silent teardown.
+            raise TimeoutError("TDLib 尚未确认关闭数据库，请等待后再退出或重试。")
         self.stop_event.set()
         with self.send_condition:
             self.send_condition.notify_all()

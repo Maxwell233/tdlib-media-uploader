@@ -40,7 +40,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --no-cache-dir --upgrade --force-reinstall --no-binary imageio-ffmpeg -r requirements-build-lock.txt
+          python -m pip install --no-binary imageio-ffmpeg -r requirements-build-lock.txt
           python -m pip check
 
       - name: Run offline regression tests
@@ -235,7 +235,7 @@ jobs:
         run: |
           python -m venv .build_venv
           .build_venv/bin/python -m pip install --upgrade pip
-          .build_venv/bin/python -m pip install --no-cache-dir --upgrade --force-reinstall --no-binary imageio-ffmpeg -r requirements-build-lock.txt
+          .build_venv/bin/python -m pip install --no-binary imageio-ffmpeg -r requirements-build-lock.txt
           .build_venv/bin/python -m pip check
 
       - name: Run offline regression tests
@@ -244,6 +244,13 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           PYTHONPATH: src
         run: .build_venv/bin/python -m unittest discover -s tests -v
+
+      - name: Cache verified macOS FFmpeg tools
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: tools/ffmpeg
+          # Includes source checksum, configure flags and validation code.
+          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1-${{ hashFiles('.github/workflows/build-platforms.yml') }}
 
       - name: Build macOS arm64 app
         shell: bash
@@ -270,9 +277,7 @@ jobs:
             local version_output=""
             local probe_output=""
             if [[ -x "$ffmpeg_path" && -x "$ffprobe_path" && -f "$license_path" ]] && grep -q "GNU LESSER GENERAL PUBLIC LICENSE" "$license_path"; then
-              version_output="$("$ffmpeg_path" -version 2>&1 || true)"
-              probe_output="$("$ffprobe_path" -version 2>&1 || true)"
-              if [[ "$version_output" != *"--enable-gpl"* && "$version_output" != *"--enable-nonfree"* && "$(file -b "$ffmpeg_path")" == *"arm64"* && "$probe_output" != *"--enable-gpl"* && "$probe_output" != *"--enable-nonfree"* && "$(file -b "$ffprobe_path")" == *"arm64"* ]]; then
+              if version_output="$("$ffmpeg_path" -version 2>&1)" && probe_output="$("$ffprobe_path" -version 2>&1)" && [[ "$version_output" == *"ffmpeg version $FFMPEG_VERSION"* && "$version_output" == *"--disable-autodetect"* && "$version_output" != *"--enable-gpl"* && "$version_output" != *"--enable-nonfree"* && "$(file -b "$ffmpeg_path")" == *"arm64"* && "$probe_output" != *"--enable-gpl"* && "$probe_output" != *"--enable-nonfree"* && "$(file -b "$ffprobe_path")" == *"arm64"* ]]; then
                 return
               fi
             fi
@@ -300,7 +305,7 @@ jobs:
             mkdir -p "$install_dir"
             (
               cd "$source_dir"
-              ./configure --prefix="$install_dir" --disable-debug --disable-doc --disable-ffplay --disable-gpl --disable-nonfree --enable-version3 --enable-static --disable-shared
+              ./configure --prefix="$install_dir" --disable-autodetect --disable-debug --disable-doc --disable-ffplay --disable-gpl --disable-nonfree --enable-version3 --enable-static --disable-shared
               make -j"$(sysctl -n hw.ncpu)"
               make install
             )
@@ -314,7 +319,7 @@ jobs:
           Source archive: ${FFMPEG_URL}
           Source archive SHA-256: ${FFMPEG_SOURCE_SHA256}
           Target architecture: macOS arm64
-          Configure: --disable-gpl --disable-nonfree --enable-version3 --enable-static --disable-shared
+          Configure: --disable-autodetect --disable-debug --disable-doc --disable-ffplay --disable-gpl --disable-nonfree --enable-version3 --enable-static --disable-shared
           License file: COPYING.LGPLv3 from the source archive
           EOF
           }
@@ -342,12 +347,12 @@ jobs:
           [[ "$(file -b "$APP_EXECUTABLE")" == *"arm64"* ]]
           PACKAGED_FFMPEG="$(find "$APP_PATH" -type f -name ffmpeg -perm -111 -print -quit)"
           test -n "$PACKAGED_FFMPEG"
-          FFMPEG_OUTPUT="$("$PACKAGED_FFMPEG" -version 2>&1 || true)"
+          FFMPEG_OUTPUT="$("$PACKAGED_FFMPEG" -version 2>&1)"
           [[ "$FFMPEG_OUTPUT" != *"--enable-gpl"* && "$FFMPEG_OUTPUT" != *"--enable-nonfree"* ]]
           [[ "$(file -b "$PACKAGED_FFMPEG")" == *"arm64"* ]]
           PACKAGED_FFPROBE="$(find "$APP_PATH" -type f -name ffprobe -perm -111 -print -quit)"
           test -n "$PACKAGED_FFPROBE"
-          FFPROBE_OUTPUT="$("$PACKAGED_FFPROBE" -version 2>&1 || true)"
+          FFPROBE_OUTPUT="$("$PACKAGED_FFPROBE" -version 2>&1)"
           [[ "$FFPROBE_OUTPUT" != *"--enable-gpl"* && "$FFPROBE_OUTPUT" != *"--enable-nonfree"* ]]
           [[ "$(file -b "$PACKAGED_FFPROBE")" == *"arm64"* ]]
           for notice in LICENSE ATTRIBUTION THIRD_PARTY_LICENSES.md; do

@@ -14,12 +14,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import sys
 import importlib
-import inspect
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
 
+from ..core.compat import call_supported as _call_supported
 from ..core.filesystem_legacy import stable_path
 
 from ..contracts import UploadContext
@@ -75,29 +75,6 @@ class V2IntegrationUnavailable(ImportError):
     """Raised when the GUI must use its dependency-free preview fallback."""
 
 
-def _call_supported(function: Callable[..., Any], args: Sequence[Any] = (), **kwargs: Any) -> Any:
-    """Call a collaborator while tolerating small test/legacy signatures."""
-
-    try:
-        signature = inspect.signature(function)
-    except (TypeError, ValueError):
-        return function(*args, **kwargs)
-
-    parameters = signature.parameters
-    positional = list(args)
-    accepted: dict[str, Any] = {}
-    accepts_any_keyword = any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
-    for name, value in kwargs.items():
-        parameter = parameters.get(name)
-        if parameter is not None and parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
-            positional.append(value)
-        elif parameter is not None or accepts_any_keyword:
-            accepted[name] = value
-    return function(*positional, **accepted)
-
 
 def _normalize_kind(kind: str) -> str:
     value = str(kind).strip().lower()
@@ -137,11 +114,11 @@ def _legacy_root_scope(legacy: Any, config: Any, kind: str, root: Path):
         owner = legacy
     previous = getattr(owner, attribute, _MISSING)
     try:
-        if previous is not _MISSING:
+        if previous is not _MISSING and previous != Path(root):
             setattr(owner, attribute, Path(root))
         yield
     finally:
-        if previous is not _MISSING:
+        if previous is not _MISSING and previous != Path(root):
             setattr(owner, attribute, previous)
 
 
@@ -641,6 +618,7 @@ class TDLibSender:
         context=None,
         caption_limit=None,
         timeout=None,
+        prepared_media=None,
     ) -> SendResult:
         del caption_limit, timeout
         if plan is None:
@@ -659,6 +637,7 @@ class TDLibSender:
                 items=legacy_items,
                 target=dict(target or {}),
                 on_submitted=on_submitted,
+                prepared_media=prepared_media,
             )
             if isinstance(value, SendResult):
                 result = value
@@ -721,6 +700,8 @@ def _premium_checker(strategy: Any, client: Any):
             return checker(item, context=context)
         return {"status": "READY"}
 
+    if strategy.kind == "image" and callable(getattr(strategy, "preflight_items", None)):
+        check.check_many = strategy.preflight_items
     return check
 
 
@@ -745,7 +726,8 @@ def run_v2_upload(kind: str, **kwargs) -> UploadRunResult:
     config = kwargs.get("config")
     if config is None:
         config = importlib.import_module("tdlib_media_uploader.config.loader")
-    frozen = snapshot_config(config, kind, kwargs.get("target"))
+    frozen = snapshot_config(config, kind, kwargs.get("target"), immutable=True,
+        overrides={_ROOT_NAMES[name]: Path(kwargs["source_root"]) for name in _ROOT_NAMES})
     legacy = _load_legacy(kind)
     modules = [legacy]
     for name in _LEGACY_MODULES.values():

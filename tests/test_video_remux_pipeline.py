@@ -8,7 +8,7 @@ Validates:
 4. Per-group lifecycle and bounded disk usage: immediate deletion upon confirmed upload.
 5. Resume preservation: validated MP4 preserved on upload failure; `.tmp.*` unlinked on cancellation.
 6. One-group-ahead pipeline: upload Group A concurrently prepares Group A+1, never Group A+2.
-7. Source change guard: stale prefetch detected and re-prepared when source modified while waiting.
+7. Source change guard: stale prefetch deferred for rescan when source modified while waiting.
 8. Policy compatibility: "remux" (default) vs "original" (rejects remux candidates).
 9. Mixed mode and Staging integration.
 10. Strict safety: source files never modified, no transcoding, no Document fallback.
@@ -144,11 +144,14 @@ class VideoRemuxMatrixAndProbeTest(unittest.TestCase):
         cases = [
             (".mp4", "h264", "aac"),
             (".mp4", "h264", "ac3"),
+            (".mp4", "hevc", "aac"),
+            (".mov", "h264", "aac"),
+            (".mov", "hevc", "aac"),
             (".mov", "hevc", "pcm_s16le"),
             (".m4v", "h264", "aac"),
         ]
         for ext, vcodec, acodec in cases:
-            with tempfile.TemporaryDirectory() as td:
+            with self.subTest(extension=ext, video=vcodec, audio=acodec), tempfile.TemporaryDirectory() as td:
                 p = Path(td) / f"video{ext}"
                 p.write_bytes(b"dummy")
                 mock_out = _mock_ffprobe_json(
@@ -162,6 +165,10 @@ class VideoRemuxMatrixAndProbeTest(unittest.TestCase):
                     info = probe_video(p)
 
                 self.assertEqual(info.compatibility, "native", f"Failed for native {ext} {vcodec} {acodec}")
+                self.assertEqual(info.video_codec, vcodec)
+                self.assertTrue(info.has_video_stream)
+                self.assertEqual((info.width, info.height), (1920, 1080))
+                self.assertAlmostEqual(info.duration, 12.0)
                 self.assertEqual(info.recommended_action, "upload")
                 self.assertTrue(determine_supports_streaming(info))
 
@@ -696,9 +703,12 @@ class PipelinedExecutionEngineTest(unittest.TestCase):
                 plan_b = make_album_plan("group_b", source_dir, (item_b,))
 
                 prepare_calls = []
+                prepared_b = threading.Event()
+                sent_plans = []
 
                 class MockStrategy:
                     kind = "video"
+                    validate_source_snapshots = True
 
                     def scan(self, source_root, **kwargs):
                         return ScanResult((item_a, item_b))
@@ -712,6 +722,8 @@ class PipelinedExecutionEngineTest(unittest.TestCase):
                         g_dir.mkdir(parents=True, exist_ok=True)
                         p_file = g_dir / f"{plan.key}.mp4"
                         p_file.write_bytes(b"prep")
+                        if plan.key == "group_b":
+                            prepared_b.set()
                         return [{
                             "@type": "inputMessageVideo",
                             "video": {"@type": "inputFileLocal", "path": str(p_file)},
@@ -719,8 +731,10 @@ class PipelinedExecutionEngineTest(unittest.TestCase):
 
                 class MockSender:
                     def send_contents(self, contents, target=None, plan=None, context=None):
+                        sent_plans.append(plan.key)
                         if plan.key == "group_a":
-                            time.sleep(0.05)
+                            if not prepared_b.wait(3):
+                                raise AssertionError("prefetch did not start")
                             # Modify source file b.mkv while Group A is sending!
                             item_b.path.write_bytes(b"modified_new_content_for_b")
                         return SendResult(BatchStatus.CONFIRMED, succeeded_ids=(100,))
@@ -740,11 +754,12 @@ class PipelinedExecutionEngineTest(unittest.TestCase):
                 )
 
                 result = engine.run(MockStrategy(), context=ctx)
-                self.assertEqual(result.status, "COMPLETED")
+                self.assertEqual(result.status, "PARTIAL")
+                self.assertEqual(sent_plans, ["group_a"])
 
-                # Group B was prepared once in background, detected as stale, and re-prepared!
-                self.assertEqual(prepare_calls.count("group_b"), 2,
-                                 "Group B should have been re-prepared due to source modification")
+                # A changed source must be rescanned before it can be sent.
+                self.assertEqual(prepare_calls.count("group_b"), 1,
+                                 "Group B must be deferred without reusing stale scan metadata")
 
 
 class MixedMediaStrategyIntegrationTest(unittest.TestCase):

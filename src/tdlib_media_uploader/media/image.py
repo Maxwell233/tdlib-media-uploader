@@ -11,11 +11,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 import importlib
-import inspect
 from pathlib import Path
 import threading
 from typing import Any, Callable
 
+from ..core.compat import call_supported as _call_supported
 from ..contracts import CancelToken, EventSink, UploadContext
 from ..core.filesystem import snapshot_file, stable_path
 from ..core.models import (
@@ -44,33 +44,6 @@ class _StrategyCancelled(RuntimeError):
 
     cancelled = True
 
-
-def _call_supported(
-    function: Callable[..., Any],
-    args: Sequence[Any] = (),
-    **kwargs: Any,
-) -> Any:
-    """Call legacy hooks while tolerating their historical small signatures."""
-
-    try:
-        signature = inspect.signature(function)
-    except (TypeError, ValueError):
-        return function(*args, **kwargs)
-
-    parameters = signature.parameters
-    positional = list(args)
-    accepted: dict[str, Any] = {}
-    accepts_any_keyword = any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
-    for name, value in kwargs.items():
-        parameter = parameters.get(name)
-        if parameter is not None and parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
-            positional.append(value)
-        elif parameter is not None or accepts_any_keyword:
-            accepted[name] = value
-    return function(*positional, **accepted)
 
 
 def _cancelled(token: CancelToken | None) -> bool:
@@ -194,6 +167,7 @@ class ImageStrategy:
     """Concrete V2 ``MediaStrategy`` backed by the V1.9 image module."""
 
     kind = "image"
+    validate_source_snapshots = True
 
     def __init__(
         self,
@@ -251,7 +225,7 @@ class ImageStrategy:
             previous_root = getattr(config, "IMAGE_DIR", _MISSING)
             previous_snapshots = getattr(self.legacy, "IMAGE_SCAN_SNAPSHOTS", _MISSING)
             try:
-                if previous_root is not _MISSING:
+                if previous_root is not _MISSING and previous_root != Path(source_root):
                     config.IMAGE_DIR = Path(source_root)
                 if previous_snapshots is not _MISSING:
                     working = dict(previous_snapshots or {})
@@ -263,7 +237,7 @@ class ImageStrategy:
                     self.legacy.IMAGE_SCAN_SNAPSHOTS = working
                 yield
             finally:
-                if previous_root is not _MISSING:
+                if previous_root is not _MISSING and previous_root != Path(source_root):
                     config.IMAGE_DIR = previous_root
                 if previous_snapshots is not _MISSING:
                     self.legacy.IMAGE_SCAN_SNAPSHOTS = previous_snapshots
@@ -678,6 +652,28 @@ class ImageStrategy:
                     errors=normalized.errors,
                 )
         return normalized
+
+    def preflight_items(self, items, *, context=None):
+        """Use one bounded legacy pool for an Album, preserving item order."""
+        items = tuple(items)
+        if not items:
+            return ()
+        token = context.cancel_token if context is not None else None
+        _check_cancel(token)
+        checker = getattr(self.legacy, "preflight_images", None)
+        if not callable(checker):
+            return tuple({"status": "READY"} for _ in items)
+        with self._legacy_scope(items[0].source_root, items):
+            skipped = _call_supported(checker, (tuple(item.path for item in items),),
+                ui=_StrategyUI(context.event_sink if context is not None else None),
+                cancel_event=_CancelEventBridge(token))
+        _check_cancel(token)
+        failures = {str(record["path"]): record for record in skipped or ()}
+        return tuple(
+            {"status": "DEFERRED" if self._category(failures[str(item.path)]) == "deferred" else "FAILED",
+             "reason": str(failures[str(item.path)].get("reason", "图片预检失败"))}
+            if str(item.path) in failures else {"status": "READY"}
+            for item in items)
 
     def preflight_item(
         self,

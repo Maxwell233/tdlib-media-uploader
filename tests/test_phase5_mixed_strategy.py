@@ -252,6 +252,20 @@ class MixedStrategyTest(unittest.TestCase):
         root, legacy, token, events = self._strategy()
         legacy.LAST_SCAN_ERRORS = []
         legacy.cfg.MIXED_CAPTION_INCLUDE_FILENAMES = False
+        folder = root / "旅行"
+        folder.mkdir(parents=True)
+        for name, size in (("01.jpg", 11), ("02.mp4", 22)):
+            (folder / name).write_bytes(b"x" * size)
+        original_scan = legacy.scan_mixed_groups
+        def scan_actual_files(cancel_event=None):
+            groups = original_scan(cancel_event=cancel_event)
+            for group in groups:
+                for item in group["items"]:
+                    stat = item["path"].stat()
+                    item["scan_size"] = stat.st_size
+                    item["scan_mtime_ns"] = stat.st_mtime_ns
+            return groups
+        legacy.scan_mixed_groups = scan_actual_files
         strategy = MixedMediaStrategy(legacy)
 
         class Sender:

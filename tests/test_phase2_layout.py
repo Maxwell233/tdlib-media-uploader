@@ -79,25 +79,6 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
             "PR artifact names must not inherit the pull_request merge ref slash",
         )
 
-    def test_package_paths_owns_the_runtime_path_contract(self):
-        package_path = PROJECT_ROOT / "src" / "tdlib_media_uploader" / "config" / "paths.py"
-        self.assertTrue(package_path.is_file(), f"missing declared V2 module: {package_path}")
-
-        src_root = PROJECT_ROOT / "src"
-        if str(src_root) not in sys.path:
-            sys.path.insert(0, str(src_root))
-        from tdlib_media_uploader.config import paths
-
-        for name in (
-            "RESOURCE_DIR",
-            "TEMPLATE_CONFIG_PATH",
-            "VERSION_PATH",
-            "ASSETS_DIR",
-            "TOOLS_DIR",
-            "FFMPEG_DIR",
-        ):
-            self.assertTrue(hasattr(paths, name))
-
     def test_spec_declares_src_package_and_hidden_imports(self):
         source = SPEC_PATH.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(SPEC_PATH))

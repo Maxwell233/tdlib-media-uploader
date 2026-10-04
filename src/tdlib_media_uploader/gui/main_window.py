@@ -252,6 +252,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"TDLib Media Uploader · V{APP_VERSION} · Maximum 2026")
         self.setMinimumSize(860, 560)
         self.resize(1240, 800)
+        self._cache_clear_worker = None
         self.worker: UploadWorker | None = None
         self.scanners: dict[str, ScanWorker] = {}
         self.active_kind = ""
@@ -260,6 +261,7 @@ class MainWindow(QMainWindow):
         self.auth_bridge = AuthBridge()
         self.auth_bridge.requested.connect(self._show_auth_dialog)
         self._build_ui()
+        self.settings_page.storage_panel.cancel_cleanup_requested.connect(self._cancel_cache_clear)
         self._refresh_pages()
 
     def _upload_page(self, kind: str):
@@ -388,6 +390,9 @@ class MainWindow(QMainWindow):
         self._scan(kind)
 
     def _scan(self, kind: str):
+        if getattr(self, "_cache_clear_worker", None) is not None:
+            self.statusBar().showMessage("请等待缓存清理结束，或先取消清理")
+            return False
         kind = _require_kind(kind)
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.warning(self, "任务运行中", "当前已有上传任务，请先安全停止后再扫描。")
@@ -489,6 +494,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("目录配置已保存")
 
     def _start_upload(self, kind: str):
+        if getattr(self, "_cache_clear_worker", None) is not None:
+            self.statusBar().showMessage("请等待缓存清理结束，或先取消清理")
+            return False
         kind = _require_kind(kind)
         if any(scanner.isRunning() for scanner in self.scanners.values()):
             QMessageBox.information(self, "正在扫描", "请等待目录扫描完成后再上传。")
@@ -667,6 +675,9 @@ class MainWindow(QMainWindow):
     def _reconcile_inflight(self, record: object, sent: bool):
         """Apply a confirmed manual decision without querying Telegram."""
 
+        if getattr(self, "_cache_clear_worker", None) is not None:
+            self.statusBar().showMessage("请等待缓存清理结束")
+            return
         if not isinstance(record, dict):
             return
         if (
@@ -714,6 +725,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("未确认上传记录已更新")
 
     def _cache_operation_allowed(self) -> bool:
+        from ..telegram.tdlib_common import TDJsonClient
+        if TDJsonClient.unclosed_instance() is not None:
+            self.statusBar().showMessage("请等待 Telegram 任务和数据库关闭后再清理缓存")
+            return False
+        if getattr(self, "_cache_clear_worker", None) is not None:
+            self.statusBar().showMessage("请等待缓存清理结束，或先取消清理")
+            return False
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.warning(self, "任务运行中", "上传任务运行时不能清理缓存，请先安全停止任务。")
             return False
@@ -724,13 +742,41 @@ class MainWindow(QMainWindow):
         return True
 
     def _finish_cache_clear(self, keys: tuple[str, ...], *, reset_scan: bool):
-        removed, errors = _clear_cache(keys)
+        from .workers import CacheClearWorker
+        worker = CacheClearWorker(keys, current_cache_targets(), self)
+        self._cache_clear_worker = worker
+        self._cache_reset_scan = reset_scan
+        panel = self.settings_page.storage_panel
+        panel.set_cleaning(True)
+        worker.progress.connect(panel.cache_status.setText)
+        worker.finished.connect(self._cache_clear_done)
+        worker.start()
+
+    def _cancel_cache_clear(self):
+        worker = self._cache_clear_worker
+        if worker is not None:
+            worker.request_stop()
+
+    def _cache_clear_done(self):
+        worker = self._cache_clear_worker
+        if worker is None:
+            return
+        removed, errors = worker.result
+        cancelled = worker.cancel_event.is_set()
+        reset_scan = self._cache_reset_scan
+        self._cache_clear_worker = None
+        worker.deleteLater()
+        self.settings_page.storage_panel.set_cleaning(False)
         self.settings_page.refresh()
         if reset_scan:
             for upload_page in self.upload_pages.values():
                 upload_page.clear_scan_result()
             self.home.clear_scan()
             self.history_page.reload_records()
+        if cancelled:
+            self.statusBar().showMessage("清理已取消；已删除的缓存不会恢复")
+            self.settings_page.storage_panel.cache_status.setText("清理已取消")
+            return
         if errors:
             detail = "\n".join(errors)
             QMessageBox.warning(self, "缓存清理未完成", f"部分项目无法删除：\n{detail}")
@@ -822,6 +868,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("扫描与外部工具设置已保存")
 
     def _can_change_configuration(self):
+        if getattr(self, "_cache_clear_worker", None) is not None:
+            self.statusBar().showMessage("请等待缓存清理结束，或先取消清理")
+            return False
         if (self.worker is not None and self.worker.isRunning()) or any(scanner.isRunning() for scanner in self.scanners.values()):
             QMessageBox.information(self, "任务进行中", "请等待扫描完成或停止上传后再修改配置。")
             return False
@@ -844,6 +893,13 @@ class MainWindow(QMainWindow):
                 self.worker.request_stop()
 
     def closeEvent(self, event):
+        cleanup = getattr(self, "_cache_clear_worker", None)
+        if cleanup is not None and cleanup.isRunning():
+            cleanup.request_stop()
+            if not cleanup.wait(1000):
+                self.statusBar().showMessage("正在停止缓存清理，请稍后再关闭窗口")
+                event.ignore()
+                return
         if self.worker is not None and self.worker.isRunning():
             answer = QMessageBox.question(
                 self,
@@ -859,6 +915,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "仍在运行", "TDLib 尚未结束，请稍后再关闭窗口。")
                 event.ignore()
                 return
+        from ..telegram.tdlib_common import TDJsonClient
+        closing_client = TDJsonClient.unclosed_instance()
+        if closing_client is not None:
+            closing_client._send_close_now()
+            QMessageBox.warning(self, "正在关闭", "Telegram 数据库尚未关闭，请稍后再退出。")
+            event.ignore()
+            return
         for scanner in list(self.scanners.values()):
             if scanner.isRunning():
                 if hasattr(scanner, "request_stop"):

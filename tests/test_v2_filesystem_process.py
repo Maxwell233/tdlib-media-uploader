@@ -356,7 +356,7 @@ class ProcessRunnerExtractionTest(unittest.TestCase):
         result = self._run(
             "import sys; sys.stdout.write(sys.stdin.read())",
             input="中文输入",
-            max_output_bytes=2,
+            max_output_bytes=6,
         )
         self.assertEqual(result.stdout, "中文")
 

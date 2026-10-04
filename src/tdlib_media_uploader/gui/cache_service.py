@@ -109,9 +109,13 @@ def cache_status_text(cancel_event=None) -> str:
     return "当前应用缓存：" + (" · ".join(rows) if rows else "无")
 
 
-def remove_cache_path(path: Path) -> None:
+def remove_cache_path(path: Path, *, cancel_event=None, progress=None) -> None:
     """Clear a known cache path while keeping its directory structure."""
     path = Path(path)
+    if cancel_event is not None and cancel_event.is_set():
+        return
+    if progress is not None:
+        progress(str(path))
     if is_link_or_junction(path):
         if path.is_dir() and not path.is_symlink():
             path.rmdir()
@@ -125,6 +129,8 @@ def remove_cache_path(path: Path) -> None:
         except OSError:
             raise
         for entry in entries:
+            if cancel_event is not None and cancel_event.is_set():
+                return
             child = Path(entry.path)
             try:
                 junction = getattr(entry, "is_junction", None)
@@ -136,7 +142,9 @@ def remove_cache_path(path: Path) -> None:
                 elif entry.is_file(follow_symlinks=False):
                     child.unlink(missing_ok=True)
                 elif entry.is_dir(follow_symlinks=False):
-                    remove_cache_path(child)
+                    remove_cache_path(child, cancel_event=cancel_event, progress=progress)
+                    if cancel_event is not None and cancel_event.is_set():
+                        return
                     child.rmdir()
             except OSError:
                 raise
@@ -145,12 +153,15 @@ def remove_cache_path(path: Path) -> None:
 def clear_cache(
     keys: tuple[str, ...],
     targets: dict[str, tuple[str, Path]] | None = None,
+    *, cancel_event=None, progress=None,
 ) -> tuple[list[str], list[str]]:
     """Clear specified cache components, returning lists of cleared labels and errors."""
     removed = []
     errors = []
     active_targets = targets if targets is not None else current_cache_targets()
     for key in keys:
+        if cancel_event is not None and cancel_event.is_set():
+            break
         if key not in active_targets:
             continue
         label, path = active_targets[key]
@@ -159,9 +170,11 @@ def clear_cache(
         try:
             if key == "staging":
                 from ..upload.staging import cleanup_staging
-                cleanup_staging(path, remove_empty=True)
+                cleanup_staging(path, remove_empty=True, cancel_event=cancel_event, progress=progress)
             else:
-                remove_cache_path(path)
+                remove_cache_path(path, cancel_event=cancel_event, progress=progress)
+            if cancel_event is not None and cancel_event.is_set():
+                break
             removed.append(label)
         except OSError as exc:
             errors.append(f"{label}：{exc}")

@@ -428,7 +428,7 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
                             else f"当前编码不在直接 Telegram Video 支持范围内，已跳过：{path.name}"
                         )
             else:
-                img_info = image_core.probe_image(path)
+                img_info = image_core.cached_image_probe(path)
                 if img_info.animated:
                     raise RuntimeError(f"检测到动画图片，不会自动转换为静态 Photo：{path.name}")
                 extreme_aspect_policy = getattr(cfg, "IMAGE_EXTREME_ASPECT_POLICY", "pad")

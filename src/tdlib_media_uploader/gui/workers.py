@@ -108,6 +108,36 @@ class ScanWorker(QThread):
             self.failed.emit(f"扫描失败：{type(exc).__name__}: {exc}")
 
 
+class CacheClearWorker(QThread):
+    """Own cache deletion until finished; emit progress at a bounded rate."""
+    progress = Signal(str)
+
+    def __init__(self, keys, targets, parent=None):
+        super().__init__(parent)
+        self.keys = tuple(keys)
+        self.targets = dict(targets)
+        self.cancel_event = threading.Event()
+        self.result = ([], [])
+
+    def request_stop(self):
+        self.cancel_event.set()
+
+    def run(self):
+        import time
+        from .cache_service import clear_cache
+        last_update = 0.0
+        def progress(path):
+            nonlocal last_update
+            now = time.monotonic()
+            if now - last_update >= 0.1:
+                last_update = now
+                self.progress.emit(f"正在清理：{path}")
+        try:
+            self.result = clear_cache(self.keys, self.targets, cancel_event=self.cancel_event, progress=progress)
+        except Exception as exc:
+            self.result = ([], [str(exc)])
+
+
 class CacheStatsWorker(QThread):
     """Calculate cache usage statistics in background without blocking Qt UI."""
 
