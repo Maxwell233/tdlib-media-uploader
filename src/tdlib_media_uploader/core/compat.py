@@ -24,4 +24,3 @@ def call_supported(function: Callable[..., Any], args: Sequence[Any] = (), **kwa
         elif parameter is not None or var_keyword:
             accepted[name] = value
     return function(*positional, **accepted)
-

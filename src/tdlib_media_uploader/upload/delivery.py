@@ -107,5 +107,3 @@ def _normalize_send_result(value: Any, expected_count: int) -> _ObservedSend:
     if status is BatchStatus.CONFIRMED and not succeeded:
         succeeded = message_ids
     return _ObservedSend(status, message_ids, succeeded, failed, pending, error)
-
-
