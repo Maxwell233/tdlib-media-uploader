@@ -8,7 +8,8 @@ retain thin wrappers for their existing progress APIs.
 from __future__ import annotations
 
 import json
-import os
+import sqlite3
+from contextlib import closing
 import threading
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -77,11 +78,10 @@ class UploadState:
         )
         digest = sha256(identity.encode("utf-8")).hexdigest()[:24]
         prefix = filename_prefix or f"{self.kind}_upload_state"
-        self.path = self.state_dir / f"{prefix}_{digest}.json"
+        self.legacy_path = self.state_dir / f"{prefix}_{digest}.json"
+        self.path = self.legacy_path.with_suffix(".sqlite3")
         self.lock = threading.RLock()
-        if reset and self.path.exists():
-            self.path.unlink()
-        self.data = self._load()
+        self.data = self._load(reset=reset)
 
     def _new(self):
         return {
@@ -92,31 +92,42 @@ class UploadState:
             "completed": {},
         }
 
-    def _load(self):
-        if not self.path.exists():
-            data = self._new()
-            self._save(data)
-            return data
+    def _load(self, *, reset=False):
+        # Short-lived connections keep the checkpoint self-contained for backups.
+        # The original JSON remains untouched as a migration backup. Once the
+        # database is initialized, reset never reimports that backup.
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError) as exc:
+            with closing(sqlite3.connect(self.path)) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                connection.execute("CREATE TABLE IF NOT EXISTS completed (signature TEXT PRIMARY KEY, record TEXT NOT NULL)")
+                row = connection.execute("SELECT value FROM metadata WHERE key='state'").fetchone()
+                if row is None:
+                    data = self._new()
+                    if self.legacy_path.exists() and not reset:
+                        data = json.loads(self.legacy_path.read_text(encoding="utf-8"))
+                        if not isinstance(data, dict) or data.get("version") != self.VERSION or not isinstance(data.get("completed", {}), dict):
+                            raise ValueError("旧断点文件格式不兼容")
+                    records = data.pop("completed", {})
+                    connection.executemany("INSERT INTO completed VALUES (?, ?)",
+                        ((key, json.dumps(value, ensure_ascii=False)) for key, value in records.items()))
+                    connection.execute("INSERT INTO metadata VALUES ('state', ?)", (json.dumps(data, ensure_ascii=False),))
+                else:
+                    data = json.loads(row[0])
+                    if data.get("version") != self.VERSION:
+                        raise ValueError("断点数据库版本不兼容")
+                if reset:
+                    connection.execute("DELETE FROM completed")
+                data["completed"] = {key: json.loads(value) for key, value in connection.execute("SELECT signature, record FROM completed")}
+                return data
+        except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
             raise RuntimeError(f"断点文件读取失败：{self.path}\n{exc}") from exc
-        if not isinstance(data, dict) or data.get("version") != self.VERSION:
-            raise RuntimeError(f"V1.9 断点文件版本不兼容：{self.path}")
-        data.setdefault("completed", {})
-        return data
 
-    def _save(self, data):
-        data["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        try:
-            with temporary.open("w", encoding="utf-8") as stream:
-                json.dump(data, stream, ensure_ascii=False, indent=2)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
-        finally:
-            temporary.unlink(missing_ok=True)
+    def _save(self, records):
+        """Commit only the confirmed Album; publish to memory after commit."""
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.executemany("INSERT OR REPLACE INTO completed VALUES (?, ?)",
+                ((key, json.dumps(value, ensure_ascii=False)) for key, value in records.items()))
 
     def signature(self, item_or_path, snapshot=None) -> str:
         item = item_or_path if isinstance(item_or_path, dict) else None
@@ -137,6 +148,7 @@ class UploadState:
         ids = list(message_ids or [])
         with self.lock:
             sent_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            records = {}
             for index, raw_item in enumerate(values):
                 item = raw_item if isinstance(raw_item, dict) else {"path": raw_item}
                 path = Path(item["path"])
@@ -159,8 +171,9 @@ class UploadState:
                 for key in ("media_kind", "group_name", "month_key", "date_tag"):
                     if isinstance(item, dict) and item.get(key) is not None:
                         record[key] = item[key]
-                self.data["completed"][signature] = record
-            self._save(self.data)
+                records[signature] = record
+            self._save(records)
+            self.data["completed"].update(records)
 
 
 __all__ = ["UploadState"]

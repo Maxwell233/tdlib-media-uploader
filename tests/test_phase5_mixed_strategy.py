@@ -252,6 +252,13 @@ class MixedStrategyTest(unittest.TestCase):
         root, legacy, token, events = self._strategy()
         legacy.LAST_SCAN_ERRORS = []
         legacy.cfg.MIXED_CAPTION_INCLUDE_FILENAMES = False
+        import os
+        folder = root / "旅行"
+        folder.mkdir(parents=True)
+        for name, size, mtime in (("01.jpg", 11, 101), ("02.mp4", 22, 202)):
+            path = folder / name
+            path.write_bytes(b"x" * size)
+            os.utime(path, ns=(mtime, mtime))
         strategy = MixedMediaStrategy(legacy)
 
         class Sender:

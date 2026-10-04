@@ -38,6 +38,7 @@ class ImageMediaInfo(Mapping[str, Any]):
     needs_compression: bool
     needs_aspect_fix: bool
     telegram_compatible: bool
+    source_snapshot: tuple[int, int] | None = None
 
     @property
     def needs_normalization(self) -> bool:
@@ -131,6 +132,7 @@ def probe_image(path: Path | str) -> ImageMediaInfo:
     telegram_compatible = (
         fmt in ("JPEG", "PNG")
         and not is_animated
+        and not has_alpha
         and not needs_resize
         and not needs_compression
         and not needs_aspect_fix
@@ -138,6 +140,8 @@ def probe_image(path: Path | str) -> ImageMediaInfo:
         and not exif_rotated
     )
 
+    from ..core.source_snapshot import validate_snapshots
+    validate_snapshots(((file_path, stat.st_size, stat.st_mtime_ns),))
     return ImageMediaInfo(
         format=fmt,
         width=width,
@@ -151,4 +155,5 @@ def probe_image(path: Path | str) -> ImageMediaInfo:
         needs_compression=needs_compression,
         needs_aspect_fix=needs_aspect_fix,
         telegram_compatible=telegram_compatible,
+        source_snapshot=(stat.st_size, stat.st_mtime_ns),
     )

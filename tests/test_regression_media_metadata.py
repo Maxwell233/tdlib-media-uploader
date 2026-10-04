@@ -282,7 +282,7 @@ class ImprovementsTest(unittest.TestCase):
                 self.assertEqual([len(plan["items"]) for plan in plans], [2])
                 state = core.UploadState()
                 state.mark_album_completed(items, [1, 2])
-                saved = json.loads(state.path.read_text(encoding="utf-8"))
+                saved = core.UploadState().data
             self.assertTrue(all(record["capture_time"] is None for record in saved["completed"].values()))
 
 

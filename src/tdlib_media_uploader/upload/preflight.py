@@ -178,6 +178,19 @@ def preflight_items(
     reasons: list[tuple[str, str]] = []
     total = len(original)
 
+    batch = None
+    batch_checker = getattr(checker, "check_many", None)
+    if callable(batch_checker) and original:
+        try:
+            _raise_if_cancelled(cancel_token)
+            batch = tuple(batch_checker(original, context=context))
+            if len(batch) != total:
+                raise ValueError("批量预检结果数量与输入不一致")
+        except BaseException as error:
+            if _looks_cancelled(error) or _is_cancelled(cancel_token):
+                return PreflightResult(original, cancelled=True)
+            batch = tuple(PreflightDecision.failed(str(error)) for _ in original)
+
     for completed, item in enumerate(original, start=1):
         try:
             _raise_if_cancelled(cancel_token)
@@ -194,7 +207,7 @@ def preflight_items(
             raise
 
         try:
-            decision = _normalize_decision(_call_checker(checker, item, context))
+            decision = _normalize_decision(batch[completed - 1] if batch is not None else _call_checker(checker, item, context))
         except BaseException as error:
             if _looks_cancelled(error) or _is_cancelled(cancel_token):
                 return PreflightResult(

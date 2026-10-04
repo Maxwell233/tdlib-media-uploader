@@ -546,33 +546,9 @@ def natural_compare(left, right) -> int:
     return -1 if len(a_parts) < len(b_parts) else 1
 
 
-def _natural_sort_key(value: object) -> tuple:
-    parts = []
-    for part in _NATURAL_PART_RE.split(str(value)):
-        if not part:
-            continue
-        if part.isdigit():
-            # Original code: digits have type 1, strings have type 0
-            parts.append((1, int(part), len(part), part))
-        else:
-            parts.append((0, part.casefold(), 0, part))
-    return tuple(parts)
-
-
 def natural_sort(values, *, key=None) -> list:
-    """Return a naturally ordered copy of *values*.
-
-    ``key`` follows ``sorted`` and is evaluated once per value, which matters
-    for network paths where repeatedly formatting a path is relatively costly.
-    """
-
-    key_func = key or (lambda value: value)
-    decorated = []
-    for index, value in enumerate(values):
-        key_val = key_func(value)
-        decorated.append((_natural_sort_key(key_val), str(key_val), index, value))
-
-    return [value for _, _, _, value in sorted(decorated)]
+    from .sorting import natural_sort as sort
+    return sort(values, key=key)
 
 
 def _relative_components(path, root=None) -> tuple[str, ...]:
@@ -613,57 +589,10 @@ def relative_path_compare(left, right, root=None) -> int:
     return (left_raw > right_raw) - (left_raw < right_raw)
 
 
-def media_path_sort(
-    values,
-    root,
-    *,
-    mode: str = "name",
-    path_key=None,
-    mtime_key=None,
-) -> list:
-    """Sort media values with one shared relative-path/mtime implementation.
-
-    ``mode="name"`` compares every relative directory and filename component
-    with :func:`natural_compare`.  ``mode="mtime"`` keeps the historical
-    oldest-first order and uses the exact same relative-path comparator for
-    ties.  ``path_key`` and ``mtime_key`` support dict-backed mixed items.
-    """
-
-    normalized_mode = str(mode).strip().lower()
-    # ``path`` is the historical image configuration value.  Treat it as
-    # the shared name mode so older callers reach exactly the same comparator.
-    if normalized_mode == "path":
-        normalized_mode = "name"
-    if normalized_mode not in {"name", "mtime"}:
-        raise ValueError(f"不支持的媒体排序方式：{mode}")
-    path_key = path_key or (lambda value: value)
-    decorated = []
-    for index, value in enumerate(values):
-        path = path_key(value)
-        mtime = None
-        if normalized_mode == "mtime":
-            try:
-                raw_mtime = mtime_key(value) if mtime_key is not None else file_mtime(path)
-                # Keep nanosecond integer snapshots exact. Converting a large
-                # ``st_mtime_ns`` to float can collapse distinct files into a
-                # false tie before the path comparator is reached.
-                mtime = (
-                    raw_mtime
-                    if isinstance(raw_mtime, (int, float))
-                    else float(raw_mtime)
-                )
-            except (OSError, TypeError, ValueError):
-                mtime = 0.0
-
-        rel_parts = tuple(_natural_sort_key(c) for c in _relative_components(path, root))
-        raw_str = "/".join(_relative_components(path, root))
-
-        decorated.append((mtime, rel_parts, raw_str, index, value))
-
-    if normalized_mode == "mtime":
-        return [value for _, _, _, _, value in sorted(decorated, key=lambda x: (x[0], x[1], x[2], x[3]))]
-    else:
-        return [value for _, _, _, _, value in sorted(decorated, key=lambda x: (x[1], x[2], x[3]))]
+def media_path_sort(values, root, *, mode="name", path_key=None, mtime_key=None) -> list:
+    from .sorting import media_path_sort as sort
+    return sort(values, root, mode=mode, path_key=path_key,
+                mtime_key=mtime_key or (lambda value: file_mtime((path_key or (lambda x: x))(value))))
 
 
 def retry_with_backoff(
@@ -793,54 +722,11 @@ def is_transient_fs_error(exc: BaseException) -> bool:
     return True
 
 
-def ordered_bounded_map(executor, items, worker, max_workers: int, *, max_ready_buffer=None):
-    """Yield worker results in input order while keeping workers busy.
-
-    ``pending`` is the set of running futures and ``ready`` is a bounded
-    reorder buffer.  They have separate limits: a slow first item therefore
-    cannot prevent later items from being submitted, while a producer still
-    cannot allocate one future per file in a large directory.
-    """
-
-    from concurrent.futures import FIRST_COMPLETED, wait
-
-    iterator = iter(items)
-    pending = {}
-    ready = {}
-    limit = max(1, int(max_workers))
-    next_output = 0
-    buffer_limit = max(1, int(max_ready_buffer or (limit * 4)))
-
-    def submit_one(index):
-        try:
-            item = next(iterator)
-        except StopIteration:
-            return False
-        pending[executor.submit(worker, item)] = index
-        return True
-
-    for index in range(limit):
-        if not submit_one(index):
-            break
-    next_index = len(pending)
-    while pending:
-        done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
-        for future in done:
-            index = pending.pop(future)
-            ready[index] = future
-        while next_output in ready:
-            future = ready.pop(next_output)
-            # Calling result here preserves input-order exception semantics.
-            yield future.result()
-            next_output += 1
-        # Keep running futures at the worker limit whenever the reorder buffer
-        # has room.  This is the key difference from the old
-        # ``pending + ready <= limit`` rule, which left workers idle behind a
-        # single slow head item.
-        while len(pending) < limit and len(ready) < buffer_limit:
-            if not submit_one(next_index):
-                break
-            next_index += 1
+def ordered_bounded_map(executor, items, worker, max_workers: int, *, max_ready_buffer=None, cancel_event=None):
+    """Compatibility route to the shared bounded, cancellable scheduler."""
+    from .concurrency import ordered_bounded_map as schedule
+    return schedule(executor, items, worker, max_workers,
+        max_ready_buffer=max_ready_buffer, cancel_event=cancel_event)
 
 
 @dataclass

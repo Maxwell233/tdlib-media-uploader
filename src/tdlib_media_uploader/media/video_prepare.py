@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from typing import Any, Sequence
 import uuid
 
+from ..core.source_snapshot import capture_snapshot, validate_snapshots
 from ..config import loader as cfg
 from ..config.paths import THUMBNAIL_CACHE_DIR, VIDEO_PROCESSED_CACHE_DIR
 from ..core.filesystem import stable_path
@@ -303,6 +304,7 @@ def prepare_video_for_telegram(
     max_bytes: int | None = None,
     is_premium: bool | None = None,
     info: Any | None = None,
+    config=None,
 ) -> PreparedVideo:
     """Prepare a video file for Telegram upload.
 
@@ -318,13 +320,20 @@ def prepare_video_for_telegram(
     - Validates processed output metadata and size against effective limit.
     Source files are never modified.
     """
+    settings = cfg if config is None else config
     w_path = Path(working_path)
     if not w_path.is_file():
         raise RuntimeError(f"视频文件不存在：{w_path}")
 
     orig_path = Path(original_path) if original_path is not None else w_path
+    working_snapshot = capture_snapshot(w_path)
+    original_snapshot = capture_snapshot(orig_path) if orig_path.is_file() else working_snapshot
+    source_snapshots = (working_snapshot, original_snapshot)
     if info is None:
         info = probe_video(w_path, cancel_event=cancel_event)
+    probed_snapshot = getattr(info, "source_snapshot", None)
+    if probed_snapshot is not None:
+        validate_snapshots(((w_path, *probed_snapshot),))
 
     compat = getattr(info, "compatibility", None)
     if compat is None and isinstance(info, Mapping):
@@ -337,11 +346,11 @@ def prepare_video_for_telegram(
     if max_bytes is not None:
         effective_max = max_bytes
     elif is_premium is True:
-        effective_max = getattr(cfg, "VIDEO_PREMIUM_MAX_BYTES", 8000 * 524_288)
+        effective_max = getattr(settings, "VIDEO_PREMIUM_MAX_BYTES", 8000 * 524_288)
     elif is_premium is False:
-        effective_max = getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)
+        effective_max = getattr(settings, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)
     else:
-        effective_max = getattr(cfg, "VIDEO_MAX_BYTES", 4000 * 524_288)
+        effective_max = getattr(settings, "VIDEO_MAX_BYTES", 4000 * 524_288)
 
     # 1. Native / legacy format (MP4, MOV, M4V)
     if compat in {"native", "legacy"}:
@@ -377,11 +386,8 @@ def prepare_video_for_telegram(
                     **thumb_kwargs,
                 )
 
-        if not orig_path.is_file():
-            native_st = w_path.stat()
-        else:
-            native_st = orig_path.stat()
-        source_sig = get_video_process_cache_key(orig_path, native_st.st_size, native_st.st_mtime_ns)
+        validate_snapshots(source_snapshots)
+        source_sig = get_video_process_cache_key(orig_path, original_snapshot[1], original_snapshot[2])
 
         return PreparedVideo(
             source_path=orig_path,
@@ -400,19 +406,16 @@ def prepare_video_for_telegram(
     # 2. Remux candidate (MKV, AVI, TS, MTS, M2TS)
     if info.compatibility == "remux":
         policy = str(
-            getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", getattr(cfg, "VIDEO_TRANSCODE_POLICY", "remux"))
+            getattr(settings, "VIDEO_COMPATIBILITY_POLICY", getattr(settings, "VIDEO_TRANSCODE_POLICY", "remux"))
         ).strip().lower()
         if policy == "original":
             raise RuntimeError(
                 f"视频格式为 {info.container.upper()}，当前策略配置为 original（仅允许原生格式），已跳过：{orig_path.name}"
             )
 
-        if not orig_path.is_file():
-            st = w_path.stat()
-        else:
-            st = orig_path.stat()
-
-        cache_key = get_video_process_cache_key(orig_path, st.st_size, st.st_mtime_ns)
+        validate_snapshots(source_snapshots)
+        source_size, source_mtime = original_snapshot[1:]
+        cache_key = get_video_process_cache_key(orig_path, source_size, source_mtime)
         safe_group = safe_group_key(group_key)
         group_dir = VIDEO_PROCESSED_CACHE_DIR / safe_group
         group_dir.mkdir(parents=True, exist_ok=True)
@@ -437,8 +440,8 @@ def prepare_video_for_telegram(
             if (
                 entry is not None
                 and entry.get("source_path") == stable_path(orig_path)
-                and entry.get("size") == st.st_size
-                and entry.get("mtime_ns") == st.st_mtime_ns
+                and entry.get("size") == source_size
+                and entry.get("mtime_ns") == source_mtime
                 and entry.get("policy") == "remux-v2"
             ):
                 try:
@@ -454,6 +457,7 @@ def prepare_video_for_telegram(
             final_mp4.unlink(missing_ok=True)
             processed_path = remux_video_lossless(w_path, final_mp4, cancel_event=cancel_event)
             processed_info = probe_video(processed_path, cancel_event=cancel_event)
+            validate_snapshots(source_snapshots)
             outputs = manifest.setdefault("outputs", {})
             tf_fold = target_filename.casefold()
             stale_keys = [
@@ -464,8 +468,8 @@ def prepare_video_for_telegram(
                 del outputs[sk]
             outputs[target_filename] = {
                 "source_path": stable_path(orig_path),
-                "size": st.st_size,
-                "mtime_ns": st.st_mtime_ns,
+                "size": source_size,
+                "mtime_ns": source_mtime,
                 "policy": "remux-v2",
             }
             _save_group_manifest(group_dir, manifest)
@@ -498,6 +502,7 @@ def prepare_video_for_telegram(
                     **thumb_kwargs,
                 )
 
+        validate_snapshots(source_snapshots)
         return PreparedVideo(
             source_path=orig_path,
             upload_path=processed_path,

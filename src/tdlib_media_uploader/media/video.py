@@ -15,11 +15,11 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 import importlib
-import inspect
 from pathlib import Path
 import threading
 from typing import Any
 
+from ..core.compat import call_supported as _call_supported
 from ..contracts import CancelToken, EventSink, UploadContext
 from ..core.filesystem import snapshot_file, stable_path
 from ..core.models import (
@@ -113,29 +113,6 @@ class _StrategyUI:
         return None
 
 
-def _call_supported(function: Callable[..., Any], args: Sequence[Any] = (), **kwargs: Any) -> Any:
-    """Call a legacy hook while tolerating its historical small signatures."""
-
-    try:
-        signature = inspect.signature(function)
-    except (TypeError, ValueError):
-        return function(*args, **kwargs)
-
-    parameters = signature.parameters
-    positional = list(args)
-    accepted: dict[str, Any] = {}
-    var_keyword = any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
-    for name, value in kwargs.items():
-        parameter = parameters.get(name)
-        if parameter is not None and parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
-            positional.append(value)
-        elif parameter is not None or var_keyword:
-            accepted[name] = value
-    return function(*positional, **accepted)
-
 
 def _token_cancelled(token: CancelToken | None) -> bool:
     if token is None:
@@ -212,6 +189,7 @@ class VideoStrategy:
     """
 
     kind = "video"
+    validate_source_snapshots = True
 
     # The legacy module reads ``cfg.VIDEO_DIR`` for several helpers even
     # though the V2 contract passes source_root explicitly.  The GUI runs one
@@ -279,7 +257,7 @@ class VideoStrategy:
             )
             previous_snapshots = getattr(self.legacy, "LAST_SCAN_SNAPSHOTS", _MISSING)
             try:
-                if attribute_owner is not None:
+                if attribute_owner is not None and original != Path(source_root):
                     setattr(attribute_owner, "VIDEO_DIR", Path(source_root))
                 if previous_snapshots is not _MISSING:
                     working = dict(previous_snapshots or {})
@@ -291,7 +269,7 @@ class VideoStrategy:
                     self.legacy.LAST_SCAN_SNAPSHOTS = working
                 yield
             finally:
-                if attribute_owner is not None and original is not _MISSING:
+                if attribute_owner is not None and original is not _MISSING and original != Path(source_root):
                     setattr(attribute_owner, "VIDEO_DIR", original)
                 if previous_snapshots is not _MISSING:
                     self.legacy.LAST_SCAN_SNAPSHOTS = previous_snapshots

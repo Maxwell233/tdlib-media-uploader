@@ -182,7 +182,8 @@ def media_path_sort(
         mtime = None
         if normalized_mode == "mtime":
             try:
-                mtime = mtime_key(value) if mtime_key is not None else _default_mtime(path)
+                raw = mtime_key(value) if mtime_key is not None else _default_mtime(path)
+                mtime = raw if isinstance(raw, (int, float)) else float(raw)
             except (OSError, TypeError, ValueError):
                 mtime = 0
 

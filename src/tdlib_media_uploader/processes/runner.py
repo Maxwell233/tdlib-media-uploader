@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import locale
 import os
 import signal
 import subprocess
@@ -35,15 +36,13 @@ def run_cancellable_process(
 ):
     """Run *command* while draining pipes and observing cancellation.
 
-    When neither cancellation mechanism is supplied this delegates directly
-    to ``subprocess.run`` so existing callers can retain its exact behavior.
-    When cancellation is enabled, one daemon worker owns ``communicate`` for
-    the complete child lifetime.  That continuously drains stdout/stderr and
-    avoids the classic deadlock caused by polling a child while its pipe is
-    full.
+    Without an output limit or cancellation this delegates to subprocess.run.
+    Otherwise one worker owns communication for the complete child lifetime.
+    Limited captures drain binary pipes concurrently into bounded buffers;
+    unlimited captures use communicate. Both paths avoid full-pipe deadlocks.
     """
 
-    if cancel_event is None and cancel_token is None:
+    if cancel_event is None and cancel_token is None and max_output_bytes is None:
         return subprocess.run(command, timeout=timeout, **kwargs)
     if is_cancelled(cancel_token, cancel_event):
         raise ProcessCancelled("外部进程已取消")
@@ -67,6 +66,20 @@ def run_cancellable_process(
     process_group_enabled = os.name != "nt" and kwargs.get("start_new_session", True)
     if os.name != "nt":
         kwargs.setdefault("start_new_session", True)
+    output_encoding = None
+    output_errors = None
+    if max_output_bytes is not None:
+        max_output_bytes = max(0, int(max_output_bytes))
+        text_mode = kwargs.pop("text", None)
+        universal = kwargs.pop("universal_newlines", None)
+        if text_mode is not None and universal is not None and bool(text_mode) != bool(universal):
+            raise subprocess.SubprocessError("text and universal_newlines disagree")
+        encoding = kwargs.pop("encoding", None)
+        output_errors = kwargs.pop("errors", None)
+        if text_mode or universal or encoding or output_errors:
+            output_encoding = encoding or locale.getencoding()
+            if input_data is not None:
+                input_data = input_data.encode(output_encoding, output_errors or "strict")
     process = subprocess.Popen(command, **kwargs)
 
     result_holder: dict[str, object] = {}
@@ -74,7 +87,12 @@ def run_cancellable_process(
 
     def communicate_worker() -> None:
         try:
-            result_holder["result"] = process.communicate(input=input_data)
+            if max_output_bytes is None:
+                result_holder["result"] = process.communicate(input=input_data)
+            else:
+                from .output import bounded_communicate
+                result_holder["result"] = bounded_communicate(process, input_data, max_output_bytes,
+                    encoding=output_encoding, errors=output_errors)
         except BaseException as exc:  # propagate subprocess errors to caller
             result_holder["error"] = exc
         finally:
@@ -90,7 +108,7 @@ def run_cancellable_process(
     stop_reason: str | None = None
 
     def stop_child() -> None:
-        if process.poll() is not None:
+        if process.poll() is not None and not process_group_enabled:
             return
         if process_group_enabled:
             try:
@@ -110,7 +128,7 @@ def run_cancellable_process(
         deadline = time.monotonic() + grace
         while process.poll() is None and time.monotonic() < deadline:
             communication_done.wait(min(0.05, max(0.0, deadline - time.monotonic())))
-        if process.poll() is None:
+        if process.poll() is None or (process_group_enabled and not communication_done.is_set()):
             if process_group_enabled:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)

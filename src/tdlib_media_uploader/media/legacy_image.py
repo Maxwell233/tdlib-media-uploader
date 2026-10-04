@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections import OrderedDict
 import threading
 import time
 from collections import deque
@@ -235,7 +236,8 @@ def scan_images(cancel_event=None) -> list[Path]:
     )
 
 
-_IMAGE_INFO_CACHE = {}
+_IMAGE_INFO_CACHE = OrderedDict()
+_IMAGE_INFO_CACHE_LIMIT = 512
 _IMAGE_INFO_CACHE_LOCK = threading.Lock()
 
 
@@ -310,18 +312,29 @@ def cleanup_compressed_images() -> None:
         pass
 
 
-def image_info(path: Path) -> tuple[int, int]:
+def cached_image_probe(path: Path):
     stat = path.stat()
     key = (stable_path(path), stat.st_size, stat.st_mtime_ns)
     with _IMAGE_INFO_CACHE_LOCK:
         cached = _IMAGE_INFO_CACHE.get(key)
-    if cached is not None:
-        return cached
+        if cached is not None:
+            _IMAGE_INFO_CACHE.move_to_end(key)
+            return cached
     info = probe_image(path)
-    result = (info.width, info.height)
+    after = path.stat()
+    if (after.st_size, after.st_mtime_ns) != key[1:]:
+        raise OSError(f"图片解码期间文件变化：{path}")
     with _IMAGE_INFO_CACHE_LOCK:
-        _IMAGE_INFO_CACHE[key] = result
-    return result
+        _IMAGE_INFO_CACHE[key] = info
+        _IMAGE_INFO_CACHE.move_to_end(key)
+        while len(_IMAGE_INFO_CACHE) > _IMAGE_INFO_CACHE_LIMIT:
+            _IMAGE_INFO_CACHE.popitem(last=False)
+    return info
+
+
+def image_info(path: Path) -> tuple[int, int]:
+    info = cached_image_probe(path)
+    return info.width, info.height
 
 
 def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
@@ -344,7 +357,7 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
             raise_for_file_readiness(path, readiness)
             size = readiness.snapshot.size
             IMAGE_UPLOAD_PATHS.pop(stable_path(path), None)
-            info = probe_image(path)
+            info = cached_image_probe(path)
             if info.animated:
                 raise RuntimeError(f"检测到动画图片，不会自动转换为静态 Photo：{path.name}")
             extreme_aspect_policy = getattr(cfg, "IMAGE_EXTREME_ASPECT_POLICY", "pad")
@@ -400,7 +413,7 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
     )
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tdlib-preflight") as executor:
         for index, result in enumerate(
-            ordered_bounded_map(executor, paths, worker, worker_count),
+            ordered_bounded_map(executor, paths, worker, worker_count, cancel_event=cancel_event),
             1,
         ):
             if cancel_event is not None and cancel_event.is_set():
@@ -504,7 +517,7 @@ def input_photo(
             cancel_event=cancel_event,
         )
         STAGED_UPLOAD_PATHS[stable_path(path)] = source_path
-    info = probe_image(source_path)
+    info = cached_image_probe(source_path)
     if info.needs_normalization or snapshot[0] > cfg.IMAGE_MAX_BYTES:
         source_path = compress_image(
             source_path,

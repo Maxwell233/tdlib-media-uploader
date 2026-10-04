@@ -45,6 +45,8 @@ class ImprovementsTest(unittest.TestCase):
             journal = InflightJournal(Path(directory))
             client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
             client.ui = UI()
+            client.send_condition = threading.Condition()
+            client.send_events = {}
             client.inflight_journal = journal
             client.cancel_event = threading.Event()
             client.request = lambda _query: {
@@ -243,6 +245,8 @@ class ImprovementsTest(unittest.TestCase):
             path.write_bytes(b"video")
             client = tdlib_common.TDJsonClient.__new__(tdlib_common.TDJsonClient)
             client.ui = UI()
+            client.send_condition = threading.Condition()
+            client.send_events = {}
             client.request = lambda _query: (_ for _ in ()).throw(
                 tdlib_common.TDLibError(400, "FILE_READ")
             )

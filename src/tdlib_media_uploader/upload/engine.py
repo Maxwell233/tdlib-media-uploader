@@ -20,6 +20,8 @@ from pathlib import Path
 import threading
 from typing import Any, Protocol
 
+from ..core.compat import call_supported as _call_supported
+from .delivery import _as_ids, _ObservedSend, _normalize_send_result, _normalize_status
 from ..config.paths import VIDEO_PROCESSED_CACHE_DIR
 from ..contracts import CancelToken, EventSink, MediaStrategy, UploadContext
 from ..core.identity import canonical_target
@@ -36,6 +38,7 @@ from ..core.models import (
 )
 from .planner import item_identity, restrict_plan, validate_plan
 from .preflight import preflight_plan
+from .prepared_media import PreparedMedia, SourceChanged, capture_prepared_media
 
 
 RUN_COMPLETED = "COMPLETED"
@@ -210,45 +213,6 @@ def _item_payload(item: MediaItem) -> dict[str, Any]:
     }
 
 
-def _as_ids(values: Any) -> tuple[int, ...]:
-    if values is None:
-        return ()
-    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-        values = (values,)
-    result: list[int] = []
-    for value in values:
-        if isinstance(value, bool):
-            continue
-        try:
-            result.append(int(value))
-        except (TypeError, ValueError, OverflowError):
-            continue
-    return tuple(result)
-
-
-def _call_supported(function: Callable[..., Any], args: Sequence[Any] = (), **kwargs: Any) -> Any:
-    """Call a collaborator while allowing small fakes with fewer keywords."""
-
-    try:
-        signature = inspect.signature(function)
-    except (TypeError, ValueError):
-        return function(*args, **kwargs)
-
-    parameters = signature.parameters
-    positional = list(args)
-    accepted: dict[str, Any] = {}
-    var_keyword = any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
-    for name, value in kwargs.items():
-        parameter = parameters.get(name)
-        if parameter is not None and parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
-            positional.append(value)
-        elif parameter is not None or var_keyword:
-            accepted[name] = value
-    return function(*positional, **accepted)
-
 
 def _is_cancel_requested(token: CancelToken) -> bool:
     checker = getattr(token, "is_cancelled", None)
@@ -289,16 +253,6 @@ def _check_cancel(token: CancelToken) -> None:
         raise UploadCancelled("上传已取消")
 
 
-@dataclass(frozen=True, slots=True)
-class _ObservedSend:
-    status: BatchStatus
-    message_ids: tuple[int, ...] = ()
-    succeeded_ids: tuple[int, ...] = ()
-    failed_ids: tuple[int, ...] = ()
-    pending_ids: tuple[int, ...] = ()
-    error: str | None = None
-
-
 @dataclass(slots=True)
 class _PreparedBatch:
     plan: AlbumPlan
@@ -320,87 +274,8 @@ class _PreparedBatch:
     confirmed_recovery_failed: bool = False
     batch_result: UploadBatchResult | None = None
     managed_processed_paths: tuple[Path, ...] = ()
-    source_snapshots: tuple[tuple[Path, int, int], ...] = ()
+    prepared_media: PreparedMedia | None = None
 
-
-
-def _normalize_status(value: Any) -> BatchStatus | None:
-    if isinstance(value, BatchStatus):
-        return value
-    if value is None:
-        return None
-    aliases = {
-        "SUCCESS": BatchStatus.CONFIRMED,
-        "SUCCEEDED": BatchStatus.CONFIRMED,
-        "COMPLETE": BatchStatus.CONFIRMED,
-        "COMPLETED": BatchStatus.CONFIRMED,
-        "PARTIAL": BatchStatus.UNKNOWN,
-        "ERROR": BatchStatus.FAILED,
-        "FAIL": BatchStatus.FAILED,
-    }
-    raw = str(value).strip().upper()
-    return aliases.get(raw, BatchStatus._value2member_map_.get(raw))
-
-
-def _normalize_send_result(value: Any, expected_count: int) -> _ObservedSend:
-    succeeded: tuple[int, ...] = ()
-    failed: tuple[int, ...] = ()
-    pending: tuple[int, ...] = ()
-    message_ids: tuple[int, ...] = ()
-    error: str | None = None
-    status: BatchStatus | None = None
-
-    if isinstance(value, Mapping):
-        status = _normalize_status(value.get("status"))
-        succeeded = _as_ids(value.get("succeeded_ids", value.get("succeeded")))
-        failed = _as_ids(value.get("failed_ids", value.get("failed")))
-        pending = _as_ids(value.get("pending_ids", value.get("pending")))
-        message_ids = _as_ids(value.get("message_ids"))
-        error_value = value.get("error", value.get("message"))
-        error = str(error_value) if error_value else None
-    elif isinstance(value, UploadBatchResult):
-        status = _normalize_status(value.status)
-        message_ids = _as_ids(value.message_ids)
-        succeeded = message_ids
-        error = value.error
-    elif value is not None and not isinstance(value, (str, bytes)):
-        status = _normalize_status(getattr(value, "status", None))
-        succeeded = _as_ids(
-            getattr(value, "succeeded_ids", getattr(value, "confirmed_ids", getattr(value, "succeeded", ())))
-        )
-        failed = _as_ids(getattr(value, "failed_ids", getattr(value, "failed", ())))
-        pending = _as_ids(getattr(value, "pending_ids", getattr(value, "pending", ())))
-        message_ids = _as_ids(getattr(value, "message_ids", ()))
-        error_value = getattr(value, "error", None)
-        error = str(error_value) if error_value else None
-        if status is None and isinstance(value, Sequence):
-            message_ids = _as_ids(value)
-            succeeded = message_ids
-    elif isinstance(value, (str, bytes)):
-        error = str(value)
-
-    if not message_ids:
-        message_ids = succeeded + failed + pending
-    if status is None:
-        if len(succeeded) == expected_count and not failed and not pending and expected_count:
-            status = BatchStatus.CONFIRMED
-        elif failed and not succeeded and not pending:
-            status = BatchStatus.FAILED
-        else:
-            status = BatchStatus.UNKNOWN
-
-    if status is BatchStatus.CONFIRMED and (failed or pending):
-        status = BatchStatus.UNKNOWN
-        error = error or "确认结果包含失败或待确认消息"
-    if status is BatchStatus.CONFIRMED and len(succeeded or message_ids) != expected_count:
-        status = BatchStatus.UNKNOWN
-        error = error or "发送器确认的消息数量少于 Album 项数"
-    if status is BatchStatus.FAILED and (succeeded or pending):
-        status = BatchStatus.UNKNOWN
-        error = error or "发送结果同时包含成功或待确认消息"
-    if status is BatchStatus.CONFIRMED and not succeeded:
-        succeeded = message_ids
-    return _ObservedSend(status, message_ids, succeeded, failed, pending, error)
 
 
 class MemoryStateStore:
@@ -626,7 +501,7 @@ class UploadEngine:
         _call_supported(function, (payloads, ids))
 
     @staticmethod
-    def _send(sender: Any, contents: Sequence[Mapping[str, Any]], plan: AlbumPlan, context: UploadContext) -> Any:
+    def _send(sender: Any, contents: Sequence[Mapping[str, Any]], plan: AlbumPlan, context: UploadContext, prepared_media=None) -> Any:
         function = getattr(sender, "send_contents", None)
         if not callable(function):
             function = getattr(sender, "send", None)
@@ -644,6 +519,7 @@ class UploadEngine:
             context=context,
             caption_limit=metadata.get("caption_limit"),
             timeout=metadata.get("send_timeout"),
+            prepared_media=prepared_media,
         )
 
     @staticmethod
@@ -955,6 +831,13 @@ class UploadEngine:
                 )
 
         errors: list[str] = []
+        if getattr(strategy, "validate_source_snapshots", False):
+            try:
+                capture_prepared_media(effective_plan.pending_items, ())
+            except SourceChanged as exc:
+                return _PreparedBatch(plan=plan, skipped=True, errors=[str(exc)],
+                    plan_deferred=tuple((*plan_deferred, *effective_plan.pending_items)),
+                    preflight_failed=preflight_failed, preflight_deferred=preflight_deferred)
         try:
             _check_cancel(token)
             built_contents = _call_supported(
@@ -1092,13 +975,16 @@ class UploadEngine:
         except Exception:
             pass
 
-        source_snapshots: list[tuple[Path, int, int]] = []
-        for item in ready_items:
+        prepared_media = None
+        if getattr(strategy, "validate_source_snapshots", False):
             try:
-                st = item.path.stat()
-                source_snapshots.append((item.path, st.st_size, st.st_mtime_ns))
-            except OSError:
-                pass
+                prepared_media = capture_prepared_media(ready_items, contents)
+            except SourceChanged as exc:
+                # Defer the complete Album to preserve its caption and membership.
+                return _PreparedBatch(plan=plan, skipped=True, errors=[*errors, str(exc)],
+                    plan_deferred=tuple((*plan_deferred, *ready_items)),
+                    build_deferred=build_deferred, build_failed=build_failed,
+                    preflight_failed=preflight_failed, preflight_deferred=preflight_deferred)
 
         send_plan = restrict_plan(effective_plan, ready_items)
         return _PreparedBatch(
@@ -1115,7 +1001,7 @@ class UploadEngine:
             preflight_deferred=preflight_deferred,
             errors=errors,
             managed_processed_paths=tuple(managed_paths),
-            source_snapshots=tuple(source_snapshots),
+            prepared_media=prepared_media,
         )
 
     def run(
@@ -1270,30 +1156,6 @@ class UploadEngine:
                 if prefetch_future is not None and prefetched_plan_index == plan_index:
                     try:
                         prep = prefetch_future.result()
-                        is_stale = False
-                        if prep.source_snapshots:
-                            for item_path, snap_size, snap_mtime in prep.source_snapshots:
-                                try:
-                                    curr = item_path.stat()
-                                    if curr.st_size != snap_size or curr.st_mtime_ns != snap_mtime:
-                                        is_stale = True
-                                        break
-                                except OSError:
-                                    is_stale = True
-                                    break
-                        if is_stale:
-                            from ..media.video_prepare import cleanup_processed_group
-                            cleanup_processed_group(prep.plan.key, prep.managed_processed_paths)
-                            prep = self._prepare_plan(
-                                strategy,
-                                plan,
-                                run_context,
-                                state,
-                                journal,
-                                token,
-                                sink,
-                                kind,
-                            )
                     except Exception as exc:
                         message = f"Album {plan.key} 预加载异常：{exc}"
                         errors.append(message)
@@ -1381,6 +1243,15 @@ class UploadEngine:
                             errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
                     continue
 
+                if prep.prepared_media is not None:
+                    try:
+                        prep.prepared_media.validate()
+                    except SourceChanged as exc:
+                        deferred_items.extend(ready_items)
+                        errors.append(str(exc))
+                        self._log(sink, "WARNING", str(exc))
+                        continue
+
                 try:
                     _check_cancel(token)
                     self._journal_call(
@@ -1461,9 +1332,22 @@ class UploadEngine:
                         )
                         prefetched_plan_index = plan_index + 1
 
+                if prep.prepared_media is not None:
+                    try:
+                        prep.prepared_media.validate()
+                    except SourceChanged as exc:
+                        deferred_items.extend(ready_items)
+                        errors.append(str(exc))
+                        try:
+                            self._journal_call(journal, "finalize", kind, plan.key, target=run_context.target)
+                        except Exception as cleanup_error:
+                            errors.append(f"清理未发送记录失败：{cleanup_error}")
+                            ambiguous = True
+                        continue
+
                 observed: _ObservedSend
                 try:
-                    raw_result = self._send(run_context.sender, contents, send_plan, run_context)
+                    raw_result = self._send(run_context.sender, contents, send_plan, run_context, prep.prepared_media)
                     observed = _normalize_send_result(raw_result, len(ready_items))
                     if _is_cancel_requested(token) and observed.status is not BatchStatus.CONFIRMED:
                         cancelled = True
@@ -1472,6 +1356,15 @@ class UploadEngine:
                             status=BatchStatus.UNKNOWN,
                             error=observed.error or "发送后取消，结果无法确认",
                         )
+                except SourceChanged as error:
+                    deferred_items.extend(ready_items)
+                    errors.append(str(error))
+                    try:
+                        self._journal_call(journal, "finalize", kind, plan.key, target=run_context.target)
+                    except Exception as cleanup_error:
+                        errors.append(f"清理未发送记录失败：{cleanup_error}")
+                        ambiguous = True
+                    continue
                 except Exception as error:
                     sender_cancelled = _is_cancel_error(error, token)
                     if sender_cancelled:
