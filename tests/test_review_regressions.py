@@ -1,10 +1,8 @@
 """Behavioral regressions from the repository review; no Telegram account needed."""
-from contextlib import closing
 import json
 import os
 from pathlib import Path
 import queue
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -34,54 +32,72 @@ class CheckpointTests(unittest.TestCase):
         self.kwargs = dict(kind="image", source_root=self.root, state_dir=self.root / "state")
         self.items = [{"path": self.root / f"{i}.jpg", "size": 10, "mtime_ns": 1} for i in range(3)]
 
-    def test_import_is_once_reset_does_not_resurrect_and_backup_is_unchanged(self):
+    def test_existing_json_is_read_updated_and_reset_without_migration(self):
         state = UploadState(**self.kwargs)
+        self.assertEqual(state.path.suffix, ".json")
         state.mark_album_completed(self.items[:1], [101])
-        original = json.dumps(state.data)
-        state.path.unlink()
-        state.legacy_path.write_text(original, encoding="utf-8")
-        migrated = UploadState(**self.kwargs)
-        self.assertTrue(migrated.is_completed(self.items[0]))
-        migrated.mark_album_completed(self.items[1:2], [202])
-        self.assertTrue(UploadState(**self.kwargs).is_completed(self.items[1]))
-        self.assertEqual(state.legacy_path.read_text(encoding="utf-8"), original)
+        reopened = UploadState(**self.kwargs)
+        self.assertTrue(reopened.is_completed(self.items[0]))
+        reopened.mark_album_completed(self.items[1:2], [202])
+        saved = json.loads(state.path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["completed"][state.signature(self.items[1])]["message_id"], 202)
+        self.assertEqual(list(state.state_dir.iterdir()), [state.path])
         reset = UploadState(**self.kwargs, reset=True)
         self.assertFalse(reset.data["completed"])
         self.assertFalse(UploadState(**self.kwargs).data["completed"])
 
-    def test_album_failure_rolls_back_disk_and_memory(self):
+    def test_album_failure_preserves_disk_and_memory_and_allows_retry(self):
+        for operation in ("json.dump", "os.fsync", "os.replace"):
+            with self.subTest(operation=operation):
+                state = UploadState(**self.kwargs, reset=True)
+                state.mark_album_completed(self.items[:1], [101])
+                original = state.path.read_bytes()
+                memory = json.dumps(state.data, sort_keys=True)
+                with patch(f"tdlib_media_uploader.core.upload_state.{operation}", side_effect=OSError("disk failure")):
+                    with self.assertRaises(OSError):
+                        state.mark_album_completed(self.items[1:], [202, 303])
+                self.assertEqual(state.path.read_bytes(), original)
+                self.assertEqual(json.dumps(state.data, sort_keys=True), memory)
+                self.assertFalse(state.path.with_suffix(".json.tmp").exists())
+                for actual in (state, UploadState(**self.kwargs)):
+                    self.assertTrue(actual.is_completed(self.items[0]))
+                    self.assertFalse(actual.is_completed(self.items[1]))
+                    self.assertFalse(actual.is_completed(self.items[2]))
+                state.mark_album_completed(self.items[1:], [202, 303])
+                self.assertEqual(len(UploadState(**self.kwargs).data["completed"]), 3)
+
+    def test_thousand_files_round_trip_in_batches(self):
+        state = UploadState(**self.kwargs)
+        items = [{"path": self.root / f"file-{i}.jpg", "size": 10, "mtime_ns": 1} for i in range(1000)]
+        for start in range(0, len(items), 10):
+            state.mark_album_completed(items[start:start + 10], range(start + 1, start + 11))
+        reopened = UploadState(**self.kwargs)
+        self.assertEqual(len(reopened.data["completed"]), 1000)
+        for index, item in enumerate(items):
+            self.assertTrue(reopened.is_completed(item))
+            self.assertEqual(reopened.data["completed"][reopened.signature(item)]["message_id"], index + 1)
+
+    def test_invalid_json_is_preserved_and_can_be_retried(self):
+        state = UploadState(**self.kwargs)
+        for broken in ("{broken", json.dumps({"version": 2, "completed": []})):
+            with self.subTest(broken=broken):
+                state.path.write_text(broken, encoding="utf-8")
+                with self.assertRaises(RuntimeError):
+                    UploadState(**self.kwargs)
+                self.assertEqual(state.path.read_text(), broken)
+        state.path.write_text(json.dumps(state.data), encoding="utf-8")
+        self.assertEqual(UploadState(**self.kwargs).data["completed"], {})
+
+    def test_failed_reset_preserves_existing_checkpoint(self):
         state = UploadState(**self.kwargs)
         state.mark_album_completed(self.items[:1], [101])
-        # Abort the second INSERT after the first has executed in the transaction.
-        failing_key = state.signature(self.items[2])
-        with closing(sqlite3.connect(state.path)) as connection, connection:
-            connection.execute(f"CREATE TRIGGER fail_album BEFORE INSERT ON completed WHEN NEW.signature='{failing_key}' BEGIN SELECT RAISE(ABORT, 'disk failure'); END")
-        with self.assertRaises(sqlite3.DatabaseError):
-            state.mark_album_completed(self.items[1:], [202, 303])
-        for actual in (state, UploadState(**self.kwargs)):
-            self.assertTrue(actual.is_completed(self.items[0]))
-            self.assertFalse(actual.is_completed(self.items[1]))
-            self.assertFalse(actual.is_completed(self.items[2]))
-
-    def test_only_new_album_records_are_serialized(self):
-        state = UploadState(**self.kwargs)
-        history = [{"path": self.root / f"old-{i}.jpg", "size": 10, "mtime_ns": 1} for i in range(1000)]
-        state.mark_album_completed(history)
-        with patch("tdlib_media_uploader.core.upload_state.json.dumps", wraps=json.dumps) as serialize:
-            state.mark_album_completed(self.items, [1, 2, 3])
-        records = [call.args[0] for call in serialize.call_args_list if isinstance(call.args[0], dict) and "sent_at" in call.args[0]]
-        self.assertEqual(len(records), 3)
-        self.assertEqual(len(UploadState(**self.kwargs).data["completed"]), 1003)
-
-    def test_invalid_legacy_data_is_preserved_and_can_be_retried(self):
-        state = UploadState(**self.kwargs)
-        state.path.unlink()
-        state.legacy_path.write_text("{broken", encoding="utf-8")
-        with self.assertRaises(RuntimeError):
-            UploadState(**self.kwargs)
-        self.assertEqual(state.legacy_path.read_text(), "{broken")
-        state.legacy_path.write_text(json.dumps(state.data), encoding="utf-8")
-        self.assertEqual(UploadState(**self.kwargs).data["completed"], {})
+        original = state.path.read_bytes()
+        with patch("tdlib_media_uploader.core.upload_state.os.replace", side_effect=OSError("disk failure")):
+            with self.assertRaises(OSError):
+                UploadState(**self.kwargs, reset=True)
+        self.assertEqual(state.path.read_bytes(), original)
+        self.assertTrue(UploadState(**self.kwargs).is_completed(self.items[0]))
 
 
 class DeliveryTests(unittest.TestCase):
