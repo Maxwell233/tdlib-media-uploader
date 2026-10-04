@@ -417,8 +417,8 @@ class MixedMediaStrategy:
             )
         if preflight:
             warnings.append(
-                f"已扫描到 {len(preflight)} 个超过 Telegram 视频上限的混合媒体，"
-                "这些文件将在上传前跳过。"
+                f"已扫描到 {len(preflight)} 个源文件超过视频大小上限；"
+                "上传前将检查能否无损转封装，并按输出大小复核。"
             )
         ignored = list(getattr(legacy, "LAST_SCAN_IGNORED_ROOT_MEDIA", ()))
         if ignored:

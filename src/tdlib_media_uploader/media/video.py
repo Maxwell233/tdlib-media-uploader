@@ -580,8 +580,8 @@ class VideoStrategy:
             )
             if preflight_count:
                 warnings.append(
-                    f"已扫描到 {preflight_count} 个超过 Telegram 视频上限的文件，"
-                    "这些文件将在上传前跳过。"
+                    f"已扫描到 {preflight_count} 个源文件超过视频大小上限；"
+                    "上传前将检查能否无损转封装，并按输出大小复核。"
                 )
 
             metadata, metadata_errors = self._metadata_index(

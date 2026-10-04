@@ -170,7 +170,8 @@ def file_signature(path: Path, snapshot=None) -> str:
 def _kind_for(path: Path) -> str | None:
     _validate_extensions()
     suffix = path.suffix.lower()
-    if suffix in cfg.MIXED_VIDEO_EXTENSIONS:
+    from .video_probe import has_video_container_signature
+    if has_video_container_signature(path) or suffix in cfg.MIXED_VIDEO_EXTENSIONS:
         return "video"
     if suffix in cfg.MIXED_IMAGE_EXTENSIONS:
         return "image"
@@ -204,8 +205,9 @@ def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
             ),
             "media_kind": media_kind,
             "reason": (
-                f"文件大小 {format_size(size)} 超过 Telegram "
-                f"{'视频' if media_kind == 'video' else 'Photo'} 上限 {limit_label}"
+                f"源文件大小 {format_size(size)} 超过 Telegram "
+                f"{'视频' if media_kind == 'video' else 'Photo'} 上限 {limit_label}；"
+                f"上传前将按{'转封装后的输出' if media_kind == 'video' else '规范化后的输出'}大小复核"
             ),
         })
         if media_kind != "image" and media_kind != "video":
@@ -226,7 +228,7 @@ def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
 def _group_items(group_path: Path, group_name: str, cancel_event=None) -> list[dict]:
     scan_result = iter_files(
         group_path,
-        cfg.MIXED_EXTENSIONS,
+        None,
         cancel_event=cancel_event,
         discovery_attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
         discovery_initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
@@ -406,13 +408,16 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
             raise_for_file_readiness(path, readiness)
             snapshot = readiness.snapshot.as_tuple()
             if item.get("media_kind") == "video":
-                if snapshot[0] > cfg.VIDEO_MAX_BYTES:
-                    raise RuntimeError("文件大小超过 Telegram 视频上限")
                 v_info = (
                     video_core.video_info(path)
                     if cancel_event is None
                     else video_core.video_info(path, cancel_event=cancel_event)
                 )
+                if snapshot[0] > cfg.VIDEO_MAX_BYTES and not video_core.can_remux_video(path, info=v_info):
+                    raise RuntimeError(
+                        f"文件大小 {format_size(snapshot[0])} 超过 Telegram 视频上限 "
+                        f"{video_core.video_limit_text(cfg.VIDEO_MAX_BYTES)}"
+                    )
                 if getattr(v_info, "compatibility", "native") not in {"native", "legacy"}:
                     policy = getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", "remux")
                     if getattr(v_info, "compatibility", "") == "remux":
@@ -545,13 +550,13 @@ def report_scan_size_skips(skipped, ui=None):
         )
     if preflight:
         target.warning(
-            f"扫描到 {len(preflight)} 个超过 Telegram 视频上限的混合媒体；"
-            "它们会显示在扫描结果中，但会在上传前安全跳过。"
+            f"扫描到 {len(preflight)} 个源文件超过视频大小上限；"
+            "上传前将检查能否无损转封装，并按输出大小复核。"
         )
     for record in skipped:
         target.log(
             f"扫描混合媒体大小检查：{record['path']}\n"
-            f"处理：{'上传时规范化' if record.get('action') in {'compress', 'normalize'} else '上传前跳过' if record.get('action') == 'preflight' else '扫描时跳过'}\n"
+            f"处理：{'上传时规范化' if record.get('action') in {'compress', 'normalize'} else '上传前复核' if record.get('action') == 'preflight' else '扫描时跳过'}\n"
             f"原因：{record.get('reason', '')}"
         )
 
@@ -895,16 +900,10 @@ def _main_impl():
         client.refresh_account_limits()
         caption_limit = int(getattr(client, "caption_length_limit", None) or 1024)
         if client.is_premium is not True:
-            policy = str(
-                getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", getattr(cfg, "VIDEO_TRANSCODE_POLICY", "remux"))
-            ).strip().lower()
             premium_items = [
                 item for item in pending
                 if item.get("requires_premium")
-                and not (
-                    Path(item["path"]).suffix.lstrip(".").lower() in {"mkv", "avi", "ts", "mts", "m2ts"}
-                    and policy != "original"
-                )
+                and not video_core.can_remux_video(item["path"], cancel_event=cancel_event)
             ]
             if premium_items:
                 UI.warning(

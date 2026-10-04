@@ -201,14 +201,14 @@ class VideoRemuxMatrixAndProbeTest(unittest.TestCase):
                 self.assertEqual(info.recommended_action, "remux")
                 self.assertTrue(determine_supports_streaming(info))
 
-    def test_unsupported_video_codecs_rejected(self):
-        for bad_codec in ("vp9", "av1", "prores", "vp8", "mpeg4"):
+    def test_other_video_codecs_are_remux_candidates(self):
+        for codec in ("vp9", "av1", "prores", "vp8", "mpeg4"):
             with tempfile.TemporaryDirectory() as td:
                 p = Path(td) / "clip.mkv"
                 p.write_bytes(b"dummy")
                 mock_out = _mock_ffprobe_json(
                     container="matroska,webm",
-                    video_codec=bad_codec,
+                    video_codec=codec,
                     audio_codec="aac",
                 )
                 with patch("tdlib_media_uploader.media.video_probe._find_ffprobe", return_value="ffprobe"), \
@@ -216,31 +216,26 @@ class VideoRemuxMatrixAndProbeTest(unittest.TestCase):
                            return_value=subprocess.CompletedProcess([], 0, mock_out, "")):
                     info = probe_video(p)
 
-                self.assertEqual(info.compatibility, "unsupported")
-                self.assertEqual(info.recommended_action, "skip")
-                reason = format_unsupported_reason(p, info)
-                self.assertIn("不在直接 Telegram Video 支持范围内", reason)
+                self.assertEqual(info.compatibility, "remux")
+                self.assertEqual(info.recommended_action, "remux")
 
-    def test_unsupported_audio_codecs_rejected_without_transcode(self):
-        for bad_audio in ("dts", "flac", "ac3", "eac3", "opus", "pcm_s16le"):
+    def test_other_audio_codecs_are_remux_candidates(self):
+        for audio_codec in ("dts", "flac", "ac3", "eac3", "opus", "pcm_s16le"):
             with tempfile.TemporaryDirectory() as td:
                 p = Path(td) / "clip.mkv"
                 p.write_bytes(b"dummy")
                 mock_out = _mock_ffprobe_json(
                     container="matroska,webm",
                     video_codec="h264",
-                    audio_codec=bad_audio,
+                    audio_codec=audio_codec,
                 )
                 with patch("tdlib_media_uploader.media.video_probe._find_ffprobe", return_value="ffprobe"), \
                      patch("tdlib_media_uploader.media.video_probe.run_cancellable_process",
                            return_value=subprocess.CompletedProcess([], 0, mock_out, "")):
                     info = probe_video(p)
 
-                self.assertEqual(info.compatibility, "unsupported")
-                self.assertEqual(info.recommended_action, "skip")
-                reason = format_unsupported_reason(p, info)
-                self.assertIn("音频编码", reason)
-                self.assertIn("无法在不重新编码音频的情况下安全重新封装为 MP4", reason)
+                self.assertEqual(info.compatibility, "remux")
+                self.assertEqual(info.recommended_action, "remux")
 
     def test_original_policy_skips_remux_candidate_in_prepare_and_preflight(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1837,18 +1832,23 @@ class RealFFmpegIntegrationTest(unittest.TestCase):
             root = Path(td)
             cache = root / "processed"
             with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", cache):
-                for suffix, container in (("mkv", "matroska"), ("avi", "avi"),
-                                          ("ts", "mpegts"), ("mts", "mpegts"),
-                                          ("m2ts", "mpegts")):
-                    with self.subTest(container=suffix):
-                        source = root / f"sample.{suffix}"
+                for filename, container in (("sample.mkv", "matroska"),
+                                            ("sample.avi", "avi"),
+                                            ("sample.ts", "mpegts"),
+                                            ("sample.mts", "mpegts"),
+                                            ("sample.m2ts", "mpegts"),
+                                            ("transport.mp4", "mpegts"),
+                                            ("transport.avi", "mpegts"),
+                                            ("transport.bin", "mpegts")):
+                    with self.subTest(filename=filename):
+                        source = root / filename
                         self._make_container(source, container)
                         before = hashlib.sha256(source.read_bytes()).hexdigest()
                         prepared = prepare_video_for_telegram(
-                            source, group_key=suffix, generate_thumbnail=False,
+                            source, group_key=filename, generate_thumbnail=False,
                         )
                         self.assertTrue(prepared.is_remuxed)
-                        self.assertEqual(prepared.upload_path, cache / suffix / "sample.mp4")
+                        self.assertEqual(prepared.upload_path, cache / filename / f"{source.stem}.mp4")
                         self.assertEqual(prepared.info.compatibility, "native")
                         self.assertEqual(prepared.info.video_codec, "h264")
                         self.assertEqual(prepared.info.audio_codec, "aac")
@@ -1858,6 +1858,41 @@ class RealFFmpegIntegrationTest(unittest.TestCase):
                                          self._decoded_video_hash(prepared.upload_path))
                         self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), before)
                         self.assertFalse(list(cache.rglob("*.tmp.*")))
+
+                unknown_suffix = root / "transport.bin"
+                with patch.object(cfg, "VIDEO_DIR", root), \
+                     patch.object(cfg, "VIDEO_EXTENSIONS", {".mp4"}):
+                    self.assertIn(unknown_suffix, video_core.scan_videos())
+                album_dir = root / "album"
+                album_dir.mkdir()
+                mixed_source = album_dir / "transport.bin"
+                mixed_source.write_bytes(unknown_suffix.read_bytes())
+                self.assertEqual(
+                    [(item["path"], item["media_kind"])
+                     for item in mixed_core._group_items(album_dir, "album")],
+                    [(mixed_source, "video")],
+                )
+                with patch.object(cfg, "VIDEO_MAX_BYTES", unknown_suffix.stat().st_size - 1), \
+                     patch.object(cfg, "VIDEO_GENERATE_THUMBNAIL", False):
+                    self.assertEqual(video_core.preflight_videos([{"path": unknown_suffix}]), [])
+                    self.assertEqual(mixed_core.preflight_mixed([{
+                        "path": unknown_suffix, "media_kind": "video",
+                    }]), [])
+
+                non_native_mp4 = root / "mpeg4.mp4"
+                subprocess.run(
+                    [self.ffmpeg, "-y", "-v", "error", "-i", str(self.fixture),
+                     "-c:v", "mpeg4", "-q:v", "2", "-c:a", "copy", str(non_native_mp4)],
+                    capture_output=True, text=True, check=True, timeout=30,
+                )
+                original_hash = self._decoded_video_hash(non_native_mp4)
+                prepared = prepare_video_for_telegram(
+                    non_native_mp4, group_key="mpeg4", generate_thumbnail=False,
+                )
+                self.assertTrue(prepared.is_remuxed)
+                self.assertEqual(prepared.info.video_codec, "mpeg4")
+                self.assertEqual(prepared.info.audio_codec, "aac")
+                self.assertEqual(self._decoded_video_hash(prepared.upload_path), original_hash)
 
     def test_real_native_containers_use_original_path(self):
         with tempfile.TemporaryDirectory() as td:
