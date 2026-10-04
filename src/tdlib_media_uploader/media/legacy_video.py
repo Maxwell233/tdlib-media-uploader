@@ -296,13 +296,17 @@ def scan_videos(cancel_event=None) -> list[Path]:
         return []
     scan_result = iter_files(
         root,
-        cfg.VIDEO_EXTENSIONS,
+        None,
         cancel_event=cancel_event,
         discovery_attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
         discovery_initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
         discovery_max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
     )
-    videos = scan_result.paths
+    # Configured video suffixes retain their established diagnostics; other
+    # names enter only when their header resembles a supported container.
+    from .video_probe import has_video_container_signature
+    videos = [path for path in scan_result.paths
+              if path.suffix.lower() in cfg.VIDEO_EXTENSIONS or has_video_container_signature(path)]
     LAST_SCAN_ERRORS = list(scan_result.errors)
     LAST_SCAN_WARNINGS = list(scan_result.warnings)
     if scan_result.cancelled:
@@ -328,8 +332,8 @@ def scan_videos(cancel_event=None) -> list[Path]:
                 "category": "size",
                 "action": "preflight",
                 "reason": (
-                    f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
-                    f"{video_limit_text(cfg.VIDEO_MAX_BYTES)}"
+                    f"源文件大小 {format_size(size)} 超过 Telegram 视频上限 "
+                    f"{video_limit_text(cfg.VIDEO_MAX_BYTES)}；转封装后将按输出大小复核"
                 ),
             })
         if size > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288):
@@ -1484,6 +1488,16 @@ def prepare_video(path: Path, cancel_event=None):
     return info
 
 
+def can_remux_video(path: Path, *, info=None, cancel_event=None) -> bool:
+    """Defer source-size checks only for verified stream-copy candidates."""
+    policy = str(getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", "remux")).strip().lower()
+    if policy == "original":
+        return False
+    if info is None:
+        info = video_info(path, cancel_event=cancel_event)
+    return getattr(info, "compatibility", None) == "remux"
+
+
 def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
     """Find unreadable videos before login and Album construction.
 
@@ -1509,11 +1523,6 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
             raise_for_file_readiness(path, readiness)
             snapshot = readiness.snapshot.as_tuple()
             size = snapshot[0]
-            if size > cfg.VIDEO_MAX_BYTES:
-                raise RuntimeError(
-                    f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
-                    f"{video_limit_text(cfg.VIDEO_MAX_BYTES)}"
-                )
             # Preserve the historical one-argument call for integrations and
             # tests that provide a lightweight preparation hook.  The worker
             # passes cancellation only when a caller requested it.
@@ -1522,6 +1531,11 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
                 if cancel_event is None
                 else prepare_video(path, cancel_event)
             )
+            if size > cfg.VIDEO_MAX_BYTES and not can_remux_video(path, info=info):
+                raise RuntimeError(
+                    f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
+                    f"{video_limit_text(cfg.VIDEO_MAX_BYTES)}"
+                )
             if getattr(info, "compatibility", "native") not in {"native", "legacy"}:
                 policy = getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", "remux")
                 if getattr(info, "compatibility", "") == "remux":
@@ -1609,13 +1623,13 @@ def report_scan_size_skips(skipped, ui=None) -> None:
         )
     if preflight:
         target.warning(
-            f"扫描到 {len(preflight)} 个超过约 4 GB 上限的视频；"
-            "它们会显示在扫描结果中，但会在上传前安全跳过。"
+            f"扫描到 {len(preflight)} 个源文件超过视频大小上限；"
+            "上传前将检查能否无损转封装，并按输出大小复核。"
         )
     for record in skipped:
         target.log(
-            f"扫描跳过视频：{record['path']}\n"
-            f"处理：{'上传前跳过' if record.get('action') == 'preflight' else '扫描时跳过'}\n"
+            f"扫描视频大小提醒：{record['path']}\n"
+            f"处理：{'上传前复核' if record.get('action') == 'preflight' else '扫描时跳过'}\n"
             f"原因：{record['reason']}"
         )
 
@@ -2199,16 +2213,10 @@ def _main_impl():
         client.refresh_account_limits()
         caption_limit = int(getattr(client, "caption_length_limit", None) or 1024)
         if client.is_premium is not True:
-            policy = str(
-                getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", getattr(cfg, "VIDEO_TRANSCODE_POLICY", "remux"))
-            ).strip().lower()
             premium_items = [
                 item for item in pending_items
                 if item.get("requires_premium")
-                and not (
-                    Path(item["path"]).suffix.lstrip(".").lower() in {"mkv", "avi", "ts", "mts", "m2ts"}
-                    and policy != "original"
-                )
+                and not can_remux_video(item["path"], cancel_event=cancel_event)
             ]
             if premium_items:
                 UI.warning(

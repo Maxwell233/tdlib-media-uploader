@@ -144,9 +144,9 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 - 代理支持 SOCKS5、HTTP、MTProto，默认关闭并使用直连。SOCKS5/HTTP 可填写用户名与密码；MTProto 需要 Secret。代理由 TDLib 配置，无需额外代理库。
 - `[scan]` 集中控制网络目录扫描：`stability_checks_local/network` 与对应间隔分别控制本地和网络盘的连续稳定检查，旧的 `stability_checks`/`stability_interval_seconds` 仍作为回退；`discovery_attempts` 和两个 delay 控制目录发现阶段的有限重试，`readiness_attempts` 是暂时不可读时的重试次数，`read_probe_bytes` 是头尾读探针大小；`io_workers_local` 与 `io_workers_network` 分别限制本地和 SMB/NAS 的 I/O 并发。扫描会跳过符号链接和 Windows junction，按下“停止”可取消目录遍历；正在进行的系统文件调用会在返回后响应取消。
 - `[process]` 集中设置 ExifTool、FFmpeg 日期/媒体信息、封面和图片压缩的单次超时，以及 ExifTool 批次大小和重试次数。ExifTool 只读取 Python 扫描确认的显式文件列表，不会再次递归扫描目录；空输出、非法 JSON、超时和不完整批次会自动重试并二分隔离，单个问题文件不会让整批失败。
-- `[image].extensions` 与 `[video].extensions` 必须互不重复；发现冲突时程序会在启动时明确提示，避免混合模式把同一个扩展名误判成图片或视频。新安装默认支持的视频格式包括原生格式 `.mp4`、`.mov`、`.m4v`，以及待封装格式 `.mkv`、`.avi`、`.ts`、`.mts`、`.m2ts`。
+- `[image].extensions` 与 `[video].extensions` 必须互不重复；发现冲突时程序会在启动时明确提示。新安装默认支持的视频扩展名包括 `.mp4`、`.mov`、`.m4v`、`.mkv`、`.avi`、`.ts`、`.mts`、`.m2ts`；扫描时也会通过文件头识别常见视频容器，不依赖扩展名判断实际格式。
 
-  > **升级兼容性提示**：程序保留现有 `data/config.toml`，不会自动扩展媒体格式。1.9.4 用户的视频列表可能仅有 `.mp4`；如需启用 MOV/M4V 直传及 MKV、AVI、TS、MTS、M2TS 无损封装，请在现有 `[video]` 段中更新 `extensions`，不要重复添加同名段：
+  > **升级兼容性提示**：程序保留现有 `data/config.toml`。旧配置中的视频扩展名列表仍可更新；文件头能识别的常见视频容器即使未列出或后缀写错，也会进入视频扫描：
   > ```toml
   > [video]
   > extensions = [
@@ -161,11 +161,11 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
   > ]
   > ```
 
-  图片的新格式也需要在现有 `[image]` 段中手动扩展：`extensions = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"]`。未修改时继续使用旧配置中列出的格式；混合上传沿用这两份格式列表。
+  图片的新格式也需要在现有 `[image]` 段中手动扩展：`extensions = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"]`。未修改时继续使用旧配置中列出的图片格式；混合上传的视频同样按文件头优先识别。
 
   **视频兼容处理与原生直传说明**：
   - **原生格式直传（MP4 / MOV / M4V）**：当经 FFprobe 探测确认为原生兼容容器且视频编码为 H.264 或 HEVC/H.265 时，程序**直接使用原文件（或网络暂存路径）上传**，**绝不会**将原生视频复制或移动到 `data/cache/video_processed/`，也不会因为 MOV/M4V 不是 MP4 就重新封装。原生格式的音频不受限制（AAC、AC3、PCM 等均允许原生直传）。
-  - **无损重新封装（MKV / AVI / TS / MTS / M2TS）**：在 `[video].compatibility_policy = "remux"`（默认）下，若视频为 H.264 或 HEVC/H.265 且音频编码为 AAC、MP3 或无音轨，将在流水线准备阶段使用 FFmpeg 流复制（`-c copy`、`-movflags +faststart`）临时无损封装为 MP4 副本。**原文件永不修改，绝不进行视频/音频有损转码，亦绝不静默降级为 Document**。若配置为 `"original"`，则跳过非原生格式。
+  - **无损重新封装**：在 `[video].compatibility_policy = "remux"`（默认）下，程序根据 FFprobe 探测到的实际容器与编码决定处理方式。MPEG-TS 即使误命名为 `.mp4`、`.avi` 也会尝试转封装；MP4 中的视频不是 H.264/H.265 时也会尝试。FFmpeg 使用流复制（`-c copy`、`-movflags +faststart`）生成 MP4 副本，并验证输出容器及音视频编码未改变。若 MP4 无法承载这些编码，则跳过该文件并报告 FFmpeg 错误。**原文件永不修改，也不会重新编码或降级为 Document**。能封装为 MP4 不保证 Telegram 能播放原编码。若配置为 `"original"`，则跳过待封装文件。
   - **处理后文件命名规则**：处理后的 MP4 保留原始文件的文件名主体（如 `clip.ts` → `clip.mp4`，`movie.mkv` → `movie.mp4`），**文件名中绝不包含哈希**。若同组内存在同名冲突（如 `movie.ts` 与 `movie.avi`），将采用确定性后缀（如 `movie.ts.mp4` 与 `movie.avi.mp4`），避免覆盖。内部特征签名仅保存在内部 `manifest.json` 元数据中。
   - **A / A+1 流水线与文件生命周期**：上传采用严格的“当前组 A 上传 + 下一组 A+1 并发准备（Lookahead = 1）”流水线。A 组正在上传时，后台线程并发完成 A+1 组的探测、重新封装、MP4 校验与视频封面预生成；A+1 组 READY 后不会重复提取封面。当 A 组在 Telegram 确认且本地 `UploadState` 成功持久化后，A 组对应的 `data/cache/video_processed/<group_key>/` 临时目录将被删除；源文件始终保持不动，且缩略图缓存（与源文件逻辑身份绑定）独立保留。中断或异常时保留已验证的处理文件以支持断点续传。
 

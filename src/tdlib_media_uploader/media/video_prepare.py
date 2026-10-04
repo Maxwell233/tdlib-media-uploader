@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unified video preparation and lossless remuxing pipeline for Telegram Video.
 
-Implements safe lossless stream-copy remuxing (MKV/AVI/TS/MTS/M2TS -> MP4) for
-compatible H.264/HEVC and AAC/MP3 streams, per-group cache management under
+Implements safe lossless stream-copy remuxing of probed media into MP4, per-group cache management under
 VIDEO_PROCESSED_CACHE_DIR, decoupled thumbnail generation, and strict cancellation
 and cleanup guarantees without modifying source files.
 """
@@ -199,13 +198,30 @@ def resolve_processed_filename(orig_path: Path, group_dir: Path, manifest: dict[
     return f"{orig_path.stem}.mp4"
 
 
+def _valid_stream_copy(info: VideoMediaInfo, expected_info: VideoMediaInfo | None = None) -> bool:
+    """Require a readable MP4 with unchanged selected video and audio codecs."""
+    return (
+        info.container == "mp4"
+        and info.has_video_stream
+        and info.video_codec not in {"", "unknown"}
+        and info.width > 1
+        and info.height > 1
+        and info.duration > 0
+        and (expected_info is None or (
+            info.video_codec == expected_info.video_codec
+            and info.audio_codec == expected_info.audio_codec
+        ))
+    )
+
+
 def remux_video_lossless(
     source_path: Path,
     target_path: Path,
     cancel_event=None,
     timeout: float = 300.0,
+    expected_info: VideoMediaInfo | None = None,
 ) -> Path:
-    """Losslessly remux supported video container to MP4 using stream copy.
+    """Losslessly remux a probed video to MP4 using stream copy.
 
     Invokes:
         ffmpeg -y -v error -i <source> -map 0:v:0 -map 0:a:0? -c copy -movflags +faststart <temp>
@@ -274,12 +290,7 @@ def remux_video_lossless(
     # Validate generated MP4 before publishing
     try:
         verified_info = probe_video(temp_path, cancel_event=cancel_event)
-        if (
-            verified_info.compatibility not in {"native", "legacy"}
-            or not verified_info.has_video_stream
-            or verified_info.width <= 1
-            or verified_info.height <= 1
-        ):
+        if not _valid_stream_copy(verified_info, expected_info):
             temp_path.unlink(missing_ok=True)
             raise RuntimeError(
                 f"重新封装后的 MP4 验证失败（兼容性：{verified_info.compatibility}）：{source_path.name}"
@@ -308,7 +319,7 @@ def prepare_video_for_telegram(
 ) -> PreparedVideo:
     """Prepare a video file for Telegram upload.
 
-    Handles native videos (MP4/MOV/M4V) and remux candidates (MKV/AVI/TS/MTS/M2TS).
+    Handles native compatible videos and other probed stream-copy candidates.
     For native videos:
     - Directly uses working/source path without creating copies in processed cache.
     - Decoupled thumbnail generated directly from source file.
@@ -403,7 +414,7 @@ def prepare_video_for_telegram(
             working_path=w_path,
         )
 
-    # 2. Remux candidate (MKV, AVI, TS, MTS, M2TS)
+    # 2. Remux candidate, including an MP4 with a non-native codec.
     if info.compatibility == "remux":
         policy = str(
             getattr(settings, "VIDEO_COMPATIBILITY_POLICY", getattr(settings, "VIDEO_TRANSCODE_POLICY", "remux"))
@@ -446,7 +457,7 @@ def prepare_video_for_telegram(
             ):
                 try:
                     cached_info = probe_video(final_mp4, cancel_event=cancel_event)
-                    if cached_info.compatibility in {"native", "legacy"} and cached_info.has_video_stream:
+                    if _valid_stream_copy(cached_info, info):
                         processed_path = final_mp4
                         processed_info = cached_info
                         can_reuse = True
@@ -455,7 +466,9 @@ def prepare_video_for_telegram(
 
         if not can_reuse:
             final_mp4.unlink(missing_ok=True)
-            processed_path = remux_video_lossless(w_path, final_mp4, cancel_event=cancel_event)
+            processed_path = remux_video_lossless(
+                w_path, final_mp4, cancel_event=cancel_event, expected_info=info,
+            )
             processed_info = probe_video(processed_path, cancel_event=cancel_event)
             validate_snapshots(source_snapshots)
             outputs = manifest.setdefault("outputs", {})
