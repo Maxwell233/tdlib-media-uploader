@@ -144,11 +144,14 @@ class VideoRemuxMatrixAndProbeTest(unittest.TestCase):
         cases = [
             (".mp4", "h264", "aac"),
             (".mp4", "h264", "ac3"),
+            (".mp4", "hevc", "aac"),
+            (".mov", "h264", "aac"),
+            (".mov", "hevc", "aac"),
             (".mov", "hevc", "pcm_s16le"),
             (".m4v", "h264", "aac"),
         ]
         for ext, vcodec, acodec in cases:
-            with tempfile.TemporaryDirectory() as td:
+            with self.subTest(extension=ext, video=vcodec, audio=acodec), tempfile.TemporaryDirectory() as td:
                 p = Path(td) / f"video{ext}"
                 p.write_bytes(b"dummy")
                 mock_out = _mock_ffprobe_json(
@@ -162,6 +165,10 @@ class VideoRemuxMatrixAndProbeTest(unittest.TestCase):
                     info = probe_video(p)
 
                 self.assertEqual(info.compatibility, "native", f"Failed for native {ext} {vcodec} {acodec}")
+                self.assertEqual(info.video_codec, vcodec)
+                self.assertTrue(info.has_video_stream)
+                self.assertEqual((info.width, info.height), (1920, 1080))
+                self.assertAlmostEqual(info.duration, 12.0)
                 self.assertEqual(info.recommended_action, "upload")
                 self.assertTrue(determine_supports_streaming(info))
 

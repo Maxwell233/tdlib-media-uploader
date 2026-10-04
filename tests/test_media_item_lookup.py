@@ -35,6 +35,12 @@ def _items(kind: str, count: int = 4):
 
 
 class MediaItemLookupTest(unittest.TestCase):
+
+    def test_file_snapshot_keeps_v19_tuple_compatibility(self):
+        snapshot = FileSnapshot("/media/clip.mp4", 12, 34)
+        self.assertEqual(snapshot.as_tuple(), (12, 34))
+        self.assertEqual(tuple(snapshot), (12, 34))
+
     def test_image_index_resolves_dict_and_media_item_without_candidate_walk(self):
         legacy = SimpleNamespace(stable_path=lambda value: str(Path(value).resolve()))
         strategy = ImageStrategy(legacy=legacy)

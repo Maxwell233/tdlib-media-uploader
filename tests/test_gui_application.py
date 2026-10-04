@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -59,6 +60,29 @@ print('tdlib_media_uploader.gui.main_window' in sys.modules)
                 patch.object(application, "_load_root_main") as load_root:
             self.assertEqual(application.main(), 2)
         load_root.assert_not_called()
+
+    def test_source_module_entrypoint_is_rejected(self):
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(SRC_ROOT)
+        result = subprocess.run(
+            [sys.executable, "-m", "tdlib_media_uploader.app"],
+            cwd=PROJECT_ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(result.returncode, 2)
+        # Windows may use backslash escapes for non-ASCII stderr when the
+        # child process is captured without a UTF-8 console. Normalize those
+        # escapes while preserving the same user-visible contract.
+        stderr = re.sub(
+            r"\\u([0-9a-fA-F]{4})",
+            lambda match: chr(int(match.group(1), 16)),
+            result.stderr,
+        )
+        self.assertIn("仅支持从发布包运行", stderr)
+
 
 
 if __name__ == "__main__":

@@ -7,7 +7,16 @@ QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m unittest discover -s tests -v
 QT_QPA_PLATFORM=offscreen PYTHONPATH=src:tests IMAGEIO_FFMPEG_EXE=tools/ffmpeg/ffmpeg TDLIB_FFPROBE_EXE=tools/ffmpeg/ffprobe python -m unittest test_video_remux_pipeline.RealFFmpegIntegrationTest -v
 ```
 
-第二条为 macOS/Linux 示例，需先准备可运行的 FFmpeg/FFprobe。测试覆盖乱序消息确认、源文件变化、旧断点导入及写入失败回滚、延迟关闭、后台清理取消、标题读取次数和图片元数据复用。外部进程的 `max_output_bytes` 按每个输出流的字节数限制保留内容，超出部分持续排空丢弃；未指定时保持原有完整输出语义。
+第二条为 macOS/Linux 示例，需先准备可运行的 FFmpeg/FFprobe。测试覆盖乱序消息确认、源文件变化、JSON 断点兼容读取及保存失败后保留旧记录、延迟关闭、后台清理取消、标题读取次数和图片元数据复用。外部进程的 `max_output_bytes` 按每个输出流的字节数限制保留内容，超出部分持续排空丢弃；未指定时保持原有完整输出语义。
+
+## 测试取舍
+
+测试优先覆盖可观察行为和失败后果。同一模块、相同准备过程的格式差异使用参数矩阵；不同入口的集成测试保留，因为单独的工具函数测试不能证明实际上传路径正确。
+
+- GUI 页面行为集中在 `tests/test_gui_pages.py`；设置保存、主题切换与安全关闭仍分别验证。删除历史 Beta/Phase 的重复页面结构检查。
+- 依赖边界集中在 `tests/test_architecture_contract.py`，保留底层不依赖 GUI、组件不反向依赖主窗口、无界面适配层不依赖 Qt 三条约束。
+- 不锁定普通颜色值、类定义的源码写法、已删除脚本的名称，也不单独测试数据类的赋值回读或直接发送 Qt 信号给测试自身的监听器。
+- 上传确认、未确认记录恢复、JSON 保存失败、源文件变化、取消清理、进程终止和真实 FFmpeg 测试继续保留。
 
 ## 职责边界
 

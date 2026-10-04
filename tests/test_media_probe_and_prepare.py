@@ -13,7 +13,6 @@ Validates:
 
 from __future__ import annotations
 
-import io
 import json
 from pathlib import Path
 import subprocess
@@ -21,7 +20,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import sys
 
@@ -32,32 +31,12 @@ if str(SRC_ROOT) not in sys.path:
 
 from PIL import Image
 
-from tdlib_media_uploader.config import loader as cfg
-from tdlib_media_uploader.config.paths import CACHE_DIR, IMAGE_COMPRESSION_CACHE_DIR
 from tdlib_media_uploader.media import legacy_image as image_core
 from tdlib_media_uploader.media import legacy_mixed as mixed_core
 from tdlib_media_uploader.media import legacy_video as video_core
-from tdlib_media_uploader.media.image_prepare import (
-    PreparedImage,
-    get_image_cache_key,
-    prepare_image_for_telegram,
-)
-from tdlib_media_uploader.media.image_probe import (
-    PHOTO_TARGET_MAX_SIDE,
-    TELEGRAM_PHOTO_MAX_ASPECT_RATIO,
-    TELEGRAM_PHOTO_MAX_BYTES,
-    TELEGRAM_PHOTO_MAX_DIMENSION_SUM,
-    TELEGRAM_PHOTO_TARGET_BYTES,
-    ImageMediaInfo,
-    probe_image,
-)
-from tdlib_media_uploader.media.video_probe import (
-    VideoMediaInfo,
-    _find_ffprobe,
-    determine_supports_streaming,
-    format_unsupported_reason,
-    probe_video,
-)
+from tdlib_media_uploader.media.image_prepare import prepare_image_for_telegram
+from tdlib_media_uploader.media.image_probe import TELEGRAM_PHOTO_MAX_BYTES, probe_image
+from tdlib_media_uploader.media.video_probe import VideoMediaInfo, determine_supports_streaming, format_unsupported_reason, probe_video
 
 
 def _ffprobe_mock_json(
@@ -98,80 +77,6 @@ def _ffprobe_mock_json(
 
 class VideoProbeAndPayloadTest(unittest.TestCase):
     """Test video media probing, compatibility evaluation, and payload generation."""
-
-    def test_native_mp4_h264(self):
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "test.mp4"
-            path.write_bytes(b"dummy")
-            mock_out = _ffprobe_mock_json(container="mov,mp4,m4a,3gp,3g2,mj2", video_codec="h264")
-            with patch("tdlib_media_uploader.media.video_probe._find_ffprobe", return_value="ffprobe"), \
-                 patch("tdlib_media_uploader.media.video_probe.run_cancellable_process",
-                       return_value=subprocess.CompletedProcess([], 0, mock_out, "")):
-                info = probe_video(path)
-
-            self.assertEqual(info.compatibility, "native")
-            self.assertEqual(info.video_codec, "h264")
-            self.assertTrue(info.has_video_stream)
-            self.assertEqual(info.width, 1920)
-            self.assertEqual(info.height, 1080)
-            self.assertAlmostEqual(info.duration, 10.5)
-            self.assertTrue(determine_supports_streaming(info))
-
-    def test_native_mp4_hevc(self):
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "test.mp4"
-            path.write_bytes(b"dummy")
-            mock_out = _ffprobe_mock_json(container="mov,mp4,m4a,3gp,3g2,mj2", video_codec="hevc")
-            with patch("tdlib_media_uploader.media.video_probe._find_ffprobe", return_value="ffprobe"), \
-                 patch("tdlib_media_uploader.media.video_probe.run_cancellable_process",
-                       return_value=subprocess.CompletedProcess([], 0, mock_out, "")):
-                info = probe_video(path)
-
-            self.assertEqual(info.compatibility, "native")
-            self.assertEqual(info.video_codec, "hevc")
-            self.assertTrue(determine_supports_streaming(info))
-
-    def test_native_mov_h264(self):
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "test.mov"
-            path.write_bytes(b"dummy")
-            mock_out = _ffprobe_mock_json(container="mov,mp4,m4a,3gp,3g2,mj2", video_codec="h264")
-            with patch("tdlib_media_uploader.media.video_probe._find_ffprobe", return_value="ffprobe"), \
-                 patch("tdlib_media_uploader.media.video_probe.run_cancellable_process",
-                       return_value=subprocess.CompletedProcess([], 0, mock_out, "")):
-                info = probe_video(path)
-
-            self.assertEqual(info.compatibility, "native")
-            self.assertEqual(info.video_codec, "h264")
-            self.assertTrue(determine_supports_streaming(info))
-
-    def test_native_mov_hevc(self):
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "test.mov"
-            path.write_bytes(b"dummy")
-            mock_out = _ffprobe_mock_json(container="mov,mp4,m4a,3gp,3g2,mj2", video_codec="hevc")
-            with patch("tdlib_media_uploader.media.video_probe._find_ffprobe", return_value="ffprobe"), \
-                 patch("tdlib_media_uploader.media.video_probe.run_cancellable_process",
-                       return_value=subprocess.CompletedProcess([], 0, mock_out, "")):
-                info = probe_video(path)
-
-            self.assertEqual(info.compatibility, "native")
-            self.assertEqual(info.video_codec, "hevc")
-            self.assertTrue(determine_supports_streaming(info))
-
-    def test_native_m4v_h264(self):
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "test.m4v"
-            path.write_bytes(b"dummy")
-            mock_out = _ffprobe_mock_json(container="mov,mp4,m4a,3gp,3g2,mj2", video_codec="h264")
-            with patch("tdlib_media_uploader.media.video_probe._find_ffprobe", return_value="ffprobe"), \
-                 patch("tdlib_media_uploader.media.video_probe.run_cancellable_process",
-                       return_value=subprocess.CompletedProcess([], 0, mock_out, "")):
-                info = probe_video(path)
-
-            self.assertEqual(info.compatibility, "native")
-            self.assertEqual(info.video_codec, "h264")
-            self.assertTrue(determine_supports_streaming(info))
 
     def test_unsupported_mov_prores(self):
         with tempfile.TemporaryDirectory() as td:
