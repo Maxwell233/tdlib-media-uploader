@@ -181,6 +181,7 @@ def run_cancellable_process(
 
     worker.join(timeout=1.0)
     if "error" in result_holder:
+        stop_child()
         raise result_holder["error"]
     stdout, stderr = result_holder.get("result", (None, None))
     stdout = _truncate_output(stdout, max_output_bytes)
