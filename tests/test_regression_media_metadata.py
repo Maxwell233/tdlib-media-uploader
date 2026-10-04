@@ -386,8 +386,10 @@ class ImprovementsTest(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, "", "")
 
             core._media_creation_metadata.cache_clear()
+            # Patch the module boundary; subprocess.run is shared with unrelated
+            # background work and would make this invocation count nondeterministic.
             with patch.object(core.imageio_ffmpeg, "get_ffmpeg_exe", return_value="ffmpeg"), \
-                    patch.object(core.subprocess, "run", side_effect=run) as ffmpeg:
+                    patch.object(core, "run_cancellable_process", side_effect=run) as ffmpeg:
                 media = core.read_media_creation_time(path)
 
             self.assertIsNotNone(media)
