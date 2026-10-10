@@ -32,6 +32,7 @@ from tdlib_media_uploader.upload import (  # noqa: E402
     SEND_STATES,
     UploadCancelled,
     UploadEngine,
+    pending_plans,
     preflight_plan,
     restrict_plan,
 )
@@ -123,6 +124,27 @@ class Phase5EngineContractTest(unittest.TestCase):
         narrowed = restrict_plan(plan, (items[1],))
         self.assertEqual(narrowed.items, items)
         self.assertEqual(narrowed.pending_items, (items[1],))
+
+    def test_pending_plans_filters_empty_and_validates(self):
+        from dataclasses import replace
+
+        items = _items(3)
+        plan = _Strategy(items).build_plans(ScanResult(items), target={})[0]
+        empty_plan = replace(plan, pending_items=())
+
+        # Test filtering out empty plans
+        plans = (plan, empty_plan)
+        filtered = pending_plans(plans)
+        self.assertEqual(filtered, (plan,))
+
+        # Test validation is called for invalid plans
+        invalid_plan = replace(plan, pending_items=(items[2], items[1]))
+        with self.assertRaises(ValueError):
+            pending_plans([invalid_plan])
+
+        # Test validation requires correct type
+        with self.assertRaises(TypeError):
+            pending_plans([items[0]])  # type: ignore
 
     def test_preflight_preserves_order_and_partitions_items(self):
         items = _items(3)
