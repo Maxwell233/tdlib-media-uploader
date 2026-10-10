@@ -783,7 +783,7 @@ class TDJsonClient:
                         pass
             except Exception as exc:
                 self.ui.warning(f"TDLib receiver 异常：{type(exc).__name__}: {exc}")
-                time.sleep(1)
+                self.stop_event.wait(1.0)
 
     def _configured_proxy(self) -> dict:
         """Build the TDLib proxy object from the optional local config."""
