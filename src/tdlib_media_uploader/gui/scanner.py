@@ -140,24 +140,10 @@ def apply_size_limits(paths: list[Path], kind: str) -> tuple[list[Path], list[di
     return accepted, skipped
 
 
-def basic_mixed_scan(
-    root: Path, cancel_event=None
-) -> tuple[list[dict], list[Path], list[str], list[str], list[dict]]:
-    """Build a dependency-free mixed preview with the same group rules."""
-    root = validate_scan_root(
-        root,
-        attempts=get_cfg("SCAN_DISCOVERY_ATTEMPTS", 3),
-        initial_delay=get_cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
-        max_delay=get_cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
-        cancel_event=cancel_event,
-    )
-    image_extensions = set(get_cfg("IMAGE_EXTENSIONS", set()))
-    video_extensions = set(get_cfg("VIDEO_EXTENSIONS", set()))
-    overlap = image_extensions & video_extensions
-    if overlap:
-        values = ", ".join(sorted(overlap))
-        raise RuntimeError(f"图片和视频扩展名不能重复：{values}")
-    accepted_extensions = image_extensions | video_extensions
+
+def _discover_mixed_directories(
+    root: Path, accepted_extensions: set[str], cancel_event=None
+) -> tuple[list[Path], list[Path], list[str], list[str]]:
     directories = []
     ignored = []
     errors = []
@@ -195,58 +181,107 @@ def basic_mixed_scan(
         warnings.append("目录扫描已取消")
     except OSError as exc:
         errors.append(f"{root}: {exc}")
+
+    return directories, ignored, errors, warnings
+
+
+def _process_mixed_group(
+    group_path: Path,
+    accepted_extensions: set[str],
+    video_extensions: set[str],
+    cancel_event=None
+) -> tuple[dict, list[dict]]:
+    scan_result = iter_files(
+        group_path,
+        accepted_extensions,
+        cancel_event=cancel_event,
+        discovery_attempts=get_cfg("SCAN_DISCOVERY_ATTEMPTS", 3),
+        discovery_initial_delay=get_cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+        discovery_max_delay=get_cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+    )
+
+    group_errors = list(scan_result.errors)
+    group_warnings = list(scan_result.warnings)
+    if scan_result.cancelled:
+        group_warnings.append("目录扫描已取消")
+
+    BASIC_SCAN_SNAPSHOTS.update({
+        key: snapshot.as_tuple()
+        for key, snapshot in getattr(scan_result, "snapshots", {}).items()
+    })
+
+    accepted, skipped = apply_size_limits(scan_result.paths, "mixed")
+
+    media_items = []
+    for path in accepted:
+        suffix = path.suffix.lower()
+        media_kind = "video" if suffix in video_extensions else "image"
+        media_items.append({
+            "path": path,
+            "media_kind": media_kind,
+            "group_name": group_path.name,
+            **(
+                {
+                    "scan_size": BASIC_SCAN_SNAPSHOTS[stable_path(path)][0],
+                    "scan_mtime_ns": BASIC_SCAN_SNAPSHOTS[stable_path(path)][1],
+                }
+                if stable_path(path) in BASIC_SCAN_SNAPSHOTS
+                else {}
+            ),
+        })
+
+    sort_mode = str(get_cfg("MIXED_SORT_MODE", "name")).strip().lower()
+    media_items = media_path_sort(
+        media_items,
+        group_path,
+        mode=sort_mode,
+        key_func=lambda item: item["path"],
+    )
+
+    group_dict = {
+        "group_name": group_path.name,
+        "group_path": group_path,
+        "items": media_items,
+        "errors": group_errors,
+        "warnings": group_warnings,
+    }
+    return group_dict, skipped
+
+
+def basic_mixed_scan(
+    root: Path, cancel_event=None
+) -> tuple[list[dict], list[Path], list[str], list[str], list[dict]]:
+    """Build a dependency-free mixed preview with the same group rules."""
+    root = validate_scan_root(
+        root,
+        attempts=get_cfg("SCAN_DISCOVERY_ATTEMPTS", 3),
+        initial_delay=get_cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+        max_delay=get_cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+        cancel_event=cancel_event,
+    )
+    image_extensions = set(get_cfg("IMAGE_EXTENSIONS", set()))
+    video_extensions = set(get_cfg("VIDEO_EXTENSIONS", set()))
+    overlap = image_extensions & video_extensions
+    if overlap:
+        values = ", ".join(sorted(overlap))
+        raise RuntimeError(f"图片和视频扩展名不能重复：{values}")
+    accepted_extensions = image_extensions | video_extensions
+
+    directories, ignored, errors, warnings = _discover_mixed_directories(
+        root, accepted_extensions, cancel_event=cancel_event
+    )
+
     groups = []
     size_skips = []
     for group_path in media_path_sort(directories, root, mode="name"):
-        scan_result = iter_files(
-            group_path,
-            accepted_extensions,
-            cancel_event=cancel_event,
-            discovery_attempts=get_cfg("SCAN_DISCOVERY_ATTEMPTS", 3),
-            discovery_initial_delay=get_cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
-            discovery_max_delay=get_cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+        group_dict, skipped = _process_mixed_group(
+            group_path, accepted_extensions, video_extensions, cancel_event=cancel_event
         )
-        errors.extend(scan_result.errors)
-        warnings.extend(scan_result.warnings)
-        if scan_result.cancelled:
-            warnings.append("目录扫描已取消")
-        BASIC_SCAN_SNAPSHOTS.update({
-            key: snapshot.as_tuple()
-            for key, snapshot in getattr(scan_result, "snapshots", {}).items()
-        })
-        accepted, skipped = apply_size_limits(scan_result.paths, "mixed")
+        groups.append(group_dict)
         size_skips.extend(skipped)
-        media_items = []
-        for path in accepted:
-            suffix = path.suffix.lower()
-            media_kind = "video" if suffix in video_extensions else "image"
-            media_items.append({
-                "path": path,
-                "media_kind": media_kind,
-                "group_name": group_path.name,
-                **(
-                    {
-                        "scan_size": BASIC_SCAN_SNAPSHOTS[stable_path(path)][0],
-                        "scan_mtime_ns": BASIC_SCAN_SNAPSHOTS[stable_path(path)][1],
-                    }
-                    if stable_path(path) in BASIC_SCAN_SNAPSHOTS
-                    else {}
-                ),
-            })
-        sort_mode = str(get_cfg("MIXED_SORT_MODE", "name")).strip().lower()
-        media_items = media_path_sort(
-            media_items,
-            group_path,
-            mode=sort_mode,
-            key_func=lambda item: item["path"],
-        )
-        groups.append({
-            "group_name": group_path.name,
-            "group_path": group_path,
-            "items": media_items,
-            "errors": scan_result.errors,
-            "warnings": scan_result.warnings,
-        })
+        errors.extend(group_dict["errors"])
+        warnings.extend(group_dict["warnings"])
+
     return groups, ignored, errors, warnings, size_skips
 
 
