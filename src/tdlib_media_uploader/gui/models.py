@@ -334,7 +334,7 @@ def scan_result(
         )
     if preflight_size:
         warning = (
-            f"已扫描到 {len(preflight_size)} 个超过 Telegram 视频上限的文件，上传前会跳过"
+            f"已扫描到 {len(preflight_size)} 个源文件超过视频大小上限，上传前会检查能否无损转封装并按输出大小复核"
             + (f"；{warning}" if warning else "")
         )
     if ignored_root_media:

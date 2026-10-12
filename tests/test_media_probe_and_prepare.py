@@ -78,7 +78,7 @@ def _ffprobe_mock_json(
 class VideoProbeAndPayloadTest(unittest.TestCase):
     """Test video media probing, compatibility evaluation, and payload generation."""
 
-    def test_unsupported_mov_prores(self):
+    def test_mov_prores_is_remux_candidate(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "test.mov"
             path.write_bytes(b"dummy")
@@ -88,12 +88,9 @@ class VideoProbeAndPayloadTest(unittest.TestCase):
                        return_value=subprocess.CompletedProcess([], 0, mock_out, "")):
                 info = probe_video(path)
 
-            self.assertEqual(info.compatibility, "unsupported")
+            self.assertEqual(info.compatibility, "remux")
             self.assertEqual(info.video_codec, "prores")
-            reason = format_unsupported_reason(path, info)
-            self.assertIn("test.mov", reason)
-            self.assertIn("prores", reason)
-            self.assertIn("当前编码不在直接 Telegram Video 支持范围内", reason)
+            self.assertEqual(info.recommended_action, "remux")
 
     def test_invalid_mov_without_video_stream(self):
         with tempfile.TemporaryDirectory() as td:
@@ -160,7 +157,7 @@ class VideoProbeAndPayloadTest(unittest.TestCase):
             self.assertEqual(mov_info.compatibility, "unsupported")
             self.assertIn("未找到 ffprobe", format_unsupported_reason(mov_path, mov_info))
 
-    def test_container_validation_mkv_renamed_to_mov_is_unsupported(self):
+    def test_actual_matroska_container_is_remuxed_despite_mov_suffix(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "fake.mov"
             path.write_bytes(b"dummy")
@@ -175,11 +172,9 @@ class VideoProbeAndPayloadTest(unittest.TestCase):
                        return_value=subprocess.CompletedProcess([], 0, mock_out, "")):
                 info = probe_video(path)
 
-            self.assertEqual(info.compatibility, "unsupported")
+            self.assertEqual(info.compatibility, "remux")
             self.assertEqual(info.container, "matroska")
-            self.assertFalse(determine_supports_streaming(info))
-            reason = format_unsupported_reason(path, info)
-            self.assertIn("fake.mov", reason)
+            self.assertTrue(determine_supports_streaming(info))
 
     def test_probe_video_cancellation_raises_timeout_error(self):
         with tempfile.TemporaryDirectory() as td:
