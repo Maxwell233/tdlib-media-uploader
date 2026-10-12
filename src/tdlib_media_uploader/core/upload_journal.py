@@ -268,19 +268,27 @@ class InflightJournal:
             return (stable_path(item["path"]),
                     item.get("size", item.get("scan_size")),
                     item.get("mtime_ns", item.get("scan_mtime_ns")))
-        requested = {identity(item) for item in items}
+
+        requested_by_path = {}
+        for item in items:
+            ident = identity(item)
+            requested_by_path.setdefault(ident[0], []).append(ident)
+
         with self._lock:
             self._ensure_index()
             for _path, record in self._records:
                 if (record.get("kind") == kind and record.get("status") in UNRESOLVED
                         and _target_matches(record, target)):
-                    if any(isinstance(item, dict) and item.get("path")
-                           and any(identity(item)[0] == candidate[0]
-                                   and all(left is None or right is None or left == right
-                                           for left, right in zip(identity(item)[1:], candidate[1:]))
-                                   for candidate in requested)
-                           for item in record.get("items", ())):
-                        return copy.deepcopy(record)
+                    for item in record.get("items", ()):
+                        if not (isinstance(item, dict) and item.get("path")):
+                            continue
+                        item_ident = identity(item)
+                        candidates = requested_by_path.get(item_ident[0])
+                        if candidates and any(
+                                all(left is None or right is None or left == right
+                                    for left, right in zip(item_ident[1:], candidate[1:]))
+                                for candidate in candidates):
+                            return copy.deepcopy(record)
         return None
 
     def find_album(self, album_key: str, kind: str | None = None, target=None) -> dict | None:

@@ -39,7 +39,6 @@ def _load_legacy_module() -> Any:
     return importlib.import_module("tdlib_media_uploader.media.legacy_mixed")
 
 
-
 def _is_cancelled(token: CancelToken | None) -> bool:
     if token is None:
         return False
@@ -209,7 +208,9 @@ class MixedMediaStrategy:
         self._legacy = (
             legacy_module
             if legacy_module is not None
-            else legacy if legacy is not None else _load_legacy_module()
+            else legacy
+            if legacy is not None
+            else _load_legacy_module()
         )
         self._config_override = config
         self.source_root = Path(source_root) if source_root is not None else None
@@ -222,7 +223,9 @@ class MixedMediaStrategy:
 
     @property
     def _config(self) -> Any:
-        return getattr(self._legacy, "cfg", None) or self._config_override or self._legacy
+        return (
+            getattr(self._legacy, "cfg", None) or self._config_override or self._legacy
+        )
 
     def _root(self, source_root: Path | None = None) -> Path:
         if source_root is not None:
@@ -288,7 +291,9 @@ class MixedMediaStrategy:
         normalized_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
         normalized_metadata["group_path"] = Path(group_path)
         normalized_metadata["requires_premium"] = bool(
-            raw.get("requires_premium", normalized_metadata.get("requires_premium", False))
+            raw.get(
+                "requires_premium", normalized_metadata.get("requires_premium", False)
+            )
         )
         return MediaItem(
             path=path,
@@ -395,7 +400,11 @@ class MixedMediaStrategy:
 
     @staticmethod
     def _scan_diagnostics(legacy: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        errors = tuple(str(value) for value in getattr(legacy, "LAST_SCAN_ERRORS", ()) if str(value))
+        errors = tuple(
+            str(value)
+            for value in getattr(legacy, "LAST_SCAN_ERRORS", ())
+            if str(value)
+        )
         warnings = [
             str(value)
             for value in getattr(legacy, "LAST_SCAN_WARNINGS", ())
@@ -425,8 +434,8 @@ class MixedMediaStrategy:
             )
         if preflight_count:
             warnings.append(
-                f"已扫描到 {preflight_count} 个超过 Telegram 视频上限的混合媒体，"
-                "这些文件将在上传前跳过。"
+                f"已扫描到 {preflight_count} 个源文件超过视频大小上限；"
+                "上传前将检查能否无损转封装，并按输出大小复核。"
             )
         ignored = list(getattr(legacy, "LAST_SCAN_IGNORED_ROOT_MEDIA", ()))
         if ignored:
@@ -470,7 +479,9 @@ class MixedMediaStrategy:
                             group_path=group_path,
                         )
                     )
-        cancelled = _is_cancelled(cancel_token) or any("取消" in warning for warning in warnings)
+        cancelled = _is_cancelled(cancel_token) or any(
+            "取消" in warning for warning in warnings
+        )
         emit = getattr(event_sink, "emit", None)
         if callable(emit):
             try:
@@ -568,7 +579,9 @@ class MixedMediaStrategy:
             )
         return tuple(plans)
 
-    def _caption_settings(self, context: UploadContext | None) -> tuple[bool, bool, int]:
+    def _caption_settings(
+        self, context: UploadContext | None
+    ) -> tuple[bool, bool, int]:
         config = getattr(self._legacy, "cfg", None) or self._config_override
         include = bool(getattr(config, "MIXED_CAPTION_INCLUDE_FILENAMES", False))
         numbered = bool(getattr(config, "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS", True))
@@ -591,7 +604,12 @@ class MixedMediaStrategy:
         return str(
             _call_compatible(
                 formatter,
-                (plan.caption, tuple(self._legacy_item(item) for item in items), include, numbered),
+                (
+                    plan.caption,
+                    tuple(self._legacy_item(item) for item in items),
+                    include,
+                    numbered,
+                ),
                 max_chars=limit,
             )
         )
@@ -601,8 +619,8 @@ class MixedMediaStrategy:
         raw_item: Any,
         record: Mapping[str, Any],
         *,
-        pending: Sequence[MediaItem],
         lookup: Mapping[tuple[object, ...], MediaItem],
+        path_lookup: Mapping[str, MediaItem | None],
         source_root: Path,
     ) -> MediaItem:
         if raw_item is not None:
@@ -611,9 +629,11 @@ class MixedMediaStrategy:
                 return lookup[identity]
         raw_path = record.get("path")
         if raw_path is not None:
-            matches = [item for item in pending if str(item.path) == str(raw_path)]
-            if len(matches) == 1:
-                return matches[0]
+            raw_path_str = str(raw_path)
+            if raw_path_str in path_lookup:
+                matched = path_lookup[raw_path_str]
+                if matched is not None:
+                    return matched
         raise ValueError(f"legacy mixed builder 返回了未知 outcome：{raw_item!r}")
 
     def _normalize_contents(
@@ -630,6 +650,15 @@ class MixedMediaStrategy:
         pending_lookup = {_model_identity(item): item for item in pending}
         if len(pending_lookup) != len(pending):
             raise ValueError("Album 待上传项 identity 重复")
+
+        path_lookup: dict[str, MediaItem | None] = {}
+        for item in pending:
+            key = str(item.path)
+            if key in path_lookup:
+                path_lookup[key] = None
+            else:
+                path_lookup[key] = item
+
         ready: list[MediaItem] = []
         deferred: list[MediaItem] = []
         failed: list[MediaItem] = []
@@ -648,7 +677,9 @@ class MixedMediaStrategy:
         for raw_item in raw_valid or ():
             identity = _raw_identity(raw_item, plan.source_root)
             if identity is None or identity not in pending_lookup:
-                raise ValueError("legacy mixed builder 返回了不属于当前 Album 的 ready 项")
+                raise ValueError(
+                    "legacy mixed builder 返回了不属于当前 Album 的 ready 项"
+                )
             add_outcome(pending_lookup[identity], ready)
 
         for record in raw_skipped or ():
@@ -657,18 +688,27 @@ class MixedMediaStrategy:
             item = self._resolve_outcome_item(
                 record.get("item"),
                 record,
-                pending=pending,
                 lookup=pending_lookup,
+                path_lookup=path_lookup,
                 source_root=plan.source_root,
             )
-            category = str(record.get("category", "unreadable") or "unreadable").strip().lower()
-            bucket = deferred if category in {
-                "deferred",
-                "changed",
-                "network",
-                "cancelled",
-                "read_failed",
-            } else failed
+            category = (
+                str(record.get("category", "unreadable") or "unreadable")
+                .strip()
+                .lower()
+            )
+            bucket = (
+                deferred
+                if category
+                in {
+                    "deferred",
+                    "changed",
+                    "network",
+                    "cancelled",
+                    "read_failed",
+                }
+                else failed
+            )
             add_outcome(item, bucket)
             reason = str(record.get("reason", "") or "").strip()
             if reason:
@@ -726,7 +766,9 @@ class MixedMediaStrategy:
             if isinstance(context.metadata, Mapping):
                 is_premium = context.metadata.get("is_premium")
             if is_premium is None and getattr(context, "sender", None) is not None:
-                is_premium = getattr(getattr(context.sender, "client", None), "is_premium", None)
+                is_premium = getattr(
+                    getattr(context.sender, "client", None), "is_premium", None
+                )
 
         with self._legacy_scope(Path(plan.source_root)):
             result = _call_compatible(
@@ -769,7 +811,9 @@ class MixedMediaStrategy:
         if not skipped:
             return {"status": "READY"}
         record = skipped[0] if isinstance(skipped[0], Mapping) else {}
-        category = str(record.get("category", "unreadable") or "unreadable").strip().lower()
+        category = (
+            str(record.get("category", "unreadable") or "unreadable").strip().lower()
+        )
         deferred = category in {
             "deferred",
             "changed",
@@ -779,7 +823,9 @@ class MixedMediaStrategy:
         }
         return {
             "status": "DEFERRED" if deferred else "FAILED",
-            "reason": str(record.get("reason", "混合媒体预检失败") or "混合媒体预检失败"),
+            "reason": str(
+                record.get("reason", "混合媒体预检失败") or "混合媒体预检失败"
+            ),
         }
 
 

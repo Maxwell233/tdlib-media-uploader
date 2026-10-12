@@ -296,16 +296,25 @@ def scan_videos(cancel_event=None) -> list[Path]:
         return []
     scan_result = iter_files(
         root,
-        cfg.VIDEO_EXTENSIONS,
+        None,
         cancel_event=cancel_event,
         discovery_attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
         discovery_initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
         discovery_max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
     )
-    videos = scan_result.paths
+    # Configured video suffixes retain their established diagnostics; other
+    # names enter only when their header resembles a supported container.
+    from .video_probe import has_video_container_signature
+    videos = []
+    for path in scan_result.paths:
+        if scan_result.cancelled or _cancel_requested(cancel_event):
+            break
+        if path.suffix.lower() in cfg.VIDEO_EXTENSIONS or has_video_container_signature(path):
+            videos.append(path)
     LAST_SCAN_ERRORS = list(scan_result.errors)
     LAST_SCAN_WARNINGS = list(scan_result.warnings)
-    if scan_result.cancelled:
+    cancelled = scan_result.cancelled or _cancel_requested(cancel_event)
+    if cancelled:
         LAST_SCAN_WARNINGS.append("目录扫描已取消")
     LAST_SCAN_SIZE_SKIPS = []
     LAST_SCAN_PREMIUM_REQUIRED = []
@@ -313,8 +322,13 @@ def scan_videos(cancel_event=None) -> list[Path]:
         key: snapshot.as_tuple()
         for key, snapshot in getattr(scan_result, "snapshots", {}).items()
     }
+    if cancelled:
+        return []
     accepted = []
     for path in videos:
+        if _cancel_requested(cancel_event):
+            LAST_SCAN_WARNINGS.append("目录扫描已取消")
+            return []
         snapshot = LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or file_snapshot(path)
         if snapshot is None:
             LAST_SCAN_ERRORS.append(f"{path}: 文件暂时不可读取或为空")
@@ -328,8 +342,8 @@ def scan_videos(cancel_event=None) -> list[Path]:
                 "category": "size",
                 "action": "preflight",
                 "reason": (
-                    f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
-                    f"{video_limit_text(cfg.VIDEO_MAX_BYTES)}"
+                    f"源文件大小 {format_size(size)} 超过 Telegram 视频上限 "
+                    f"{video_limit_text(cfg.VIDEO_MAX_BYTES)}；转封装后将按输出大小复核"
                 ),
             })
         if size > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288):
@@ -830,32 +844,43 @@ class _NoMediaDate(Exception):
     """Internal signal used to keep transient/negative results out of cache."""
 
 
-@functools.lru_cache(maxsize=4096)
-def _cached_media_creation_metadata(path_text: str, size: int, mtime_ns: int):
-    result = _read_media_creation_metadata(path_text, size, mtime_ns)
-    if result is None:
-        # Exceptions are not retained by functools.lru_cache.  This prevents
-        # a temporary SMB/FFmpeg failure from becoming a permanent negative
-        # cache entry for the rest of the process.
-        raise _NoMediaDate
-    return result
+_media_metadata_cache = {}
+_MEDIA_CACHE_MAX_SIZE = 4096
+_media_metadata_cache_lock = threading.Lock()
 
 
 def _media_creation_metadata(path_text: str, size: int, mtime_ns: int, cancel_event=None):
-    if cancel_event is not None:
-        try:
-            return _read_media_creation_metadata(
-                path_text, size, mtime_ns, cancel_event=cancel_event
-            )
-        except _NoMediaDate:
-            return None
+    if _cancel_requested(cancel_event):
+        return None
+
+    cache_key = (path_text, size, mtime_ns)
+    with _media_metadata_cache_lock:
+        if cache_key in _media_metadata_cache:
+            return _media_metadata_cache[cache_key]
+
     try:
-        return _cached_media_creation_metadata(path_text, size, mtime_ns)
+        result = _read_media_creation_metadata(
+            path_text, size, mtime_ns, cancel_event=cancel_event
+        )
+        if _cancel_requested(cancel_event):
+            return None
+        if result is None:
+            return None
+
+        with _media_metadata_cache_lock:
+            _media_metadata_cache[cache_key] = result
+            if len(_media_metadata_cache) > _MEDIA_CACHE_MAX_SIZE:
+                _media_metadata_cache.pop(next(iter(_media_metadata_cache)))
+        return result
     except _NoMediaDate:
         return None
 
 
-_media_creation_metadata.cache_clear = _cached_media_creation_metadata.cache_clear
+def _clear_media_metadata_cache():
+    with _media_metadata_cache_lock:
+        _media_metadata_cache.clear()
+
+_media_creation_metadata.cache_clear = _clear_media_metadata_cache
 
 
 def read_media_creation_time(path: Path, cancel_event=None):
@@ -1476,12 +1501,25 @@ def prepare_video(path: Path, cancel_event=None):
         if cancel_event is None
         else video_info(path, cancel_event=cancel_event)
     )
-    if cfg.VIDEO_GENERATE_THUMBNAIL:
+    if cfg.VIDEO_GENERATE_THUMBNAIL and (
+        Path(path).stat().st_size <= cfg.VIDEO_MAX_BYTES
+        or can_remux_video(path, info=info)
+    ):
         if cancel_event is None:
             build_thumbnail(path, duration=info.get("duration"))
         else:
             build_thumbnail(path, cancel_event, duration=info.get("duration"))
     return info
+
+
+def can_remux_video(path: Path, *, info=None, cancel_event=None) -> bool:
+    """Defer source-size checks only for verified stream-copy candidates."""
+    policy = str(getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", "remux")).strip().lower()
+    if policy == "original":
+        return False
+    if info is None:
+        info = video_info(path, cancel_event=cancel_event)
+    return getattr(info, "compatibility", None) == "remux"
 
 
 def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
@@ -1509,11 +1547,6 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
             raise_for_file_readiness(path, readiness)
             snapshot = readiness.snapshot.as_tuple()
             size = snapshot[0]
-            if size > cfg.VIDEO_MAX_BYTES:
-                raise RuntimeError(
-                    f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
-                    f"{video_limit_text(cfg.VIDEO_MAX_BYTES)}"
-                )
             # Preserve the historical one-argument call for integrations and
             # tests that provide a lightweight preparation hook.  The worker
             # passes cancellation only when a caller requested it.
@@ -1522,6 +1555,11 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
                 if cancel_event is None
                 else prepare_video(path, cancel_event)
             )
+            if size > cfg.VIDEO_MAX_BYTES and not can_remux_video(path, info=info):
+                raise RuntimeError(
+                    f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
+                    f"{video_limit_text(cfg.VIDEO_MAX_BYTES)}"
+                )
             if getattr(info, "compatibility", "native") not in {"native", "legacy"}:
                 policy = getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", "remux")
                 if getattr(info, "compatibility", "") == "remux":
@@ -1609,13 +1647,13 @@ def report_scan_size_skips(skipped, ui=None) -> None:
         )
     if preflight:
         target.warning(
-            f"扫描到 {len(preflight)} 个超过约 4 GB 上限的视频；"
-            "它们会显示在扫描结果中，但会在上传前安全跳过。"
+            f"扫描到 {len(preflight)} 个源文件超过视频大小上限；"
+            "上传前将检查能否无损转封装，并按输出大小复核。"
         )
     for record in skipped:
         target.log(
-            f"扫描跳过视频：{record['path']}\n"
-            f"处理：{'上传前跳过' if record.get('action') == 'preflight' else '扫描时跳过'}\n"
+            f"扫描视频大小提醒：{record['path']}\n"
+            f"处理：{'上传前复核' if record.get('action') == 'preflight' else '扫描时跳过'}\n"
             f"原因：{record['reason']}"
         )
 
@@ -2199,16 +2237,10 @@ def _main_impl():
         client.refresh_account_limits()
         caption_limit = int(getattr(client, "caption_length_limit", None) or 1024)
         if client.is_premium is not True:
-            policy = str(
-                getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", getattr(cfg, "VIDEO_TRANSCODE_POLICY", "remux"))
-            ).strip().lower()
             premium_items = [
                 item for item in pending_items
                 if item.get("requires_premium")
-                and not (
-                    Path(item["path"]).suffix.lstrip(".").lower() in {"mkv", "avi", "ts", "mts", "m2ts"}
-                    and policy != "original"
-                )
+                and not can_remux_video(item["path"], cancel_event=cancel_event)
             ]
             if premium_items:
                 UI.warning(

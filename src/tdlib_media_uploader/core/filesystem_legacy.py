@@ -1178,7 +1178,7 @@ def iter_files(
     the historical ``paths, errors = iter_files(...)`` adapter.
     """
 
-    accepted = {str(ext).lower() for ext in extensions}
+    accepted = None if extensions is None else {str(ext).lower() for ext in extensions}
     paths: list[Path] = []
     errors: list[str] = []
     warnings: list[str] = []
@@ -1243,7 +1243,7 @@ def iter_files(
                     # pathlib.Path.suffix for names such as ``photo.`` and
                     # ``.hidden`` (both have no suffix).
                     ext = _entry_suffix(entry.name)
-                    if ext.lower() not in accepted:
+                    if accepted is not None and ext.lower() not in accepted:
                         continue
                     if stat.S_ISREG(info.st_mode) and info.st_size > 0:
                         path = Path(entry.path)
