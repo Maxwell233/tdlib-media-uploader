@@ -177,6 +177,12 @@ ISO_BMFF_FORMAT_NAMES = frozenset({
     "mp42",
 })
 
+ISO_BMFF_IMAGE_BRANDS = frozenset({
+    b"avif", b"avis", b"mif1", b"msf1",
+    b"heic", b"heix", b"hevc", b"hevx",
+})
+
+
 def has_video_container_signature(path: Path | str) -> bool:
     """Select extensionless candidates cheaply; ffprobe makes the final decision."""
     try:
@@ -185,7 +191,25 @@ def has_video_container_signature(path: Path | str) -> bool:
     except OSError:
         return False
     if len(header) >= 12 and header[4:8] == b"ftyp":
-        return True
+        # AVIF/HEIF share the BMFF file header with MP4. Check both the
+        # major brand and compatible brands, within the ftyp box only.
+        # Image brands: https://mp4ra.org/registered-types/brands
+        box_size = int.from_bytes(header[:4], "big")
+        brand_offset = 8
+        if box_size == 1:
+            if len(header) < 24:
+                return False
+            box_size = int.from_bytes(header[8:16], "big")
+            brand_offset = 16
+        box_end = min(box_size or len(header), len(header))
+        if box_end < brand_offset + 8:
+            return False
+        brands = {header[brand_offset:brand_offset + 4]}
+        brands.update(
+            header[offset:offset + 4]
+            for offset in range(brand_offset + 8, box_end - 3, 4)
+        )
+        return not bool(brands & ISO_BMFF_IMAGE_BRANDS)
     if header.startswith(b"\x1a\x45\xdf\xa3"):
         return True
     if header.startswith(b"RIFF") and header[8:12] == b"AVI ":

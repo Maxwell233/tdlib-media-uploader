@@ -305,11 +305,16 @@ def scan_videos(cancel_event=None) -> list[Path]:
     # Configured video suffixes retain their established diagnostics; other
     # names enter only when their header resembles a supported container.
     from .video_probe import has_video_container_signature
-    videos = [path for path in scan_result.paths
-              if path.suffix.lower() in cfg.VIDEO_EXTENSIONS or has_video_container_signature(path)]
+    videos = []
+    for path in scan_result.paths:
+        if scan_result.cancelled or _cancel_requested(cancel_event):
+            break
+        if path.suffix.lower() in cfg.VIDEO_EXTENSIONS or has_video_container_signature(path):
+            videos.append(path)
     LAST_SCAN_ERRORS = list(scan_result.errors)
     LAST_SCAN_WARNINGS = list(scan_result.warnings)
-    if scan_result.cancelled:
+    cancelled = scan_result.cancelled or _cancel_requested(cancel_event)
+    if cancelled:
         LAST_SCAN_WARNINGS.append("目录扫描已取消")
     LAST_SCAN_SIZE_SKIPS = []
     LAST_SCAN_PREMIUM_REQUIRED = []
@@ -317,8 +322,13 @@ def scan_videos(cancel_event=None) -> list[Path]:
         key: snapshot.as_tuple()
         for key, snapshot in getattr(scan_result, "snapshots", {}).items()
     }
+    if cancelled:
+        return []
     accepted = []
     for path in videos:
+        if _cancel_requested(cancel_event):
+            LAST_SCAN_WARNINGS.append("目录扫描已取消")
+            return []
         snapshot = LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or file_snapshot(path)
         if snapshot is None:
             LAST_SCAN_ERRORS.append(f"{path}: 文件暂时不可读取或为空")
@@ -1480,7 +1490,10 @@ def prepare_video(path: Path, cancel_event=None):
         if cancel_event is None
         else video_info(path, cancel_event=cancel_event)
     )
-    if cfg.VIDEO_GENERATE_THUMBNAIL:
+    if cfg.VIDEO_GENERATE_THUMBNAIL and (
+        Path(path).stat().st_size <= cfg.VIDEO_MAX_BYTES
+        or can_remux_video(path, info=info)
+    ):
         if cancel_event is None:
             build_thumbnail(path, duration=info.get("duration"))
         else:

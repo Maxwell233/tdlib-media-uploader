@@ -238,14 +238,20 @@ def _group_items(group_path: Path, group_name: str, cancel_event=None) -> list[d
     LAST_SCAN_WARNINGS.extend(scan_result.warnings)
     if scan_result.cancelled:
         LAST_SCAN_WARNINGS.append("目录扫描已取消")
+        return []
     candidates = scan_result.paths
     snapshots = getattr(scan_result, "snapshots", {})
     items = []
     for path in candidates:
+        if cancel_event is not None and cancel_event.is_set():
+            break
         snapshot = snapshots.get(stable_path(path))
         item = _item_for_path(path, group_name, snapshot.as_tuple() if snapshot else None)
         if item is not None:
             items.append(item)
+    if cancel_event is not None and cancel_event.is_set():
+        LAST_SCAN_WARNINGS.append("目录扫描已取消")
+        return []
     sort_mode = str(getattr(cfg, "MIXED_SORT_MODE", "name")).strip().lower()
     def item_mtime(item):
         snapshot_mtime = item.get("scan_mtime_ns")
@@ -321,6 +327,8 @@ def scan_mixed_groups(cancel_event=None) -> list[dict]:
         LAST_SCAN_ERRORS.append(f"{root}: {exc}")
     directories = media_path_sort(directories, root, mode="name")
     for group_path in directories:
+        if cancel_event is not None and cancel_event.is_set():
+            break
         items = _group_items(group_path, group_path.name, cancel_event=cancel_event)
         if items:
             groups.append({
