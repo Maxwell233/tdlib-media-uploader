@@ -1162,7 +1162,7 @@ def _is_reparse_info(info) -> bool:
 
 def _process_directory_entry(
     entry,
-    accepted: set[str],
+    accepted: set[str] | None,
     stack: list[str],
     paths: list[Path],
     warnings: list[str],
@@ -1197,7 +1197,7 @@ def _process_directory_entry(
     # pathlib.Path.suffix for names such as ``photo.`` and
     # ``.hidden`` (both have no suffix).
     ext = _entry_suffix(entry.name)
-    if ext.lower() not in accepted:
+    if accepted is not None and ext.lower() not in accepted:
         return
     if stat.S_ISREG(info.st_mode) and info.st_size > 0:
         path = Path(entry.path)
@@ -1229,7 +1229,7 @@ def iter_files(
     the historical ``paths, errors = iter_files(...)`` adapter.
     """
 
-    accepted = {str(ext).lower() for ext in extensions}
+    accepted = None if extensions is None else {str(ext).lower() for ext in extensions}
     paths: list[Path] = []
     errors: list[str] = []
     warnings: list[str] = []

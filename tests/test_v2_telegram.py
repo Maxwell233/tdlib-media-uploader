@@ -111,6 +111,16 @@ class TelegramLimitsTest(unittest.TestCase):
         self.assertTrue(limits.is_premium)
         self.assertEqual(limits.caption_length_max, 777)
 
+    def test_validate_caption_error_paths(self):
+        with self.assertRaisesRegex(ValueError, "Caption 限制必须是整数"):
+            validate_caption("text", limit=[])
+        with self.assertRaisesRegex(ValueError, "Caption 限制必须是整数"):
+            validate_caption("text", limit="not_an_int")
+        with self.assertRaisesRegex(ValueError, "Caption 限制必须大于 0"):
+            validate_caption("text", limit=0)
+        with self.assertRaisesRegex(ValueError, "Caption 限制必须大于 0"):
+            validate_caption("text", limit=-10)
+
 
 class TelegramTargetTest(unittest.TestCase):
     def test_forum_and_channel_canonical_identity_ignore_irrelevant_fields(self):

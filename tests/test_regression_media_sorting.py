@@ -216,10 +216,12 @@ class ImprovementsTest(unittest.TestCase):
             nested.mkdir()
             (nested / "clip.WMV").write_bytes(b"video")
             (nested / "clip.MP4").write_bytes(b"video")
+            (nested / "transport.bin").write_bytes((b"\x47" + b"\0" * 187) * 3)
+            (nested / "ordinary.bin").write_bytes(b"not a video")
             with patch.object(core.cfg, "VIDEO_DIR", root), \
                     patch.object(core.cfg, "VIDEO_EXTENSIONS", {".mp4"}), \
                     patch.object(core.cfg, "VIDEO_MAX_BYTES", 100), \
                     patch.object(core.cfg, "VIDEO_READ_DATES", False), \
                     patch.object(core.cfg, "VIDEO_SORT_MODE", "name"):
                 paths = core.scan_videos()
-            self.assertEqual([path.name for path in paths], ["clip.MP4"])
+            self.assertEqual([path.name for path in paths], ["clip.MP4", "transport.bin"])
