@@ -14,7 +14,6 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from functools import cmp_to_key
 from typing import Callable, TypeVar
 from pathlib import Path
 
@@ -1161,6 +1160,58 @@ def _is_reparse_info(info) -> bool:
     return bool(int(getattr(info, "st_file_attributes", 0)) & reparse_flag)
 
 
+def _process_directory_entry(
+    entry,
+    accepted: set[str],
+    stack: list[str],
+    paths: list[Path],
+    warnings: list[str],
+    snapshots: dict[str, FileSnapshot],
+    cancel_event,
+    discovery_attempts: int,
+    discovery_initial_delay: float,
+    discovery_max_delay: float,
+) -> None:
+    """Inspect a directory entry and update the discovery state collections."""
+    # The non-following stat is both the type check and
+    # the discovery snapshot.  Avoid a separate ``is_symlink``
+    # syscall so a transient SMB stat failure gets the same
+    # bounded retry as every other entry and matching files
+    # are inspected only once.
+    info = retry_fs_operation(
+        lambda entry=entry: entry.stat(follow_symlinks=False),
+        attempts=discovery_attempts,
+        initial_delay=discovery_initial_delay,
+        max_delay=discovery_max_delay,
+        cancel_event=cancel_event,
+    )
+    if _is_reparse_info(info):
+        warnings.append(f"跳过符号链接或 junction：{entry.path}")
+        return
+    if stat.S_ISDIR(info.st_mode):
+        stack.append(entry.path)
+        return
+
+    # Avoid constructing Path objects for files that will be
+    # rejected by the extension filter. This spelling matches
+    # pathlib.Path.suffix for names such as ``photo.`` and
+    # ``.hidden`` (both have no suffix).
+    ext = _entry_suffix(entry.name)
+    if ext.lower() not in accepted:
+        return
+    if stat.S_ISREG(info.st_mode) and info.st_size > 0:
+        path = Path(entry.path)
+        paths.append(path)
+        mtime_ns = getattr(info, "st_mtime_ns", None)
+        if mtime_ns is None:
+            mtime_ns = int(info.st_mtime * 1_000_000_000)
+        snapshots[stable_path(path)] = FileSnapshot(
+            _text(path),
+            int(info.st_size),
+            int(mtime_ns),
+        )
+
+
 def iter_files(
     root,
     extensions,
@@ -1219,43 +1270,18 @@ def iter_files(
                     cancelled = True
                     break
                 try:
-                    # The non-following stat is both the type check and
-                    # the discovery snapshot.  Avoid a separate ``is_symlink``
-                    # syscall so a transient SMB stat failure gets the same
-                    # bounded retry as every other entry and matching files
-                    # are inspected only once.
-                    info = retry_fs_operation(
-                        lambda entry=entry: entry.stat(follow_symlinks=False),
-                        attempts=discovery_attempts,
-                        initial_delay=discovery_initial_delay,
-                        max_delay=discovery_max_delay,
-                        cancel_event=cancel_event,
+                    _process_directory_entry(
+                        entry,
+                        accepted,
+                        stack,
+                        paths,
+                        warnings,
+                        snapshots,
+                        cancel_event,
+                        discovery_attempts,
+                        discovery_initial_delay,
+                        discovery_max_delay,
                     )
-                    if _is_reparse_info(info):
-                        warnings.append(f"跳过符号链接或 junction：{entry.path}")
-                        continue
-                    if stat.S_ISDIR(info.st_mode):
-                        stack.append(entry.path)
-                        continue
-
-                    # Avoid constructing Path objects for files that will be
-                    # rejected by the extension filter. This spelling matches
-                    # pathlib.Path.suffix for names such as ``photo.`` and
-                    # ``.hidden`` (both have no suffix).
-                    ext = _entry_suffix(entry.name)
-                    if ext.lower() not in accepted:
-                        continue
-                    if stat.S_ISREG(info.st_mode) and info.st_size > 0:
-                        path = Path(entry.path)
-                        paths.append(path)
-                        mtime_ns = getattr(info, "st_mtime_ns", None)
-                        if mtime_ns is None:
-                            mtime_ns = int(info.st_mtime * 1_000_000_000)
-                        snapshots[stable_path(path)] = FileSnapshot(
-                            _text(path),
-                            int(info.st_size),
-                            int(mtime_ns),
-                        )
                 except TimeoutError as error:
                     if _cancelled(cancel_event):
                         cancelled = True
