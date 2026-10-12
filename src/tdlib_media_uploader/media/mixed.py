@@ -401,23 +401,31 @@ class MixedMediaStrategy:
             for value in getattr(legacy, "LAST_SCAN_WARNINGS", ())
             if str(value)
         ]
-        size_skips = list(getattr(legacy, "LAST_SCAN_SIZE_SKIPS", ()))
-        rejected = [record for record in size_skips if record.get("action") == "skip"]
-        preflight = [record for record in size_skips if record.get("action") == "preflight"]
-        compressing = [record for record in size_skips if record.get("action") == "compress"]
-        if rejected:
+        rejected_count = 0
+        preflight_count = 0
+        compressing_count = 0
+        for record in getattr(legacy, "LAST_SCAN_SIZE_SKIPS", ()):
+            action = record.get("action")
+            if action == "skip":
+                rejected_count += 1
+            elif action == "preflight":
+                preflight_count += 1
+            elif action == "compress":
+                compressing_count += 1
+
+        if rejected_count:
             warnings.append(
-                f"扫描时跳过 {len(rejected)} 个超过 Telegram 限制的混合媒体；"
+                f"扫描时跳过 {rejected_count} 个超过 Telegram 限制的混合媒体；"
                 "这些文件未加入上传计划。"
             )
-        if compressing:
+        if compressing_count:
             warnings.append(
-                f"扫描提醒：发现 {len(compressing)} 个需规范化图片；"
+                f"扫描提醒：发现 {compressing_count} 个需规范化图片；"
                 "上传时将自动规范化生成临时副本（原文件不修改）。"
             )
-        if preflight:
+        if preflight_count:
             warnings.append(
-                f"已扫描到 {len(preflight)} 个超过 Telegram 视频上限的混合媒体，"
+                f"已扫描到 {preflight_count} 个超过 Telegram 视频上限的混合媒体，"
                 "这些文件将在上传前跳过。"
             )
         ignored = list(getattr(legacy, "LAST_SCAN_IGNORED_ROOT_MEDIA", ()))
