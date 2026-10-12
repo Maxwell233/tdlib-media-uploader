@@ -830,32 +830,43 @@ class _NoMediaDate(Exception):
     """Internal signal used to keep transient/negative results out of cache."""
 
 
-@functools.lru_cache(maxsize=4096)
-def _cached_media_creation_metadata(path_text: str, size: int, mtime_ns: int):
-    result = _read_media_creation_metadata(path_text, size, mtime_ns)
-    if result is None:
-        # Exceptions are not retained by functools.lru_cache.  This prevents
-        # a temporary SMB/FFmpeg failure from becoming a permanent negative
-        # cache entry for the rest of the process.
-        raise _NoMediaDate
-    return result
+_media_metadata_cache = {}
+_MEDIA_CACHE_MAX_SIZE = 4096
+_media_metadata_cache_lock = threading.Lock()
 
 
 def _media_creation_metadata(path_text: str, size: int, mtime_ns: int, cancel_event=None):
-    if cancel_event is not None:
-        try:
-            return _read_media_creation_metadata(
-                path_text, size, mtime_ns, cancel_event=cancel_event
-            )
-        except _NoMediaDate:
-            return None
+    if _cancel_requested(cancel_event):
+        return None
+
+    cache_key = (path_text, size, mtime_ns)
+    with _media_metadata_cache_lock:
+        if cache_key in _media_metadata_cache:
+            return _media_metadata_cache[cache_key]
+
     try:
-        return _cached_media_creation_metadata(path_text, size, mtime_ns)
+        result = _read_media_creation_metadata(
+            path_text, size, mtime_ns, cancel_event=cancel_event
+        )
+        if _cancel_requested(cancel_event):
+            return None
+        if result is None:
+            return None
+
+        with _media_metadata_cache_lock:
+            _media_metadata_cache[cache_key] = result
+            if len(_media_metadata_cache) > _MEDIA_CACHE_MAX_SIZE:
+                _media_metadata_cache.pop(next(iter(_media_metadata_cache)))
+        return result
     except _NoMediaDate:
         return None
 
 
-_media_creation_metadata.cache_clear = _cached_media_creation_metadata.cache_clear
+def _clear_media_metadata_cache():
+    with _media_metadata_cache_lock:
+        _media_metadata_cache.clear()
+
+_media_creation_metadata.cache_clear = _clear_media_metadata_cache
 
 
 def read_media_creation_time(path: Path, cancel_event=None):
