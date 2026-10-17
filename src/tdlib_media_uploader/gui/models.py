@@ -282,13 +282,13 @@ def scan_result(
             }
         )
 
-    completed_keys = {
-        item_identity(item)
-        for model_plan in bundle.plans
-        for item in model_plan.items
-        if item_identity(item)
-        not in {item_identity(pending) for pending in model_plan.pending_items}
-    }
+    completed_keys = set()
+    for model_plan in bundle.plans:
+        pending_ids = {item_identity(pending) for pending in model_plan.pending_items}
+        for item in model_plan.items:
+            iid = item_identity(item)
+            if iid not in pending_ids:
+                completed_keys.add(iid)
     completed_paths = [
         stable_path(item.path)
         for item in models
@@ -344,12 +344,11 @@ def scan_result(
         )
 
     total_bytes = sum(size_of(item) for item in item_values)
-    pending_items = [
-        item
+    pending_bytes = sum(
+        size_of(item_dict(item))
         for model_plan in bundle.plans
         for item in model_plan.pending_items
-    ]
-    pending_bytes = sum(size_of(item_dict(item)) for item in pending_items)
+    )
     return {
         "kind": kind,
         "scan_result": scan,

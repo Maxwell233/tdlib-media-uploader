@@ -720,23 +720,20 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
                     "completed_count": sum(1 for item in chunk if completed(item)),
                 })
 
-    all_items = [
-        item
-        for group in groups
-        for item in group["items"]
-    ]
-    completed_paths = [
-        stable_path(item["path"] if isinstance(item, dict) else item)
-        for item in all_items
-        if state is not None and state.is_completed(item)
-    ]
-    total_bytes = sum(item_size(item) for item in all_items)
-    pending_bytes = sum(
-        item_size(item)
-        for group in groups
-        for item in group["items"]
-        if not completed(item)
-    )
+    all_items = []
+    completed_paths = []
+    total_bytes = 0
+    pending_bytes = 0
+
+    for group in groups:
+        for item in group.get("items", []):
+            all_items.append(item)
+            sz = item_size(item)
+            total_bytes += sz
+            if completed(item):
+                completed_paths.append(stable_path(item["path"] if isinstance(item, dict) else item))
+            else:
+                pending_bytes += sz
 
     separator_key = {
         "video": "VIDEO_ALBUM_CAPTION_SEPARATOR",
