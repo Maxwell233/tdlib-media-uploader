@@ -12,15 +12,21 @@ from typing import Any
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -145,9 +151,7 @@ class UploadPage(QWidget):
     edit_target_requested = Signal(str)
     edit_parameters_requested = Signal(str)
 
-    def __init__(
-        self, kind: str, *, services: UploadPageServices | None = None, parent=None
-    ):
+    def __init__(self, kind: str, *, services: UploadPageServices | None = None, parent=None):
         super().__init__(parent)
         self.services = services or UploadPageServices()
         self.kind = self.services.require_kind(kind)
@@ -172,9 +176,7 @@ class UploadPage(QWidget):
             "image": "按自然顺序或修改时间分批分组；支持超限自动高质量压缩，确保原生画质发送。",
             "mixed": "以一级子文件夹为分组单元，同组内照片与视频严格保序混合发送为 Album。",
         }
-        subtitle = QLabel(
-            desc_map.get(self.kind, "配置媒体来源与目标，一键执行扫描与分批上传。")
-        )
+        subtitle = QLabel(desc_map.get(self.kind, "配置媒体来源与目标，一键执行扫描与分批上传。"))
         subtitle.setObjectName("mutedLabel")
         header_layout.addWidget(subtitle)
         layout.addLayout(header_layout)
@@ -193,9 +195,7 @@ class UploadPage(QWidget):
         source_lbl.setObjectName("mutedLabel")
         source_lbl.setFixedWidth(96)
         self.source_edit = QLineEdit()
-        self.source_edit.setPlaceholderText(
-            "输入或粘贴媒体目录路径，按 Enter 保存；也可点击右侧浏览选择…"
-        )
+        self.source_edit.setPlaceholderText("输入或粘贴媒体目录路径，按 Enter 保存；也可点击右侧浏览选择…")
         self.source_edit.editingFinished.connect(self._commit_source)
 
         browse = QPushButton("选择目录")
@@ -229,12 +229,8 @@ class UploadPage(QWidget):
         self.edit_params_button = QPushButton(f"编辑{accent}上传参数")
         self.edit_params_button.setObjectName("secondaryButton")
         self.edit_params_button.setIcon(get_svg_icon("sliders", 14, 14))
-        self.edit_params_button.setToolTip(
-            f"跳转至设置页面调整{accent}分卷规则与高级参数"
-        )
-        self.edit_params_button.clicked.connect(
-            lambda: self.edit_parameters_requested.emit(self.kind)
-        )
+        self.edit_params_button.setToolTip(f"跳转至设置页面调整{accent}分卷规则与高级参数")
+        self.edit_params_button.clicked.connect(lambda: self.edit_parameters_requested.emit(self.kind))
 
         target_row.addWidget(target_lbl)
         target_row.addWidget(self.chat_label)
@@ -305,9 +301,7 @@ class UploadPage(QWidget):
         self.edit_caption_button.setToolTip("编辑所选媒体组标题，也可双击媒体组")
         self.edit_caption_button.setEnabled(False)
         self.edit_caption_button.setVisible(True)
-        self.edit_caption_button.clicked.connect(
-            lambda: self._edit_album(self.tree.currentItem())
-        )
+        self.edit_caption_button.clicked.connect(lambda: self._edit_album(self.tree.currentItem()))
 
         expand_btn = QPushButton("展开全部")
         expand_btn.setObjectName("ghostButton")
@@ -388,9 +382,7 @@ class UploadPage(QWidget):
         target = dict(self.services.target_getter(self.kind) or {})
         mode = str(target.get("target_mode", "forum_topic"))
         target_name = "频道" if mode == "channel" else "超级群组"
-        self.chat_label.setText(
-            f"{target_name} · {str(target.get('chat_id', '未配置'))}"
-        )
+        self.chat_label.setText(f"{target_name} · {str(target.get('chat_id', '未配置'))}")
         self.topic_label.setText(
             "不适用（频道不使用 Topic）"
             if mode == "channel"
@@ -428,9 +420,7 @@ class UploadPage(QWidget):
             self.status_label.setText("正在扫描目录…")
         self._update_edit_button()
 
-    def _normalize_legacy_group(
-        self, value: Mapping[str, Any], completed_paths: set[str]
-    ) -> dict:
+    def _normalize_legacy_group(self, value: Mapping[str, Any], completed_paths: set[str]) -> dict:
         """Keep older scanner payloads renderable during the V2 migration."""
         group = dict(value or {})
         if all(key in group for key in ("label", "completed", "pending", "albums")):
@@ -442,9 +432,7 @@ class UploadPage(QWidget):
             for item in items
             if self._stable(_item_path(item)) not in completed_paths
         ]
-        label = str(
-            group.get("label") or group.get("title") or group.get("subtitle") or ""
-        )
+        label = str(group.get("label") or group.get("title") or group.get("subtitle") or "")
         raw_caption = group.get("caption", "")
         if isinstance(raw_caption, Mapping):
             base_label = str(raw_caption.get("base_label", label) or label)
@@ -594,6 +582,7 @@ class UploadPage(QWidget):
                         f"{len(album_items)} 个文件 · 已完成 {completed_count} · 待上传 {pending_count}",
                     ]
                 )
+
                 album_row.setData(0, Qt.ItemDataRole.UserRole, plan)
                 album_row.setToolTip(1, caption_text or "无标题")
                 if self.kind == "image":
@@ -653,7 +642,6 @@ class UploadPage(QWidget):
 
         self._update_scan_summary_chips_and_labels(result)
 
-    @staticmethod
     @staticmethod
     def _format_date(value) -> str:
         if value is None:
@@ -766,11 +754,10 @@ class UploadPage(QWidget):
             )
             item.setToolTip(1, caption_text or "无标题")
 
+
     def _update_edit_button(self):
         item = self.tree.currentItem()
-        if item is not None and not isinstance(
-            item.data(0, Qt.ItemDataRole.UserRole), dict
-        ):
+        if item is not None and not isinstance(item.data(0, Qt.ItemDataRole.UserRole), dict):
             item = item.parent()
         self.edit_caption_button.setEnabled(
             bool(
@@ -811,9 +798,7 @@ class UploadPage(QWidget):
             for index in range(row.childCount()):
                 visible = visit(row.child(index), matches) or visible
             if not row.childCount():
-                visible = matches and (
-                    not self.pending_only.isChecked() or row.text(0) != "已完成"
-                )
+                visible = matches and (not self.pending_only.isChecked() or row.text(0) != "已完成")
             row.setHidden(not visible)
             if query and visible:
                 row.setExpanded(True)
@@ -932,15 +917,11 @@ class UploadHubPage(QWidget):
         top_layout.addStretch(1)
         layout.addWidget(top_bar)
 
-        from PySide6.QtWidgets import QStackedWidget
+        from PySide6.QtWidgets import QScrollArea, QStackedWidget
 
         self.stack = QStackedWidget()
         self.scroll_areas = {}
-        for kind, page in (
-            ("video", video_page),
-            ("image", image_page),
-            ("mixed", mixed_page),
-        ):
+        for kind, page in (("video", video_page), ("image", image_page), ("mixed", mixed_page)):
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -961,9 +942,8 @@ class UploadHubPage(QWidget):
         idx = {"video": 0, "image": 1, "mixed": 2}[kind]
         self.stack.setCurrentIndex(idx)
         from ..icons import get_svg_icon
-
         for k, btn in self.buttons.items():
-            active = k == kind
+            active = (k == kind)
             btn.setChecked(active)
             btn.setProperty("active", "true" if active else "false")
             color = "#ffffff" if active else THEME.text_secondary
@@ -977,10 +957,9 @@ class UploadHubPage(QWidget):
 
     def refresh_theme(self):
         from ..icons import get_svg_icon
-
         curr_k = self.current_kind()
         for kind, btn in self.buttons.items():
-            active = kind == curr_k
+            active = (kind == curr_k)
             color = "#ffffff" if active else THEME.text_secondary
             btn.setIcon(get_svg_icon(kind, color=color, size=16))
         for p in self.pages.values():

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+import datetime as _dt
 import functools
 import os
 from pathlib import Path
@@ -10,7 +12,10 @@ import stat
 from typing import Any
 
 from ..config.paths import (
+    IMAGE_STATE_DIR,
+    MIXED_STATE_DIR,
     RESOURCE_DIR,
+    VIDEO_STATE_DIR,
 )
 from ..core.album import CaptionStore, album_key, compose_caption, validate_caption
 from ..core.filesystem_legacy import (
@@ -113,30 +118,27 @@ def apply_size_limits(paths: list[Path], kind: str) -> tuple[list[Path], list[di
         size = int(snapshot[0]) if snapshot is not None else path_size(str(path))
         if size > limit:
             action = (
-                "compress"
-                if media_kind == "image" and compress_images
-                else "preflight"
-                if media_kind == "video"
+                "compress" if media_kind == "image" and compress_images
+                else "preflight" if media_kind == "video"
                 else "skip"
             )
-            skipped.append(
-                {
-                    "path": path,
-                    "media_kind": media_kind,
-                    "size": size,
-                    "limit": limit,
-                    "category": "size",
-                    "action": action,
-                    "reason": (
-                        f"文件大小 {format_size(size)} 超过 Telegram "
-                        f"{media_label} 上限 {limit_label}"
-                    ),
-                }
-            )
+            skipped.append({
+                "path": path,
+                "media_kind": media_kind,
+                "size": size,
+                "limit": limit,
+                "category": "size",
+                "action": action,
+                "reason": (
+                    f"文件大小 {format_size(size)} 超过 Telegram "
+                    f"{media_label} 上限 {limit_label}"
+                ),
+            })
             if action == "skip":
                 continue
         accepted.append(path)
     return accepted, skipped
+
 
 
 def _discover_mixed_directories(
@@ -171,10 +173,7 @@ def _discover_mixed_directories(
                     continue
                 if stat.S_ISDIR(info.st_mode):
                     directories.append(path)
-                elif (
-                    stat.S_ISREG(info.st_mode)
-                    and path.suffix.lower() in accepted_extensions
-                ):
+                elif stat.S_ISREG(info.st_mode) and path.suffix.lower() in accepted_extensions:
                     ignored.append(path)
             except OSError as exc:
                 errors.append(f"{entry.path}: {exc}")
@@ -190,7 +189,7 @@ def _process_mixed_group(
     group_path: Path,
     accepted_extensions: set[str],
     video_extensions: set[str],
-    cancel_event=None,
+    cancel_event=None
 ) -> tuple[dict, list[dict]]:
     scan_result = iter_files(
         group_path,
@@ -206,12 +205,10 @@ def _process_mixed_group(
     if scan_result.cancelled:
         group_warnings.append("目录扫描已取消")
 
-    BASIC_SCAN_SNAPSHOTS.update(
-        {
-            key: snapshot.as_tuple()
-            for key, snapshot in getattr(scan_result, "snapshots", {}).items()
-        }
-    )
+    BASIC_SCAN_SNAPSHOTS.update({
+        key: snapshot.as_tuple()
+        for key, snapshot in getattr(scan_result, "snapshots", {}).items()
+    })
 
     accepted, skipped = apply_size_limits(scan_result.paths, "mixed")
 
@@ -219,21 +216,19 @@ def _process_mixed_group(
     for path in accepted:
         suffix = path.suffix.lower()
         media_kind = "video" if suffix in video_extensions else "image"
-        media_items.append(
-            {
-                "path": path,
-                "media_kind": media_kind,
-                "group_name": group_path.name,
-                **(
-                    {
-                        "scan_size": BASIC_SCAN_SNAPSHOTS[stable_path(path)][0],
-                        "scan_mtime_ns": BASIC_SCAN_SNAPSHOTS[stable_path(path)][1],
-                    }
-                    if stable_path(path) in BASIC_SCAN_SNAPSHOTS
-                    else {}
-                ),
-            }
-        )
+        media_items.append({
+            "path": path,
+            "media_kind": media_kind,
+            "group_name": group_path.name,
+            **(
+                {
+                    "scan_size": BASIC_SCAN_SNAPSHOTS[stable_path(path)][0],
+                    "scan_mtime_ns": BASIC_SCAN_SNAPSHOTS[stable_path(path)][1],
+                }
+                if stable_path(path) in BASIC_SCAN_SNAPSHOTS
+                else {}
+            ),
+        })
 
     sort_mode = str(get_cfg("MIXED_SORT_MODE", "name")).strip().lower()
     media_items = media_path_sort(
@@ -327,12 +322,10 @@ def basic_paths(kind: str, cancel_event=None) -> list[Path]:
         discovery_max_delay=get_cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
     )
     paths = scan_result.paths
-    BASIC_SCAN_SNAPSHOTS.update(
-        {
-            key: snapshot.as_tuple()
-            for key, snapshot in getattr(scan_result, "snapshots", {}).items()
-        }
-    )
+    BASIC_SCAN_SNAPSHOTS.update({
+        key: snapshot.as_tuple()
+        for key, snapshot in getattr(scan_result, "snapshots", {}).items()
+    })
     if kind == "image":
         mode = "mtime" if get_cfg("IMAGE_SORT_MODE", "mtime") == "mtime" else "name"
     else:
@@ -385,383 +378,140 @@ def cancelled_scan_result(
     }
 
 
-def _scan_legacy_video(core, cancel_event, progress_callback):
-    scan_errors = []
-    scan_warnings = []
-    scan_size_skips = []
-    warning = ""
-    state = None
-
-    if core is not None:
-        from ..config.paths import VIDEO_STATE_DIR
-
-        core.STATE_DIR = VIDEO_STATE_DIR
-        paths = (
-            core.scan_videos()
-            if cancel_event is None
-            else core.scan_videos(cancel_event=cancel_event)
-        )
-        scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
-        scan_warnings = list(getattr(core, "LAST_SCAN_WARNINGS", []))
-        scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
-        metadata = {}
-        exiftool = Path(get_cfg("EXIFTOOL_PATH", ""))
-        read_dates = bool(get_cfg("VIDEO_READ_DATES", True))
-        if progress_callback is not None:
-            progress_callback(
-                {
-                    "phase": "exif" if read_dates else "date_disabled",
-                    "completed": 0,
-                    "total": len(paths),
-                }
-            )
-        if not read_dates:
-            warning = "已关闭日期读取，将按文件名扫描并按固定数量分组。"
-        elif exiftool.exists():
-            try:
-                metadata = core.read_exif_metadata(
-                    paths,
-                    cancel_event=cancel_event,
-                    progress_callback=progress_callback,
-                )
-            except Exception as exc:
-                warning = f"ExifTool 读取失败，将使用后备日期：{exc}"
-                scan_errors.append(str(exc))
-        elif get_cfg("VIDEO_READ_MEDIA_CREATION_DATE", True):
-            warning = (
-                "未找到 ExifTool，EXIF 日期不可用；"
-                "缺少 EXIF 的视频仍会尝试读取媒体创建日期，失败后使用文件修改时间。"
-            )
-        elif get_cfg("VIDEO_MISSING_DATE_POLICY", "mtime") == "mtime":
-            warning = "未找到 ExifTool，缺失 EXIF 的视频将使用文件修改时间。"
-        else:
-            warning = (
-                "未找到 ExifTool，无法读取 EXIF；"
-                "当前未启用媒体日期回退，缺失日期的视频会被标记。"
-            )
-        if cancel_event is not None and cancel_event.is_set():
-            return None, [], warning, scan_errors, scan_warnings, scan_size_skips
-        if cancel_event is None:
-            items, missing = core.build_items(
-                paths,
-                metadata,
-                progress_callback=progress_callback,
-            )
-        else:
-            items, missing = core.build_items(
-                paths,
-                metadata,
-                progress_callback=progress_callback,
-                cancel_event=cancel_event,
-            )
-        state = core.UploadState()
-        return (
-            items,
-            missing,
-            warning,
-            scan_errors,
-            scan_warnings,
-            scan_size_skips,
-            state,
-        )
-    else:
-        paths, scan_size_skips = apply_size_limits(
-            basic_paths("video", cancel_event=cancel_event), "video"
-        )
-        missing = []
-        items = []
-        if not get_cfg("VIDEO_READ_DATES", True):
-            items = [
-                {
-                    "path": path,
-                    "capture_time": None,
-                    "month_key": "__all_videos__",
-                }
-                for path in paths
-            ]
-        else:
-            for path in paths:
-                items.append(
-                    {
-                        "path": path,
-                        "capture_time": file_mtime(path),
-                        "month_key": format_date(
-                            file_mtime(path), "%Y-%m", missing="未知日期"
-                        ),
-                    }
-                )
-        return (
-            items,
-            missing,
-            warning,
-            scan_errors,
-            scan_warnings,
-            scan_size_skips,
-            state,
-        )
-
-
-def _scan_legacy_image(core, cancel_event):
-    scan_errors = []
-    scan_warnings = []
-    scan_size_skips = []
-    state = None
-
-    if core is not None:
-        from ..config.paths import IMAGE_STATE_DIR
-
-        core.STATE_DIR = IMAGE_STATE_DIR
-        paths = (
-            core.scan_images()
-            if cancel_event is None
-            else core.scan_images(cancel_event=cancel_event)
-        )
-        scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
-        scan_warnings = list(getattr(core, "LAST_SCAN_WARNINGS", []))
-        scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
-        missing = []
-        items = paths
-        state = core.UploadState()
-    else:
-        paths, scan_size_skips = apply_size_limits(
-            basic_paths("image", cancel_event=cancel_event), "image"
-        )
-        missing = []
-        items = paths
-    return items, missing, scan_errors, scan_warnings, scan_size_skips, state
-
-
-def _scan_legacy_mixed(core, cancel_event):
-    scan_errors = []
-    scan_warnings = []
-    scan_size_skips = []
-    ignored_root_media = []
-    state = None
-
-    if core is not None:
-        from ..config.paths import MIXED_STATE_DIR
-
-        core.STATE_DIR = MIXED_STATE_DIR
-        root_path = Path(get_cfg("MIXED_DIR", PROJECT_DIR))
-        mixed_groups = (
-            core.scan_mixed(root_path)
-            if cancel_event is None
-            else core.scan_mixed(root_path, cancel_event=cancel_event)
-        )
-        ignored_root_media = list(getattr(core, "LAST_SCAN_IGNORED_ROOT_MEDIA", []))
-        scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
-        scan_warnings = list(getattr(core, "LAST_SCAN_WARNINGS", []))
-        scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
-        items = [item for group in mixed_groups for item in group.get("items", [])]
-        missing = []
-        state = core.UploadState()
-    else:
-        (
-            mixed_groups,
-            ignored_root_media,
-            scan_errors,
-            scan_warnings,
-            scan_size_skips,
-        ) = basic_mixed_scan(
-            Path(get_cfg("MIXED_DIR", PROJECT_DIR)),
-            cancel_event=cancel_event,
-        )
-        items = [item for group in mixed_groups for item in group.get("items", [])]
-        missing = []
-    return (
-        items,
-        missing,
-        mixed_groups,
-        ignored_root_media,
-        scan_errors,
-        scan_warnings,
-        scan_size_skips,
-        state,
-    )
-
-
-def _group_legacy_items(
-    kind,
-    items,
-    mixed_groups,
-    group_size,
-    source_root,
-    scan_snapshot,
-    store,
-    core,
-    completed,
-):
+def _legacy_video_groups(items, group_size, source_root, scan_snapshot, store, core, completed):
+    """Build date or fixed-count video Albums without changing scan state."""
     groups = []
-    if kind == "video":
-        read_dates = bool(get_cfg("VIDEO_READ_DATES", True))
-        group_mode = str(get_cfg("VIDEO_GROUP_MODE", "date")).strip().lower()
-        force_fixed = (
-            not read_dates
-            or group_mode == "fixed"
-            or bool(get_cfg("VIDEO_FORCE_TEN_PER_ALBUM", False))
-        )
-        force_mode = (
-            getattr(core, "force_ten_per_album", None) if core is not None else None
-        )
-        if callable(force_mode):
-            try:
-                force_fixed = bool(force_mode())
-            except Exception:
-                pass
-        forced_group_key = getattr(core, "FORCED_GROUP_KEY", "__all_videos__")
-        if force_fixed:
-            for index, start in enumerate(range(0, len(items), group_size), start=1):
-                chunk = items[start : start + group_size]
-                key_group = f"{forced_group_key}:{index}"
-                key = album_key(
-                    "video",
-                    key_group,
-                    chunk,
-                    root=source_root,
-                    snapshot_provider=scan_snapshot,
-                )
-                caption = store.get(key, f"第 {index} 组")
-                groups.append(
-                    {
-                        "album_key": key,
-                        "number": index,
-                        "title": f"第 {index} 组",
-                        "subtitle": f"第 {index} 组（共 {len(chunk)} 个视频）",
-                        "caption": caption,
-                        "caption_warning": validate_caption(caption, 4096),
-                        "items": chunk,
-                        "completed": all(completed(item) for item in chunk),
-                        "completed_count": sum(1 for item in chunk if completed(item)),
-                    }
-                )
-        else:
-            from collections import defaultdict
-
-            by_month = defaultdict(list)
-            for item in items:
-                by_month[item["month_key"]].append(item)
-            for month_key, month_items in by_month.items():
-                month_title = f"{month_key}（共 {len(month_items)} 个视频）"
-                for index, start in enumerate(
-                    range(0, len(month_items), group_size), start=1
-                ):
-                    chunk = month_items[start : start + group_size]
-                    key = album_key(
-                        "video",
-                        month_key,
-                        chunk,
-                        root=source_root,
-                        snapshot_provider=scan_snapshot,
-                    )
-                    caption = store.get(key, f"{month_key} · 第 {index} 组")
-                    groups.append(
-                        {
-                            "album_key": key,
-                            "number": index,
-                            "title": f"{month_key} · 第 {index} 组",
-                            "subtitle": f"{month_title} · 第 {index} 组",
-                            "caption": caption,
-                            "caption_warning": validate_caption(caption, 4096),
-                            "items": chunk,
-                            "completed": all(completed(item) for item in chunk),
-                            "completed_count": sum(
-                                1 for item in chunk if completed(item)
-                            ),
-                        }
-                    )
-    elif kind == "image":
+    read_dates = bool(get_cfg("VIDEO_READ_DATES", True))
+    group_mode = str(get_cfg("VIDEO_GROUP_MODE", "date")).strip().lower()
+    force_fixed = (
+        not read_dates
+        or group_mode == "fixed"
+        or bool(get_cfg("VIDEO_FORCE_TEN_PER_ALBUM", False))
+    )
+    force_mode = getattr(core, "force_ten_per_album", None) if core is not None else None
+    if callable(force_mode):
+        try:
+            force_fixed = bool(force_mode())
+        except Exception:
+            pass
+    forced_group_key = getattr(core, "FORCED_GROUP_KEY", "__all_videos__")
+    if force_fixed:
         for index, start in enumerate(range(0, len(items), group_size), start=1):
             chunk = items[start : start + group_size]
-            album_number = int(get_cfg("IMAGE_ALBUM_NUMBER_START", 1)) + index - 1
+            key_group = f"{forced_group_key}:{index}"
             key = album_key(
-                "image",
-                f"Album {album_number}",
+                "video",
+                key_group,
                 chunk,
                 root=source_root,
                 snapshot_provider=scan_snapshot,
             )
             caption = store.get(key, f"第 {index} 组")
-            groups.append(
-                {
+            groups.append({
+                "album_key": key,
+                "number": index,
+                "title": f"第 {index} 组",
+                "subtitle": f"第 {index} 组（共 {len(chunk)} 个视频）",
+                "caption": caption,
+                "caption_warning": validate_caption(caption, 4096),
+                "items": chunk,
+                "completed": all(completed(item) for item in chunk),
+                "completed_count": sum(1 for item in chunk if completed(item)),
+            })
+    else:
+        by_month = defaultdict(list)
+        for item in items:
+            by_month[item["month_key"]].append(item)
+        for month_key, month_items in by_month.items():
+            month_title = f"{month_key}（共 {len(month_items)} 个视频）"
+            for index, start in enumerate(range(0, len(month_items), group_size), start=1):
+                chunk = month_items[start : start + group_size]
+                key = album_key(
+                    "video",
+                    month_key,
+                    chunk,
+                    root=source_root,
+                    snapshot_provider=scan_snapshot,
+                )
+                caption = store.get(key, f"{month_key} · 第 {index} 组")
+                groups.append({
                     "album_key": key,
-                    "number": album_number,
-                    "title": f"第 {index} 组",
-                    "subtitle": f"第 {index} 组（共 {len(chunk)} 张图片）",
+                    "number": index,
+                    "title": f"{month_key} · 第 {index} 组",
+                    "subtitle": f"{month_title} · 第 {index} 组",
                     "caption": caption,
                     "caption_warning": validate_caption(caption, 4096),
                     "items": chunk,
                     "completed": all(completed(item) for item in chunk),
                     "completed_count": sum(1 for item in chunk if completed(item)),
-                }
-            )
-    else:
-        for group_dict in mixed_groups:
-            folder_name = group_dict["group_name"]
-            group_items = group_dict["items"]
-            total_items = len(group_items)
-            for index, start in enumerate(range(0, total_items, group_size), start=1):
-                chunk = group_items[start : start + group_size]
-                key = album_key(
-                    "mixed",
-                    f"{folder_name}:{index}",
-                    chunk,
-                    root=source_root,
-                    snapshot_provider=scan_snapshot,
-                )
-                default_caption = (
-                    folder_name
-                    if total_items <= group_size
-                    else f"{folder_name} ({index})"
-                )
-                caption = store.get(key, default_caption)
-                groups.append(
-                    {
-                        "album_key": key,
-                        "number": index,
-                        "title": f"{folder_name} · 第 {index} 组",
-                        "subtitle": f"{folder_name}（共 {total_items} 个媒体）· 第 {index} 组",
-                        "caption": caption,
-                        "caption_warning": validate_caption(caption, 4096),
-                        "items": chunk,
-                        "completed": all(completed(item) for item in chunk),
-                        "completed_count": sum(1 for item in chunk if completed(item)),
-                    }
-                )
+                })
     return groups
 
 
-def _compile_legacy_scan_result(
-    kind,
-    items,
-    missing,
-    groups,
-    source_dir,
-    state,
-    core,
-    warning,
-    scan_errors,
-    scan_warnings,
-    scan_size_skips,
-    ignored_root_media,
-    completed_fn,
-):
-    all_items = []
-    completed_paths = []
-    total_bytes = 0
-    pending_bytes = 0
+def _legacy_image_groups(items, group_size, source_root, scan_snapshot, store, completed):
+    """Build image Albums with their configured starting number."""
+    groups = []
+    for index, start in enumerate(range(0, len(items), group_size), start=1):
+        chunk = items[start : start + group_size]
+        album_number = (
+            int(get_cfg("IMAGE_ALBUM_NUMBER_START", 1)) + index - 1
+        )
+        key = album_key(
+            "image",
+            f"Album {album_number}",
+            chunk,
+            root=source_root,
+            snapshot_provider=scan_snapshot,
+        )
+        caption = store.get(key, f"第 {index} 组")
+        groups.append({
+            "album_key": key,
+            "number": album_number,
+            "title": f"第 {index} 组",
+            "subtitle": f"第 {index} 组（共 {len(chunk)} 张图片）",
+            "caption": caption,
+            "caption_warning": validate_caption(caption, 4096),
+            "items": chunk,
+            "completed": all(completed(item) for item in chunk),
+            "completed_count": sum(1 for item in chunk if completed(item)),
+        })
+    return groups
 
-    for group in groups:
-        for item in group.get("items", []):
-            all_items.append(item)
-            sz = item_size(item)
-            total_bytes += sz
-            if completed_fn(item):
-                completed_paths.append(
-                    stable_path(item["path"] if isinstance(item, dict) else item)
-                )
-            else:
-                pending_bytes += sz
 
+def _legacy_mixed_groups(mixed_groups, group_size, source_root, scan_snapshot, store, completed):
+    """Preserve folder order and split each mixed folder into Albums."""
+    groups = []
+    for group_dict in mixed_groups:
+        folder_name = group_dict["group_name"]
+        group_items = group_dict["items"]
+        total_items = len(group_items)
+        for index, start in enumerate(range(0, total_items, group_size), start=1):
+            chunk = group_items[start : start + group_size]
+            key = album_key(
+                "mixed",
+                f"{folder_name}:{index}",
+                chunk,
+                root=source_root,
+                snapshot_provider=scan_snapshot,
+            )
+            default_caption = folder_name if total_items <= group_size else f"{folder_name} ({index})"
+            caption = store.get(key, default_caption)
+            groups.append({
+                "album_key": key,
+                "number": index,
+                "title": f"{folder_name} · 第 {index} 组",
+                "subtitle": f"{folder_name}（共 {total_items} 个媒体）· 第 {index} 组",
+                "caption": caption,
+                "caption_warning": validate_caption(caption, 4096),
+                "items": chunk,
+                "completed": all(completed(item) for item in chunk),
+                "completed_count": sum(1 for item in chunk if completed(item)),
+            })
+    return groups
+
+
+def _normalize_legacy_groups(groups, kind, completed):
+    """Translate legacy Album groups into the shared preview contract."""
     separator_key = {
         "video": "VIDEO_ALBUM_CAPTION_SEPARATOR",
         "image": "IMAGE_ALBUM_CAPTION_SEPARATOR",
@@ -770,14 +520,12 @@ def _compile_legacy_scan_result(
     normalized_groups = []
     for group in groups:
         group_items = list(group.get("items", []))
-        pending_items = [item for item in group_items if not completed_fn(item)]
+        pending_items = [item for item in group_items if not completed(item)]
         completed_count = len(group_items) - len(pending_items)
         default_label = str(group.get("title") or group.get("subtitle") or "")
         raw_caption = group.get("caption")
         if isinstance(raw_caption, dict):
-            base_label = str(
-                raw_caption.get("base_label", default_label) or default_label
-            )
+            base_label = str(raw_caption.get("base_label", default_label) or default_label)
             custom_text = str(raw_caption.get("custom_text", "") or "")
         else:
             base_label = str(raw_caption or default_label)
@@ -813,35 +561,7 @@ def _compile_legacy_scan_result(
             }
         )
         normalized_groups.append(normalized)
-
-    return {
-        "kind": kind,
-        "items": items,
-        "missing": missing,
-        "groups": normalized_groups,
-        "total_files": len(all_items),
-        "completed_files": len(completed_paths),
-        "pending_files": len(all_items) - len(completed_paths),
-        "total_bytes": total_bytes,
-        "pending_bytes": pending_bytes,
-        "album_count": sum(group["albums"] for group in normalized_groups),
-        "completed_paths": completed_paths,
-        "source_dir": source_dir,
-        "state_path": str(getattr(state, "path", getattr(state, "file_path", ""))),
-        "core_available": core is not None,
-        "warning": warning,
-        "scan_errors": scan_errors,
-        "scan_warnings": scan_warnings,
-        "scan_size_skips": scan_size_skips,
-        "scan_skipped_files": sum(
-            1 for entry in scan_size_skips if entry.get("action") == "skip"
-        ),
-        "scan_compress_files": sum(
-            1 for entry in scan_size_skips if entry.get("action") == "compress"
-        ),
-        "ignored_root_media": [str(path) for path in ignored_root_media],
-        "target": target_for(kind),
-    }
+    return normalized_groups
 
 
 def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
@@ -879,31 +599,136 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
 
     state = None
     if kind == "video":
-        res = _scan_legacy_video(core, cancel_event, progress_callback)
-        if res[0] is None:
-            return cancelled_scan_result(
-                kind, core_available=core is not None, warning="扫描已取消"
+        if core is not None:
+            core.STATE_DIR = VIDEO_STATE_DIR
+            paths = (
+                core.scan_videos()
+                if cancel_event is None
+                else core.scan_videos(cancel_event=cancel_event)
             )
-        items, missing, warn_add, scan_errors, scan_warnings, scan_size_skips, state = (
-            res
-        )
-        if warn_add:
-            warning = f"{warning}；{warn_add}" if warning else warn_add
+            scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
+            scan_warnings = list(getattr(core, "LAST_SCAN_WARNINGS", []))
+            scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
+            metadata = {}
+            exiftool = Path(get_cfg("EXIFTOOL_PATH", ""))
+            read_dates = bool(get_cfg("VIDEO_READ_DATES", True))
+            if progress_callback is not None:
+                progress_callback({
+                    "phase": "exif" if read_dates else "date_disabled",
+                    "completed": 0,
+                    "total": len(paths),
+                })
+            if not read_dates:
+                warning = "已关闭日期读取，将按文件名扫描并按固定数量分组。"
+            elif exiftool.exists():
+                try:
+                    metadata = core.read_exif_metadata(
+                        paths,
+                        cancel_event=cancel_event,
+                        progress_callback=progress_callback,
+                    )
+                except Exception as exc:
+                    warning = f"ExifTool 读取失败，将使用后备日期：{exc}"
+                    scan_errors.append(str(exc))
+            elif get_cfg("VIDEO_READ_MEDIA_CREATION_DATE", True):
+                warning = (
+                    "未找到 ExifTool，EXIF 日期不可用；"
+                    "缺少 EXIF 的视频仍会尝试读取媒体创建日期，失败后使用文件修改时间。"
+                )
+            elif get_cfg("VIDEO_MISSING_DATE_POLICY", "mtime") == "mtime":
+                warning = "未找到 ExifTool，缺失 EXIF 的视频将使用文件修改时间。"
+            else:
+                warning = (
+                    "未找到 ExifTool，无法读取 EXIF；"
+                    "当前未启用媒体日期回退，缺失日期的视频会被标记。"
+                )
+            if cancel_event is not None and cancel_event.is_set():
+                return cancelled_scan_result(
+                    kind,
+                    core_available=core is not None,
+                    warning="扫描已取消",
+                )
+            if cancel_event is None:
+                items, missing = core.build_items(
+                    paths,
+                    metadata,
+                    progress_callback=progress_callback,
+                )
+            else:
+                items, missing = core.build_items(
+                    paths,
+                    metadata,
+                    progress_callback=progress_callback,
+                    cancel_event=cancel_event,
+                )
+            state = core.UploadState()
+        else:
+            paths, scan_size_skips = apply_size_limits(
+                basic_paths(kind, cancel_event=cancel_event), kind
+            )
+            missing = []
+            items = []
+            if not get_cfg("VIDEO_READ_DATES", True):
+                items = [
+                    {
+                        "path": path,
+                        "capture_time": None,
+                        "month_key": "__all_videos__",
+                    }
+                    for path in paths
+                ]
+            else:
+                for path in paths:
+                    items.append({
+                        "path": path,
+                        "capture_time": file_mtime(path),
+                        "month_key": format_date(file_mtime(path), "%Y-%m", missing="未知日期"),
+                    })
     elif kind == "image":
-        items, missing, scan_errors, scan_warnings, scan_size_skips, state = (
-            _scan_legacy_image(core, cancel_event)
-        )
+        if core is not None:
+            core.STATE_DIR = IMAGE_STATE_DIR
+            paths = (
+                core.scan_images()
+                if cancel_event is None
+                else core.scan_images(cancel_event=cancel_event)
+            )
+            scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
+            scan_warnings = list(getattr(core, "LAST_SCAN_WARNINGS", []))
+            scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
+            missing = []
+            items = paths
+            state = core.UploadState()
+        else:
+            paths, scan_size_skips = apply_size_limits(
+                basic_paths(kind, cancel_event=cancel_event), kind
+            )
+            missing = []
+            items = paths
     elif kind == "mixed":
-        (
-            items,
-            missing,
-            mixed_groups,
-            ignored_root_media,
-            scan_errors,
-            scan_warnings,
-            scan_size_skips,
-            state,
-        ) = _scan_legacy_mixed(core, cancel_event)
+        if core is not None:
+            core.STATE_DIR = MIXED_STATE_DIR
+            root_path = Path(get_cfg("MIXED_DIR", PROJECT_DIR))
+            mixed_groups = (
+                core.scan_mixed(root_path)
+                if cancel_event is None
+                else core.scan_mixed(root_path, cancel_event=cancel_event)
+            )
+            ignored_root_media = list(getattr(core, "LAST_SCAN_IGNORED_ROOT_MEDIA", []))
+            scan_errors = list(getattr(core, "LAST_SCAN_ERRORS", []))
+            scan_warnings = list(getattr(core, "LAST_SCAN_WARNINGS", []))
+            scan_size_skips = list(getattr(core, "LAST_SCAN_SIZE_SKIPS", []))
+            items = [item for group in mixed_groups for item in group.get("items", [])]
+            missing = []
+            state = core.UploadState()
+        else:
+            mixed_groups, ignored_root_media, scan_errors, scan_warnings, scan_size_skips = (
+                basic_mixed_scan(
+                    Path(get_cfg("MIXED_DIR", PROJECT_DIR)),
+                    cancel_event=cancel_event,
+                )
+            )
+            items = [item for group in mixed_groups for item in group.get("items", [])]
+            missing = []
     else:
         raise ValueError(f"未知媒体类型：{kind}")
 
@@ -936,6 +761,7 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
         )
     )
     group_size = max(1, min(group_size, 10))
+    groups = []
     source_dir = str(get_cfg(KIND_PATH_KEYS[kind], ""))
     source_root = source_dir or None
 
@@ -947,7 +773,9 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
             return snapshot
         for mapping_name in ("IMAGE_SCAN_SNAPSHOTS", "LAST_SCAN_SNAPSHOTS"):
             snapshots = (
-                getattr(core, mapping_name, {}) or {} if core is not None else {}
+                getattr(core, mapping_name, {}) or {}
+                if core is not None
+                else {}
             )
             for key in (stable_path(path), str(path)):
                 snapshot = snapshots.get(key)
@@ -960,32 +788,64 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
             return False
         return state.is_completed(item)
 
-    groups = _group_legacy_items(
-        kind,
-        items,
-        mixed_groups,
-        group_size,
-        source_root,
-        scan_snapshot,
-        store,
-        core,
-        completed,
-    )
-    return _compile_legacy_scan_result(
-        kind,
-        items,
-        missing,
-        groups,
-        source_dir,
-        state,
-        core,
-        warning,
-        scan_errors,
-        scan_warnings,
-        scan_size_skips,
-        ignored_root_media,
-        completed,
-    )
+    if kind == "video":
+        groups = _legacy_video_groups(
+            items, group_size, source_root, scan_snapshot, store, core, completed
+        )
+    elif kind == "image":
+        groups = _legacy_image_groups(
+            items, group_size, source_root, scan_snapshot, store, completed
+        )
+    else:
+        groups = _legacy_mixed_groups(
+            mixed_groups, group_size, source_root, scan_snapshot, store, completed
+        )
+
+    all_items = []
+    completed_paths = []
+    total_bytes = 0
+    pending_bytes = 0
+
+    for group in groups:
+        for item in group.get("items", []):
+            all_items.append(item)
+            sz = item_size(item)
+            total_bytes += sz
+            if completed(item):
+                completed_paths.append(stable_path(item["path"] if isinstance(item, dict) else item))
+            else:
+                pending_bytes += sz
+
+    normalized_groups = _normalize_legacy_groups(groups, kind, completed)
+
+    return {
+        "kind": kind,
+        "items": items,
+        "missing": missing,
+        "groups": normalized_groups,
+        "total_files": len(all_items),
+        "completed_files": len(completed_paths),
+        "pending_files": len(all_items) - len(completed_paths),
+        "total_bytes": total_bytes,
+        "pending_bytes": pending_bytes,
+        "album_count": sum(group["albums"] for group in normalized_groups),
+        "completed_paths": completed_paths,
+        "source_dir": source_dir,
+        "state_path": str(getattr(state, "path", getattr(state, "file_path", ""))),
+        "core_available": core is not None,
+        "warning": warning,
+        "scan_errors": scan_errors,
+        "scan_warnings": scan_warnings,
+        "scan_size_skips": scan_size_skips,
+        "scan_skipped_files": sum(
+            1 for entry in scan_size_skips if entry.get("action") == "skip"
+        ),
+        "scan_compress_files": sum(
+            1 for entry in scan_size_skips if entry.get("action") == "compress"
+        ),
+        "ignored_root_media": [str(path) for path in ignored_root_media],
+        "target": target_for(kind),
+    }
 
 
 def load_v2_gui_integration():
@@ -995,7 +855,6 @@ def load_v2_gui_integration():
         run_v2_upload,
         scan_v2,
     )
-
     return V2IntegrationUnavailable, run_v2_upload, scan_v2
 
 
@@ -1031,9 +890,7 @@ def scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
             config=current_cfg,
             runtime_paths=_runtime_paths,
         )
-        return v2_scan_result(
-            bundle, progress_callback=progress_callback, cancel_event=cancel_event
-        )
+        return v2_scan_result(bundle, progress_callback=progress_callback, cancel_event=cancel_event)
     except unavailable:
         return legacy_scan_result(
             kind,

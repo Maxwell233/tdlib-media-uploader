@@ -11,6 +11,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping
 from functools import lru_cache
 import os
+from pathlib import Path
 from typing import Any
 
 from ..core.album import CaptionStore
@@ -131,9 +132,7 @@ def plan_dict(
         ),
     }
     if kind == "video":
-        result["month_key"] = (
-            plan.items[0].month_key if plan.items else plan.group_label
-        )
+        result["month_key"] = plan.items[0].month_key if plan.items else plan.group_label
     elif kind == "mixed":
         result["group_name"] = plan.group_label
         if plan.items:
@@ -192,7 +191,7 @@ def _default_cancelled_result(
     }
 
 
-def _build_scan_result_groups(bundle, models, item_values, plans, kind):
+def _build_scan_result_groups(bundle, models, plans, kind):
     group_labels: dict[tuple[str, str], str] = {}
     grouped_items: dict[tuple[str, str], list[dict]] = defaultdict(list)
     group_plans: dict[tuple[str, str], list[dict]] = defaultdict(list)
@@ -256,9 +255,8 @@ def _build_scan_result_groups(bundle, models, item_values, plans, kind):
         )
     return groups
 
-
 def _format_scan_warnings(
-    scan, kind, scan_errors, scan_warnings, scan_size_skips, ignored_root_media, logger
+    kind, scan_errors, scan_warnings, scan_size_skips, ignored_root_media, logger
 ):
     warning = ""
     if scan_errors:
@@ -307,8 +305,7 @@ def _format_scan_warnings(
             f"混合根目录中有 {len(ignored_root_media)} 个媒体已忽略，请移动到一级子文件夹后重新扫描"
             + (f"；{warning}" if warning else "")
         )
-    return warning, rejected, preflight_size, compressing
-
+    return warning, rejected, compressing
 
 def scan_result(
     bundle: Any,
@@ -344,7 +341,7 @@ def scan_result(
         plan_dict(item, kind, caption_store_factory=lambda _kind: caption_store)
         for item in bundle.plans
     ]
-    groups = _build_scan_result_groups(bundle, models, item_values, plans, kind)
+    groups = _build_scan_result_groups(bundle, models, plans, kind)
 
     completed_keys = set()
     for model_plan in bundle.plans:
@@ -368,8 +365,7 @@ def scan_result(
     ignored_root_media = list(
         getattr(bundle.legacy, "LAST_SCAN_IGNORED_ROOT_MEDIA", ()) or ()
     )
-    warning, rejected, preflight_size, compressing = _format_scan_warnings(
-        scan,
+    warning, rejected, compressing = _format_scan_warnings(
         kind,
         scan_errors,
         scan_warnings,
