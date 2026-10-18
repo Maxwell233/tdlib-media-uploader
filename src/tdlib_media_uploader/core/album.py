@@ -14,7 +14,7 @@ import os
 import threading
 from pathlib import Path
 
-from .filesystem_legacy import stable_path
+from .filesystem import stable_path
 from .identity import media_file_identity
 from ..config.paths import APP_DATA_DIR, CAPTIONS_DIR
 

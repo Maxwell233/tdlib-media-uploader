@@ -105,8 +105,8 @@ def run_self_test(*, emit=print) -> int:
         failures.append(f"缺少配置模板：{TEMPLATE_CONFIG_PATH}")
     for module_name in (
         "tdjson", "PySide6", "PIL", "tdlib_media_uploader.telegram.tdlib_common",
-        "tdlib_media_uploader.media.legacy_video", "tdlib_media_uploader.media.legacy_image",
-        "tdlib_media_uploader.media.legacy_mixed",
+        "tdlib_media_uploader.media.video_pipeline", "tdlib_media_uploader.media.image_pipeline",
+        "tdlib_media_uploader.media.mixed_pipeline",
     ):
         try:
             importlib.import_module(module_name)
@@ -124,7 +124,7 @@ def run_self_test(*, emit=print) -> int:
     if ffmpeg:
         try:
             import subprocess
-            from .filesystem_legacy import run_cancellable_process
+            from ..processes.runner import run_cancellable_process
 
             run_cancellable_process(
                 [ffmpeg, "-version"],

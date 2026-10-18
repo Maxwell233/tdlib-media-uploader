@@ -23,7 +23,7 @@ from tdlib_media_uploader.core import album as metadata
 from tdlib_media_uploader.core import logging as app_logging
 from tdlib_media_uploader.gui import main_window as gui
 from tdlib_media_uploader.gui import config_service, tools, cache_service
-from tdlib_media_uploader.core import filesystem_legacy as path_utils
+from tdlib_media_uploader.core import filesystem as path_utils
 from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
 
 
@@ -99,7 +99,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_image_filename_scan_uses_natural_numeric_order(self):
-        from tdlib_media_uploader.media import legacy_image as core
+        from tdlib_media_uploader.media import image_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -118,7 +118,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_video_filename_scan_uses_natural_numeric_order(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -138,9 +138,9 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_all_media_scanners_keep_directory_order_before_basename_order(self):
-        from tdlib_media_uploader.media import legacy_image as image_core
-        from tdlib_media_uploader.media import legacy_mixed as mixed_core
-        from tdlib_media_uploader.media import legacy_video as video_core
+        from tdlib_media_uploader.media import image_pipeline as image_core
+        from tdlib_media_uploader.media import mixed_pipeline as mixed_core
+        from tdlib_media_uploader.media import video_pipeline as video_core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -192,7 +192,7 @@ class ImprovementsTest(unittest.TestCase):
         self.assertEqual(path_utils._entry_suffix("photo.jpg"), ".jpg")
 
     def test_video_scanner_ignores_document_only_extensions(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

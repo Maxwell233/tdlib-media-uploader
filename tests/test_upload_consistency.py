@@ -17,7 +17,7 @@ from tdlib_media_uploader.core import album
 from tdlib_media_uploader.core.upload_journal import InflightJournal
 from tdlib_media_uploader.core.upload_state import UploadState
 from tdlib_media_uploader.gui import integration, models
-from tdlib_media_uploader.media import legacy_image
+from tdlib_media_uploader.media import image_pipeline
 from tdlib_media_uploader.telegram import tdlib_common as td
 from tdlib_media_uploader.upload.reconciliation import ReconciliationService, SourceRootRequired
 
@@ -76,8 +76,8 @@ class UploadConsistencyTest(unittest.TestCase):
         self.config.IMAGE_ALBUM_SIZE = 10
         for name, value in [('STABILITY_CHECKS_LOCAL', 1), ('STABILITY_INTERVAL_LOCAL_SECONDS', 0)]:
             setattr(self.config, name, value)
-        for obj, name, value in [(legacy_image, 'cfg', self.config),
-                                 (legacy_image, 'STATE_DIR', self.runtime.IMAGE_STATE_DIR),
+        for obj, name, value in [(image_pipeline, 'cfg', self.config),
+                                 (image_pipeline, 'STATE_DIR', self.runtime.IMAGE_STATE_DIR),
                                  (album, 'PROJECT_DIR', self.root/'captions')]:
             patcher = patch.object(obj, name, value); patcher.start(); self.addCleanup(patcher.stop)
         OfflineClient.sent = []; OfflineClient.outcome = None
@@ -98,7 +98,7 @@ class UploadConsistencyTest(unittest.TestCase):
         preview = self.preview()
         Image.new('RGB', (12, 12), 'blue').save(self.source/'new.jpg')
         preview['caption_overrides'] = {preview['plans'][0].key: 'edited title'}
-        with patch.object(legacy_image, 'scan_images', side_effect=AssertionError('must not rescan')):
+        with patch.object(image_pipeline, 'scan_images', side_effect=AssertionError('must not rescan')):
             result = self.run_upload(preview)
         self.assertEqual(result.status, 'COMPLETED')
         self.assertEqual(len(OfflineClient.sent), 1)

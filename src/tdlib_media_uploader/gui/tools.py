@@ -15,7 +15,7 @@ from PySide6.QtCore import QLibraryInfo
 from PySide6.QtGui import QIcon
 
 from ..config.paths import DATA_DIR, RESOURCE_DIR
-from ..core.filesystem_legacy import run_cancellable_process
+from ..processes.runner import run_cancellable_process
 
 PROJECT_DIR = RESOURCE_DIR
 

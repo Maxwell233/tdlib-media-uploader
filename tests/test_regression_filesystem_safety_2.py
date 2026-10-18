@@ -23,7 +23,7 @@ from tdlib_media_uploader.core import album as metadata
 from tdlib_media_uploader.core import logging as app_logging
 from tdlib_media_uploader.gui import main_window as gui
 from tdlib_media_uploader.gui import config_service, tools, cache_service
-from tdlib_media_uploader.core import filesystem_legacy as path_utils
+from tdlib_media_uploader.core import filesystem as path_utils
 from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
 
 
@@ -47,7 +47,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_video_scan_builds_all_months_once(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
         import datetime
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -69,7 +69,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_unreadable_videos_are_isolated_before_upload(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         class UI:
             def __init__(self):

@@ -40,17 +40,9 @@ from ..core.album import (
     with_filename_description,
 )
 from ..core.logging import APP_LOG_PATH, LOG_DIR, TDLIB_LOG_PATH, write_app_log
-from ..core.filesystem_legacy import (
-    file_mtime,
-    is_link_or_junction,
-    iter_files,
-    media_path_sort,
-    retry_fs_operation,
-    stable_path,
-    iter_directory_entries_with_retry,
-    run_cancellable_process,
-    validate_scan_root,
-)
+from ..core.filesystem import file_mtime, is_link_or_junction, iter_files, retry_fs_operation, stable_path, iter_directory_entries_with_retry, validate_scan_root
+from ..core.sorting import media_path_sort
+from ..processes.runner import run_cancellable_process
 from PySide6.QtCore import QLibraryInfo, QTimer, Signal, Slot, Qt, QLockFile
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (

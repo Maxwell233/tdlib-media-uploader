@@ -24,7 +24,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from tdlib_media_uploader.core.upload_journal import InflightJournal  # noqa: E402
-from tdlib_media_uploader.core.filesystem_legacy import stable_path  # noqa: E402
+from tdlib_media_uploader.core.filesystem import stable_path
 
 if GUI_AVAILABLE:
     from tdlib_media_uploader.gui import main_window as gui  # noqa: E402

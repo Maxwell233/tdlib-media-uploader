@@ -31,9 +31,9 @@ if str(SRC_ROOT) not in sys.path:
 
 from PIL import Image
 
-from tdlib_media_uploader.media import legacy_image as image_core
-from tdlib_media_uploader.media import legacy_mixed as mixed_core
-from tdlib_media_uploader.media import legacy_video as video_core
+from tdlib_media_uploader.media import image_pipeline as image_core
+from tdlib_media_uploader.media import mixed_pipeline as mixed_core
+from tdlib_media_uploader.media import video_pipeline as video_core
 from tdlib_media_uploader.media.image_prepare import prepare_image_for_telegram
 from tdlib_media_uploader.media.image_probe import TELEGRAM_PHOTO_MAX_BYTES, probe_image
 from tdlib_media_uploader.media.video_probe import VideoMediaInfo, determine_supports_streaming, format_unsupported_reason, probe_video
@@ -324,7 +324,7 @@ class VideoProbeAndPayloadTest(unittest.TestCase):
                 probe_count += 1
                 return native_info
 
-            with patch("tdlib_media_uploader.media.legacy_video.probe_video", side_effect=mock_probe):
+            with patch("tdlib_media_uploader.media.video_pipeline.probe_video", side_effect=mock_probe):
                 info1 = video_core.video_info(video_path)
                 info2 = video_core.video_info(video_path)
                 self.assertEqual(probe_count, 1)

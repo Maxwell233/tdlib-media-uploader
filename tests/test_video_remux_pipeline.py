@@ -80,8 +80,8 @@ from tdlib_media_uploader.gui.cache_service import (
     CACHE_TARGETS,
     clear_cache,
 )
-from tdlib_media_uploader.media import legacy_mixed as mixed_core
-from tdlib_media_uploader.media import legacy_video as video_core
+from tdlib_media_uploader.media import mixed_pipeline as mixed_core
+from tdlib_media_uploader.media import video_pipeline as video_core
 from tdlib_media_uploader.media.video_prepare import (
     PreparedVideo,
     cleanup_processed_group,
@@ -262,7 +262,7 @@ class VideoRemuxMatrixAndProbeTest(unittest.TestCase):
                 self.assertIn("仅允许原生格式", str(ctx.exception))
 
             with patch.object(cfg, "VIDEO_COMPATIBILITY_POLICY", "original"), \
-                 patch("tdlib_media_uploader.media.legacy_video.prepare_video", return_value=m_info):
+                 patch("tdlib_media_uploader.media.video_pipeline.prepare_video", return_value=m_info):
                 skipped = video_core.preflight_videos([{"path": p}])
                 self.assertEqual(len(skipped), 1)
                 self.assertIn("original", skipped[0]["reason"])
@@ -415,7 +415,7 @@ class DecoupledThumbnailAndCacheLifecycleTest(unittest.TestCase):
             processed_dir = cache_dir / "video_processed"
 
             with patch("tdlib_media_uploader.media.video_prepare.THUMBNAIL_CACHE_DIR", thumb_dir), \
-                 patch("tdlib_media_uploader.media.legacy_video.THUMB_CACHE_DIR", thumb_dir), \
+                 patch("tdlib_media_uploader.media.video_pipeline.THUMB_CACHE_DIR", thumb_dir), \
                  patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir):
 
                 src = source_dir / "movie.mkv"
@@ -469,7 +469,7 @@ class DecoupledThumbnailAndCacheLifecycleTest(unittest.TestCase):
 
                 with patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=[m_info, p_info]), \
                      patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless", side_effect=fake_remux), \
-                     patch("tdlib_media_uploader.media.legacy_video.build_thumbnail", side_effect=fake_build_thumb):
+                     patch("tdlib_media_uploader.media.video_pipeline.build_thumbnail", side_effect=fake_build_thumb):
                     prep = prepare_video_for_telegram(src, group_key="group_1")
 
                 self.assertTrue(prep.is_remuxed)
@@ -778,8 +778,8 @@ class MixedMediaStrategyIntegrationTest(unittest.TestCase):
                 "video": {"@type": "inputFileLocal", "path": str(vid_path.with_suffix(".mp4"))},
             }
 
-            with patch("tdlib_media_uploader.media.legacy_mixed.image_core.input_photo", return_value=img_payload), \
-                 patch("tdlib_media_uploader.media.legacy_video.input_video", return_value=vid_payload) as mock_input_video:
+            with patch("tdlib_media_uploader.media.mixed_pipeline.image_core.input_photo", return_value=img_payload), \
+                 patch("tdlib_media_uploader.media.video_pipeline.input_video", return_value=vid_payload) as mock_input_video:
 
                 contents, valid, skipped = mixed_core.build_mixed_contents(
                     items, caption="Mixed Album", group_key="mixed_group_1"

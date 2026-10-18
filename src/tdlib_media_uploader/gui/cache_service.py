@@ -21,7 +21,7 @@ from ..config.paths import (
     VIDEO_PROCESSED_CACHE_DIR,
     VIDEO_STATE_DIR,
 )
-from ..core.filesystem_legacy import is_link_or_junction
+from ..core.filesystem import is_link_or_junction
 from .config_service import get_cfg
 from .tools import format_size
 

@@ -104,11 +104,11 @@ class ReconciliationService:
         if not target:
             target = self._target_identity()
         if kind == "video":
-            module = importlib.import_module("tdlib_media_uploader.media.legacy_video")
+            module = importlib.import_module("tdlib_media_uploader.media.video_pipeline")
         elif kind == "image":
-            module = importlib.import_module("tdlib_media_uploader.media.legacy_image")
+            module = importlib.import_module("tdlib_media_uploader.media.image_pipeline")
         elif kind == "mixed":
-            module = importlib.import_module("tdlib_media_uploader.media.legacy_mixed")
+            module = importlib.import_module("tdlib_media_uploader.media.mixed_pipeline")
         else:
             raise ValueError(f"无法为未知媒体类型恢复上传断点：{kind}")
         roots = {str(item.get("source_root")) for item in record.get("items", ())
@@ -120,7 +120,7 @@ class ReconciliationService:
         root = next(iter(roots), None) or source_root
         if root is None:
             raise SourceRootRequired("旧记录缺少来源目录，请选择当时扫描的根目录；不会使用当前配置猜测")
-        from ..core.filesystem_legacy import stable_path
+        from ..core.filesystem import stable_path
         normalized_root = Path(stable_path(root))
         if any(not Path(stable_path(item["path"])).is_relative_to(normalized_root)
                for item in record.get("items", ())

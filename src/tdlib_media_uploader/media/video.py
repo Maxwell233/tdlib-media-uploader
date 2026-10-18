@@ -32,6 +32,17 @@ from ..core.models import (
     ScanResult,
 )
 
+from .strategy_support import (
+    CancelEventBridge as _CancelEventBridge,
+    StrategyCancelled as _StrategyCancelled,
+    build_item_lookup as _shared_item_lookup,
+    check_cancelled as _check_cancelled,
+    emit_event as _emit_event,
+    is_cancelled as _token_cancelled,
+    state_completed as _shared_state_completed,
+    target_dict as _shared_target_dict,
+)
+
 
 _MISSING = object()
 
@@ -39,29 +50,7 @@ _MISSING = object()
 def _load_legacy_module() -> Any:
     """Load the bundled video compatibility module."""
 
-    return importlib.import_module("tdlib_media_uploader.media.legacy_video")
-
-
-class _StrategyCancelled(RuntimeError):
-    """Cancellation raised after a legacy call has returned control."""
-
-    cancelled = True
-
-
-class _CancelEventBridge:
-    """Expose the V1.9 ``Event.is_set`` shape for a V2 cancel token."""
-
-    def __init__(self, token: CancelToken):
-        self.token = token
-
-    def is_set(self) -> bool:
-        checker = getattr(self.token, "is_cancelled", None)
-        if callable(checker):
-            try:
-                return bool(checker())
-            except Exception:
-                return False
-        return bool(getattr(self.token, "cancelled", False))
+    return importlib.import_module("tdlib_media_uploader.media.video_pipeline")
 
 
 class _StrategyUI:
@@ -72,14 +61,7 @@ class _StrategyUI:
         self.kind = kind
 
     def _emit(self, event: Any) -> None:
-        sink = self.event_sink
-        emit = getattr(sink, "emit", None) if sink is not None else None
-        if callable(emit):
-            try:
-                emit(event)
-            except Exception:
-                # A progress/log consumer must not change media behavior.
-                pass
+        _emit_event(self.event_sink, event)
 
     def warning(self, message: Any) -> None:
         self._emit(LogEvent("WARNING", str(message), source="video-strategy"))
@@ -113,32 +95,8 @@ class _StrategyUI:
         return None
 
 
-
-def _token_cancelled(token: CancelToken | None) -> bool:
-    if token is None:
-        return False
-    checker = getattr(token, "is_cancelled", None)
-    if callable(checker):
-        try:
-            return bool(checker())
-        except Exception:
-            return False
-    return bool(getattr(token, "cancelled", False))
-
-
 def _check_cancel(token: CancelToken | None) -> None:
-    if _token_cancelled(token):
-        raise _StrategyCancelled("视频策略操作已取消")
-    if token is None:
-        return
-    raiser = getattr(token, "raise_if_cancelled", None)
-    if callable(raiser):
-        try:
-            raiser()
-        except BaseException as error:
-            if _token_cancelled(token) or bool(getattr(error, "cancelled", False)):
-                raise _StrategyCancelled(str(error) or "视频策略操作已取消") from error
-            raise
+    _check_cancelled(token, message="视频策略操作已取消")
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -218,15 +176,7 @@ class VideoStrategy:
     def _config(self) -> Any:
         return getattr(self.legacy, "cfg", None) or self.config or self.legacy
 
-    @staticmethod
-    def _target_dict(target: Any) -> dict[str, Any]:
-        if isinstance(target, Mapping):
-            return dict(target)
-        as_dict = getattr(target, "as_dict", None)
-        if callable(as_dict):
-            value = as_dict()
-            return dict(value) if isinstance(value, Mapping) else {}
-        return {}
+    _target_dict = staticmethod(_shared_target_dict)
 
     def _root(self, source_root: Path | None = None) -> Path:
         if source_root is not None:
@@ -278,12 +228,7 @@ class VideoStrategy:
         return _CancelEventBridge(token) if token is not None else None
 
     def _emit(self, event_sink: EventSink | None, event: Any) -> None:
-        emit = getattr(event_sink, "emit", None) if event_sink is not None else None
-        if callable(emit):
-            try:
-                emit(event)
-            except Exception:
-                pass
+        _emit_event(event_sink, event)
 
     def _progress_callback(
         self,
@@ -421,19 +366,7 @@ class VideoStrategy:
         return values
 
     def _state_completed(self, state: Any, item: MediaItem) -> bool:
-        if state is None:
-            return False
-        checker = getattr(state, "is_completed", None)
-        if not callable(checker):
-            raise TypeError("state 必须提供 is_completed()")
-        legacy_item = self._legacy_item(item)
-        for candidate in (item, legacy_item):
-            try:
-                if bool(checker(candidate)):
-                    return True
-            except (OSError, TypeError, ValueError, AttributeError):
-                continue
-        return False
+        return _shared_state_completed(state, item, self._legacy_item)
 
     def _match_item(
         self,
@@ -474,24 +407,9 @@ class VideoStrategy:
         raise ValueError(f"legacy 视频计划返回了未知项：{path}")
 
     def _build_item_lookup(self, candidates: Sequence[MediaItem]) -> dict[str, dict]:
-        """Build one immutable-run lookup for legacy planner values."""
-
-        by_identity: dict[tuple[object, ...], MediaItem] = {}
-        by_path: dict[tuple[str, str], list[MediaItem]] = {}
-        for item in candidates:
-            normalized_path = self._normalize_path(item.path)
-            media_kind = str(item.media_kind or self.kind)
-            key = (
-                normalized_path,
-                int(item.snapshot.size),
-                int(item.snapshot.mtime_ns),
-                media_kind,
-            )
-            if key in by_identity:
-                raise ValueError(f"视频 MediaItem identity 重复：{item.path}")
-            by_identity[key] = item
-            by_path.setdefault((normalized_path, media_kind), []).append(item)
-        return {"by_identity": by_identity, "by_path": by_path}
+        return _shared_item_lookup(
+            candidates, self._normalize_path, kind=self.kind, item_label="视频",
+        )
 
     def _configured_dates_enabled(self) -> bool:
         checker = getattr(self.legacy, "video_dates_enabled", None)

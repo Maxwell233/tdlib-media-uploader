@@ -11,10 +11,27 @@ from tdlib_media_uploader.gui import models, scanner
 
 
 class TestRefactoringBoundaries(unittest.TestCase):
+    def test_basic_mixed_preview_sorts_dictionary_items_by_source_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            group = root / 'album'
+            group.mkdir()
+            for name in ('photo10.jpg', 'photo2.jpg'):
+                (group / name).write_bytes(b'photo')
+            values = {
+                'IMAGE_EXTENSIONS': {'.jpg'}, 'VIDEO_EXTENSIONS': {'.mp4'},
+                'MIXED_SORT_MODE': 'name',
+            }
+            with patch.object(scanner, 'get_cfg', side_effect=lambda name, default=None: values.get(name, default)):
+                groups, ignored, errors, warnings, skipped = scanner.basic_mixed_scan(root)
+            self.assertEqual([item['path'].name for item in groups[0]['items']],
+                             ['photo2.jpg', 'photo10.jpg'])
+            self.assertEqual((ignored, errors, warnings, skipped), ([], [], [], []))
+
     def test_legacy_scan_result_uses_basic_preview_without_optional_dependency(self):
         real_import = builtins.__import__
         def import_without_image(name, globals=None, locals=None, fromlist=(), level=0):
-            if 'legacy_image' in (fromlist or ()):
+            if 'image_pipeline' in (fromlist or ()):
                 raise ImportError('optional image dependency unavailable')
             return real_import(name, globals, locals, fromlist, level)
 

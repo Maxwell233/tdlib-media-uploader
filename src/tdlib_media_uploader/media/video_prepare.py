@@ -25,8 +25,9 @@ from ..core.source_snapshot import capture_snapshot, validate_snapshots
 from ..config import loader as cfg
 from ..config.paths import THUMBNAIL_CACHE_DIR, VIDEO_PROCESSED_CACHE_DIR
 from ..core.filesystem import stable_path
-from ..core.filesystem_legacy import display_path, run_cancellable_process
-from .legacy_video import build_thumbnail, format_size, video_limit_text
+from ..core.filesystem import display_path
+from ..processes.runner import run_cancellable_process
+from .video_pipeline import build_thumbnail, format_size, video_limit_text
 from .video_probe import (
     VideoMediaInfo,
     _find_ffmpeg,
@@ -367,7 +368,7 @@ def prepare_video_for_telegram(
     if compat in {"native", "legacy"}:
         size = w_path.stat().st_size
         if size > effective_max:
-            from .legacy_video import format_size, video_limit_text
+            from .video_pipeline import format_size, video_limit_text
             raise RuntimeError(
                 f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
                 f"{video_limit_text(effective_max)}"
@@ -375,7 +376,7 @@ def prepare_video_for_telegram(
 
         thumb_path, tw, th = None, 0, 0
         if generate_thumbnail:
-            from .legacy_video import build_thumbnail
+            from .video_pipeline import build_thumbnail
             dur = getattr(info, "duration", None)
             if dur is None and isinstance(info, Mapping):
                 dur = info.get("duration")
@@ -489,7 +490,7 @@ def prepare_video_for_telegram(
 
         p_size = processed_path.stat().st_size
         if p_size > effective_max:
-            from .legacy_video import format_size, video_limit_text
+            from .video_pipeline import format_size, video_limit_text
             raise RuntimeError(
                 f"重新封装后的文件大小 {format_size(p_size)} 超过 Telegram 视频上限 "
                 f"{video_limit_text(effective_max)}"
@@ -497,7 +498,7 @@ def prepare_video_for_telegram(
 
         thumb_path, tw, th = None, 0, 0
         if generate_thumbnail:
-            from .legacy_video import build_thumbnail
+            from .video_pipeline import build_thumbnail
             thumb_kwargs = {
                 "timestamp_seconds": thumbnail_timestamp_seconds,
                 "duration": processed_info.duration,

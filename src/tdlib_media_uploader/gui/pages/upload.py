@@ -44,7 +44,7 @@ from ...core.album import (
     validate_caption,
     with_filename_description,
 )
-from ...core.filesystem_legacy import stable_path
+from ...core.filesystem import stable_path
 from ...config.paths import RESOURCE_DIR
 from ..icons import get_svg_icon
 from ..theme import THEME

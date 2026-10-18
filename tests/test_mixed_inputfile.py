@@ -16,7 +16,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from tdlib_media_uploader.telegram import tdlib_common
-from tdlib_media_uploader.media import legacy_mixed as mixed_core
+from tdlib_media_uploader.media import mixed_pipeline as mixed_core
 
 
 class MixedInputFileRegressionTest(unittest.TestCase):

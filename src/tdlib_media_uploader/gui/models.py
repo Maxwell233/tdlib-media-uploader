@@ -16,7 +16,7 @@ from typing import Any
 
 from ..core.album import CaptionStore
 from ..core.logging import write_app_log
-from ..core.filesystem_legacy import stable_path
+from ..core.filesystem import stable_path
 
 from ..core.models import MediaItem
 

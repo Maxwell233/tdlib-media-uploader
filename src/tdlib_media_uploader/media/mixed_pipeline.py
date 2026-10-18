@@ -4,8 +4,8 @@
 Each first-level directory below ``MIXED_DIR`` is an independent group. Files
 inside that directory (including nested directories) keep one deterministic
 order and are split into Telegram Albums of at most ten items. The module
-reuses the existing photo/video input builders and TDLib client, so mixed
-Albums retain the same resumable state and error isolation guarantees.
+reuses the photo/video input builders while the caller owns transport and
+checkpoint finalization. Mixed Albums retain per-item error isolation.
 """
 
 from __future__ import annotations
@@ -21,35 +21,23 @@ from pathlib import Path
 from ..core.album import CaptionStore, album_key, compose_caption, with_filename_description
 from ..core.identity import media_file_signature
 from ..core.upload_state import UploadState as SharedUploadState
-from ..core.filesystem_legacy import (
-    display_path,
-    CHANGED,
-    DEFERRED,
-    FileReadinessError,
-    file_snapshot,
-    io_worker_count,
-    iter_files,
-    is_network_path,
-    media_path_sort,
-    file_mtime,
-    is_link_or_junction,
-    ordered_bounded_map,
-    readiness_category,
-    relative_name as stable_relative_name,
-    raise_for_file_readiness,
-    retry_fs_operation,
-    stable_path,
-    iter_directory_entries_with_retry,
-    validate_scan_root,
-    wait_for_file_ready,
+from ..core.filesystem import display_path, file_snapshot, io_worker_count, iter_files, is_network_path, file_mtime, is_link_or_junction, retry_fs_operation, stable_path, iter_directory_entries_with_retry, validate_scan_root
+from ..core.readiness import CHANGED, DEFERRED, FileReadinessError, raise_for_file_readiness, wait_for_file_ready
+from ..core.sorting import media_path_sort, relative_name as stable_relative_name
+from ..core.concurrency import ordered_bounded_map
+from .common import (
+    cleanup_confirmed_staging as _cleanup_confirmed_staging,
+    format_size as _format_size,
+    prune_staging_cache as _prune_staging_cache,
+    readiness_options as _shared_readiness_options,
+    readiness_record as _readiness_record,
 )
 from ..config import loader as cfg
 from ..telegram.tdlib_common import HeadlessUI, formatted_text
 from ..config.paths import APP_DATA_DIR, RESOURCE_DIR, MIXED_STATE_DIR
-from ..upload.staging import cleanup_staging, remove_staged_file, should_stage, stage_file
 
-from . import legacy_image as image_core
-from . import legacy_video as video_core
+from . import image_pipeline as image_core
+from . import video_pipeline as video_core
 
 
 PROJECT_DIR = RESOURCE_DIR
@@ -65,39 +53,11 @@ READINESS_ATTEMPTS = 3
 
 
 def _readiness_options(path=None) -> dict:
-    network = is_network_path(path or cfg.MIXED_DIR)
-    legacy_interval = getattr(cfg, "SCAN_STABILITY_INTERVAL_SECONDS", None)
-    legacy_checks = getattr(cfg, "SCAN_STABILITY_CHECKS", None)
-    interval_default = 0.5 if network else 0.05
-    checks_default = 3 if network else 2
-    return {
-        "attempts": int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", READINESS_ATTEMPTS)),
-        "stable_interval": float(getattr(
-            cfg,
-            "SCAN_STABILITY_INTERVAL_NETWORK_SECONDS" if network else "SCAN_STABILITY_INTERVAL_LOCAL_SECONDS",
-            legacy_interval if legacy_interval is not None else interval_default,
-        )),
-        "stable_checks": int(getattr(
-            cfg,
-            "SCAN_STABILITY_CHECKS_NETWORK" if network else "SCAN_STABILITY_CHECKS_LOCAL",
-            legacy_checks if legacy_checks is not None else checks_default,
-        )),
-        "probe_bytes": int(getattr(cfg, "SCAN_READ_PROBE_BYTES", 64 * 1024)),
-    }
-
-
-def _readiness_record(exc: BaseException) -> dict | None:
-    """Return structured readiness fields for a skipped mixed item."""
-
-    if not isinstance(exc, FileReadinessError):
-        return None
-    readiness = exc.readiness
-    return {
-        "readiness_status": readiness.status,
-        "readiness_code": readiness.code,
-        "readiness_attempts": readiness.attempts,
-        "category": readiness_category(readiness),
-    }
+    return _shared_readiness_options(
+        cfg,
+        network=is_network_path(path or cfg.MIXED_DIR),
+        default_attempts=READINESS_ATTEMPTS,
+    )
 
 
 def _validate_extensions() -> None:
@@ -112,12 +72,7 @@ def _validate_extensions() -> None:
 
 
 def format_size(value: float | int) -> str:
-    value = float(value or 0)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if value < 1024 or unit == "TiB":
-            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.2f} {unit}"
-        value /= 1024
-    return f"{value:.2f} TiB"
+    return _format_size(value or 0)
 
 
 def relative_name(path: Path, root=None) -> str:
@@ -125,35 +80,19 @@ def relative_name(path: Path, root=None) -> str:
 
 
 def cleanup_staging_cache(*, startup: bool = False) -> None:
-    """Prune stale local staging artifacts without affecting source state."""
-
-    if startup and not getattr(cfg, "STAGING_CLEANUP_ON_START", True):
-        return
-    # Existing staged copies remain safe to prune when the new mode is off;
-    # disabling staging should not leave its old cache behind indefinitely.
-    cleanup_staging(
-        cfg.STAGING_DIR,
-        staging_base_dir=getattr(cfg, "STAGING_BASE_DIR", cfg.STAGING_DIR),
-        max_age_seconds=float(getattr(cfg, "STAGING_CLEANUP_DAYS", 7)) * 86400,
-    )
+    _prune_staging_cache(cfg, startup=startup)
 
 
 def cleanup_confirmed_staging(items) -> None:
-    """Delete staged copies only after a mixed Album is confirmed."""
-
-    if not getattr(cfg, "STAGING_CLEANUP_AFTER_SUCCESS", True):
-        return
-    for item in items or []:
-        path = item.get("path") if isinstance(item, dict) else item
-        if path is None:
-            continue
-        for mapping in (
+    paths = (item.get("path") if isinstance(item, dict) else item for item in items or ())
+    _cleanup_confirmed_staging(
+        (path for path in paths if path is not None),
+        config=cfg,
+        staged_maps=(
             getattr(image_core, "STAGED_UPLOAD_PATHS", {}),
             getattr(video_core, "STAGED_UPLOAD_PATHS", {}),
-        ):
-            staged = mapping.pop(stable_path(path), None)
-            if staged is not None:
-                remove_staged_file(staged)
+        ),
+    )
 
 
 def file_signature(path: Path, snapshot=None) -> str:

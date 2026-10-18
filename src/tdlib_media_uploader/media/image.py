@@ -22,10 +22,23 @@ from ..core.models import (
     AlbumPlan,
     ContentBuildResult,
     FileSnapshot,
-    LogEvent,
     MediaItem,
     ProgressEvent,
     ScanResult,
+)
+
+from .strategy_support import (
+    CancelEventBridge as _CancelEventBridge,
+    StrategyCancelled as _StrategyCancelled,
+    StrategyLogUI,
+    build_item_lookup as _shared_item_lookup,
+    check_cancelled as _check_cancelled,
+    is_cancelled as _cancelled,
+    model_identity as _model_identity,
+    raw_snapshot as _shared_raw_snapshot,
+    snapshot_item as _snapshot_item,
+    state_completed as _shared_state_completed,
+    target_dict as _shared_target_dict,
 )
 
 
@@ -36,111 +49,20 @@ _LEGACY_SCOPE_LOCK = threading.RLock()
 def _load_legacy_module() -> Any:
     """Load the bundled image compatibility module."""
 
-    return importlib.import_module("tdlib_media_uploader.media.legacy_image")
-
-
-class _StrategyCancelled(RuntimeError):
-    """Cancellation raised at the V2 strategy boundary."""
-
-    cancelled = True
-
-
-
-def _cancelled(token: CancelToken | None) -> bool:
-    if token is None:
-        return False
-    checker = getattr(token, "is_cancelled", None)
-    if callable(checker):
-        try:
-            return bool(checker())
-        except Exception:
-            return False
-    return bool(getattr(token, "cancelled", False))
+    return importlib.import_module("tdlib_media_uploader.media.image_pipeline")
 
 
 def _check_cancel(token: CancelToken | None) -> None:
-    if _cancelled(token):
-        raise _StrategyCancelled("图片策略操作已取消")
-    if token is None:
-        return
-    raiser = getattr(token, "raise_if_cancelled", None)
-    if callable(raiser):
-        try:
-            raiser()
-        except BaseException as error:
-            if _cancelled(token) or bool(getattr(error, "cancelled", False)):
-                raise _StrategyCancelled(str(error) or "图片策略操作已取消") from error
-            raise
+    _check_cancelled(token, message="图片策略操作已取消")
 
 
-class _CancelEventBridge:
-    """Expose the legacy ``Event.is_set`` shape for a V2 token."""
-
-    def __init__(self, token: CancelToken | None):
-        self.token = token
-
-    def is_set(self) -> bool:
-        return _cancelled(self.token)
-
-
-class _StrategyUI:
-    """GUI-free callback facade that forwards legacy diagnostics to EventSink."""
-
+class _StrategyUI(StrategyLogUI):
     def __init__(self, event_sink: EventSink | None):
-        self.event_sink = event_sink
-
-    def _emit(self, level: str, message: Any) -> None:
-        emit = getattr(self.event_sink, "emit", None)
-        if not callable(emit):
-            return
-        try:
-            emit(LogEvent(level=level, message=str(message), source="image-strategy"))
-        except Exception:
-            # Presentation must not change a media decision.
-            pass
-
-    def warning(self, message: Any) -> None:
-        self._emit("WARNING", message)
-
-    def info(self, message: Any) -> None:
-        self._emit("INFO", message)
-
-    def log(self, message: Any) -> None:
-        self._emit("INFO", message)
-
-
-def _model_identity(item: MediaItem) -> tuple[object, ...]:
-    return (
-        str(Path(item.path)),
-        str(Path(item.source_root)),
-        str(item.media_kind),
-        item.snapshot.path,
-        item.snapshot.size,
-        item.snapshot.mtime_ns,
-    )
+        super().__init__(event_sink, source="image-strategy")
 
 
 def _raw_snapshot(raw: Mapping[str, Any], path: Path) -> FileSnapshot:
-    value = raw.get("snapshot")
-    if isinstance(value, FileSnapshot):
-        return value
-    if value is not None:
-        size = getattr(value, "size", None)
-        mtime_ns = getattr(value, "mtime_ns", None)
-        snapshot_path = getattr(value, "path", str(path))
-        if size is None or mtime_ns is None:
-            try:
-                size, mtime_ns = value[0], value[1]
-            except (IndexError, KeyError, TypeError):
-                size = mtime_ns = None
-        if size is not None and mtime_ns is not None:
-            return FileSnapshot(str(snapshot_path), int(size), int(mtime_ns))
-
-    size = raw.get("scan_size", raw.get("size"))
-    mtime_ns = raw.get("scan_mtime_ns", raw.get("mtime_ns"))
-    if size is None or mtime_ns is None:
-        raise ValueError(f"图片项缺少扫描快照：{path}")
-    return FileSnapshot(str(path), int(size), int(mtime_ns))
+    return _shared_raw_snapshot(raw, path, item_label="图片")
 
 
 class _LegacyStateBridge:
@@ -316,55 +238,14 @@ class ImageStrategy:
         raise ValueError(f"legacy 图片计划返回了未知项：{path}")
 
     def _build_item_lookup(self, candidates: Sequence[MediaItem]) -> dict[str, dict]:
-        by_identity: dict[tuple[object, ...], MediaItem] = {}
-        by_path: dict[tuple[str, str], list[MediaItem]] = {}
-        for item in candidates:
-            normalized_path = self._normalize_path(item.path)
-            key = (
-                normalized_path,
-                int(item.snapshot.size),
-                int(item.snapshot.mtime_ns),
-                str(item.media_kind or self.kind),
-            )
-            if key in by_identity:
-                raise ValueError(f"图片 MediaItem identity 重复：{item.path}")
-            by_identity[key] = item
-            by_path.setdefault((normalized_path, key[3]), []).append(item)
-        return {"by_identity": by_identity, "by_path": by_path}
+        return _shared_item_lookup(
+            candidates, self._normalize_path, kind=self.kind, item_label="图片",
+        )
 
     def _state_completed(self, state: Any, item: MediaItem) -> bool:
-        if state is None:
-            return False
-        checker = getattr(state, "is_completed", None)
-        if not callable(checker):
-            raise TypeError("state 必须提供 is_completed()")
-        legacy_item = {
-            "path": item.path,
-            "source_root": item.source_root,
-            "media_kind": item.media_kind,
-            "scan_size": item.snapshot.size,
-            "scan_mtime_ns": item.snapshot.mtime_ns,
-        }
-        # Legacy UploadState accepts the dictionary shape while V2 stores
-        # generally accept MediaItem. Try both without allowing an old facade
-        # to force a late stat when the V2 item already has a snapshot.
-        for candidate in (item, legacy_item):
-            try:
-                if bool(checker(candidate)):
-                    return True
-            except (OSError, TypeError, ValueError, AttributeError):
-                continue
-        return False
+        return _shared_state_completed(state, item, _snapshot_item)
 
-    @staticmethod
-    def _target_dict(target: Any) -> dict[str, Any]:
-        if isinstance(target, Mapping):
-            return dict(target)
-        converter = getattr(target, "as_dict", None)
-        if callable(converter):
-            value = converter()
-            return dict(value) if isinstance(value, Mapping) else {}
-        return {}
+    _target_dict = staticmethod(_shared_target_dict)
 
     @staticmethod
     def _caption_text(value: Any) -> str:

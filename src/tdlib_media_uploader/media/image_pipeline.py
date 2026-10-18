@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""TDLib 图片批量 Album 上传器：递归扫描、分组编号与可编辑 Caption。"""
+"""图片媒体管线：递归扫描、规范化、Album 分组及内容构建。"""
 
 from __future__ import annotations
 
@@ -14,27 +14,22 @@ from PIL import Image
 from ..core.album import CaptionStore, album_key, compose_caption, with_filename_description
 from ..core.identity import media_file_signature
 from ..core.upload_state import UploadState as SharedUploadState
-from ..core.filesystem_legacy import (
-    display_path,
-    FileReadinessError,
-    file_snapshot,
-    is_network_path,
-    io_worker_count,
-    iter_files,
-    media_path_sort,
-    ordered_bounded_map,
-    readiness_category,
-    relative_name as stable_relative_name,
-    raise_for_file_readiness,
-    run_cancellable_process,
-    stable_path,
-    validate_scan_root,
-    wait_for_file_ready,
+from ..core.filesystem import display_path, file_snapshot, is_network_path, io_worker_count, iter_files, stable_path, validate_scan_root
+from ..core.sorting import media_path_sort, relative_name as stable_relative_name
+from ..core.concurrency import ordered_bounded_map
+from ..core.readiness import raise_for_file_readiness, wait_for_file_ready
+from ..processes.runner import run_cancellable_process
+from .common import (
+    cleanup_confirmed_staging as _cleanup_confirmed_staging,
+    format_size,
+    prune_staging_cache as _prune_staging_cache,
+    readiness_options as _shared_readiness_options,
+    readiness_record as _readiness_record,
 )
 from ..config import loader as cfg
 from ..telegram.tdlib_common import HeadlessUI, formatted_text
 from ..config.paths import IMAGE_STATE_DIR, IMAGE_COMPRESSION_CACHE_DIR
-from ..upload.staging import cleanup_staging, remove_staged_file, should_stage, stage_file
+from ..upload.staging import should_stage, stage_file
 from .image_probe import (
     PHOTO_TARGET_MAX_SIDE,
     TELEGRAM_PHOTO_MAX_ASPECT_RATIO,
@@ -64,49 +59,11 @@ UI = HeadlessUI()
 
 
 def _readiness_options(path=None) -> dict:
-    """Return the shared, bounded source-file readiness configuration."""
-    network = is_network_path(path or cfg.IMAGE_DIR)
-    legacy_interval = getattr(cfg, "SCAN_STABILITY_INTERVAL_SECONDS", None)
-    legacy_checks = getattr(cfg, "SCAN_STABILITY_CHECKS", None)
-    interval_default = 0.5 if network else 0.05
-    checks_default = 3 if network else 2
-    return {
-        "attempts": int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", READINESS_ATTEMPTS)),
-        "stable_interval": float(getattr(
-            cfg,
-            "SCAN_STABILITY_INTERVAL_NETWORK_SECONDS" if network else "SCAN_STABILITY_INTERVAL_LOCAL_SECONDS",
-            legacy_interval if legacy_interval is not None else interval_default,
-        )),
-        "stable_checks": int(getattr(
-            cfg,
-            "SCAN_STABILITY_CHECKS_NETWORK" if network else "SCAN_STABILITY_CHECKS_LOCAL",
-            legacy_checks if legacy_checks is not None else checks_default,
-        )),
-        "probe_bytes": int(getattr(cfg, "SCAN_READ_PROBE_BYTES", 64 * 1024)),
-    }
-
-
-def _readiness_record(exc: BaseException) -> dict | None:
-    """Return structured readiness fields for a skipped image."""
-
-    if not isinstance(exc, FileReadinessError):
-        return None
-    readiness = exc.readiness
-    return {
-        "readiness_status": readiness.status,
-        "readiness_code": readiness.code,
-        "readiness_attempts": readiness.attempts,
-        "category": readiness_category(readiness),
-    }
-
-
-def format_size(value: float) -> str:
-    value = float(value)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if value < 1024 or unit == "TiB":
-            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.2f} {unit}"
-        value /= 1024
-    return f"{value:.2f} TiB"
+    return _shared_readiness_options(
+        cfg,
+        network=is_network_path(path or cfg.IMAGE_DIR),
+        default_attempts=READINESS_ATTEMPTS,
+    )
 
 
 def relative_name(path: Path) -> str:
@@ -114,28 +71,11 @@ def relative_name(path: Path) -> str:
 
 
 def cleanup_staging_cache(*, startup: bool = False) -> None:
-    """Prune stale local staging artifacts without affecting source state."""
-
-    if startup and not getattr(cfg, "STAGING_CLEANUP_ON_START", True):
-        return
-    # The mode only controls new staging operations. Continue pruning an old
-    # cache after staging is disabled so switching modes cannot strand files.
-    cleanup_staging(
-        cfg.STAGING_DIR,
-        staging_base_dir=getattr(cfg, "STAGING_BASE_DIR", cfg.STAGING_DIR),
-        max_age_seconds=float(getattr(cfg, "STAGING_CLEANUP_DAYS", 7)) * 86400,
-    )
+    _prune_staging_cache(cfg, startup=startup)
 
 
 def cleanup_confirmed_staging(paths) -> None:
-    """Delete staged copies only after the corresponding Album is confirmed."""
-
-    if not getattr(cfg, "STAGING_CLEANUP_AFTER_SUCCESS", True):
-        return
-    for path in paths or []:
-        staged = STAGED_UPLOAD_PATHS.pop(stable_path(path), None)
-        if staged is not None:
-            remove_staged_file(staged)
+    _cleanup_confirmed_staging(paths, config=cfg, staged_maps=(STAGED_UPLOAD_PATHS,))
 
 
 def _snapshot_for_path(path: Path):

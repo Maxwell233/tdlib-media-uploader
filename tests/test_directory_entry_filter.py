@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from tdlib_media_uploader.core.filesystem_legacy import iter_files, stable_path
+from tdlib_media_uploader.core.filesystem import iter_files, stable_path
 
 
 class DirectoryEntryFilterTest(unittest.TestCase):

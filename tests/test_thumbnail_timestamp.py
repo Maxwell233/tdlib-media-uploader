@@ -27,8 +27,8 @@ from tdlib_media_uploader.config.snapshot import snapshot_config
 from tdlib_media_uploader.gui import config_service
 from tdlib_media_uploader.gui.settings import upload_panel as upload_panel_module
 from tdlib_media_uploader.gui.settings.upload_panel import UploadPanel
-from tdlib_media_uploader.media import legacy_mixed as mixed_core
-from tdlib_media_uploader.media import legacy_video as video_core
+from tdlib_media_uploader.media import mixed_pipeline as mixed_core
+from tdlib_media_uploader.media import video_pipeline as video_core
 
 
 class ThumbnailTimestampConfigTest(unittest.TestCase):

@@ -12,8 +12,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from tdlib_media_uploader.config import loader as cfg
-from tdlib_media_uploader.media import legacy_mixed as mixed_core
-from tdlib_media_uploader.media import legacy_video as video_core
+from tdlib_media_uploader.media import mixed_pipeline as mixed_core
+from tdlib_media_uploader.media import video_pipeline as video_core
 from tdlib_media_uploader.media.video_probe import (
     VideoMediaInfo,
     has_video_container_signature,

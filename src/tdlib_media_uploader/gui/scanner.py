@@ -18,17 +18,8 @@ from ..config.paths import (
     VIDEO_STATE_DIR,
 )
 from ..core.album import CaptionStore, album_key, compose_caption, validate_caption
-from ..core.filesystem_legacy import (
-    file_mtime,
-    file_snapshot,
-    is_link_or_junction,
-    iter_directory_entries_with_retry,
-    iter_files,
-    media_path_sort,
-    retry_fs_operation,
-    stable_path,
-    validate_scan_root,
-)
+from ..core.filesystem import file_mtime, file_snapshot, is_link_or_junction, iter_directory_entries_with_retry, iter_files, retry_fs_operation, stable_path, validate_scan_root
+from ..core.sorting import media_path_sort
 from ..core.logging import write_app_log
 from . import config_service
 from .config_service import get_cfg, get_config, target_for
@@ -235,7 +226,7 @@ def _process_mixed_group(
         media_items,
         group_path,
         mode=sort_mode,
-        key_func=lambda item: item["path"],
+        path_key=lambda item: item["path"],
     )
 
     group_dict = {
@@ -378,7 +369,7 @@ def cancelled_scan_result(
     }
 
 
-def _legacy_video_groups(items, group_size, source_root, scan_snapshot, store, core, completed):
+def _video_pipeline_groups(items, group_size, source_root, scan_snapshot, store, core, completed):
     """Build date or fixed-count video Albums without changing scan state."""
     groups = []
     read_dates = bool(get_cfg("VIDEO_READ_DATES", True))
@@ -448,7 +439,7 @@ def _legacy_video_groups(items, group_size, source_root, scan_snapshot, store, c
     return groups
 
 
-def _legacy_image_groups(items, group_size, source_root, scan_snapshot, store, completed):
+def _image_pipeline_groups(items, group_size, source_root, scan_snapshot, store, completed):
     """Build image Albums with their configured starting number."""
     groups = []
     for index, start in enumerate(range(0, len(items), group_size), start=1):
@@ -478,7 +469,7 @@ def _legacy_image_groups(items, group_size, source_root, scan_snapshot, store, c
     return groups
 
 
-def _legacy_mixed_groups(mixed_groups, group_size, source_root, scan_snapshot, store, completed):
+def _mixed_pipeline_groups(mixed_groups, group_size, source_root, scan_snapshot, store, completed):
     """Preserve folder order and split each mixed folder into Albums."""
     groups = []
     for group_dict in mixed_groups:
@@ -586,11 +577,11 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
     scan_size_skips: list[dict] = []
     try:
         if kind == "video":
-            from ..media import legacy_video as core_module
+            from ..media import video_pipeline as core_module
         elif kind == "image":
-            from ..media import legacy_image as core_module
+            from ..media import image_pipeline as core_module
         elif kind == "mixed":
-            from ..media import legacy_mixed as core_module
+            from ..media import mixed_pipeline as core_module
         else:
             raise ValueError(f"未知媒体类型：{kind}")
         core = core_module
@@ -789,15 +780,15 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
         return state.is_completed(item)
 
     if kind == "video":
-        groups = _legacy_video_groups(
+        groups = _video_pipeline_groups(
             items, group_size, source_root, scan_snapshot, store, core, completed
         )
     elif kind == "image":
-        groups = _legacy_image_groups(
+        groups = _image_pipeline_groups(
             items, group_size, source_root, scan_snapshot, store, completed
         )
     else:
-        groups = _legacy_mixed_groups(
+        groups = _mixed_pipeline_groups(
             mixed_groups, group_size, source_root, scan_snapshot, store, completed
         )
 

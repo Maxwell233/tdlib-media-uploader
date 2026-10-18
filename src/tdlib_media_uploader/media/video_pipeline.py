@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""TDLib 视频按月 Album 上传器。"""
+"""视频媒体管线：日期读取、按月分组、预检及 Album 内容构建。"""
 
 from __future__ import annotations
 
@@ -31,30 +31,22 @@ if not hasattr(imageio_ffmpeg, "get_ffmpeg_exe"):
 from ..core.album import CaptionStore, album_key, compose_caption, with_filename_description
 from ..core.identity import media_file_signature
 from ..core.upload_state import UploadState as SharedUploadState
-from ..core.filesystem_legacy import (
-    cancelable_sleep,
-    display_path,
-    file_mtime,
-    file_snapshot,
-    FileReadinessError,
-    is_network_path,
-    io_worker_count,
-    iter_files,
-    media_path_sort,
-    ordered_bounded_map,
-    relative_name as stable_relative_name,
-    run_cancellable_process,
-    readiness_category,
-    raise_for_file_readiness,
-    stable_path,
-    retry_fs_operation,
-    validate_scan_root,
-    wait_for_file_ready,
+from ..core.concurrency import cancelable_sleep, ordered_bounded_map
+from ..core.filesystem import display_path, file_mtime, file_snapshot, is_network_path, io_worker_count, iter_files, stable_path, retry_fs_operation, validate_scan_root
+from ..core.sorting import media_path_sort, relative_name as stable_relative_name
+from ..processes.runner import run_cancellable_process
+from ..core.readiness import raise_for_file_readiness, wait_for_file_ready
+from .common import (
+    cleanup_confirmed_staging as _cleanup_confirmed_staging,
+    format_size,
+    prune_staging_cache as _prune_staging_cache,
+    readiness_options as _shared_readiness_options,
+    readiness_record as _readiness_record,
 )
 from ..config import loader as cfg
 from ..telegram.tdlib_common import HeadlessUI, formatted_text
 from ..config.paths import APP_DATA_DIR, RESOURCE_DIR, VIDEO_STATE_DIR, THUMBNAIL_CACHE_DIR
-from ..upload.staging import cleanup_staging, remove_staged_file, should_stage, stage_file
+from ..upload.staging import should_stage, stage_file
 from .video_probe import (
     VideoMediaInfo,
     determine_supports_streaming,
@@ -163,15 +155,6 @@ if _FFMPEG_OVERRIDE:
 UI = HeadlessUI()
 
 
-def format_size(value: float) -> str:
-    value = float(value)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if value < 1024 or unit == "TiB":
-            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.2f} {unit}"
-        value /= 1024
-    return f"{value:.2f} TiB"
-
-
 def video_limit_text(limit: int) -> str:
     """Use product-facing GB labels for Telegram's protocol limits."""
 
@@ -215,29 +198,11 @@ def video_dates_enabled() -> bool:
 
 
 def cleanup_staging_cache(*, startup: bool = False) -> None:
-    """Prune stale local staging artifacts without affecting source state."""
-
-    if startup and not getattr(cfg, "STAGING_CLEANUP_ON_START", True):
-        return
-    # Keep pruning previously-created artifacts even after staging has been
-    # switched off. The mode controls new copies; it must not strand stale
-    # files left by an older configuration.
-    cleanup_staging(
-        cfg.STAGING_DIR,
-        staging_base_dir=getattr(cfg, "STAGING_BASE_DIR", cfg.STAGING_DIR),
-        max_age_seconds=float(getattr(cfg, "STAGING_CLEANUP_DAYS", 7)) * 86400,
-    )
+    _prune_staging_cache(cfg, startup=startup)
 
 
 def cleanup_confirmed_staging(paths) -> None:
-    """Delete staged copies only after the corresponding Album is confirmed."""
-
-    if not getattr(cfg, "STAGING_CLEANUP_AFTER_SUCCESS", True):
-        return
-    for path in paths or []:
-        staged = STAGED_UPLOAD_PATHS.pop(stable_path(path), None)
-        if staged is not None:
-            remove_staged_file(staged)
+    _cleanup_confirmed_staging(paths, config=cfg, staged_maps=(STAGED_UPLOAD_PATHS,))
 
 
 def force_ten_per_album() -> bool:
@@ -414,41 +379,11 @@ def _cancel_requested(cancel_event=None) -> bool:
 
 
 def _readiness_options(path=None) -> dict:
-    """Return the shared, bounded source-file readiness configuration."""
-
-    network = is_network_path(path or cfg.VIDEO_DIR)
-    legacy_interval = getattr(cfg, "SCAN_STABILITY_INTERVAL_SECONDS", None)
-    legacy_checks = getattr(cfg, "SCAN_STABILITY_CHECKS", None)
-    interval_default = 0.5 if network else 0.05
-    checks_default = 3 if network else 2
-    return {
-        "attempts": int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", READINESS_ATTEMPTS)),
-        "stable_interval": float(getattr(
-            cfg,
-            "SCAN_STABILITY_INTERVAL_NETWORK_SECONDS" if network else "SCAN_STABILITY_INTERVAL_LOCAL_SECONDS",
-            legacy_interval if legacy_interval is not None else interval_default,
-        )),
-        "stable_checks": int(getattr(
-            cfg,
-            "SCAN_STABILITY_CHECKS_NETWORK" if network else "SCAN_STABILITY_CHECKS_LOCAL",
-            legacy_checks if legacy_checks is not None else checks_default,
-        )),
-        "probe_bytes": int(getattr(cfg, "SCAN_READ_PROBE_BYTES", 64 * 1024)),
-    }
-
-
-def _readiness_record(exc: BaseException) -> dict | None:
-    """Return a structured skip record for a readiness failure."""
-
-    if not isinstance(exc, FileReadinessError):
-        return None
-    readiness = exc.readiness
-    return {
-        "readiness_status": readiness.status,
-        "readiness_code": readiness.code,
-        "readiness_attempts": readiness.attempts,
-        "category": readiness_category(readiness),
-    }
+    return _shared_readiness_options(
+        cfg,
+        network=is_network_path(path or cfg.VIDEO_DIR),
+        default_attempts=READINESS_ATTEMPTS,
+    )
 
 
 def _process_timeout(config_name: str, fallback: float) -> float:

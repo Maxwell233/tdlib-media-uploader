@@ -18,7 +18,8 @@ import tdjson
 
 from ..config import loader as cfg
 from ..core.logging import TDLIB_LOG_PATH, write_app_log, write_exception
-from ..core.filesystem_legacy import probe_readable, snapshot_file, stable_path
+from ..core.readiness import probe_readable
+from ..core.filesystem import snapshot_file, stable_path
 from ..config.paths import APP_DATA_DIR, TDLIB_DATABASE_DIR, TDLIB_FILES_DIR
 from ..core.upload_journal import (
     CONFIRMED,

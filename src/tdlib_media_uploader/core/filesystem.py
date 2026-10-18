@@ -20,6 +20,7 @@ from .concurrency import (
     is_cancelled,
 )
 from .models import FileSnapshot
+from ..processes.runner import run_cancellable_process
 from .sorting import (
     media_path_sort,
     natural_compare,
@@ -207,7 +208,7 @@ def _macos_filesystem_type(path: str) -> str | None:
             try:
                 # This diagnostic is bounded and does not depend on GUI or
                 # TDLib.  Keep it local so ordinary path checks stay cheap.
-                result = subprocess.run(
+                result = run_cancellable_process(
                     ["/sbin/mount"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -567,7 +568,7 @@ def _entry_suffix(name: str) -> str:
 
 def iter_files(
     root,
-    extensions: Iterable[str] | str,
+    extensions: Iterable[str] | str | None,
     cancel_event=None,
     *,
     cancel_token=None,
@@ -575,11 +576,15 @@ def iter_files(
     discovery_initial_delay: float = DISCOVERY_INITIAL_DELAY_SECONDS,
     discovery_max_delay: float = DISCOVERY_MAX_DELAY_SECONDS,
 ) -> DirectoryScanResult:
-    """Walk a tree without following links and capture one file snapshot."""
+    """Walk a tree without following links and capture one file snapshot.
+
+    ``extensions=None`` includes every non-empty regular file, preserving
+    the unfiltered discovery contract used by directory inspection tools.
+    """
 
     if isinstance(extensions, (str, bytes)):
         extensions = (extensions,)
-    accepted = {str(ext).casefold() for ext in extensions}
+    accepted = None if extensions is None else {str(ext).casefold() for ext in extensions}
     paths: list[Path] = []
     errors: list[str] = []
     warnings: list[str] = []
@@ -634,7 +639,7 @@ def iter_files(
                     if stat.S_ISDIR(info.st_mode):
                         stack.append(entry.path)
                         continue
-                    if _entry_suffix(entry.name).casefold() not in accepted:
+                    if accepted is not None and _entry_suffix(entry.name).casefold() not in accepted:
                         continue
                     snapshot = _snapshot_from_info(entry.path, info)
                     if snapshot is None:

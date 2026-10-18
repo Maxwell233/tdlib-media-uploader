@@ -158,7 +158,7 @@ class Phase6GuiIntegrationTest(unittest.TestCase):
                 IMAGE_STATE_DIR=root / "state",
                 UPLOAD_INFLIGHT_DIR=root / "journal",
             )
-            with patch.object(integration, "_load_legacy", return_value=legacy):
+            with patch.object(integration, "_load_pipeline", return_value=legacy):
                 bundle = integration.scan_v2(
                     "image",
                     source_root=root,
@@ -195,7 +195,7 @@ class Phase6GuiIntegrationTest(unittest.TestCase):
                 "completed_paths": [],
                 "album_count": 1,
             }
-            with patch.object(integration, "_load_legacy", return_value=legacy):
+            with patch.object(integration, "_load_pipeline", return_value=legacy):
                 result = integration.run_v2_upload(
                     "image",
                     ui=ui,

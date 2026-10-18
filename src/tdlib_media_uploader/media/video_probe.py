@@ -17,7 +17,8 @@ import subprocess
 from typing import Any
 
 from ..config.paths import APP_DATA_DIR, RESOURCE_DIR
-from ..core.filesystem_legacy import display_path, run_cancellable_process
+from ..core.filesystem import display_path
+from ..processes.runner import run_cancellable_process
 
 PROJECT_DIR = RESOURCE_DIR
 
@@ -470,7 +471,7 @@ def _fallback_probe_without_ffprobe(
     try:
         import imageio_ffmpeg
         reader = imageio_ffmpeg.read_frames(display_path(file_path))
-        from .legacy_video import _next_frame_metadata
+        from .video_pipeline import _next_frame_metadata
         metadata = (
             _next_frame_metadata(reader, timeout=timeout)
             if cancel_event is None
