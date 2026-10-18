@@ -378,6 +378,192 @@ def cancelled_scan_result(
     }
 
 
+def _legacy_video_groups(items, group_size, source_root, scan_snapshot, store, core, completed):
+    """Build date or fixed-count video Albums without changing scan state."""
+    groups = []
+    read_dates = bool(get_cfg("VIDEO_READ_DATES", True))
+    group_mode = str(get_cfg("VIDEO_GROUP_MODE", "date")).strip().lower()
+    force_fixed = (
+        not read_dates
+        or group_mode == "fixed"
+        or bool(get_cfg("VIDEO_FORCE_TEN_PER_ALBUM", False))
+    )
+    force_mode = getattr(core, "force_ten_per_album", None) if core is not None else None
+    if callable(force_mode):
+        try:
+            force_fixed = bool(force_mode())
+        except Exception:
+            pass
+    forced_group_key = getattr(core, "FORCED_GROUP_KEY", "__all_videos__")
+    if force_fixed:
+        for index, start in enumerate(range(0, len(items), group_size), start=1):
+            chunk = items[start : start + group_size]
+            key_group = f"{forced_group_key}:{index}"
+            key = album_key(
+                "video",
+                key_group,
+                chunk,
+                root=source_root,
+                snapshot_provider=scan_snapshot,
+            )
+            caption = store.get(key, f"第 {index} 组")
+            groups.append({
+                "album_key": key,
+                "number": index,
+                "title": f"第 {index} 组",
+                "subtitle": f"第 {index} 组（共 {len(chunk)} 个视频）",
+                "caption": caption,
+                "caption_warning": validate_caption(caption, 4096),
+                "items": chunk,
+                "completed": all(completed(item) for item in chunk),
+                "completed_count": sum(1 for item in chunk if completed(item)),
+            })
+    else:
+        by_month = defaultdict(list)
+        for item in items:
+            by_month[item["month_key"]].append(item)
+        for month_key, month_items in by_month.items():
+            month_title = f"{month_key}（共 {len(month_items)} 个视频）"
+            for index, start in enumerate(range(0, len(month_items), group_size), start=1):
+                chunk = month_items[start : start + group_size]
+                key = album_key(
+                    "video",
+                    month_key,
+                    chunk,
+                    root=source_root,
+                    snapshot_provider=scan_snapshot,
+                )
+                caption = store.get(key, f"{month_key} · 第 {index} 组")
+                groups.append({
+                    "album_key": key,
+                    "number": index,
+                    "title": f"{month_key} · 第 {index} 组",
+                    "subtitle": f"{month_title} · 第 {index} 组",
+                    "caption": caption,
+                    "caption_warning": validate_caption(caption, 4096),
+                    "items": chunk,
+                    "completed": all(completed(item) for item in chunk),
+                    "completed_count": sum(1 for item in chunk if completed(item)),
+                })
+    return groups
+
+
+def _legacy_image_groups(items, group_size, source_root, scan_snapshot, store, completed):
+    """Build image Albums with their configured starting number."""
+    groups = []
+    for index, start in enumerate(range(0, len(items), group_size), start=1):
+        chunk = items[start : start + group_size]
+        album_number = (
+            int(get_cfg("IMAGE_ALBUM_NUMBER_START", 1)) + index - 1
+        )
+        key = album_key(
+            "image",
+            f"Album {album_number}",
+            chunk,
+            root=source_root,
+            snapshot_provider=scan_snapshot,
+        )
+        caption = store.get(key, f"第 {index} 组")
+        groups.append({
+            "album_key": key,
+            "number": album_number,
+            "title": f"第 {index} 组",
+            "subtitle": f"第 {index} 组（共 {len(chunk)} 张图片）",
+            "caption": caption,
+            "caption_warning": validate_caption(caption, 4096),
+            "items": chunk,
+            "completed": all(completed(item) for item in chunk),
+            "completed_count": sum(1 for item in chunk if completed(item)),
+        })
+    return groups
+
+
+def _legacy_mixed_groups(mixed_groups, group_size, source_root, scan_snapshot, store, completed):
+    """Preserve folder order and split each mixed folder into Albums."""
+    groups = []
+    for group_dict in mixed_groups:
+        folder_name = group_dict["group_name"]
+        group_items = group_dict["items"]
+        total_items = len(group_items)
+        for index, start in enumerate(range(0, total_items, group_size), start=1):
+            chunk = group_items[start : start + group_size]
+            key = album_key(
+                "mixed",
+                f"{folder_name}:{index}",
+                chunk,
+                root=source_root,
+                snapshot_provider=scan_snapshot,
+            )
+            default_caption = folder_name if total_items <= group_size else f"{folder_name} ({index})"
+            caption = store.get(key, default_caption)
+            groups.append({
+                "album_key": key,
+                "number": index,
+                "title": f"{folder_name} · 第 {index} 组",
+                "subtitle": f"{folder_name}（共 {total_items} 个媒体）· 第 {index} 组",
+                "caption": caption,
+                "caption_warning": validate_caption(caption, 4096),
+                "items": chunk,
+                "completed": all(completed(item) for item in chunk),
+                "completed_count": sum(1 for item in chunk if completed(item)),
+            })
+    return groups
+
+
+def _normalize_legacy_groups(groups, kind, completed):
+    """Translate legacy Album groups into the shared preview contract."""
+    separator_key = {
+        "video": "VIDEO_ALBUM_CAPTION_SEPARATOR",
+        "image": "IMAGE_ALBUM_CAPTION_SEPARATOR",
+        "mixed": "MIXED_ALBUM_CAPTION_SEPARATOR",
+    }[kind]
+    normalized_groups = []
+    for group in groups:
+        group_items = list(group.get("items", []))
+        pending_items = [item for item in group_items if not completed(item)]
+        completed_count = len(group_items) - len(pending_items)
+        default_label = str(group.get("title") or group.get("subtitle") or "")
+        raw_caption = group.get("caption")
+        if isinstance(raw_caption, dict):
+            base_label = str(raw_caption.get("base_label", default_label) or default_label)
+            custom_text = str(raw_caption.get("custom_text", "") or "")
+        else:
+            base_label = str(raw_caption or default_label)
+            custom_text = ""
+        caption_text = compose_caption(
+            base_label,
+            custom_text,
+            str(get_cfg(separator_key, " · ")),
+        )
+        plan = {
+            "key": group.get("album_key", ""),
+            "number": group.get("number", len(normalized_groups) + 1),
+            "items": group_items,
+            "pending_items": pending_items,
+            "caption": {
+                "text": caption_text,
+                "base_label": base_label,
+                "custom_text": custom_text,
+            },
+        }
+        normalized = dict(group)
+        normalized.update(
+            {
+                "label": default_label,
+                "caption": caption_text,
+                "items": group_items,
+                "completed": completed_count,
+                "pending": len(pending_items),
+                "albums": 1 if pending_items else 0,
+                "album_plans": [plan],
+                "caption_warning": validate_caption(caption_text, 4096),
+                "completed_count": completed_count,
+            }
+        )
+        normalized_groups.append(normalized)
+    return normalized_groups
+
+
 def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
     """Scan using fallback routines when V2 bundle integration is unavailable."""
     kind = str(kind).strip().lower()
@@ -603,122 +789,17 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
         return state.is_completed(item)
 
     if kind == "video":
-        read_dates = bool(get_cfg("VIDEO_READ_DATES", True))
-        group_mode = str(get_cfg("VIDEO_GROUP_MODE", "date")).strip().lower()
-        force_fixed = (
-            not read_dates
-            or group_mode == "fixed"
-            or bool(get_cfg("VIDEO_FORCE_TEN_PER_ALBUM", False))
+        groups = _legacy_video_groups(
+            items, group_size, source_root, scan_snapshot, store, core, completed
         )
-        force_mode = getattr(core, "force_ten_per_album", None) if core is not None else None
-        if callable(force_mode):
-            try:
-                force_fixed = bool(force_mode())
-            except Exception:
-                pass
-        forced_group_key = getattr(core, "FORCED_GROUP_KEY", "__all_videos__")
-        if force_fixed:
-            for index, start in enumerate(range(0, len(items), group_size), start=1):
-                chunk = items[start : start + group_size]
-                key_group = f"{forced_group_key}:{index}"
-                key = album_key(
-                    "video",
-                    key_group,
-                    chunk,
-                    root=source_root,
-                    snapshot_provider=scan_snapshot,
-                )
-                caption = store.get(key, f"第 {index} 组")
-                groups.append({
-                    "album_key": key,
-                    "number": index,
-                    "title": f"第 {index} 组",
-                    "subtitle": f"第 {index} 组（共 {len(chunk)} 个视频）",
-                    "caption": caption,
-                    "caption_warning": validate_caption(caption, 4096),
-                    "items": chunk,
-                    "completed": all(completed(item) for item in chunk),
-                    "completed_count": sum(1 for item in chunk if completed(item)),
-                })
-        else:
-            by_month = defaultdict(list)
-            for item in items:
-                by_month[item["month_key"]].append(item)
-            for month_key, month_items in by_month.items():
-                month_title = f"{month_key}（共 {len(month_items)} 个视频）"
-                for index, start in enumerate(range(0, len(month_items), group_size), start=1):
-                    chunk = month_items[start : start + group_size]
-                    key = album_key(
-                        "video",
-                        month_key,
-                        chunk,
-                        root=source_root,
-                        snapshot_provider=scan_snapshot,
-                    )
-                    caption = store.get(key, f"{month_key} · 第 {index} 组")
-                    groups.append({
-                        "album_key": key,
-                        "number": index,
-                        "title": f"{month_key} · 第 {index} 组",
-                        "subtitle": f"{month_title} · 第 {index} 组",
-                        "caption": caption,
-                        "caption_warning": validate_caption(caption, 4096),
-                        "items": chunk,
-                        "completed": all(completed(item) for item in chunk),
-                        "completed_count": sum(1 for item in chunk if completed(item)),
-                    })
     elif kind == "image":
-        for index, start in enumerate(range(0, len(items), group_size), start=1):
-            chunk = items[start : start + group_size]
-            album_number = (
-                int(get_cfg("IMAGE_ALBUM_NUMBER_START", 1)) + index - 1
-            )
-            key = album_key(
-                "image",
-                f"Album {album_number}",
-                chunk,
-                root=source_root,
-                snapshot_provider=scan_snapshot,
-            )
-            caption = store.get(key, f"第 {index} 组")
-            groups.append({
-                "album_key": key,
-                "number": album_number,
-                "title": f"第 {index} 组",
-                "subtitle": f"第 {index} 组（共 {len(chunk)} 张图片）",
-                "caption": caption,
-                "caption_warning": validate_caption(caption, 4096),
-                "items": chunk,
-                "completed": all(completed(item) for item in chunk),
-                "completed_count": sum(1 for item in chunk if completed(item)),
-            })
+        groups = _legacy_image_groups(
+            items, group_size, source_root, scan_snapshot, store, completed
+        )
     else:
-        for group_dict in mixed_groups:
-            folder_name = group_dict["group_name"]
-            group_items = group_dict["items"]
-            total_items = len(group_items)
-            for index, start in enumerate(range(0, total_items, group_size), start=1):
-                chunk = group_items[start : start + group_size]
-                key = album_key(
-                    "mixed",
-                    f"{folder_name}:{index}",
-                    chunk,
-                    root=source_root,
-                    snapshot_provider=scan_snapshot,
-                )
-                default_caption = folder_name if total_items <= group_size else f"{folder_name} ({index})"
-                caption = store.get(key, default_caption)
-                groups.append({
-                    "album_key": key,
-                    "number": index,
-                    "title": f"{folder_name} · 第 {index} 组",
-                    "subtitle": f"{folder_name}（共 {total_items} 个媒体）· 第 {index} 组",
-                    "caption": caption,
-                    "caption_warning": validate_caption(caption, 4096),
-                    "items": chunk,
-                    "completed": all(completed(item) for item in chunk),
-                    "completed_count": sum(1 for item in chunk if completed(item)),
-                })
+        groups = _legacy_mixed_groups(
+            mixed_groups, group_size, source_root, scan_snapshot, store, completed
+        )
 
     all_items = []
     completed_paths = []
@@ -735,55 +816,7 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
             else:
                 pending_bytes += sz
 
-    separator_key = {
-        "video": "VIDEO_ALBUM_CAPTION_SEPARATOR",
-        "image": "IMAGE_ALBUM_CAPTION_SEPARATOR",
-        "mixed": "MIXED_ALBUM_CAPTION_SEPARATOR",
-    }[kind]
-    normalized_groups = []
-    for group in groups:
-        group_items = list(group.get("items", []))
-        pending_items = [item for item in group_items if not completed(item)]
-        completed_count = len(group_items) - len(pending_items)
-        default_label = str(group.get("title") or group.get("subtitle") or "")
-        raw_caption = group.get("caption")
-        if isinstance(raw_caption, dict):
-            base_label = str(raw_caption.get("base_label", default_label) or default_label)
-            custom_text = str(raw_caption.get("custom_text", "") or "")
-        else:
-            base_label = str(raw_caption or default_label)
-            custom_text = ""
-        caption_text = compose_caption(
-            base_label,
-            custom_text,
-            str(get_cfg(separator_key, " · ")),
-        )
-        plan = {
-            "key": group.get("album_key", ""),
-            "number": group.get("number", len(normalized_groups) + 1),
-            "items": group_items,
-            "pending_items": pending_items,
-            "caption": {
-                "text": caption_text,
-                "base_label": base_label,
-                "custom_text": custom_text,
-            },
-        }
-        normalized = dict(group)
-        normalized.update(
-            {
-                "label": default_label,
-                "caption": caption_text,
-                "items": group_items,
-                "completed": completed_count,
-                "pending": len(pending_items),
-                "albums": 1 if pending_items else 0,
-                "album_plans": [plan],
-                "caption_warning": validate_caption(caption_text, 4096),
-                "completed_count": completed_count,
-            }
-        )
-        normalized_groups.append(normalized)
+    normalized_groups = _normalize_legacy_groups(groups, kind, completed)
 
     return {
         "kind": kind,
