@@ -65,7 +65,6 @@ class StatCard(QFrame):
 
 
 from ..icons import get_svg_pixmap
-from ..theme import THEME
 
 
 class ActionCard(QFrame):

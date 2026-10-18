@@ -52,7 +52,7 @@ from ..core.filesystem_legacy import (
     validate_scan_root,
 )
 from PySide6.QtCore import QLibraryInfo, QTimer, Signal, Slot, Qt, QLockFile
-from PySide6.QtGui import QColor, QIcon, QPalette
+from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -90,20 +90,12 @@ from ..config.paths import (
     DATA_DIR, VIDEO_STATE_DIR, IMAGE_STATE_DIR, MIXED_STATE_DIR,
     CAPTIONS_DIR, UPLOAD_INFLIGHT_DIR, THUMBNAIL_CACHE_DIR,
     IMAGE_COMPRESSION_CACHE_DIR, STAGING_CACHE_DIR,
-    HISTORY_PATH as RUNTIME_HISTORY_PATH,
-    TDLIB_DATABASE_DIR as RUNTIME_TDLIB_DATABASE_DIR,
-    TDLIB_FILES_DIR as RUNTIME_TDLIB_FILES_DIR,
     read_version, ensure_data_dirs,
 )
 from ..core.instance_lock import InstanceLock
 from ..core.self_test import run_self_test
 from .events import AuthBridge, GuiConsoleUI
 from .models import (
-    caption_payload as _v2_caption_payload,
-    group_key as _v2_group_key,
-    item_dict as _v2_item_dict,
-    item_identity as _v2_item_identity,
-    plan_dict as _v2_plan_dict,
     scan_result as _translate_v2_scan_result,
 )
 from .pages import (

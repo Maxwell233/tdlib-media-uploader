@@ -189,6 +189,24 @@ class UploadConsistencyTest(unittest.TestCase):
         self.assertEqual(record['message_ids'], [100])
         self.assertEqual(record['pending_ids'], [100])
 
+    def test_duplicate_confirmation_ids_keep_guard_and_do_not_checkpoint(self):
+        Image.new('RGB', (12, 12), 'blue').save(self.source/'two.jpg')
+        preview = self.preview()
+        with patch.object(OfflineClient, 'wait_for_send_results', return_value={
+            'succeeded': [100, 100], 'failed': [], 'pending': [],
+        }):
+            result = self.run_upload(preview)
+        self.assertEqual(result.status, 'UNKNOWN')
+        journal = InflightJournal(self.runtime.UPLOAD_INFLIGHT_DIR)
+        self.assertEqual(journal.list_unresolved()[0]['status'], 'UNKNOWN')
+        state = UploadState(kind='image', source_root=self.source, target=TARGET,
+                            state_dir=self.runtime.IMAGE_STATE_DIR)
+        for item in preview['plans'][0].items:
+            self.assertFalse(state.is_completed(item))
+        OfflineClient.sent = []
+        self.assertEqual(self.run_upload(preview).status, 'UNKNOWN')
+        self.assertEqual(OfflineClient.sent, [])
+
     def test_authorization_wait_has_a_real_deadline(self):
         client = object.__new__(td.TDJsonClient)
         client.cancel_event = threading.Event()

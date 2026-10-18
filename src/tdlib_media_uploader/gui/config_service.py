@@ -90,16 +90,22 @@ def source_root_for(kind: str) -> Path:
 
 @functools.lru_cache(maxsize=128)
 def get_section_re(section: str):
-    return re.compile(rf"(?ms)^(\[{re.escape(section)}\]\s*$)(.*?)(?=^\[|\Z)")
+    # TOML permits indentation and a trailing comment on table headers.
+    # Both normal and array tables terminate the selected table's body.
+    return re.compile(
+        rf"(?ms)^([ \t]*\[{re.escape(section)}\][ \t]*(?:\#[^\r\n]*)?\r?$)"
+        rf"(.*?)(?=^[ \t]*\[|\Z)"
+    )
 
 
 @functools.lru_cache(maxsize=128)
 def get_key_re(key: str):
-    return re.compile(rf"(?m)^(\s*{re.escape(key)}\s*=\s*).*$")
+    return re.compile(rf"(?m)^([ \t]*{re.escape(key)}[ \t]*=[ \t]*)[^\r\n]*")
 
 
 def update_toml_value(text: str, section: str, key: str, value: Any) -> str:
     """Update or insert a key/value pair in TOML text preserving formatting and comments."""
+    newline = "\r\n" if "\r\n" in text else "\n"
     if isinstance(value, bool):
         literal = "true" if value else "false"
     elif isinstance(value, int):
@@ -112,8 +118,8 @@ def update_toml_value(text: str, section: str, key: str, value: Any) -> str:
     section_re = get_section_re(section)
     match = section_re.search(text)
     if not match:
-        suffix = "\n" if text and not text.endswith("\n") else ""
-        return f"{text}{suffix}\n[{section}]\n{key} = {literal}\n"
+        suffix = newline if text and not text.endswith("\n") else ""
+        return f"{text}{suffix}{newline}[{section}]{newline}{key} = {literal}{newline}"
 
     body = match.group(2)
     key_re = get_key_re(key)
@@ -121,9 +127,9 @@ def update_toml_value(text: str, section: str, key: str, value: Any) -> str:
     if key_match:
         body = body[: key_match.start()] + key_match.group(1) + literal + body[key_match.end() :]
     else:
-        if body and not body.endswith("\n"):
-            body += "\n"
-        body += f"{key} = {literal}\n"
+        if not body or not body.endswith("\n"):
+            body += newline
+        body += f"{key} = {literal}{newline}"
     return text[: match.start(2)] + body + text[match.end(2) :]
 
 
@@ -141,17 +147,18 @@ def write_config_values(
                 return "找不到 config.toml 和默认配置资源。"
             path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(TEMPLATE_CONFIG_PATH, path)
-        text = path.read_text(encoding="utf-8")
+        with path.open(encoding="utf-8", newline="") as stream:
+            previous = stream.read()
+        text = previous
         for (section, key), value in values.items():
             text = update_toml_value(text, section, key, value)
         tomllib.loads(text)
-        previous = path.read_text(encoding="utf-8")
         temp = path.with_suffix(".toml.tmp")
-        temp.write_text(text, encoding="utf-8")
+        temp.write_text(text, encoding="utf-8", newline="")
         os.replace(temp, path)
         error = reloader_fn()
         if error:
-            temp.write_text(previous, encoding="utf-8")
+            temp.write_text(previous, encoding="utf-8", newline="")
             os.replace(temp, path)
             reloader_fn()
         return error

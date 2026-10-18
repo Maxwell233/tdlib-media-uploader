@@ -19,7 +19,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tdlib_media_uploader.core import concurrency, filesystem, readiness, sorting  # noqa: E402
+from tdlib_media_uploader.core import concurrency, filesystem, filesystem_legacy, readiness, sorting  # noqa: E402
 from tdlib_media_uploader.core.models import FileSnapshot  # noqa: E402
 from tdlib_media_uploader.processes.runner import (  # noqa: E402
     ProcessCancelled,
@@ -78,11 +78,13 @@ class SortingExtractionTest(unittest.TestCase):
             root / "A" / "x.100.jpg",
             root / "B10" / "x.2.jpg",
         ]
-        ordered = sorting.media_path_sort(paths, root)
-        self.assertEqual(
-            [sorting.relative_name(path, root) for path in ordered],
-            ["A/x.1.jpg", "A/x.100.jpg", "B2/x.41.jpg", "B2/x.410.jpg", "B10/x.2.jpg"],
-        )
+        for helpers in (sorting, filesystem_legacy):
+            with self.subTest(entry=helpers.__name__):
+                ordered = helpers.media_path_sort(paths, root)
+                self.assertEqual(
+                    [helpers.relative_name(path, root) for path in ordered],
+                    ["A/x.1.jpg", "A/x.100.jpg", "B2/x.41.jpg", "B2/x.410.jpg", "B10/x.2.jpg"],
+                )
 
     def test_sort_key_is_evaluated_once_per_value(self):
         calls = []

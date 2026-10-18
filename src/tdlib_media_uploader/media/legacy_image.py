@@ -3,17 +3,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
-import shutil
-import subprocess
 from collections import OrderedDict
 import threading
-import time
-from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image
@@ -39,8 +32,8 @@ from ..core.filesystem_legacy import (
     wait_for_file_ready,
 )
 from ..config import loader as cfg
-from ..telegram.tdlib_common import HeadlessUI, TDJsonClient, formatted_text, verify_tdjson_version
-from ..config.paths import APP_DATA_DIR, RESOURCE_DIR, IMAGE_STATE_DIR, IMAGE_COMPRESSION_CACHE_DIR
+from ..telegram.tdlib_common import HeadlessUI, formatted_text
+from ..config.paths import IMAGE_STATE_DIR, IMAGE_COMPRESSION_CACHE_DIR
 from ..upload.staging import cleanup_staging, remove_staged_file, should_stage, stage_file
 from .image_probe import (
     PHOTO_TARGET_MAX_SIDE,
@@ -56,7 +49,6 @@ from .image_prepare import (
     prepare_image_for_telegram,
 )
 
-PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = IMAGE_STATE_DIR
 LAST_SCAN_ERRORS: list[str] = []
 LAST_SCAN_WARNINGS: list[str] = []
@@ -66,9 +58,6 @@ IMAGE_UPLOAD_PATHS: dict[str, Path] = {}
 STAGED_UPLOAD_PATHS: dict[str, Path] = {}
 IMAGE_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
 COMPRESSED_IMAGE_DIR = IMAGE_COMPRESSION_CACHE_DIR
-FFMPEG_COMPRESS_TIMEOUT_SECONDS = float(
-    getattr(cfg, "FFMPEG_COMPRESSION_TIMEOUT_SECONDS", 45)
-)
 READINESS_ATTEMPTS = int(getattr(cfg, "SCAN_READINESS_ATTEMPTS", 3))
 
 UI = HeadlessUI()
@@ -109,13 +98,6 @@ def _readiness_record(exc: BaseException) -> dict | None:
         "readiness_attempts": readiness.attempts,
         "category": readiness_category(readiness),
     }
-
-
-def _process_timeout(config_name: str, fallback: float) -> float:
-    try:
-        return max(1.0, float(getattr(cfg, config_name, fallback)))
-    except (TypeError, ValueError):
-        return float(fallback)
 
 
 def format_size(value: float) -> str:
@@ -239,44 +221,6 @@ def scan_images(cancel_event=None) -> list[Path]:
 _IMAGE_INFO_CACHE = OrderedDict()
 _IMAGE_INFO_CACHE_LIMIT = 512
 _IMAGE_INFO_CACHE_LOCK = threading.Lock()
-
-
-def _hidden_subprocess_kwargs() -> dict:
-    """Keep FFmpeg from opening a console window in the Windows GUI build."""
-
-    if os.name != "nt":
-        return {}
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = 0
-    return {
-        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        "startupinfo": startupinfo,
-    }
-
-
-def _find_ffmpeg() -> str | None:
-    configured = os.environ.get("IMAGEIO_FFMPEG_EXE", "").strip()
-    if configured and Path(configured).is_file():
-        return str(Path(configured).resolve())
-    name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
-    for candidate in (
-        PROJECT_DIR / "tools" / "ffmpeg" / name,
-        PROJECT_DIR / "tools" / name,
-        APP_DATA_DIR / "tools" / "ffmpeg" / name,
-        APP_DATA_DIR / "tools" / name,
-    ):
-        if candidate.is_file():
-            return str(candidate.resolve())
-    return shutil.which("ffmpeg")
-
-
-def _compressed_path(path: Path) -> Path:
-    stat = path.stat()
-    digest = hashlib.sha1(
-        f"{stable_path(path)}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
-    ).hexdigest()
-    return COMPRESSED_IMAGE_DIR / f"{digest}.jpg"
 
 
 def compress_image(path: Path, cancel_event=None, *, source_info=None) -> Path:
@@ -433,56 +377,6 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
     return skipped
 
 
-def report_skipped_images(skipped, ui=None, *, final=False) -> None:
-    if not skipped:
-        return
-    target = ui or UI
-    prefix = "本次任务结束" if final else "图片预检完成"
-    size_count = sum(record.get("category") == "size" for record in skipped)
-    deferred_count = sum(record.get("category") == "deferred" for record in skipped)
-    cancelled_count = sum(record.get("category") == "cancelled" for record in skipped)
-    unreadable_count = len(skipped) - size_count - deferred_count - cancelled_count
-    parts = []
-    if unreadable_count:
-        parts.append(f"{unreadable_count} 个无法读取的图片")
-    if size_count:
-        parts.append(f"{size_count} 个超过 10 MiB 上限的图片")
-    if deferred_count:
-        parts.append(f"{deferred_count} 个暂时不可读的图片（DEFERRED）")
-    if cancelled_count:
-        parts.append(f"{cancelled_count} 个因取消而未检查的图片")
-    target.warning(
-        f"{prefix}：已跳过{'、'.join(parts) or f'{len(skipped)} 个图片'}；"
-        "这些文件未写入上传断点，修复后可重新扫描上传。"
-    )
-
-
-def report_scan_size_skips(skipped, ui=None) -> None:
-    """Report image size decisions made while scanning the directory."""
-
-    if not skipped:
-        return
-    target = ui or UI
-    compressing = [record for record in skipped if record.get("action") in {"compress", "normalize"}]
-    rejected = [record for record in skipped if record.get("action") == "skip"]
-    if compressing:
-        target.warning(
-            f"扫描提醒：发现 {len(compressing)} 个需规范化图片；"
-            "上传时将自动规范化生成临时副本（原文件不修改）。"
-        )
-    if rejected:
-        target.warning(
-            f"扫描时跳过 {len(rejected)} 个超过 Telegram Photo 10 MiB 上限的图片；"
-            "这些文件未加入上传计划。"
-        )
-    for record in skipped:
-        target.log(
-            f"扫描图片大小检查：{record['path']}\n"
-            f"处理：{'上传时规范化' if record.get('action') in {'compress', 'normalize'} else '跳过'}\n"
-            f"原因：{record['reason']}"
-        )
-
-
 def input_photo(
     path: Path,
     caption: str = "",
@@ -612,206 +506,6 @@ class UploadState(SharedUploadState):
         )
 
 
-class ImageUploadProgress:
-    def __init__(self, all_paths: list[Path], completed_paths: list[Path]):
-        self.sizes = {
-            path: int((_snapshot_for_path(path) or (0, 0))[0])
-            for path in all_paths
-        }
-        self.total_bytes = sum(self.sizes.values())
-        self.total_files = len(all_paths)
-        self.completed_bytes = sum(self.sizes[path] for path in completed_paths)
-        self.completed_files = len(completed_paths)
-        self.current_paths = {}
-        self.current_uploaded = {}
-        self.file_id_to_path = {}
-        self.album_number = 0
-        self.album_total = 0
-        self.samples = deque()
-        self.last_draw = 0.0
-        self.lock = threading.Lock()
-
-    def begin_album(self, paths: list[Path], number: int, total: int):
-        with self.lock:
-            self.album_number = number
-            self.album_total = total
-            self.current_paths = {stable_path(p): p for p in paths}
-            self.current_uploaded = {p: 0 for p in paths}
-            self.file_id_to_path = {}
-            self.samples.clear()
-            self.last_draw = 0.0
-
-    def skip_items(self, paths: list[Path]):
-        """Remove files that failed local preparation from progress totals."""
-
-        with self.lock:
-            for path in paths:
-                size = self.sizes.pop(path, 0)
-                self.total_bytes = max(0, self.total_bytes - size)
-                self.total_files = max(0, self.total_files - 1)
-                self.current_uploaded.pop(path, None)
-        self.draw(force=True)
-
-    @staticmethod
-    def _photo_file(message):
-        content = message.get("content", {})
-        if content.get("@type") != "messagePhoto":
-            return None
-        sizes = content.get("photo", {}).get("sizes", [])
-        if not sizes:
-            return None
-        largest = max(sizes, key=lambda s: int(s.get("width", 0)) * int(s.get("height", 0)))
-        return largest.get("photo")
-
-    def register_messages(self, messages, paths):
-        with self.lock:
-            for message, path in zip(messages, paths):
-                file_obj = self._photo_file(message)
-                if not file_obj:
-                    continue
-                if file_obj.get("id") is not None:
-                    self.file_id_to_path[file_obj["id"]] = path
-                self._apply_unlocked(file_obj)
-
-    def _apply_unlocked(self, file_obj):
-        path = None
-        local_path = file_obj.get("local", {}).get("path", "")
-        if local_path:
-            path = self.current_paths.get(stable_path(local_path))
-        if path is None:
-            path = self.file_id_to_path.get(file_obj.get("id"))
-        if path is None:
-            return
-        remote = file_obj.get("remote", {})
-        uploaded = self.sizes[path] if remote.get("is_uploading_completed") else int(remote.get("uploaded_size", 0) or 0)
-        self.current_uploaded[path] = max(self.current_uploaded.get(path, 0), min(uploaded, self.sizes[path]))
-
-    def handle_update(self, obj):
-        if obj.get("@type") != "updateFile" or not obj.get("file"):
-            return
-        with self.lock:
-            self._apply_unlocked(obj["file"])
-        self.draw()
-
-    def _speed_unlocked(self):
-        now = time.monotonic()
-        uploaded = sum(self.current_uploaded.values())
-        self.samples.append((now, uploaded))
-        while len(self.samples) > 2 and now - self.samples[0][0] > 3:
-            self.samples.popleft()
-        if len(self.samples) < 2:
-            return 0.0
-        old_time, old_bytes = self.samples[0]
-        duration = now - old_time
-        return max(0.0, (uploaded - old_bytes) / duration) if duration > 0 else 0.0
-
-    def draw(self, force=False):
-        with self.lock:
-            now = time.monotonic()
-            if not force and now - self.last_draw < 0.15:
-                return
-            self.last_draw = now
-            current = sum(self.current_uploaded.values())
-            done = self.completed_bytes + current
-            ratio = min(done / self.total_bytes, 1.0) if self.total_bytes else 0.0
-            speed = self._speed_unlocked()
-            eta = (self.total_bytes - done) / speed if speed > 0 else None
-            kwargs = dict(
-                kind="IMAGE",
-                ratio=ratio,
-                speed=speed,
-                eta=eta,
-                detail="每组最多 10 张；Album Caption=编号/自定义文本",
-                album_number=self.album_number,
-                album_total=self.album_total,
-                done_files=self.completed_files,
-                total_files=self.total_files,
-                done_bytes=done,
-                total_bytes=self.total_bytes,
-            )
-        UI.progress(**kwargs)
-
-    def finish_album(self, paths):
-        with self.lock:
-            self.completed_bytes += sum(self.sizes[path] for path in paths)
-            self.completed_files += len(paths)
-            self.current_paths = {}
-            self.current_uploaded = {}
-            self.file_id_to_path = {}
-        self.draw(force=True)
-        UI.finish()
-
-
-def show_file_list(images, state):
-    rows = []
-    for index, path in enumerate(images, 1):
-        snapshot = _snapshot_for_path(path)
-        if snapshot is None:
-            continue
-        size, mtime_ns = snapshot
-        rows.append((
-            index,
-            "✓ 已完成" if state.is_completed(path) else "• 待上传",
-            datetime.fromtimestamp(mtime_ns / 1_000_000_000).strftime("%Y-%m-%d %H:%M:%S"),
-            format_size(size),
-            relative_name(path),
-        ))
-
-    UI.files(
-        f"图片文件 · 共 {len(images)} 张",
-        [
-            ("#", {"justify": "right", "width": 5}),
-            ("状态", {"no_wrap": True, "width": 10}),
-            ("修改时间", {"no_wrap": True, "width": 19}),
-            ("大小", {"justify": "right", "no_wrap": True, "width": 11}),
-            ("文件", {"overflow": "fold"}),
-        ],
-        rows,
-        kind="IMAGE",
-        caption="图片按扫描顺序每组编号；可在 GUI 中编辑每个 Album 的 Caption。",
-    )
-
-
-def show_upload_summary(images, state, completed, pending, total_albums, skipped_items):
-    total_bytes = sum(int((_snapshot_for_path(path) or (0, 0))[0]) for path in images)
-    pending_bytes = sum(int((_snapshot_for_path(path) or (0, 0))[0]) for path in pending)
-
-    UI.summary(
-        f"上传前确认 · TDLib Media Uploader V{cfg.APP_VERSION}",
-        [
-            ("上传引擎", "TDLib 原生 C++ / tdjson"),
-            ("图片目录", cfg.IMAGE_DIR),
-            ("扫描图片", len(images)),
-            ("跳过坏图片", len(skipped_items)),
-            ("排序方式", cfg.IMAGE_SORT_MODE),
-            ("全部大小", format_size(total_bytes)),
-            ("断点已完成", f"{len(completed)}/{len(images)}"),
-            ("本次待上传", f"{len(pending)} · {format_size(pending_bytes)}"),
-            ("本次 Album", total_albums),
-            (
-                "Album 规则",
-                f"每组最多 {cfg.IMAGE_ALBUM_SIZE} 张；"
-                f"Album Caption=编号，可追加自定义文本；"
-                f"文件名清单={'开' if getattr(cfg, 'IMAGE_CAPTION_INCLUDE_FILENAMES', False) else '关'}",
-            ),
-            ("CHAT_ID", cfg.CHAT_ID),
-            ("目标模式", "Channel 频道" if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel" else "超级群组 Forum Topic"),
-            ("FORUM_TOPIC_ID", cfg.FORUM_TOPIC_ID if getattr(cfg, "TARGET_MODE", "forum_topic") == "forum_topic" else "不适用"),
-            ("状态文件", state.path),
-        ],
-        kind="IMAGE",
-    )
-
-def validate_config():
-    if cfg.API_ID == 12345678 or not str(cfg.API_HASH).strip() or cfg.API_HASH == "YOUR_API_HASH":
-        raise RuntimeError("请先在 config.toml 中填写 API_ID / API_HASH。")
-    if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel":
-        if cfg.CHAT_ID in {0, -1001234567890}:
-            raise RuntimeError("请先在 config.toml 中填写频道 Chat ID。")
-    elif cfg.CHAT_ID in {0, -1001234567890} or cfg.FORUM_TOPIC_ID <= 0 or cfg.FORUM_TOPIC_ID == 12345:
-        raise RuntimeError("请先在 config.toml 中填写 CHAT_ID / FORUM_TOPIC_ID。")
-
-
 def build_album_plans(images: list[Path], state=None) -> list[dict]:
     """Build stable image Albums from the complete scan, not pending-only files."""
     store = CaptionStore("image")
@@ -860,201 +554,3 @@ def build_album_plans(images: list[Path], state=None) -> list[dict]:
             "caption": caption,
         })
     return plans
-
-
-def _main_impl():
-    activate = getattr(cfg, "activate_target", None)
-    if callable(activate):
-        activate("image")
-    validate_config()
-    version = verify_tdjson_version()
-
-    UI.banner(
-        f"TDLib Media Uploader V{cfg.APP_VERSION}",
-        f"图片模式 · tdjson {version}",
-        accent="magenta",
-    )
-
-    cancel_event = getattr(UI, "cancel_event", None)
-    cleanup_staging_cache(startup=True)
-    UI.info(f"扫描图片目录：{cfg.IMAGE_DIR}")
-    images = (
-        scan_images()
-        if cancel_event is None
-        else scan_images(cancel_event=cancel_event)
-    )
-    report_scan_size_skips(LAST_SCAN_SIZE_SKIPS, UI)
-    if LAST_SCAN_WARNINGS:
-        UI.warning("图片目录扫描提醒：" + "；".join(LAST_SCAN_WARNINGS[:5]))
-        UI.log("图片目录扫描提醒详情：\n" + "\n".join(LAST_SCAN_WARNINGS))
-    if not images:
-        UI.warning("没有找到支持的图片。")
-        return
-
-    state = UploadState()
-    completed = [p for p in images if state.is_completed(p)]
-    pending = [p for p in images if not state.is_completed(p)]
-    skipped_items = [
-        record for record in LAST_SCAN_SIZE_SKIPS
-        if record.get("action") == "skip"
-    ]
-    # Album membership is derived from the complete scan.  Preflight only
-    # marks files that cannot be sent in this run; it must never remove them
-    # and let later files move into an earlier Album.
-    plans = build_album_plans(images, state)
-    preflight_skipped_paths = set()
-    if pending:
-        UI.info(f"检查 {len(pending)} 个待上传图片的媒体数据…")
-        preflight_skipped = (
-            preflight_images(pending, UI)
-            if cancel_event is None
-            else preflight_images(pending, UI, cancel_event=cancel_event)
-        )
-        skipped_items.extend(preflight_skipped)
-        preflight_skipped_paths = {
-            stable_path(record["path"])
-            for record in preflight_skipped
-        }
-        if preflight_skipped_paths:
-            report_skipped_images(skipped_items, UI)
-    pending_plans = [plan for plan in plans if plan["pending_items"]]
-    total_albums = len(pending_plans)
-
-    # GUI 调用的扫描与上传流程：保留原有 Album 与断点逻辑。
-    if cfg.IMAGE_SHOW_FILE_LIST:
-        show_file_list(images, state)
-
-    show_upload_summary(images, state, completed, pending, total_albums, skipped_items)
-
-    sendable_pending = [
-        path for path in pending
-        if stable_path(path) not in preflight_skipped_paths
-    ]
-    if not pending or not sendable_pending:
-        if skipped_items:
-            report_skipped_images(skipped_items, UI, final=True)
-        else:
-            UI.success("所有图片都已上传完成。")
-        cleanup_compressed_images()
-        return
-
-    if not UI.confirm_upload():
-        cleanup_compressed_images()
-        UI.cancelled()
-        return
-
-    client = TDJsonClient(UI, "TDLib Image Album Uploader")
-    progress = ImageUploadProgress(images, completed)
-    if preflight_skipped_paths:
-        progress.skip_items([
-            path for path in pending
-            if stable_path(path) in preflight_skipped_paths
-        ])
-    client.add_update_callback(progress.handle_update)
-
-    try:
-        client.login()
-        client.refresh_account_limits()
-        caption_limit = int(getattr(client, "caption_length_limit", None) or 1024)
-        client.set_fast_options()
-        client.validate_target()
-
-        album_global = 0
-        for plan in pending_plans:
-            album_paths = [
-                path for path in plan["pending_items"]
-                if stable_path(path) not in preflight_skipped_paths
-            ]
-            if not album_paths:
-                continue
-            album_number = plan["number"]
-            caption = plan["caption"]["text"]
-            caption = with_filename_description(
-                caption,
-                album_paths,
-                getattr(cfg, "IMAGE_CAPTION_INCLUDE_FILENAMES", False),
-                max_chars=caption_limit,
-            )
-            if cancel_event is None:
-                contents, ready_paths, runtime_skipped = build_image_contents(
-                    album_paths,
-                    caption,
-                    UI,
-                )
-            else:
-                contents, ready_paths, runtime_skipped = build_image_contents(
-                    album_paths,
-                    caption,
-                    UI,
-                    cancel_event,
-                )
-            if runtime_skipped:
-                skipped_items.extend(runtime_skipped)
-                progress.skip_items([record["path"] for record in runtime_skipped])
-            if not ready_paths:
-                UI.warning("当前图片 Album 没有可读取的图片，已跳过。")
-                continue
-            if ready_paths != album_paths and getattr(cfg, "IMAGE_CAPTION_INCLUDE_FILENAMES", False):
-                # ``build_image_contents`` has already validated and created
-                # the inputs.  Reusing them avoids a second image decode when
-                # a later file is deferred during JIT revalidation.
-                caption = with_filename_description(
-                    plan["caption"]["text"],
-                    ready_paths,
-                    True,
-                    max_chars=caption_limit,
-                )
-                if contents:
-                    contents[0]["caption"] = formatted_text(caption)
-            album_global += 1
-            progress.begin_album(ready_paths, album_global, total_albums)
-            UI.album(
-                kind="IMAGE",
-                title=f"Album {album_number} · {album_global}/{total_albums}",
-                subtitle=f"{len(ready_paths)} 张待上传图片 · Caption={caption or '无'}",
-                rows=[
-                    f"{format_size((_snapshot_for_path(path) or (0, 0))[0]):>10}  {relative_name(path)}"
-                    for path in ready_paths
-                ],
-            )
-            try:
-                # Keep the scanner-owned snapshot in the in-flight journal;
-                # ``ready_paths`` is intentionally kept as Paths for the
-                # progress adapter, while journal identity must not depend
-                # on another network stat at send time.
-                journal_items = []
-                for path in ready_paths:
-                    journal_item = {"path": path}
-                    snapshot = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
-                    if snapshot is not None:
-                        journal_item["scan_size"], journal_item["scan_mtime_ns"] = snapshot
-                    journal_items.append(journal_item)
-                message_ids = client.send_contents(
-                    contents,
-                    progress,
-                    ready_paths,
-                    album_key=plan["key"],
-                    kind="image",
-                    journal_items=journal_items,
-                )
-            except Exception:
-                UI.finish()
-                UI.error("当前图片 Album 未写入断点；下次会重新处理这一组。")
-                raise
-            state.mark_album_completed(ready_paths, message_ids)
-            client.finalize_inflight(plan["key"], kind="image", message_ids=message_ids)
-            cleanup_confirmed_staging(ready_paths)
-            progress.finish_album(ready_paths)
-            UI.success(f"图片 Album {album_number} 发送成功 · Caption={caption or '无'} · 断点已保存。")
-
-        UI.banner(
-            "全部图片上传完成",
-            f"共完成 {total_albums} 个 Album · 断点已保存",
-            accent="green",
-        )
-        report_skipped_images(skipped_items, UI, final=True)
-    finally:
-        client.remove_update_callback(progress.handle_update)
-        client.close()
-        cleanup_staging_cache()
-        cleanup_compressed_images()

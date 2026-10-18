@@ -1,60 +1,45 @@
-import time
+"""Measure path-only mixed outcomes; run from any directory, without TDLib I/O."""
+
+import argparse
 from pathlib import Path
-from dataclasses import dataclass
-from typing import Sequence
-
 import sys
-sys.path.insert(0, str(Path("src").resolve()))
+from time import perf_counter
+from types import SimpleNamespace
 
-import types
-mock_tdjson = types.ModuleType("tdjson")
-sys.modules["tdjson"] = mock_tdjson
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from tdlib_media_uploader.core.models import AlbumPlan, FileSnapshot, MediaItem
 from tdlib_media_uploader.media.mixed import MixedMediaStrategy
-from tdlib_media_uploader.core.models import MediaItem, AlbumPlan, FileSnapshot
 
-class MockPlan:
-    def __init__(self, items):
-        self.pending_items = items
-        self.source_root = Path("/")
-        self.type = "document"
-        self.caption = ""
 
-def run_benchmark():
-    num_items = 5000
-    pending = []
-
-    for i in range(num_items):
-        item = MediaItem(
-            path=Path(f"/tmp/file_{i}.txt"),
-            source_root=Path("/"),
-            media_kind="document",
-            snapshot=FileSnapshot(path=f"/tmp/file_{i}.txt", size=1024, mtime_ns=0)
+def run_benchmark(num_items: int) -> float:
+    if num_items < 1:
+        raise ValueError("items must be positive")
+    root = Path("/benchmark")
+    pending = tuple(
+        MediaItem(
+            path=root / f"file_{index}.jpg",
+            source_root=root,
+            media_kind="image",
+            snapshot=FileSnapshot(str(root / f"file_{index}.jpg"), 1024, index),
         )
-        pending.append(item)
+        for index in range(num_items)
+    )
+    plan = AlbumPlan("benchmark", "mixed", root, "benchmark", 1, pending, pending, "")
+    skipped = [{"path": str(item.path), "category": "unreadable"} for item in pending]
+    strategy = MixedMediaStrategy(legacy=SimpleNamespace())
 
-    plan = MockPlan(pending)
+    started = perf_counter()
+    result = strategy._normalize_contents(([], [], skipped), plan, context=None)
+    elapsed = perf_counter() - started
+    if result.failed_items != pending or result.ready_items or result.deferred_items or result.contents:
+        raise AssertionError("benchmark did not resolve every path to the expected outcome")
+    return elapsed
 
-    # Generate large number of skipped records, each missing 'item' to trigger the path lookup branch
-    raw_skipped = [{"path": str(item.path)} for item in pending]
-
-    strategy = MixedMediaStrategy(legacy=types.ModuleType("mock"))
-
-    start_time = time.time()
-    try:
-        strategy._normalize_contents(
-            ([], [], raw_skipped),
-            plan,
-            context=None
-        )
-    except Exception as e:
-        # Catch expected exception since our mock results are not full valid records,
-        # but only after _resolve_outcome_item has done its work.
-        pass
-
-    end_time = time.time()
-    return end_time - start_time
 
 if __name__ == "__main__":
-    duration = run_benchmark()
-    print(f"Baseline Time taken: {duration:.4f} seconds")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--items", type=int, nargs="+", default=[5000, 10000])
+    args = parser.parse_args()
+    for count in args.items:
+        print(f"{count} items: {run_benchmark(count):.4f} seconds")

@@ -11,7 +11,6 @@ from __future__ import annotations
 import ntpath
 import os
 import re
-from functools import cmp_to_key
 from typing import Callable, TypeVar
 
 

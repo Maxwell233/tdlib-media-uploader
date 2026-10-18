@@ -405,12 +405,6 @@ class UploadPage(QWidget):
         if path != saved:
             self.path_selected.emit(self.kind, path)
 
-    def _scan_button_clicked(self):
-        if self._scanning:
-            self.scan_cancel_requested.emit(self.kind)
-        else:
-            self.scan_requested.emit(self.kind)
-
     def set_scanning(self, active: bool):
         self._scanning = active
         self.scan_button.setText("停止扫描" if active else "扫描目录")

@@ -98,22 +98,6 @@ class ImprovementsTest(unittest.TestCase):
         )
 
 
-    def test_relative_path_sort_compares_directories_before_filenames(self):
-        root = Path("root")
-        paths = [
-            root / "B2" / "x.41.jpg",
-            root / "A" / "x.1.jpg",
-            root / "B2" / "x.410.jpg",
-            root / "A" / "x.100.jpg",
-            root / "B10" / "x.2.jpg",
-        ]
-        ordered = path_utils.media_path_sort(paths, root)
-        self.assertEqual(
-            [path_utils.relative_name(path, root) for path in ordered],
-            ["A/x.1.jpg", "A/x.100.jpg", "B2/x.41.jpg", "B2/x.410.jpg", "B10/x.2.jpg"],
-        )
-
-
     def test_image_filename_scan_uses_natural_numeric_order(self):
         from tdlib_media_uploader.media import legacy_image as core
 

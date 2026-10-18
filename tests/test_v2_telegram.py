@@ -255,6 +255,19 @@ class TelegramAuthTest(unittest.TestCase):
 
 
 class TelegramSendResultTest(unittest.TestCase):
+    def test_duplicate_confirmed_ids_never_confirm_two_album_items(self):
+        cases = (
+            ([{"id": 11}, {"id": 11}], []),
+            ([{"id": 11}, {"id": -2, "sending_state": {
+                "@type": "messageSendingStatePending",
+            }}], [{"@type": "updateMessageSendSucceeded", "old_message_id": -2,
+                   "message": {"id": 11}}]),
+        )
+        for messages, updates in cases:
+            with self.subTest(messages=messages, updates=updates):
+                result = map_send_result(messages, updates, expected_count=2)
+                self.assertEqual(result.status, "UNKNOWN")
+
     def test_confirmed_failed_and_unknown_semantics(self):
         confirmed = map_send_result([{"id": 1}, {"id": 2}])
         self.assertIsInstance(confirmed, SendResult)
