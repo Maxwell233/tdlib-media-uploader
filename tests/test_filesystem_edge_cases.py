@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import patch
+import os
 from tdlib_media_uploader.core.filesystem_legacy import (
     is_link_or_junction,
     relative_name,
@@ -23,11 +24,11 @@ class TestFilesystemEdgeCases(unittest.TestCase):
         with (
             patch(
                 "tdlib_media_uploader.core.filesystem_legacy.ntpath.relpath",
-                return_value="../outside",
+                return_value=os.pardir + os.sep + "outside",
             ),
             patch(
                 "tdlib_media_uploader.core.filesystem_legacy.os.path.relpath",
-                return_value="../outside",
+                return_value=os.pardir + os.sep + "outside",
             ),
         ):
             self.assertEqual(relative_name("/outside/path", "/root"), "path")
