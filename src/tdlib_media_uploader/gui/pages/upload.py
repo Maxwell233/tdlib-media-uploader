@@ -12,21 +12,15 @@ from typing import Any
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QCheckBox,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
-    QFormLayout,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QMenu,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -151,7 +145,9 @@ class UploadPage(QWidget):
     edit_target_requested = Signal(str)
     edit_parameters_requested = Signal(str)
 
-    def __init__(self, kind: str, *, services: UploadPageServices | None = None, parent=None):
+    def __init__(
+        self, kind: str, *, services: UploadPageServices | None = None, parent=None
+    ):
         super().__init__(parent)
         self.services = services or UploadPageServices()
         self.kind = self.services.require_kind(kind)
@@ -176,7 +172,9 @@ class UploadPage(QWidget):
             "image": "按自然顺序或修改时间分批分组；支持超限自动高质量压缩，确保原生画质发送。",
             "mixed": "以一级子文件夹为分组单元，同组内照片与视频严格保序混合发送为 Album。",
         }
-        subtitle = QLabel(desc_map.get(self.kind, "配置媒体来源与目标，一键执行扫描与分批上传。"))
+        subtitle = QLabel(
+            desc_map.get(self.kind, "配置媒体来源与目标，一键执行扫描与分批上传。")
+        )
         subtitle.setObjectName("mutedLabel")
         header_layout.addWidget(subtitle)
         layout.addLayout(header_layout)
@@ -195,7 +193,9 @@ class UploadPage(QWidget):
         source_lbl.setObjectName("mutedLabel")
         source_lbl.setFixedWidth(96)
         self.source_edit = QLineEdit()
-        self.source_edit.setPlaceholderText("输入或粘贴媒体目录路径，按 Enter 保存；也可点击右侧浏览选择…")
+        self.source_edit.setPlaceholderText(
+            "输入或粘贴媒体目录路径，按 Enter 保存；也可点击右侧浏览选择…"
+        )
         self.source_edit.editingFinished.connect(self._commit_source)
 
         browse = QPushButton("选择目录")
@@ -229,8 +229,12 @@ class UploadPage(QWidget):
         self.edit_params_button = QPushButton(f"编辑{accent}上传参数")
         self.edit_params_button.setObjectName("secondaryButton")
         self.edit_params_button.setIcon(get_svg_icon("sliders", 14, 14))
-        self.edit_params_button.setToolTip(f"跳转至设置页面调整{accent}分卷规则与高级参数")
-        self.edit_params_button.clicked.connect(lambda: self.edit_parameters_requested.emit(self.kind))
+        self.edit_params_button.setToolTip(
+            f"跳转至设置页面调整{accent}分卷规则与高级参数"
+        )
+        self.edit_params_button.clicked.connect(
+            lambda: self.edit_parameters_requested.emit(self.kind)
+        )
 
         target_row.addWidget(target_lbl)
         target_row.addWidget(self.chat_label)
@@ -301,7 +305,9 @@ class UploadPage(QWidget):
         self.edit_caption_button.setToolTip("编辑所选媒体组标题，也可双击媒体组")
         self.edit_caption_button.setEnabled(False)
         self.edit_caption_button.setVisible(True)
-        self.edit_caption_button.clicked.connect(lambda: self._edit_album(self.tree.currentItem()))
+        self.edit_caption_button.clicked.connect(
+            lambda: self._edit_album(self.tree.currentItem())
+        )
 
         expand_btn = QPushButton("展开全部")
         expand_btn.setObjectName("ghostButton")
@@ -382,7 +388,9 @@ class UploadPage(QWidget):
         target = dict(self.services.target_getter(self.kind) or {})
         mode = str(target.get("target_mode", "forum_topic"))
         target_name = "频道" if mode == "channel" else "超级群组"
-        self.chat_label.setText(f"{target_name} · {str(target.get('chat_id', '未配置'))}")
+        self.chat_label.setText(
+            f"{target_name} · {str(target.get('chat_id', '未配置'))}"
+        )
         self.topic_label.setText(
             "不适用（频道不使用 Topic）"
             if mode == "channel"
@@ -420,7 +428,9 @@ class UploadPage(QWidget):
             self.status_label.setText("正在扫描目录…")
         self._update_edit_button()
 
-    def _normalize_legacy_group(self, value: Mapping[str, Any], completed_paths: set[str]) -> dict:
+    def _normalize_legacy_group(
+        self, value: Mapping[str, Any], completed_paths: set[str]
+    ) -> dict:
         """Keep older scanner payloads renderable during the V2 migration."""
         group = dict(value or {})
         if all(key in group for key in ("label", "completed", "pending", "albums")):
@@ -432,7 +442,9 @@ class UploadPage(QWidget):
             for item in items
             if self._stable(_item_path(item)) not in completed_paths
         ]
-        label = str(group.get("label") or group.get("title") or group.get("subtitle") or "")
+        label = str(
+            group.get("label") or group.get("title") or group.get("subtitle") or ""
+        )
         raw_caption = group.get("caption", "")
         if isinstance(raw_caption, Mapping):
             base_label = str(raw_caption.get("base_label", label) or label)
@@ -475,111 +487,10 @@ class UploadPage(QWidget):
         )
         return group
 
-    def set_result(self, result: dict):
-        result = dict(result or {})
-        completed_paths = set()
-        normalized_completed_paths = []
-        for path in result.get("completed_paths", []):
-            stable = self._stable(path)
-            if stable not in completed_paths:
-                completed_paths.add(stable)
-                normalized_completed_paths.append(stable)
-        result["completed_paths"] = normalized_completed_paths
-        result["groups"] = [
-            self._normalize_legacy_group(group, completed_paths)
-            for group in result.get("groups", [])
-        ]
-        self.result = result
-        self.tree.setUpdatesEnabled(False)
-        try:
-            self.tree.clear()
-            for group in result["groups"]:
-                label = (
-                    f"{group['label']} · {len(group['items'])} 个 · "
-                    f"已完成 {group['completed']} · 待上传 {group['pending']} · "
-                    f"{group['albums']} 组待上传"
-                )
-                top = QTreeWidgetItem(["分组", group["label"], "", label])
-                if self.kind in {"video", "mixed"}:
-                    self.tree.addTopLevelItem(top)
-                    top.setExpanded(True)
-                plans = group.get("album_plans") or [{
-                    "key": "",
-                    "number": 1,
-                    "items": group["items"],
-                    "pending_items": [
-                        item for item in group["items"]
-                        if self._stable(_item_path(item)) not in completed_paths
-                    ],
-                    "caption": {
-                        "text": group.get("caption", ""),
-                        "base_label": group.get("caption", ""),
-                        "custom_text": "",
-                    },
-                }]
-                for plan in plans:
-                    album_items = plan.get("items", [])
-                    pending_count = len(plan.get("pending_items", []))
-                    completed_count = len(album_items) - pending_count
-                    caption = plan.get("caption", {}) or {}
-                    include_key = {
-                        "video": "VIDEO_CAPTION_INCLUDE_FILENAMES",
-                        "mixed": "MIXED_CAPTION_INCLUDE_FILENAMES",
-                        "image": "IMAGE_CAPTION_INCLUDE_FILENAMES",
-                    }[self.kind]
-                    number_key = {
-                        "video": "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS",
-                        "mixed": "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS",
-                        "image": "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
-                    }[self.kind]
-                    caption_text = self.services.filename_description(
-                        caption.get("text", ""),
-                        album_items,
-                        bool(self._cfg(include_key, False)),
-                        bool(self._cfg(number_key, True)),
-                        max_chars=int(self.services.caption_limit),
-                    )
-                    album_row = QTreeWidgetItem([
-                        "待上传" if pending_count else "已完成",
-                        self._album_title(plan),
-                        self.services.size_formatter(sum(self._size(item) for item in album_items)),
-                        f"{len(album_items)} 个文件 · 已完成 {completed_count} · 待上传 {pending_count}",
-                    ])
-                    album_row.setData(0, Qt.ItemDataRole.UserRole, plan)
-                    album_row.setToolTip(1, caption_text or "无标题")
-                    if self.kind == "image":
-                        self.tree.addTopLevelItem(album_row)
-                    else:
-                        top.addChild(album_row)
-                    for item in album_items:
-                        path = _item_path(item)
-                        completed = self._stable(path) in completed_paths
-                        date_value = item.get("capture_time") if isinstance(item, Mapping) else None
-                        if self.kind == "mixed" and isinstance(item, Mapping):
-                            date_value = "图片" if item.get("media_kind") == "image" else "视频"
-                        row = QTreeWidgetItem([
-                            "待上传" if not completed else "已完成",
-                            self._format_date(date_value),
-                            self.services.size_formatter(self._size(item)),
-                            str(path),
-                        ])
-                        album_row.addChild(row)
-                        row.setToolTip(3, str(path))
-                        if isinstance(item, Mapping):
-                            source = item.get("date_tag") or "未知"
-                            row.setToolTip(
-                                1,
-                                f"{self._format_date(date_value)}\n日期来源：{source}",
-                            )
-            for column, width in enumerate((140, 250, 100)):
-                self.tree.setColumnWidth(column, width)
-            self._filter_preview()
-        finally:
-            self.tree.setUpdatesEnabled(True)
-
+    def _update_scan_summary_chips_and_labels(self, result: dict):
         if hasattr(self, "chip_files"):
             self.chip_files.setText(f"{result['total_files']} 个")
-            self.chip_bytes.setText(self.services.size_formatter(result['total_bytes']))
+            self.chip_bytes.setText(self.services.size_formatter(result["total_bytes"]))
             self.chip_done.setText(f"{result['completed_files']} 个")
             self.chip_pending.setText(f"{result['pending_files']} 个")
             self.chip_albums.setText(f"{result['album_count']} 组")
@@ -590,7 +501,9 @@ class UploadPage(QWidget):
             f"{result['album_count']} 组待上传"
         )
         if result.get("missing"):
-            self.summary_label.setText(self.summary_label.text() + f" · 缺失日期 {len(result['missing'])}")
+            self.summary_label.setText(
+                self.summary_label.text() + f" · 缺失日期 {len(result['missing'])}"
+            )
         if result.get("scan_skipped_files"):
             self.summary_label.setText(
                 self.summary_label.text()
@@ -620,6 +533,127 @@ class UploadPage(QWidget):
             )
         )
 
+    def _build_scan_result_tree(self, result: dict, completed_paths: set[str]):
+        self.tree.clear()
+        for group in result["groups"]:
+            label = (
+                f"{group['label']} · {len(group['items'])} 个 · "
+                f"已完成 {group['completed']} · 待上传 {group['pending']} · "
+                f"{group['albums']} 组待上传"
+            )
+            top = QTreeWidgetItem(["分组", group["label"], "", label])
+            if self.kind in {"video", "mixed"}:
+                self.tree.addTopLevelItem(top)
+                top.setExpanded(True)
+            plans = group.get("album_plans") or [
+                {
+                    "key": "",
+                    "number": 1,
+                    "items": group["items"],
+                    "pending_items": [
+                        item
+                        for item in group["items"]
+                        if self._stable(_item_path(item)) not in completed_paths
+                    ],
+                    "caption": {
+                        "text": group.get("caption", ""),
+                        "base_label": group.get("caption", ""),
+                        "custom_text": "",
+                    },
+                }
+            ]
+            for plan in plans:
+                album_items = plan.get("items", [])
+                pending_count = len(plan.get("pending_items", []))
+                completed_count = len(album_items) - pending_count
+                caption = plan.get("caption", {}) or {}
+                include_key = {
+                    "video": "VIDEO_CAPTION_INCLUDE_FILENAMES",
+                    "mixed": "MIXED_CAPTION_INCLUDE_FILENAMES",
+                    "image": "IMAGE_CAPTION_INCLUDE_FILENAMES",
+                }[self.kind]
+                number_key = {
+                    "video": "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS",
+                    "mixed": "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS",
+                    "image": "IMAGE_CAPTION_INCLUDE_FILENAME_NUMBERS",
+                }[self.kind]
+                caption_text = self.services.filename_description(
+                    caption.get("text", ""),
+                    album_items,
+                    bool(self._cfg(include_key, False)),
+                    bool(self._cfg(number_key, True)),
+                    max_chars=int(self.services.caption_limit),
+                )
+                album_row = QTreeWidgetItem(
+                    [
+                        "待上传" if pending_count else "已完成",
+                        self._album_title(plan),
+                        self.services.size_formatter(
+                            sum(self._size(item) for item in album_items)
+                        ),
+                        f"{len(album_items)} 个文件 · 已完成 {completed_count} · 待上传 {pending_count}",
+                    ]
+                )
+                album_row.setData(0, Qt.ItemDataRole.UserRole, plan)
+                album_row.setToolTip(1, caption_text or "无标题")
+                if self.kind == "image":
+                    self.tree.addTopLevelItem(album_row)
+                else:
+                    top.addChild(album_row)
+                for item in album_items:
+                    path = _item_path(item)
+                    completed = self._stable(path) in completed_paths
+                    date_value = (
+                        item.get("capture_time") if isinstance(item, Mapping) else None
+                    )
+                    if self.kind == "mixed" and isinstance(item, Mapping):
+                        date_value = (
+                            "图片" if item.get("media_kind") == "image" else "视频"
+                        )
+                    row = QTreeWidgetItem(
+                        [
+                            "待上传" if not completed else "已完成",
+                            self._format_date(date_value),
+                            self.services.size_formatter(self._size(item)),
+                            str(path),
+                        ]
+                    )
+                    album_row.addChild(row)
+                    row.setToolTip(3, str(path))
+                    if isinstance(item, Mapping):
+                        source = item.get("date_tag") or "未知"
+                        row.setToolTip(
+                            1,
+                            f"{self._format_date(date_value)}\n日期来源：{source}",
+                        )
+        for column, width in enumerate((140, 250, 100)):
+            self.tree.setColumnWidth(column, width)
+        self._filter_preview()
+
+    def set_result(self, result: dict):
+        result = dict(result or {})
+        completed_paths = set()
+        normalized_completed_paths = []
+        for path in result.get("completed_paths", []):
+            stable = self._stable(path)
+            if stable not in completed_paths:
+                completed_paths.add(stable)
+                normalized_completed_paths.append(stable)
+        result["completed_paths"] = normalized_completed_paths
+        result["groups"] = [
+            self._normalize_legacy_group(group, completed_paths)
+            for group in result.get("groups", [])
+        ]
+        self.result = result
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self._build_scan_result_tree(result, completed_paths)
+        finally:
+            self.tree.setUpdatesEnabled(True)
+
+        self._update_scan_summary_chips_and_labels(result)
+
+    @staticmethod
     @staticmethod
     def _format_date(value) -> str:
         if value is None:
@@ -732,10 +766,11 @@ class UploadPage(QWidget):
             )
             item.setToolTip(1, caption_text or "无标题")
 
-
     def _update_edit_button(self):
         item = self.tree.currentItem()
-        if item is not None and not isinstance(item.data(0, Qt.ItemDataRole.UserRole), dict):
+        if item is not None and not isinstance(
+            item.data(0, Qt.ItemDataRole.UserRole), dict
+        ):
             item = item.parent()
         self.edit_caption_button.setEnabled(
             bool(
@@ -776,7 +811,9 @@ class UploadPage(QWidget):
             for index in range(row.childCount()):
                 visible = visit(row.child(index), matches) or visible
             if not row.childCount():
-                visible = matches and (not self.pending_only.isChecked() or row.text(0) != "已完成")
+                visible = matches and (
+                    not self.pending_only.isChecked() or row.text(0) != "已完成"
+                )
             row.setHidden(not visible)
             if query and visible:
                 row.setExpanded(True)
@@ -895,11 +932,15 @@ class UploadHubPage(QWidget):
         top_layout.addStretch(1)
         layout.addWidget(top_bar)
 
-        from PySide6.QtWidgets import QScrollArea, QStackedWidget
+        from PySide6.QtWidgets import QStackedWidget
 
         self.stack = QStackedWidget()
         self.scroll_areas = {}
-        for kind, page in (("video", video_page), ("image", image_page), ("mixed", mixed_page)):
+        for kind, page in (
+            ("video", video_page),
+            ("image", image_page),
+            ("mixed", mixed_page),
+        ):
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -920,8 +961,9 @@ class UploadHubPage(QWidget):
         idx = {"video": 0, "image": 1, "mixed": 2}[kind]
         self.stack.setCurrentIndex(idx)
         from ..icons import get_svg_icon
+
         for k, btn in self.buttons.items():
-            active = (k == kind)
+            active = k == kind
             btn.setChecked(active)
             btn.setProperty("active", "true" if active else "false")
             color = "#ffffff" if active else THEME.text_secondary
@@ -935,9 +977,10 @@ class UploadHubPage(QWidget):
 
     def refresh_theme(self):
         from ..icons import get_svg_icon
+
         curr_k = self.current_kind()
         for kind, btn in self.buttons.items():
-            active = (kind == curr_k)
+            active = kind == curr_k
             color = "#ffffff" if active else THEME.text_secondary
             btn.setIcon(get_svg_icon(kind, color=color, size=16))
         for p in self.pages.values():

@@ -11,7 +11,6 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping
 from functools import lru_cache
 import os
-from pathlib import Path
 from typing import Any
 
 from ..core.album import CaptionStore
@@ -132,7 +131,9 @@ def plan_dict(
         ),
     }
     if kind == "video":
-        result["month_key"] = plan.items[0].month_key if plan.items else plan.group_label
+        result["month_key"] = (
+            plan.items[0].month_key if plan.items else plan.group_label
+        )
     elif kind == "mixed":
         result["group_name"] = plan.group_label
         if plan.items:
@@ -191,6 +192,124 @@ def _default_cancelled_result(
     }
 
 
+def _build_scan_result_groups(bundle, models, item_values, plans, kind):
+    group_labels: dict[tuple[str, str], str] = {}
+    grouped_items: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    group_plans: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    image_plan_for_item: dict[tuple[object, ...], tuple[str, str]] = {}
+    if kind == "image":
+        for model_plan in bundle.plans:
+            plan_group = (kind, str(model_plan.key))
+            for item in model_plan.items:
+                image_plan_for_item[item_identity(item)] = plan_group
+    for item in models:
+        key = image_plan_for_item.get(
+            item_identity(item),
+            group_key(kind, item),
+        )
+        grouped_items[key].append(item_dict(item))
+    for model_plan, plan in zip(bundle.plans, plans):
+        if kind == "image":
+            key = (kind, str(model_plan.key))
+        else:
+            first = model_plan.items[0] if model_plan.items else None
+            key = (
+                group_key(kind, first, model_plan.group_label)
+                if first is not None
+                else (
+                    kind,
+                    str(model_plan.group_label),
+                )
+            )
+        group_plans[key].append(plan)
+        group_labels.setdefault(key, str(model_plan.group_label or key[1]))
+
+    groups = []
+    ordered_keys = list(grouped_items)
+    for key in group_plans:
+        if key not in grouped_items:
+            ordered_keys.append(key)
+    for key in ordered_keys:
+        group_items = grouped_items.get(key, [])
+        plans_for_group = group_plans.get(key, [])
+        pending = sum(len(plan.get("pending_items", ())) for plan in plans_for_group)
+        total = sum(len(plan.get("items", ())) for plan in plans_for_group)
+        if not plans_for_group:
+            total = len(group_items)
+            pending = len(group_items)
+        groups.append(
+            {
+                "label": group_labels.get(key, key[1]),
+                "caption": (
+                    plans_for_group[0].get("caption", {}).get("text", "")
+                    if plans_for_group
+                    else ""
+                ),
+                "items": group_items,
+                "pending": pending,
+                "completed": max(0, total - pending),
+                "albums": sum(
+                    bool(plan.get("pending_items")) for plan in plans_for_group
+                ),
+                "album_plans": plans_for_group,
+            }
+        )
+    return groups
+
+
+def _format_scan_warnings(
+    scan, kind, scan_errors, scan_warnings, scan_size_skips, ignored_root_media, logger
+):
+    warning = ""
+    if scan_errors:
+        if logger is not None:
+            logger(
+                "WARNING",
+                "目录扫描跳过项目：\n" + "\n".join(scan_errors),
+                source=f"scan/{kind}",
+            )
+        warning = f"扫描时跳过 {len(scan_errors)} 个暂时无法读取的项目（可能是 SMB 连接中断）。"
+    if scan_warnings:
+        if logger is not None:
+            logger(
+                "WARNING",
+                "目录扫描提醒：\n" + "\n".join(scan_warnings),
+                source=f"scan/{kind}",
+            )
+        warning = "；".join(scan_warnings) + (f"；{warning}" if warning else "")
+    rejected = [
+        record for record in scan_size_skips if record.get("action", "skip") == "skip"
+    ]
+    preflight_size = [
+        record for record in scan_size_skips if record.get("action") == "preflight"
+    ]
+    compressing = [
+        record
+        for record in scan_size_skips
+        if record.get("action") in {"compress", "normalize"}
+    ]
+    if rejected:
+        warning = f"扫描时跳过 {len(rejected)} 个超过 Telegram 限制的项目" + (
+            f"；{warning}" if warning else ""
+        )
+    if compressing:
+        warning = (
+            f"发现 {len(compressing)} 个需规范化图片，将在上传时规范化生成临时副本（原文件不修改）"
+            + (f"；{warning}" if warning else "")
+        )
+    if preflight_size:
+        warning = (
+            f"已扫描到 {len(preflight_size)} 个源文件超过视频大小上限，上传前会检查能否无损转封装并按输出大小复核"
+            + (f"；{warning}" if warning else "")
+        )
+    if ignored_root_media:
+        warning = (
+            f"混合根目录中有 {len(ignored_root_media)} 个媒体已忽略，请移动到一级子文件夹后重新扫描"
+            + (f"；{warning}" if warning else "")
+        )
+    return warning, rejected, preflight_size, compressing
+
+
 def scan_result(
     bundle: Any,
     *,
@@ -225,62 +344,7 @@ def scan_result(
         plan_dict(item, kind, caption_store_factory=lambda _kind: caption_store)
         for item in bundle.plans
     ]
-
-    grouped_items: dict[tuple[str, str], list] = defaultdict(list)
-    group_labels: dict[tuple[str, str], str] = {}
-    group_plans: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    image_plan_for_item: dict[tuple[object, ...], tuple[str, str]] = {}
-    if kind == "image":
-        for model_plan in bundle.plans:
-            plan_group = (kind, str(model_plan.key))
-            for item in model_plan.items:
-                image_plan_for_item[item_identity(item)] = plan_group
-    for item in models:
-        key = image_plan_for_item.get(
-            item_identity(item),
-            group_key(kind, item),
-        )
-        grouped_items[key].append(item_dict(item))
-    for model_plan, plan in zip(bundle.plans, plans):
-        if kind == "image":
-            key = (kind, str(model_plan.key))
-        else:
-            first = model_plan.items[0] if model_plan.items else None
-            key = group_key(kind, first, model_plan.group_label) if first is not None else (
-                kind,
-                str(model_plan.group_label),
-            )
-        group_plans[key].append(plan)
-        group_labels.setdefault(key, str(model_plan.group_label or key[1]))
-
-    groups = []
-    ordered_keys = list(grouped_items)
-    for key in group_plans:
-        if key not in grouped_items:
-            ordered_keys.append(key)
-    for key in ordered_keys:
-        group_items = grouped_items.get(key, [])
-        plans_for_group = group_plans.get(key, [])
-        pending = sum(len(plan.get("pending_items", ())) for plan in plans_for_group)
-        total = sum(len(plan.get("items", ())) for plan in plans_for_group)
-        if not plans_for_group:
-            total = len(group_items)
-            pending = len(group_items)
-        groups.append(
-            {
-                "label": group_labels.get(key, key[1]),
-                "caption": (
-                    plans_for_group[0].get("caption", {}).get("text", "")
-                    if plans_for_group
-                    else ""
-                ),
-                "items": group_items,
-                "pending": pending,
-                "completed": max(0, total - pending),
-                "albums": sum(bool(plan.get("pending_items")) for plan in plans_for_group),
-                "album_plans": plans_for_group,
-            }
-        )
+    groups = _build_scan_result_groups(bundle, models, item_values, plans, kind)
 
     completed_keys = set()
     for model_plan in bundle.plans:
@@ -301,47 +365,18 @@ def scan_result(
         for value in (getattr(bundle.legacy, "LAST_SCAN_SIZE_SKIPS", ()) or ())
         if isinstance(value, dict)
     ]
-    ignored_root_media = list(getattr(bundle.legacy, "LAST_SCAN_IGNORED_ROOT_MEDIA", ()) or ())
-    warning = ""
-    if scan_errors:
-        if logger is not None:
-            logger(
-                "WARNING",
-                "目录扫描跳过项目：\n" + "\n".join(scan_errors),
-                source=f"scan/{kind}",
-            )
-        warning = f"扫描时跳过 {len(scan_errors)} 个暂时无法读取的项目（可能是 SMB 连接中断）。"
-    if scan_warnings:
-        if logger is not None:
-            logger(
-                "WARNING",
-                "目录扫描提醒：\n" + "\n".join(scan_warnings),
-                source=f"scan/{kind}",
-            )
-        warning = "；".join(scan_warnings) + (f"；{warning}" if warning else "")
-    rejected = [record for record in scan_size_skips if record.get("action", "skip") == "skip"]
-    preflight_size = [record for record in scan_size_skips if record.get("action") == "preflight"]
-    compressing = [record for record in scan_size_skips if record.get("action") in {"compress", "normalize"}]
-    if rejected:
-        warning = (
-            f"扫描时跳过 {len(rejected)} 个超过 Telegram 限制的项目"
-            + (f"；{warning}" if warning else "")
-        )
-    if compressing:
-        warning = (
-            f"发现 {len(compressing)} 个需规范化图片，将在上传时规范化生成临时副本（原文件不修改）"
-            + (f"；{warning}" if warning else "")
-        )
-    if preflight_size:
-        warning = (
-            f"已扫描到 {len(preflight_size)} 个源文件超过视频大小上限，上传前会检查能否无损转封装并按输出大小复核"
-            + (f"；{warning}" if warning else "")
-        )
-    if ignored_root_media:
-        warning = (
-            f"混合根目录中有 {len(ignored_root_media)} 个媒体已忽略，请移动到一级子文件夹后重新扫描"
-            + (f"；{warning}" if warning else "")
-        )
+    ignored_root_media = list(
+        getattr(bundle.legacy, "LAST_SCAN_IGNORED_ROOT_MEDIA", ()) or ()
+    )
+    warning, rejected, preflight_size, compressing = _format_scan_warnings(
+        scan,
+        kind,
+        scan_errors,
+        scan_warnings,
+        scan_size_skips,
+        ignored_root_media,
+        logger,
+    )
 
     total_bytes = sum(size_of(item) for item in item_values)
     pending_bytes = sum(
