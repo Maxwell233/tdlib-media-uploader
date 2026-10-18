@@ -1,69 +1,64 @@
+"""Isolated contracts retained from the Jules preview characterization PR."""
+import builtins
+import tempfile
 import unittest
 from pathlib import Path
-import os
-from tdlib_media_uploader.gui.scanner import legacy_scan_result
-from tdlib_media_uploader.gui.models import scan_result as models_scan_result
-from tdlib_media_uploader.gui.pages.upload import UploadPage
-from tdlib_media_uploader.gui import config_service
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
-class DummyConfig:
-    def __init__(self):
-        self._opts = {
-            "VIDEO_DIR": str(Path.cwd()),
-            "IMAGE_DIR": str(Path.cwd()),
-            "MIXED_DIR": str(Path.cwd()),
-            "VIDEO_READ_DATES": False,
-        }
-    def get(self, key, default=None):
-        return self._opts.get(key, default)
+from tdlib_media_uploader.core.models import ScanResult
+from tdlib_media_uploader.gui import models, scanner
 
-    def activate_target(self, kind):
-        pass
 
 class TestRefactoringBoundaries(unittest.TestCase):
-    def setUp(self):
-        self.old_cfg = config_service.get_config
-        config_service._CONFIG = DummyConfig()
-        config_service.get_config = lambda: config_service._CONFIG
-        os.environ["VIDEO_DIR"] = str(Path.cwd())
+    def test_legacy_scan_result_uses_basic_preview_without_optional_dependency(self):
+        real_import = builtins.__import__
+        def import_without_image(name, globals=None, locals=None, fromlist=(), level=0):
+            if 'legacy_image' in (fromlist or ()):
+                raise ImportError('optional image dependency unavailable')
+            return real_import(name, globals, locals, fromlist, level)
 
-        self.old_basic = config_service.get_cfg
-        config_service.get_cfg = lambda k, d=None: str(Path.cwd()) if k.endswith("_DIR") else d
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch('builtins.__import__', side_effect=import_without_image), \
+                 patch.object(scanner, 'get_config', return_value=SimpleNamespace()), \
+                 patch.object(scanner, 'get_cfg', side_effect=lambda name, default=None: root if name == 'IMAGE_DIR' else default), \
+                 patch.object(scanner, 'target_for', return_value={}), \
+                 patch.object(scanner, 'basic_paths', return_value=[]) as scan, \
+                 patch.object(scanner, 'CaptionStore'):
+                result = scanner.legacy_scan_result('image')
+            scan.assert_called_once_with('image', cancel_event=None)
+            self.assertEqual(result['kind'], 'image')
+            self.assertEqual(result['source_dir'], str(root))
+            self.assertEqual(result['groups'], [])
+            self.assertEqual(result['items'], [])
+            self.assertEqual(result['total_files'], 0)
+            self.assertEqual(result['total_bytes'], 0)
+            self.assertFalse(result['core_available'])
+            self.assertIn('optional image dependency unavailable', result['warning'])
 
-    def tearDown(self):
-        config_service.get_config = self.old_cfg
-        config_service.get_cfg = self.old_basic
+    def test_models_scan_result_preserves_empty_bundle_contract(self):
+        root = Path('empty-preview-root')
+        target = {'target_mode': 'channel', 'chat_id': 7}
+        bundle = SimpleNamespace(
+            kind='video', scan_result=ScanResult(()), plans=(), missing=(),
+            source_root=root, state=None, legacy=SimpleNamespace(), target=target,
+        )
+        captions = Mock()
+        result = models.scan_result(bundle, caption_store_factory=captions, logger=None)
+        captions.assert_called_once_with('video')
+        self.assertEqual(result['groups'], [])
+        self.assertEqual(result['items'], [])
+        self.assertEqual(result['plans'], ())
+        for field in ('total_files', 'pending_files', 'completed_files',
+                      'total_bytes', 'pending_bytes', 'album_count'):
+            self.assertEqual(result[field], 0, field)
+        self.assertEqual(result['source_dir'], str(root))
+        self.assertEqual(result['target'], target)
+        self.assertIsNot(result['target'], target)
+        self.assertFalse(result['cancelled'])
+        self.assertEqual(result['warning'], '')
 
-    def test_legacy_scan_result_executes(self):
-        try:
-            res = legacy_scan_result("image")
-            self.assertIn("groups", res)
-            self.assertIn("items", res)
-            self.assertEqual(res["kind"], "image")
-            self.assertIn("total_bytes", res)
-        except Exception:
-            pass
-
-    def test_models_scan_result_structure(self):
-        class Bundle:
-            kind = "video"
-            class scan_result:
-                cancelled = False
-                items = []
-                errors = []
-                warnings = []
-            plans = []
-            missing = []
-            source_root = Path.cwd()
-            state = None
-            class legacy:
-                pass
-            target = {}
-
-        res = models_scan_result(Bundle())
-        self.assertIn("groups", res)
-        self.assertIn("total_bytes", res)
-        self.assertFalse(res["cancelled"])
 
 if __name__ == '__main__':
     unittest.main()
