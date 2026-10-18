@@ -238,8 +238,6 @@ class UploadJournalTest(unittest.TestCase):
             self.assertEqual(record["items"], [])
             self.assertEqual(record["status"], "PREPARED")
 
-
-
     def test_unresolved_for_items_empty_inputs_and_journal(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = InflightJournal(Path(directory))
@@ -279,6 +277,15 @@ class UploadJournalTest(unittest.TestCase):
             self.assertIsNone(journal.unresolved_for_items("image", [{"path": "shared.jpg", "size": 300, "mtime_ns": 3000}]))
             self.assertIsNotNone(journal.unresolved_for_items("image", [{"path": "shared.jpg", "size": 200, "mtime_ns": 2000}]))
 
+            # Keep every requested snapshot for a path, regardless of order.
+            matching = {"path": "shared.jpg", "size": 200, "mtime_ns": 2000}
+            changed = {"path": "shared.jpg", "size": 300, "mtime_ns": 3000}
+            for requested in ([matching, changed], [changed, matching]):
+                with self.subTest(requested=requested):
+                    match = journal.unresolved_for_items("image", requested)
+                    self.assertIsNotNone(match)
+                    self.assertEqual(match["album_key"], "album1")
+
     def test_unresolved_for_items_none_size_mtime_wildcard(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = InflightJournal(Path(directory))
@@ -289,11 +296,11 @@ class UploadJournalTest(unittest.TestCase):
             self.assertIsNotNone(journal.unresolved_for_items("image", [{"path": "photo.jpg", "size": 100}]))
             self.assertIsNotNone(journal.unresolved_for_items("image", [{"path": "photo.jpg", "mtime_ns": 1000}]))
 
-            # None in record
-            # In order to store an item with None size/mtime, prepare() defaults size/mtime by scanning the file,
-            # but if file doesn't exist, it leaves them missing (which means get returns None).
-            journal.prepare("image", "album2", [{"path": "photo2.jpg"}])
-            self.assertIsNotNone(journal.unresolved_for_items("image", [{"path": "photo2.jpg", "size": 200, "mtime_ns": 2000}]))
+            # A missing source in a private temporary directory leaves the
+            # recorded snapshot unknown, independently of the working tree.
+            missing_path = Path(directory) / "missing.jpg"
+            journal.prepare("image", "album2", [{"path": missing_path}])
+            self.assertIsNotNone(journal.unresolved_for_items("image", [{"path": missing_path, "size": 200, "mtime_ns": 2000}]))
 
     def test_unresolved_for_items_legacy_scan_keys(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -339,12 +346,17 @@ class UploadJournalTest(unittest.TestCase):
             journal.prepare("image", "album1", [{"path": "photo1.jpg", "size": 100, "mtime_ns": 1000}])
             journal.prepare("image", "album2", [{"path": "photo2.jpg", "size": 200, "mtime_ns": 2000}])
 
+            # Pin disk order so a last-match implementation cannot pass.
+            journal.path_for("image", "album1").rename(Path(directory) / "a-first.json")
+            journal.path_for("image", "album2").rename(Path(directory) / "z-second.json")
+            journal.invalidate()
+
             match = journal.unresolved_for_items("image", [
+                {"path": "photo2.jpg", "size": 200, "mtime_ns": 2000},
                 {"path": "photo1.jpg", "size": 100, "mtime_ns": 1000},
-                {"path": "photo2.jpg", "size": 200, "mtime_ns": 2000}
             ])
             self.assertIsNotNone(match)
-            self.assertIn(match["album_key"], ["album1", "album2"])
+            self.assertEqual(match["album_key"], "album1")
 
     def test_unresolved_for_items_deepcopy_isolation(self):
         with tempfile.TemporaryDirectory() as directory:
