@@ -239,5 +239,138 @@ class UploadJournalTest(unittest.TestCase):
             self.assertEqual(record["status"], "PREPARED")
 
 
+
+    def test_unresolved_for_items_empty_inputs_and_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            self.assertIsNone(journal.unresolved_for_items("image", []))
+
+            journal.prepare("image", "album", [])
+            self.assertIsNone(journal.unresolved_for_items("image", []))
+            self.assertIsNone(journal.unresolved_for_items("image", [{"path": "photo.jpg"}]))
+
+    def test_unresolved_for_items_large_disjoint_and_overlapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "album1", [
+                {"path": f"photo_{i}.jpg", "size": i * 100, "mtime_ns": i * 1000}
+                for i in range(100)
+            ])
+
+            disjoint_items = [
+                {"path": f"photo_{i}.jpg", "size": i * 100, "mtime_ns": i * 1000}
+                for i in range(100, 200)
+            ]
+            self.assertIsNone(journal.unresolved_for_items("image", disjoint_items))
+
+            overlapping_items = disjoint_items + [{"path": "photo_50.jpg", "size": 5000, "mtime_ns": 50000}]
+            overlap = journal.unresolved_for_items("image", overlapping_items)
+            self.assertIsNotNone(overlap)
+            self.assertEqual(overlap["album_key"], "album1")
+
+    def test_unresolved_for_items_multiple_snapshots_sharing_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "album1", [
+                {"path": "shared.jpg", "size": 100, "mtime_ns": 1000},
+                {"path": "shared.jpg", "size": 200, "mtime_ns": 2000},
+            ])
+
+            self.assertIsNone(journal.unresolved_for_items("image", [{"path": "shared.jpg", "size": 300, "mtime_ns": 3000}]))
+            self.assertIsNotNone(journal.unresolved_for_items("image", [{"path": "shared.jpg", "size": 200, "mtime_ns": 2000}]))
+
+    def test_unresolved_for_items_none_size_mtime_wildcard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "album1", [{"path": "photo.jpg", "size": 100, "mtime_ns": 1000}])
+
+            # None in requested
+            self.assertIsNotNone(journal.unresolved_for_items("image", [{"path": "photo.jpg"}]))
+            self.assertIsNotNone(journal.unresolved_for_items("image", [{"path": "photo.jpg", "size": 100}]))
+            self.assertIsNotNone(journal.unresolved_for_items("image", [{"path": "photo.jpg", "mtime_ns": 1000}]))
+
+            # None in record
+            # In order to store an item with None size/mtime, prepare() defaults size/mtime by scanning the file,
+            # but if file doesn't exist, it leaves them missing (which means get returns None).
+            journal.prepare("image", "album2", [{"path": "photo2.jpg"}])
+            self.assertIsNotNone(journal.unresolved_for_items("image", [{"path": "photo2.jpg", "size": 200, "mtime_ns": 2000}]))
+
+    def test_unresolved_for_items_legacy_scan_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            # Manually inject a record with legacy keys since prepare normalizes them
+            path = journal.path_for("image", "legacy-album")
+            record = {
+                "kind": "image",
+                "album_key": "legacy-album",
+                "status": "PREPARED",
+                "items": [{"path": "photo.jpg", "scan_size": 100, "scan_mtime_ns": 1000}],
+            }
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record), encoding="utf-8")
+
+            self.assertIsNotNone(journal.unresolved_for_items("image", [{"path": "photo.jpg", "scan_size": 100, "scan_mtime_ns": 1000}]))
+            self.assertIsNone(journal.unresolved_for_items("image", [{"path": "photo.jpg", "scan_size": 101, "scan_mtime_ns": 1000}]))
+
+    def test_unresolved_for_items_target_and_status_isolation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            target1 = {"target_mode": "channel", "channel_chat_id": 1}
+            target2 = {"target_mode": "channel", "channel_chat_id": 2}
+
+            journal.prepare("image", "album1", [{"path": "photo.jpg", "size": 100, "mtime_ns": 1000}], target=target1)
+
+            # Different target
+            self.assertIsNone(journal.unresolved_for_items("image", [{"path": "photo.jpg", "size": 100, "mtime_ns": 1000}], target=target2))
+
+            # Different kind
+            self.assertIsNone(journal.unresolved_for_items("video", [{"path": "photo.jpg", "size": 100, "mtime_ns": 1000}], target=target1))
+
+            # Resolved status
+            journal.failed("image", "album1", "error", target=target1)
+            self.assertIsNone(journal.unresolved_for_items("image", [{"path": "photo.jpg", "size": 100, "mtime_ns": 1000}], target=target1))
+
+            journal.mark_not_sent("image", "album1", target=target1)
+            self.assertIsNone(journal.unresolved_for_items("image", [{"path": "photo.jpg", "size": 100, "mtime_ns": 1000}], target=target1))
+
+    def test_unresolved_for_items_first_matching_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "album1", [{"path": "photo1.jpg", "size": 100, "mtime_ns": 1000}])
+            journal.prepare("image", "album2", [{"path": "photo2.jpg", "size": 200, "mtime_ns": 2000}])
+
+            match = journal.unresolved_for_items("image", [
+                {"path": "photo1.jpg", "size": 100, "mtime_ns": 1000},
+                {"path": "photo2.jpg", "size": 200, "mtime_ns": 2000}
+            ])
+            self.assertIsNotNone(match)
+            self.assertIn(match["album_key"], ["album1", "album2"])
+
+    def test_unresolved_for_items_deepcopy_isolation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "album1", [{"path": "photo.jpg", "size": 100, "mtime_ns": 1000}])
+
+            match1 = journal.unresolved_for_items("image", [{"path": "photo.jpg", "size": 100, "mtime_ns": 1000}])
+            match1["items"][0]["size"] = 999
+            match1["status"] = "HACKED"
+
+            match2 = journal.unresolved_for_items("image", [{"path": "photo.jpg", "size": 100, "mtime_ns": 1000}])
+            self.assertEqual(match2["items"][0]["size"], 100)
+            self.assertEqual(match2["status"], "PREPARED")
+
+    def test_list_unresolved_deepcopy_isolation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = InflightJournal(Path(directory))
+            journal.prepare("image", "album1", [{"path": "photo.jpg", "size": 100, "mtime_ns": 1000}])
+
+            records1 = journal.list_unresolved()
+            records1[0]["items"][0]["size"] = 999
+            records1[0]["status"] = "HACKED"
+
+            records2 = journal.list_unresolved()
+            self.assertEqual(records2[0]["items"][0]["size"], 100)
+            self.assertEqual(records2[0]["status"], "PREPARED")
+
 if __name__ == "__main__":
     unittest.main()
