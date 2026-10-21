@@ -933,7 +933,9 @@ class TDJsonClient:
             value = getpass.getpass(text)
         else:
             value = input(text)
-        value = str(value).strip()
+        value = str(value)
+        if not password:
+            value = value.strip()
         if not value:
             self._raise_if_cancelled()
         return value

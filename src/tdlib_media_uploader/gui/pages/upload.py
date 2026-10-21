@@ -5,28 +5,20 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-import importlib
-import os
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QCheckBox,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
-    QFormLayout,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QMenu,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -48,73 +40,21 @@ from ...core.filesystem import stable_path
 from ...config.paths import RESOURCE_DIR
 from ..icons import get_svg_icon
 from ..theme import THEME
-from ..tools import format_size as _format_size
-
-MEDIA_KINDS = ("video", "image", "mixed")
-KIND_LABELS = {"video": "视频", "image": "图片", "mixed": "混合"}
-KIND_PATH_KEYS = {"video": "VIDEO_DIR", "image": "IMAGE_DIR", "mixed": "MIXED_DIR"}
-
-
-def _require_kind(kind: str) -> str:
-    normalized = str(kind).strip().lower()
-    if normalized not in MEDIA_KINDS:
-        raise ValueError(f"未知媒体类型：{kind}")
-    return normalized
-
-
-def _kind_label(kind: str) -> str:
-    return KIND_LABELS.get(str(kind).lower(), str(kind))
-
-
-def _config_getter(name: str, default=None):
-    try:
-        config = importlib.import_module("tdlib_media_uploader.config.loader")
-    except Exception:
-        return default
-    return getattr(config, name, default)
-
-
-def _target_getter(kind: str) -> dict[str, Any]:
-    try:
-        config = importlib.import_module("tdlib_media_uploader.config.loader")
-    except Exception:
-        config = None
-    target_for = getattr(config, "target_for", None)
-    if callable(target_for):
-        value = target_for(kind)
-        return dict(value or {})
-    return {
-        "target_mode": "forum_topic",
-        "group_chat_id": _config_getter("GROUP_CHAT_ID", _config_getter("CHAT_ID", 0)),
-        "channel_chat_id": _config_getter("CHANNEL_CHAT_ID", 0),
-        "forum_topic_id": _config_getter("FORUM_TOPIC_ID", 0),
-        "chat_id": _config_getter("CHAT_ID", 0),
-    }
-
-
-def _path_text(value: Any) -> str:
-    return str(value) if value is not None else ""
+from ..config_service import get_cfg as _config_getter, target_for as _target_getter
+from ..models import item_size as _item_size
+from ..tools import (
+    KIND_PATH_KEYS,
+    format_size as _format_size,
+    kind_label as _kind_label,
+    path_text as _path_text,
+    require_kind as _require_kind,
+)
 
 
 def _item_path(value: Any) -> Path:
     if isinstance(value, Mapping):
         value = value.get("path")
     return Path(value)
-
-
-def _item_size(value: Any) -> int:
-    path = _item_path(value)
-    if isinstance(value, Mapping):
-        raw = value.get("scan_size", value.get("size"))
-        if raw is not None:
-            try:
-                return max(0, int(raw))
-            except (TypeError, ValueError):
-                pass
-    try:
-        return max(0, int(os.stat(path).st_size))
-    except OSError:
-        return 0
 
 
 @dataclass
@@ -470,12 +410,11 @@ class UploadPage(QWidget):
         return group
 
     def _update_scan_summary_chips_and_labels(self, result: dict):
-        if hasattr(self, "chip_files"):
-            self.chip_files.setText(f"{result['total_files']} 个")
-            self.chip_bytes.setText(self.services.size_formatter(result["total_bytes"]))
-            self.chip_done.setText(f"{result['completed_files']} 个")
-            self.chip_pending.setText(f"{result['pending_files']} 个")
-            self.chip_albums.setText(f"{result['album_count']} 组")
+        self.chip_files.setText(f"{result['total_files']} 个")
+        self.chip_bytes.setText(self.services.size_formatter(result["total_bytes"]))
+        self.chip_done.setText(f"{result['completed_files']} 个")
+        self.chip_pending.setText(f"{result['pending_files']} 个")
+        self.chip_albums.setText(f"{result['album_count']} 组")
 
         self.summary_label.setText(
             f"共 {result['total_files']} 个 · {self.services.size_formatter(result['total_bytes'])} · "
@@ -648,12 +587,11 @@ class UploadPage(QWidget):
     def set_cancelled(self, result: dict | None = None):
         self.result = result
         self.tree.clear()
-        if hasattr(self, "chip_files"):
-            self.chip_files.setText("—")
-            self.chip_bytes.setText("—")
-            self.chip_done.setText("—")
-            self.chip_pending.setText("—")
-            self.chip_albums.setText("—")
+        self.chip_files.setText("—")
+        self.chip_bytes.setText("—")
+        self.chip_done.setText("—")
+        self.chip_pending.setText("—")
+        self.chip_albums.setText("—")
         self.summary_label.setText("扫描已取消；请重新扫描以获取完整列表")
         self.status_label.setText("扫描已取消")
         self.start_button.setEnabled(False)
@@ -804,12 +742,11 @@ class UploadPage(QWidget):
     def clear_scan_result(self):
         self.result = None
         self.tree.clear()
-        if hasattr(self, "chip_files"):
-            self.chip_files.setText("—")
-            self.chip_bytes.setText("—")
-            self.chip_done.setText("—")
-            self.chip_pending.setText("—")
-            self.chip_albums.setText("—")
+        self.chip_files.setText("—")
+        self.chip_bytes.setText("—")
+        self.chip_done.setText("—")
+        self.chip_pending.setText("—")
+        self.chip_albums.setText("—")
         self.summary_label.setText("尚未扫描")
         self.status_label.setText("准备扫描")
         self.start_button.setEnabled(False)
@@ -832,12 +769,8 @@ class UploadPage(QWidget):
 
     def refresh_theme(self):
         """Re-apply dynamic status styles when theme is toggled."""
-        if hasattr(self, "status_pill") and hasattr(self.status_pill, "refresh_theme"):
-            self.status_pill.refresh_theme()
-        if hasattr(self, "edit_caption_button"):
-            self.edit_caption_button.setIcon(get_svg_icon("edit", 14, 14))
-        if hasattr(self, "edit_params_button"):
-            self.edit_params_button.setIcon(get_svg_icon("sliders", 14, 14))
+        self.edit_caption_button.setIcon(get_svg_icon("edit", 14, 14))
+        self.edit_params_button.setIcon(get_svg_icon("sliders", 14, 14))
 
 
 class VideoPage(UploadPage):
@@ -957,8 +890,7 @@ class UploadHubPage(QWidget):
             color = "#ffffff" if active else THEME.text_secondary
             btn.setIcon(get_svg_icon(kind, color=color, size=16))
         for p in self.pages.values():
-            if hasattr(p, "refresh_theme"):
-                p.refresh_theme()
+            p.refresh_theme()
 
 
 __all__ = [

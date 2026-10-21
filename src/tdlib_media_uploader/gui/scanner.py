@@ -4,12 +4,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
-import datetime as _dt
-import functools
-import os
 from pathlib import Path
 import stat
-from typing import Any
 
 from ..config.paths import (
     IMAGE_STATE_DIR,
@@ -23,7 +19,11 @@ from ..core.sorting import media_path_sort
 from ..core.logging import write_app_log
 from . import config_service
 from .config_service import get_cfg, get_config, target_for
-from .models import scan_result as _translate_v2_scan_result
+from .models import (
+    _path_size as path_size,
+    item_size,
+    scan_result as _translate_v2_scan_result,
+)
 from .tools import (
     KIND_PATH_KEYS,
     MEDIA_KINDS,
@@ -35,35 +35,6 @@ from .tools import (
 PROJECT_DIR = RESOURCE_DIR
 
 BASIC_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
-
-
-@functools.lru_cache(maxsize=32768)
-def path_size(path_str: str) -> int:
-    try:
-        return int(os.stat(path_str).st_size)
-    except OSError:
-        return 0
-
-
-def item_size(item: Any) -> int:
-    if isinstance(item, dict):
-        raw_size = item.get("scan_size", item.get("size"))
-        if raw_size is not None:
-            try:
-                return max(0, int(raw_size))
-            except (TypeError, ValueError):
-                pass
-        path = item.get("path")
-    else:
-        snapshot = getattr(item, "snapshot", None)
-        raw_size = getattr(snapshot, "size", None)
-        if raw_size is not None:
-            try:
-                return max(0, int(raw_size))
-            except (TypeError, ValueError):
-                pass
-        path = item
-    return path_size(str(path))
 
 
 def apply_size_limits(paths: list[Path], kind: str) -> tuple[list[Path], list[dict]]:
@@ -839,16 +810,6 @@ def legacy_scan_result(kind: str, progress_callback=None, cancel_event=None) -> 
     }
 
 
-def load_v2_gui_integration():
-    """Load the package GUI boundary from the bundled application."""
-    from .integration import (
-        V2IntegrationUnavailable,
-        run_v2_upload,
-        scan_v2,
-    )
-    return V2IntegrationUnavailable, run_v2_upload, scan_v2
-
-
 def v2_scan_result(bundle, *, progress_callback=None, cancel_event=None) -> dict:
     """Translate V2 scan/plan models into the existing preview page contract."""
     return _translate_v2_scan_result(
@@ -868,10 +829,10 @@ def scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
     current_cfg = get_config()
     if current_cfg is None:
         raise RuntimeError(config_service._CONFIG_ERROR or "配置不可用。")
-    try:
-        unavailable, _run_v2_upload, scan_v2 = load_v2_gui_integration()
-        from ..config import paths as _runtime_paths
+    from .integration import V2IntegrationUnavailable, scan_v2
+    from ..config import paths as runtime_paths
 
+    try:
         bundle = scan_v2(
             kind,
             source_root=Path(get_cfg(KIND_PATH_KEYS[kind], PROJECT_DIR)),
@@ -879,10 +840,10 @@ def scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
             cancel_event=cancel_event,
             progress_callback=progress_callback,
             config=current_cfg,
-            runtime_paths=_runtime_paths,
+            runtime_paths=runtime_paths,
         )
         return v2_scan_result(bundle, progress_callback=progress_callback, cancel_event=cancel_event)
-    except unavailable:
+    except V2IntegrationUnavailable:
         return legacy_scan_result(
             kind,
             progress_callback=progress_callback,
@@ -890,38 +851,14 @@ def scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
         )
 
 
-# Compatibility aliases
-_basic_paths = basic_paths
-_path_size = path_size
-_item_size = item_size
-_apply_size_limits = apply_size_limits
-_basic_mixed_scan = basic_mixed_scan
-_cancelled_scan_result = cancelled_scan_result
-_legacy_scan_result = legacy_scan_result
-_load_v2_gui_integration = load_v2_gui_integration
-_v2_scan_result = v2_scan_result
-_scan_result = scan_result
-
-
 __all__ = [
     "BASIC_SCAN_SNAPSHOTS",
-    "_apply_size_limits",
-    "_basic_mixed_scan",
-    "_basic_paths",
-    "_cancelled_scan_result",
-    "_item_size",
-    "_legacy_scan_result",
-    "_load_v2_gui_integration",
-    "_path_size",
-    "_scan_result",
-    "_v2_scan_result",
     "apply_size_limits",
     "basic_mixed_scan",
     "basic_paths",
     "cancelled_scan_result",
     "item_size",
     "legacy_scan_result",
-    "load_v2_gui_integration",
     "path_size",
     "scan_result",
     "v2_scan_result",

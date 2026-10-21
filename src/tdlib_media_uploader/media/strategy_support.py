@@ -20,16 +20,12 @@ class StrategyCancelled(RuntimeError):
     cancelled = True
 
 
-def is_cancelled(token: CancelToken | None, *, fallback_on_error: bool = False) -> bool:
+def is_cancelled(token: CancelToken | None) -> bool:
     if token is None:
         return False
     checker = getattr(token, "is_cancelled", None)
     if callable(checker):
-        try:
-            return bool(checker())
-        except Exception:
-            if not fallback_on_error:
-                return False
+        return bool(checker())
     return bool(getattr(token, "cancelled", False))
 
 

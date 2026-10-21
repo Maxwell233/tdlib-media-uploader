@@ -197,21 +197,7 @@ def run_cancellable_process(
     return completed
 
 
-def run_process(command, **kwargs):
-    """Compatibility alias for the extracted process boundary."""
-
-    return run_cancellable_process(command, **kwargs)
-
-
-def run_external_process(command, **kwargs):
-    """Descriptive alias used by media-tool adapters."""
-
-    return run_cancellable_process(command, **kwargs)
-
-
 __all__ = [
     "ProcessCancelled",
     "run_cancellable_process",
-    "run_external_process",
-    "run_process",
 ]

@@ -51,21 +51,8 @@ def save_history(records: list[dict[str, Any]]) -> None:
                 pass
 
 
-def clear_history() -> None:
-    """Clear all saved history records."""
-    save_history([])
-
-
-# Compatibility aliases
-_load_history = load_history
-_save_history = save_history
-
-
 __all__ = [
     "HISTORY_PATH",
-    "_load_history",
-    "_save_history",
-    "clear_history",
     "load_history",
     "save_history",
 ]

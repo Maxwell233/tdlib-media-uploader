@@ -109,11 +109,6 @@ class GuiConsoleUI(QObject):
         if client is not None:
             client.cancel()
 
-    def request_stop(self):
-        """Backward-compatible alias for the high-risk immediate stop."""
-
-        self.request_immediate_stop()
-
     def prompt(self, text: str, *, password: bool = False) -> str:
         value = self.auth_bridge.ask(text, password)
         if not value and not self.safe_stop_requested and not self.stop_requested:

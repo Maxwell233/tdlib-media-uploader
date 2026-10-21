@@ -52,7 +52,6 @@ def format_size(value: float | int) -> str:
         if value < 1024 or unit == "TiB":
             return f"{value:.0f} {unit}" if unit == "B" else f"{value:.2f} {unit}"
         value /= 1024
-    return f"{value:.2f} TiB"
 
 
 def prune_staging_cache(config: Any, *, startup: bool = False) -> None:

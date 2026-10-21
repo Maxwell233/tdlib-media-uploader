@@ -26,6 +26,8 @@ QT_QPA_PLATFORM=offscreen PYTHONPATH=src:tests IMAGEIO_FFMPEG_EXE=tools/ffmpeg/f
 - `core/upload_state.py` 保留原有 JSON 格式，整批写入临时文件、刷盘并原子替换后才更新内存完成状态；保存或重置失败时保留原记录，无需格式迁移。
 - `core/compat.py`、`core/sorting.py`、`core/concurrency.py` 分别集中旧接口调用适配、排序及有界调度。文件系统、就绪检查和外部进程各只有一份正式实现；媒体流程的共用策略集中在 `media/common.py`，策略适配共用逻辑集中在 `media/strategy_support.py`。
 - GUI 上传与 TDLib 使用只读配置快照；上传根目录在任务开始时固定，兼容作用域不再改写相同根目录。媒体流程配置引用由任务作用域接入并在结束时恢复。
+- Telegram 登录、请求与发送统一使用 `telegram/tdlib_common.py`；测试直接验证这个实际入口，不维护平行的客户端或鉴权状态机。状态与日志直接注入上传引擎。
+- 打包模块由 `collect_submodules` 自动发现，构建发现失败直接报告；依赖数据保留，仅排除 imageio-ffmpeg wheel 自带的可执行文件。
 - `gui/workers.py` 承担缓存删除，主线程处理进度和完成事件；直到线程结束才解除操作互斥。取消不会撤销已删除的文件。
 
 ## CI 分工

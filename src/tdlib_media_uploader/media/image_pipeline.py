@@ -3,22 +3,19 @@
 
 from __future__ import annotations
 
-import json
 from collections import OrderedDict
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PIL import Image
-
-from ..core.album import CaptionStore, album_key, compose_caption, with_filename_description
+from ..core.album import CaptionStore, album_key, compose_caption
+from ..core.album import with_filename_description as with_filename_description
 from ..core.identity import media_file_signature
 from ..core.upload_state import UploadState as SharedUploadState
 from ..core.filesystem import display_path, file_snapshot, is_network_path, io_worker_count, iter_files, stable_path, validate_scan_root
 from ..core.sorting import media_path_sort, relative_name as stable_relative_name
 from ..core.concurrency import ordered_bounded_map
 from ..core.readiness import raise_for_file_readiness, wait_for_file_ready
-from ..processes.runner import run_cancellable_process
 from .common import (
     cleanup_confirmed_staging as _cleanup_confirmed_staging,
     format_size,
@@ -31,16 +28,10 @@ from ..telegram.tdlib_common import HeadlessUI, formatted_text
 from ..config.paths import IMAGE_STATE_DIR, IMAGE_COMPRESSION_CACHE_DIR
 from ..upload.staging import should_stage, stage_file
 from .image_probe import (
-    PHOTO_TARGET_MAX_SIDE,
     TELEGRAM_PHOTO_MAX_ASPECT_RATIO,
-    TELEGRAM_PHOTO_MAX_BYTES,
-    TELEGRAM_PHOTO_MAX_DIMENSION_SUM,
-    TELEGRAM_PHOTO_TARGET_BYTES,
-    ImageMediaInfo,
     probe_image,
 )
 from .image_prepare import (
-    PreparedImage,
     prepare_image_for_telegram,
 )
 
@@ -48,7 +39,6 @@ STATE_DIR = IMAGE_STATE_DIR
 LAST_SCAN_ERRORS: list[str] = []
 LAST_SCAN_WARNINGS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
-DEFERRED_STATUS = "DEFERRED"
 IMAGE_UPLOAD_PATHS: dict[str, Path] = {}
 STAGED_UPLOAD_PATHS: dict[str, Path] = {}
 IMAGE_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
@@ -175,10 +165,6 @@ def compress_image(path: Path, cancel_event=None, *, source_info=None) -> Path:
         background=transparency_background,
     )
     return prepared.upload_path
-
-
-def upload_path(path: Path) -> Path:
-    return IMAGE_UPLOAD_PATHS.get(stable_path(path), path)
 
 
 def cleanup_compressed_images() -> None:
@@ -338,7 +324,7 @@ def input_photo(
     )
     raise_for_file_readiness(path, readiness)
     snapshot = readiness.snapshot.as_tuple()
-    source_path = upload_path(path)
+    source_path = path
     staging_mode = getattr(cfg, "STAGING_MODE", None)
     if staging_mode is None or (staging_mode == "off" and getattr(cfg, "STAGING_ENABLED", False)):
         staging_mode = "always" if getattr(cfg, "STAGING_ENABLED", False) else "off"

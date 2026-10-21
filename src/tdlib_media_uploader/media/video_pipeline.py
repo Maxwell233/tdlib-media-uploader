@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import json
 import math
@@ -28,11 +27,12 @@ from PIL import Image
 if not hasattr(imageio_ffmpeg, "get_ffmpeg_exe"):
     imageio_ffmpeg.get_ffmpeg_exe = lambda: shutil.which("ffmpeg") or "ffmpeg"
 
-from ..core.album import CaptionStore, album_key, compose_caption, with_filename_description
+from ..core.album import CaptionStore, album_key, compose_caption
+from ..core.album import with_filename_description as with_filename_description
 from ..core.identity import media_file_signature
 from ..core.upload_state import UploadState as SharedUploadState
 from ..core.concurrency import cancelable_sleep, ordered_bounded_map
-from ..core.filesystem import display_path, file_mtime, file_snapshot, is_network_path, io_worker_count, iter_files, stable_path, retry_fs_operation, validate_scan_root
+from ..core.filesystem import display_path, file_snapshot, is_network_path, io_worker_count, iter_files, stable_path, validate_scan_root
 from ..core.sorting import media_path_sort, relative_name as stable_relative_name
 from ..processes.runner import run_cancellable_process
 from ..core.readiness import raise_for_file_readiness, wait_for_file_ready
@@ -63,7 +63,6 @@ LAST_SCAN_SIZE_SKIPS: list[dict] = []
 LAST_SCAN_PREMIUM_REQUIRED: list[dict] = []
 LAST_SCAN_SNAPSHOTS: dict[str, tuple[int, int]] = {}
 STAGED_UPLOAD_PATHS: dict[str, Path] = {}
-DEFERRED_STATUS = "DEFERRED"
 
 
 def _hidden_subprocess_kwargs() -> dict:
@@ -395,7 +394,7 @@ def _process_timeout(config_name: str, fallback: float) -> float:
         return float(fallback)
 
 
-def _exiftool_command(*, recursive: bool = False) -> list[str]:
+def _exiftool_command() -> list[str]:
     command = [
         str(cfg.EXIFTOOL_PATH),
         "-charset", "FileName=UTF8",
@@ -406,7 +405,7 @@ def _exiftool_command(*, recursive: bool = False) -> list[str]:
     ]
     # ExifTool must never discover a second, potentially inconsistent view of
     # a network directory.  Python supplies the explicit file list through
-    # stdin; keep the legacy argument for API compatibility but ignore it.
+    # stdin.
     for ext in sorted(cfg.VIDEO_EXTENSIONS):
         command += ["-ext", ext.lstrip(".")]
     # Keep all paths in an UTF-8 argument stream. This avoids Windows codepage
@@ -419,7 +418,6 @@ def _exiftool_command(*, recursive: bool = False) -> list[str]:
 def _exiftool_rows_detailed(
     batch,
     *,
-    recursive: bool,
     cancel_event=None,
 ) -> tuple[list[dict], str | None, bool]:
     """Run one ExifTool batch and report whether the output is complete."""
@@ -431,7 +429,7 @@ def _exiftool_rows_detailed(
         if _cancel_requested(cancel_event):
             return [], "ExifTool 读取已取消", False
         try:
-            command = _exiftool_command(recursive=recursive)
+            command = _exiftool_command()
             process_kwargs = {
                 "input": input_text,
                 "stdout": subprocess.PIPE,
@@ -520,16 +518,6 @@ def _exiftool_rows_detailed(
     return [], last_error or "ExifTool 未返回有效结果", False
 
 
-def _exiftool_rows(batch, *, recursive: bool) -> tuple[list[dict], str | None]:
-    """Backward-compatible two-value wrapper for integrations."""
-
-    rows, diagnostic, _complete = _exiftool_rows_detailed(
-        batch,
-        recursive=recursive,
-    )
-    return rows, diagnostic
-
-
 def read_exif_metadata(
     paths=None,
     cancel_event=None,
@@ -578,18 +566,17 @@ def read_exif_metadata(
     emit_progress()
 
     batches = [
-        (requested[offset:offset + EXIFTOOL_BATCH_SIZE], False)
+        requested[offset:offset + EXIFTOOL_BATCH_SIZE]
         for offset in range(0, len(requested), EXIFTOOL_BATCH_SIZE)
     ]
     index = {}
     diagnostics = []
 
-    def collect(batch, recursive):
+    def collect(batch):
         if _cancel_requested(cancel_event):
             return
         rows, diagnostic, complete = _exiftool_rows_detailed(
             batch,
-            recursive=recursive,
             cancel_event=cancel_event,
         )
         returned = set()
@@ -645,16 +632,16 @@ def read_exif_metadata(
                 return
             # The one-file retry is deliberately isolated from all rows that
             # were already accepted above.
-            collect(missing, False)
+            collect(missing)
             return
         midpoint = max(1, len(missing) // 2)
-        collect(missing[:midpoint], False)
-        collect(missing[midpoint:], False)
+        collect(missing[:midpoint])
+        collect(missing[midpoint:])
 
-    for batch, recursive in batches:
+    for batch in batches:
         if _cancel_requested(cancel_event):
             break
-        collect(batch, recursive)
+        collect(batch)
     if diagnostics:
         LAST_SCAN_ERRORS.extend(f"ExifTool：{message}" for message in diagnostics)
     if not _cancel_requested(cancel_event):
@@ -770,10 +757,6 @@ def _read_media_creation_metadata(
             pass
 
 
-class _NoMediaDate(Exception):
-    """Internal signal used to keep transient/negative results out of cache."""
-
-
 _media_metadata_cache = {}
 _MEDIA_CACHE_MAX_SIZE = 4096
 _media_metadata_cache_lock = threading.Lock()
@@ -788,22 +771,17 @@ def _media_creation_metadata(path_text: str, size: int, mtime_ns: int, cancel_ev
         if cache_key in _media_metadata_cache:
             return _media_metadata_cache[cache_key]
 
-    try:
-        result = _read_media_creation_metadata(
-            path_text, size, mtime_ns, cancel_event=cancel_event
-        )
-        if _cancel_requested(cancel_event):
-            return None
-        if result is None:
-            return None
-
-        with _media_metadata_cache_lock:
-            _media_metadata_cache[cache_key] = result
-            if len(_media_metadata_cache) > _MEDIA_CACHE_MAX_SIZE:
-                _media_metadata_cache.pop(next(iter(_media_metadata_cache)))
-        return result
-    except _NoMediaDate:
+    result = _read_media_creation_metadata(
+        path_text, size, mtime_ns, cancel_event=cancel_event
+    )
+    if _cancel_requested(cancel_event) or result is None:
         return None
+
+    with _media_metadata_cache_lock:
+        _media_metadata_cache[cache_key] = result
+        if len(_media_metadata_cache) > _MEDIA_CACHE_MAX_SIZE:
+            _media_metadata_cache.pop(next(iter(_media_metadata_cache)))
+    return result
 
 
 def _clear_media_metadata_cache():

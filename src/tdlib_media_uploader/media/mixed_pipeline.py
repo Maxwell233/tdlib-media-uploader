@@ -10,18 +10,15 @@ checkpoint finalization. Mixed Albums retain per-item error isolation.
 
 from __future__ import annotations
 
-import hashlib
-import json
-import os
 import stat
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 from pathlib import Path
 
-from ..core.album import CaptionStore, album_key, compose_caption, with_filename_description
+from ..core.album import CaptionStore, album_key, compose_caption
+from ..core.album import with_filename_description as with_filename_description
 from ..core.identity import media_file_signature
 from ..core.upload_state import UploadState as SharedUploadState
-from ..core.filesystem import display_path, file_snapshot, io_worker_count, iter_files, is_network_path, file_mtime, is_link_or_junction, retry_fs_operation, stable_path, iter_directory_entries_with_retry, validate_scan_root
+from ..core.filesystem import file_snapshot, io_worker_count, iter_files, is_network_path, file_mtime, is_link_or_junction, retry_fs_operation, stable_path, iter_directory_entries_with_retry, validate_scan_root
 from ..core.readiness import CHANGED, DEFERRED, FileReadinessError, raise_for_file_readiness, wait_for_file_ready
 from ..core.sorting import media_path_sort, relative_name as stable_relative_name
 from ..core.concurrency import ordered_bounded_map
@@ -33,20 +30,19 @@ from .common import (
     readiness_record as _readiness_record,
 )
 from ..config import loader as cfg
-from ..telegram.tdlib_common import HeadlessUI, formatted_text
-from ..config.paths import APP_DATA_DIR, RESOURCE_DIR, MIXED_STATE_DIR
+from ..telegram.tdlib_common import HeadlessUI
+from ..telegram.tdlib_common import formatted_text as formatted_text
+from ..config.paths import MIXED_STATE_DIR
 
 from . import image_pipeline as image_core
 from . import video_pipeline as video_core
 
 
-PROJECT_DIR = RESOURCE_DIR
 STATE_DIR = MIXED_STATE_DIR
 LAST_SCAN_ERRORS: list[str] = []
 LAST_SCAN_WARNINGS: list[str] = []
 LAST_SCAN_SIZE_SKIPS: list[dict] = []
 LAST_SCAN_IGNORED_ROOT_MEDIA: list[Path] = []
-DEFERRED_STATUS = "DEFERRED"
 UI = HeadlessUI()
 MEDIA_DATE_MAX_WORKERS = 4
 READINESS_ATTEMPTS = 3
@@ -146,8 +142,6 @@ def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
                 f"上传前将按{'转封装后的输出' if media_kind == 'video' else '规范化后的输出'}大小复核"
             ),
         })
-        if media_kind != "image" and media_kind != "video":
-            return None
     return {
         "path": path,
         "media_kind": media_kind,

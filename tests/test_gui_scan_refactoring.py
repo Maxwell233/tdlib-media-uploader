@@ -11,6 +11,19 @@ from tdlib_media_uploader.gui import models, scanner
 
 
 class TestRefactoringBoundaries(unittest.TestCase):
+    def test_scan_preserves_integration_import_error(self):
+        real_import = builtins.__import__
+
+        def import_without_integration(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == 'integration' and 'scan_v2' in (fromlist or ()):
+                raise ImportError('bundled integration unavailable')
+            return real_import(name, globals, locals, fromlist, level)
+
+        with patch('builtins.__import__', side_effect=import_without_integration), \
+             patch.object(scanner, 'get_config', return_value=SimpleNamespace()):
+            with self.assertRaisesRegex(ImportError, 'bundled integration unavailable'):
+                scanner.scan_result('image')
+
     def test_basic_mixed_preview_sorts_dictionary_items_by_source_path(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

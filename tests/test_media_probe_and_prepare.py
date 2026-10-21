@@ -665,6 +665,34 @@ class ImageProbeAndPrepareTest(unittest.TestCase):
 class MixedMediaIntegrationTest(unittest.TestCase):
     """Test mixed upload processing containing video and image formats."""
 
+    def test_changed_image_rebuilds_normalized_copy_instead_of_reusing_old_upload_path(self):
+        from tdlib_media_uploader.media import image_pipeline as images
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "photo.bmp"
+            with patch("tdlib_media_uploader.media.image_prepare.IMAGE_COMPRESSION_CACHE_DIR", root / "cache"), \
+                 patch.object(images, "IMAGE_UPLOAD_PATHS", {}), \
+                 patch.object(images, "IMAGE_SCAN_SNAPSHOTS", {}), \
+                 patch.object(images.cfg, "STAGING_MODE", "off"), \
+                 patch.object(images.cfg, "STAGING_ENABLED", False):
+                def contents(color):
+                    Image.new("RGB", (64, 48), color).save(source)
+                    stat = source.stat()
+                    item = {"path": source, "media_kind": "image",
+                            "scan_size": stat.st_size, "scan_mtime_ns": stat.st_mtime_ns}
+                    built, valid, skipped = mixed_core.build_mixed_contents([item], "")
+                    self.assertEqual(valid, [item])
+                    self.assertEqual(skipped, [])
+                    return Path(built[0]["photo"]["path"])
+
+                first = contents("red")
+                second = contents("blue")
+                self.assertNotEqual(first, second)
+                with Image.open(second) as image:
+                    red, _green, blue = image.getpixel((32, 24))
+                    self.assertGreater(blue, red)
+
     def test_mixed_preflight_and_payloads(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

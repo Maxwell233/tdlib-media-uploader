@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import ast
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
 import unittest
+from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 
@@ -48,21 +50,6 @@ print(json.dumps({
     return json.loads(result.stdout)
 
 
-def _literal_strings_in_assignment(tree: ast.AST, name: str) -> set[str]:
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if not any(isinstance(target, ast.Name) and target.id == name for target in targets):
-                continue
-            value = node.value
-            return {
-                item.value
-                for item in ast.walk(value)
-                if isinstance(item, ast.Constant) and isinstance(item.value, str)
-            }
-    raise AssertionError(f"spec assignment not found: {name}")
-
-
 class Phase2PyInstallerLayoutTest(unittest.TestCase):
     def test_platform_build_workflow_runs_on_pull_requests(self):
         source = BUILD_WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -79,95 +66,72 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
             "PR artifact names must not inherit the pull_request merge ref slash",
         )
 
-    def test_spec_declares_src_package_and_hidden_imports(self):
-        source = SPEC_PATH.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(SPEC_PATH))
-        package_modules = _literal_strings_in_assignment(tree, "PACKAGE_HIDDENIMPORTS")
-        expected_modules = {
+    def _run_spec(self, *, failing_hook=None):
+        hooks = ModuleType("PyInstaller.utils.hooks")
+        hooks.collect_submodules = Mock(return_value=[
             "tdlib_media_uploader",
-            "tdlib_media_uploader.app",
-            "tdlib_media_uploader.contracts",
-            "tdlib_media_uploader.config",
-            "tdlib_media_uploader.config.model",
-            "tdlib_media_uploader.config.loader",
-            "tdlib_media_uploader.config.paths",
-            "tdlib_media_uploader.core",
-            "tdlib_media_uploader.core.models",
-            "tdlib_media_uploader.core.sorting",
-            "tdlib_media_uploader.core.filesystem",
-            "tdlib_media_uploader.core.readiness",
-            "tdlib_media_uploader.core.concurrency",
-            "tdlib_media_uploader.core.album",
-            "tdlib_media_uploader.core.identity",
-            "tdlib_media_uploader.core.upload_state",
-            "tdlib_media_uploader.core.upload_journal",
-            "tdlib_media_uploader.core.logging",
-            "tdlib_media_uploader.core.instance_lock",
-            "tdlib_media_uploader.core.self_test",
-            "tdlib_media_uploader.gui",
-            "tdlib_media_uploader.gui.application",
-            "tdlib_media_uploader.gui.main_window",
-            "tdlib_media_uploader.gui.events",
-            "tdlib_media_uploader.gui.integration",
-            "tdlib_media_uploader.gui.models",
-            "tdlib_media_uploader.gui.workers",
-            "tdlib_media_uploader.gui.pages",
-            "tdlib_media_uploader.gui.pages.home",
-            "tdlib_media_uploader.gui.pages.task",
-            "tdlib_media_uploader.gui.pages.upload",
-            "tdlib_media_uploader.gui.pages.video",
-            "tdlib_media_uploader.gui.pages.image",
-            "tdlib_media_uploader.gui.pages.mixed",
-            "tdlib_media_uploader.media",
-            "tdlib_media_uploader.media.image",
-            "tdlib_media_uploader.media.mixed",
-            "tdlib_media_uploader.media.video",
-            "tdlib_media_uploader.media.common",
-            "tdlib_media_uploader.media.strategy_support",
-            "tdlib_media_uploader.media.image_pipeline",
-            "tdlib_media_uploader.media.mixed_pipeline",
-            "tdlib_media_uploader.media.video_pipeline",
-            "tdlib_media_uploader.processes",
-            "tdlib_media_uploader.processes.runner",
-            "tdlib_media_uploader.telegram",
-            "tdlib_media_uploader.telegram.client",
-            "tdlib_media_uploader.telegram.auth",
-            "tdlib_media_uploader.telegram.target",
-            "tdlib_media_uploader.telegram.limits",
-            "tdlib_media_uploader.telegram.send_result",
-            "tdlib_media_uploader.telegram.tdlib_common",
-            "tdlib_media_uploader.upload",
-            "tdlib_media_uploader.upload.engine",
-            "tdlib_media_uploader.upload.planner",
-            "tdlib_media_uploader.upload.preflight",
-            "tdlib_media_uploader.upload.staging",
-        }
-        self.assertTrue(expected_modules <= package_modules)
-        self.assertIn("from PyInstaller.utils.hooks import collect_all, collect_submodules", source)
-        self.assertIn("collect_submodules(PACKAGE_NAME)", source)
-        self.assertIn("pathex=[str(SRC_DIR), str(PROJECT_DIR)]", source)
-        self.assertIn('[str(PACKAGE_DIR / "app.py")]', source)
+            "tdlib_media_uploader.gui.settings.upload_panel",
+            "tdlib_media_uploader.media.video_prepare",
+        ])
+        hooks.collect_all = Mock(side_effect=lambda name: (
+            [(f"/{name}/metadata.json", name)],
+            [("/native/tdjson.dylib", "."),
+             ("/imageio_ffmpeg/binaries/ffmpeg-osx", "imageio_ffmpeg/binaries")],
+            [f"{name}.native"],
+        ))
+        if failing_hook:
+            getattr(hooks, failing_hook).side_effect = RuntimeError("discovery failed")
+        api = ModuleType("PyInstaller.building.api")
+        api.COLLECT = Mock()
+        api.EXE = Mock()
+        osx = ModuleType("PyInstaller.building.osx")
+        osx.BUNDLE = Mock()
+        analysis = Mock(return_value=SimpleNamespace(
+            pure=[], scripts=[], binaries=[], datas=[], zipfiles=[],
+        ))
+        with patch.dict(sys.modules, {
+            "PyInstaller.building.api": api,
+            "PyInstaller.building.osx": osx,
+            "PyInstaller.utils.hooks": hooks,
+        }):
+            runpy.run_path(str(SPEC_PATH), init_globals={
+                "SPEC": str(SPEC_PATH), "Analysis": analysis, "PYZ": Mock(),
+            })
+        return analysis.call_args, hooks
+
+    def test_spec_declares_src_package_and_hidden_imports(self):
+        call, hooks = self._run_spec()
+        self.assertEqual(call.args, ([str(PROJECT_ROOT / "src/tdlib_media_uploader/app.py")],))
+        self.assertEqual(call.kwargs["pathex"], [str(PROJECT_ROOT / "src"), str(PROJECT_ROOT)])
+        hooks.collect_submodules.assert_called_once_with("tdlib_media_uploader")
+        self.assertEqual(set(call.kwargs["hiddenimports"]), {
+            *hooks.collect_submodules.return_value,
+            "tdjson", "PIL", "imageio_ffmpeg", "tdjson.native", "imageio_ffmpeg.native",
+        })
+        self.assertIn(("/native/tdjson.dylib", "."), call.kwargs["binaries"])
+        self.assertFalse(any("ffmpeg-osx" in source for source, _dest in call.kwargs["binaries"]))
+
+    def test_spec_reports_package_discovery_failures(self):
+        for hook in ("collect_submodules", "collect_all"):
+            with self.subTest(hook=hook):
+                with self.assertRaisesRegex(RuntimeError, "discovery failed"):
+                    self._run_spec(failing_hook=hook)
 
     def test_spec_keeps_all_source_resource_destinations_explicit(self):
-        source = SPEC_PATH.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(SPEC_PATH))
-        resource_literals = _literal_strings_in_assignment(tree, "RESOURCE_DATA")
-        for name in (
-            "default_config.toml",
-            "resources",
-            "VERSION",
-            "LICENSE",
-            "ATTRIBUTION",
-            "THIRD_PARTY_LICENSES.md",
-            "assets",
-            "tdlib_media_uploader_icon.ico",
-            "tdlib_media_uploader_icon.png",
-            "tools",
-            "README.txt",
+        call, _hooks = self._run_spec()
+        resources = set(call.kwargs["datas"])
+        for source, destination in (
+            ("resources/default_config.toml", "resources"),
+            ("VERSION", "."), ("LICENSE", "."), ("ATTRIBUTION", "."),
+            ("THIRD_PARTY_LICENSES.md", "."),
+            ("assets/tdlib_media_uploader_icon.ico", "assets"),
+            ("assets/tdlib_media_uploader_icon.png", "assets"),
+            ("tools/README.txt", "tools"),
         ):
-            self.assertIn(name, resource_literals)
-        self.assertIn('datas.append((str(ffmpeg_build_info), "tools/ffmpeg"))', source)
-        self.assertIn('binaries.append((str(packaged_ffmpeg), "tools/ffmpeg"))', source)
+            with self.subTest(source=source):
+                self.assertIn((str(PROJECT_ROOT / source), destination), resources)
+        self.assertIn(("/tdjson/metadata.json", "tdjson"), resources)
+        self.assertIn(("/imageio_ffmpeg/metadata.json", "imageio_ffmpeg"), resources)
 
     def test_build_time_imports_resolve_repository_resources(self):
         result = _probe_runtime_paths(

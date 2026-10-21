@@ -23,16 +23,14 @@ import uuid
 
 from ..core.source_snapshot import capture_snapshot, validate_snapshots
 from ..config import loader as cfg
-from ..config.paths import THUMBNAIL_CACHE_DIR, VIDEO_PROCESSED_CACHE_DIR
+from ..config.paths import VIDEO_PROCESSED_CACHE_DIR
 from ..core.filesystem import stable_path
 from ..core.filesystem import display_path
 from ..processes.runner import run_cancellable_process
-from .video_pipeline import build_thumbnail, format_size, video_limit_text
 from .video_probe import (
     VideoMediaInfo,
     _find_ffmpeg,
     _hidden_subprocess_kwargs,
-    determine_supports_streaming,
     format_unsupported_reason,
     probe_video,
 )
@@ -196,8 +194,6 @@ def resolve_processed_filename(orig_path: Path, group_dir: Path, manifest: dict[
         # Neither manifest nor disk has this slot -> free!
         return cand_name
 
-    return f"{orig_path.stem}.mp4"
-
 
 def _valid_stream_copy(info: VideoMediaInfo, expected_info: VideoMediaInfo | None = None) -> bool:
     """Require a readable MP4 with unchanged selected video and audio codecs."""
@@ -225,7 +221,7 @@ def remux_video_lossless(
     """Losslessly remux a probed video to MP4 using stream copy.
 
     Invokes:
-        ffmpeg -y -v error -i <source> -map 0:v:0 -map 0:a:0? -c copy -movflags +faststart <temp>
+        ffmpeg -y -v error -i <source> -map 0:V:0 -map 0:a:0? -c copy -movflags +faststart <temp>
     Outputs to temporary file first, verifies output, and atomically renames.
     Any temporary file is deleted immediately on error or cancellation.
     """
@@ -248,7 +244,7 @@ def remux_video_lossless(
         "-i",
         display_path(source_path),
         "-map",
-        "0:v:0",
+        "0:V:0",
         "-map",
         "0:a:0?",
         "-c",

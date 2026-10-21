@@ -166,30 +166,9 @@ def write_config_values(
         return f"配置保存失败：{type(exc).__name__}: {exc}"
 
 
-# Compatibility aliases
-_ensure_config_file = ensure_config_file
-_reload_config = reload_config
-_cfg = get_cfg
-_target_for = target_for
-_source_root_for = source_root_for
-_get_section_re = get_section_re
-_get_key_re = get_key_re
-_update_toml_value = update_toml_value
-_write_config_values = write_config_values
-
-
 __all__ = [
     "_CONFIG_CREATED",
     "_CONFIG_ERROR",
-    "_cfg",
-    "_ensure_config_file",
-    "_get_key_re",
-    "_get_section_re",
-    "_reload_config",
-    "_source_root_for",
-    "_target_for",
-    "_update_toml_value",
-    "_write_config_values",
     "cfg",
     "ensure_config_file",
     "get_cfg",

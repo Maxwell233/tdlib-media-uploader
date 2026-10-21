@@ -13,7 +13,7 @@ from contextlib import contextmanager
 import importlib
 from pathlib import Path
 import threading
-from typing import Any, Callable
+from typing import Any
 
 from ..core.compat import call_supported as _call_supported
 from ..contracts import CancelToken, EventSink, UploadContext
@@ -29,7 +29,6 @@ from ..core.models import (
 
 from .strategy_support import (
     CancelEventBridge as _CancelEventBridge,
-    StrategyCancelled as _StrategyCancelled,
     StrategyLogUI,
     build_item_lookup as _shared_item_lookup,
     check_cancelled as _check_cancelled,

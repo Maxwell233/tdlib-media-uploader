@@ -271,6 +271,41 @@ class VideoRemuxMatrixAndProbeTest(unittest.TestCase):
 class VideoRemuxExecutionAndValidationTest(unittest.TestCase):
     """Test lossless remux command construction, temporary file safety, and verification."""
 
+    def test_remux_ignores_attached_picture_before_video(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "with-cover.mkv"
+            source.write_bytes(b"source video with attached cover")
+            target = Path(directory) / "out.mp4"
+            cover = {"codec_type": "video", "codec_name": "mjpeg", "width": 32,
+                     "height": 32, "duration": "1", "disposition": {"attached_pic": 1}}
+            video = {"codec_type": "video", "codec_name": "h264", "width": 640,
+                     "height": 360, "duration": "5", "disposition": {"attached_pic": 0}}
+
+            def probe(command, **_kwargs):
+                path = Path(command[-1])
+                streams = [cover, video] if path == source else [
+                    video if path.read_bytes() == b"video stream" else cover
+                ]
+                payload = {"format": {"format_name": "matroska" if path == source else "mp4",
+                                      "duration": "5"}, "streams": streams}
+                return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+            def remux(command, **_kwargs):
+                selected = command[command.index("-map") + 1]
+                Path(command[-1]).write_bytes(b"video stream" if selected == "0:V:0" else b"cover stream")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch("tdlib_media_uploader.media.video_probe._find_ffprobe", return_value="ffprobe"), \
+                 patch("tdlib_media_uploader.media.video_probe.run_cancellable_process", side_effect=probe), \
+                 patch("tdlib_media_uploader.media.video_prepare._find_ffmpeg", return_value="ffmpeg"), \
+                 patch("tdlib_media_uploader.media.video_prepare.run_cancellable_process", side_effect=remux):
+                info = probe_video(source)
+                self.assertEqual((info.video_codec, info.width, info.height), ("h264", 640, 360))
+                remux_video_lossless(source, target, expected_info=info)
+                result = probe_video(target)
+            self.assertEqual((result.video_codec, result.width, result.height), ("h264", 640, 360))
+            self.assertEqual(source.read_bytes(), b"source video with attached cover")
+
     def test_ffmpeg_remux_command_exact_flags(self):
         with tempfile.TemporaryDirectory() as td:
             src = Path(td) / "test.mkv"
@@ -318,7 +353,7 @@ class VideoRemuxExecutionAndValidationTest(unittest.TestCase):
             m_idx = cmd.index("-movflags")
             self.assertEqual(cmd[m_idx + 1], "+faststart")
             self.assertIn("-map", cmd)
-            self.assertIn("0:v:0", cmd)
+            self.assertIn("0:V:0", cmd)
             self.assertIn("0:a:0?", cmd)
 
             # Ensure NO transcode flags
@@ -414,8 +449,7 @@ class DecoupledThumbnailAndCacheLifecycleTest(unittest.TestCase):
             thumb_dir = cache_dir / "thumbnails"
             processed_dir = cache_dir / "video_processed"
 
-            with patch("tdlib_media_uploader.media.video_prepare.THUMBNAIL_CACHE_DIR", thumb_dir), \
-                 patch("tdlib_media_uploader.media.video_pipeline.THUMB_CACHE_DIR", thumb_dir), \
+            with patch("tdlib_media_uploader.media.video_pipeline.THUMB_CACHE_DIR", thumb_dir), \
                  patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir):
 
                 src = source_dir / "movie.mkv"
@@ -916,8 +950,7 @@ class ProcessedFilenameAndDirectNativeTest(unittest.TestCase):
             cache_dir = Path(td) / "cache"
             processed_dir = cache_dir / "video_processed"
 
-            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
-                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir):
                 for ext in (".mp4", ".mov", ".m4v"):
                     src = src_dir / f"sample{ext}"
                     src.write_bytes(b"native raw bytes")
@@ -950,8 +983,7 @@ class ProcessedFilenameAndDirectNativeTest(unittest.TestCase):
             cache_dir = Path(td) / "cache"
             processed_dir = cache_dir / "video_processed"
 
-            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
-                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir):
 
                 test_files = [
                     ("clip.ts", "clip.mp4"),
@@ -1008,8 +1040,7 @@ class ProcessedFilenameAndDirectNativeTest(unittest.TestCase):
             cache_dir = Path(td) / "cache"
             processed_dir = cache_dir / "video_processed"
 
-            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
-                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir):
 
                 src1 = src_dir / "movie.ts"
                 src2 = src_dir / "movie.avi"
@@ -1077,8 +1108,7 @@ class ProcessedFilenameAndDirectNativeTest(unittest.TestCase):
             cache_dir = Path(td) / "cache"
             processed_dir = cache_dir / "video_processed"
 
-            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
-                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir):
 
                 src1 = src_dir / "Movie.ts"
                 src2 = src_dir / "movie.avi"
@@ -1156,8 +1186,7 @@ class ProcessedFilenameAndDirectNativeTest(unittest.TestCase):
             cache_dir = Path(td) / "cache"
             processed_dir = cache_dir / "video_processed"
 
-            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
-                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir):
 
                 src1 = src_dir / "MOVIE.ts"
                 src2 = src_dir / "movie.avi"
@@ -1244,8 +1273,7 @@ class ProcessedFilenameAndDirectNativeTest(unittest.TestCase):
             existing_disk_file = grp_dir / "Movie.mp4"
             existing_disk_file.write_bytes(b"PRE_EXISTING_DISK_CONTENT")
 
-            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
-                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir):
 
                 src = src_dir / "movie.avi"
                 src.write_bytes(b"new movie avi")
@@ -1298,8 +1326,7 @@ class ProcessedFilenameAndDirectNativeTest(unittest.TestCase):
             cache_dir = Path(td) / "cache"
             processed_dir = cache_dir / "video_processed"
 
-            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir), \
-                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+            with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", processed_dir):
 
                 src = src_dir / "clip.ts"
                 src.write_bytes(b"initial ts content")
@@ -1446,8 +1473,7 @@ class CleanupIsolationAndSecurityTest(unittest.TestCase):
 
             with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", proc_dir), \
                  patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=mock_probe), \
-                 patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux, \
-                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+                 patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
 
                 mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"remuxed 003.mp4") and d
 
@@ -1766,8 +1792,7 @@ class SafeStopAndCleanupSequencingTest(unittest.TestCase):
 
             with patch("tdlib_media_uploader.media.video_prepare.VIDEO_PROCESSED_CACHE_DIR", proc_dir), \
                  patch("tdlib_media_uploader.media.video_prepare.probe_video", side_effect=mock_probe), \
-                 patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux, \
-                 patch("tdlib_media_uploader.media.video_prepare.build_thumbnail", return_value=(None, 0, 0)):
+                 patch("tdlib_media_uploader.media.video_prepare.remux_video_lossless") as mock_remux:
 
                 mock_remux.side_effect = lambda s, d, **kw: d.write_bytes(b"b3 remuxed") and d
 
@@ -1790,16 +1815,27 @@ class ConfigBehaviorNoAutoMigrationTest(unittest.TestCase):
     """Test that existing user configs are not automatically mutated."""
 
     def test_existing_config_remains_unchanged(self):
-        old_config = {
-            "video": {
-                "extensions": [".mp4", ".mov", ".m4v"]
-            }
-        }
-        # Verify loader or defaults do not forcibly inject extensions into old config
-        exts = set(old_config["video"]["extensions"])
-        self.assertEqual(exts, {".mp4", ".mov", ".m4v"})
-        self.assertNotIn(".mkv", exts)
-        self.assertNotIn(".ts", exts)
+        import importlib
+        from tdlib_media_uploader.config import paths
+
+        template = paths.TEMPLATE_CONFIG_PATH.read_text(encoding="utf-8")
+        old_config = re.sub(
+            r"(?ms)(^\[video\]\n.*?^extensions = )\[[^\]]*\]",
+            r'\1[".mp4", ".mov", ".m4v"]',
+            template,
+            count=1,
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_bytes(old_config)
+            try:
+                with patch.object(paths, "CONFIG_PATH", config_path):
+                    importlib.reload(cfg)
+                    self.assertEqual(cfg.VIDEO_EXTENSIONS, {".mp4", ".mov", ".m4v"})
+                    self.assertEqual(cfg.MIXED_VIDEO_EXTENSIONS, cfg.VIDEO_EXTENSIONS)
+                self.assertEqual(config_path.read_bytes(), old_config)
+            finally:
+                importlib.reload(cfg)
 
 
 class RealFFmpegIntegrationTest(unittest.TestCase):
@@ -1813,9 +1849,10 @@ class RealFFmpegIntegrationTest(unittest.TestCase):
         self.fixture = PROJECT_ROOT / "tests" / "fixtures" / "remux_h264_aac.mp4"
 
     def _make_container(self, destination, container):
+        container_options = ["-mpegts_m2ts_mode", "0"] if container == "mpegts" else []
         subprocess.run(
             [self.ffmpeg, "-y", "-v", "error", "-i", str(self.fixture),
-             "-c", "copy", "-f", container, str(destination)],
+             "-c", "copy", "-f", container, *container_options, str(destination)],
             capture_output=True, text=True, check=True, timeout=30,
         )
 

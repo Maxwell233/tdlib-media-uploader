@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 import sys
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -13,9 +14,58 @@ if str(SRC_ROOT) not in sys.path:
 
 from tdlib_media_uploader.gui.events import AuthBridge  # noqa: E402
 from tdlib_media_uploader.gui.workers import ScanWorker, UploadWorker  # noqa: E402
+from tdlib_media_uploader.upload.engine import UploadCancelled
 
 
 class Phase8GuiWorkersTest(unittest.TestCase):
+    def test_gui_auth_dialog_preserves_password_whitespace(self):
+        from tdlib_media_uploader.gui.events import GuiConsoleUI
+        from tdlib_media_uploader.gui.main_window import MainWindow
+        from tdlib_media_uploader.telegram.tdlib_common import TDJsonClient
+
+        bridge = AuthBridge()
+        window = SimpleNamespace(auth_bridge=bridge, worker=None)
+        bridge.requested.connect(
+            lambda prompt, password: MainWindow._show_auth_dialog(window, prompt, password)
+        )
+        client = object.__new__(TDJsonClient)
+        client.ui = GuiConsoleUI(bridge)
+        for password, entered, expected in (
+            (True, " secret ", " secret "),
+            (False, " 123456 ", "123456"),
+        ):
+            with self.subTest(password=password), patch(
+                "tdlib_media_uploader.gui.main_window.QInputDialog.getText",
+                return_value=(entered, True),
+            ):
+                self.assertEqual(client._prompt("Telegram 登录", password=password), expected)
+
+    def test_safe_stop_does_not_hide_an_unrelated_runner_error(self):
+        messages = []
+
+        def upload_runner(_kind, **kwargs):
+            kwargs["ui"].request_safe_stop()
+            raise RuntimeError("checkpoint disk full")
+
+        worker = UploadWorker("image", AuthBridge(), upload_runner=upload_runner)
+        worker.completed.connect(lambda success, message: messages.append((success, message)))
+        with patch("tdlib_media_uploader.gui.workers.write_exception") as logged:
+            worker.run()
+        self.assertEqual(messages, [(False, "任务失败：RuntimeError: checkpoint disk full")])
+        logged.assert_called_once()
+
+    def test_safe_stop_cancellation_keeps_safe_stop_message(self):
+        messages = []
+
+        def upload_runner(_kind, **kwargs):
+            kwargs["ui"].request_safe_stop()
+            raise UploadCancelled("stopped before next album")
+
+        worker = UploadWorker("image", AuthBridge(), upload_runner=upload_runner)
+        worker.completed.connect(lambda success, message: messages.append((success, message)))
+        worker.run()
+        self.assertEqual(messages, [(False, "已安全停止；当前 Album 已完成，未开始后续 Album。")])
+
     def test_scan_worker_uses_explicit_preview_runner(self):
         calls = []
         results = []

@@ -1,0 +1,56 @@
+# Core / config / process / upload / Telegram audit (2026-10-22)
+
+Baseline: `d0da14c`, including the earlier cleanup. This record is written before deleting the candidates below. Synced `sources/` is untouched.
+
+## Deletion evidence and retained behavior
+
+All candidate names were searched with `rg -n` across `src`, `tests`, README, docs, resources, benchmarks, tools, `.github`, and the PyInstaller spec; a second hidden-file search excluded only `.git`, local `audit` output and user `data`. Definitions, imports, re-exports and string references were inspected individually. Dynamic `import_module`/`getattr` calls, package `__all__`, application bootstrap and spec hidden imports were inspected as well. A static unused-code warning alone is not the evidence.
+
+| Candidate | Concrete evidence | Behavior retained |
+| --- | --- | --- |
+| `config/model.py:ConfigModel` and package re-export | The class docstring explicitly says “future package services”. All name hits are the definition, its `__all__` and `config/__init__.py`. No caller, config loader reference, dynamic string or test. | Actual configuration continues through `config.loader`, `config.snapshot`, `config.paths`; the package stays importable. |
+| `processes.runner.run_process`, `run_external_process` | Each only calls `run_cancellable_process` with identical arguments. All name hits are the definitions and two package/module export lists. Media preparation imports `run_cancellable_process` directly; no CLI, documented integration or dynamic name uses the aliases. | Process cancellation, timeout, bounded pipe capture and all existing process tests remain on the real function. |
+| `upload.engine.ReferenceUploadEngine` | Alias to `UploadEngine`; all hits are that assignment and the module/package export lists. No consumer. | `UploadEngine` and its runtime/test callers remain. |
+| `UploadEngine.state_factory`, `journal_factory`, `_make_collaborator` | All hits are constructor parameters, attributes, the private helper and its two calls in `run`; no caller supplies either factory in source, tests, docs or scripts. The helper uses signature inspection to support several hypothetical factory signatures. GUI integration already creates and injects durable `state`/`journal` directly through `UploadContext`. | Explicit injected stores retain precedence; absent stores still get `MemoryStateStore`/`MemoryJournalStore`, as exercised by engine tests. No change to durable journal/checkpoint rules. |
+| `telegram/client.py` and `telegram/auth.py` | All module/name consumers are mutual imports, eager package re-exports, spec hidden-import registration and `test_v2_telegram`. Actual entry is `app → gui.application → gui.integration.run_upload → TDJsonClient` (`telegram/tdlib_common.py`), whose request, receiver, login, caption, send and close paths are independent. No production code instantiates the alternate `TDLibClient` or calls alternate auth helpers. README has no public API guarantee for them. `telegram/__init__` eagerly importing them is not a runtime caller of their behavior. | Keep native `TDJsonClient` and all journal/confirmation/snapshot safety; retain the actively used `telegram.send_result`. Build module discovery is being updated separately to discover existing package files. |
+| `telegram/target.py`, `telegram/limits.py` and unused package re-exports | A subsequent import-by-import check finds these also belong entirely to the unused V2 layer: only the deleted client, `telegram/__init__` and `test_v2_telegram` consume them. Current code canonicalizes targets in `core.identity`, validates them in `TDJsonClient.validate_target`, gets byte limits and `video_size_status` from `config.loader`, and validates captions in `core.album`/`TDJsonClient`. All module strings in spec/tests only register modules for packaging. No external entry, README API, reflection or production call uses the alternate `TelegramTarget`, `SizeDecision`, `AccountLimits` objects. | Keep those actual paths and migrate useful assertions to them. The Telegram package remains importable and `from telegram import tdlib_common` still resolves the actual submodule normally. |
+
+### Tests belonging to the unused Telegram parallel layer
+
+No test will be removed because it fails. The old `TelegramClientTest` (3 methods), `TelegramAuthTest` (3 methods), `QueueTransport` fake and one `build_send_request` test exclusively exercise the unused layer above. Their useful product assertions are migrated to `test_telegram_runtime.py`, using the actual `TDJsonClient` with native calls replaced by deterministic local queues:
+
+- matching `@extra`, returned `ok` and native TDLib error mapping → real `request` / receiver;
+- over-limit caption rejected before transport → real `send_contents`;
+- forum topic included and channel topic absent → real `send_contents` request payload;
+- nested authorization update delivery, code/email-code payloads, external-device link and successful ready transition → real receiver/login.
+
+The old auth transition dataclass's `action`, `requires_input` and `ready` fields have no product consumer and are not preserved as an API. Their actual consequences (prompt, outgoing request, link shown, successful return) are checked instead. Limits/target business assertions are migrated as detailed below; send-result tests stay intact. Existing `test_upload_consistency`, `test_regression_telegram_delivery`, `test_review_regressions` and inflight/reconciliation tests remain.
+
+The remaining alternate target/limit tests are handled before removing those modules:
+
+- Preserve every standard/Premium byte-boundary assertion through `config.loader.video_size_status`, and exact image-byte constant through `config.loader.IMAGE_MAX_BYTES`. Preserve caption boundary checks through `core.album.validate_caption`. Test runtime Premium/caption option responses through actual `TDJsonClient.refresh_account_limits`.
+- Preserve forum/channel canonical identity assertions through `core.identity`; verify valid forum/channel and wrong-mode rejection through actual `TDJsonClient.validate_target`. `parse_target`'s object attributes are replaced by canonical dictionary fields; the unused dataclass is not a product API.
+- The old image classifier says an oversized image is rejected when `compression_enabled=False`. Current production intentionally normalizes oversized images regardless of that obsolete flag. Existing `test_regression_media_planning.test_media_scan_applies_telegram_size_limits` exercises exact limit/limit+1 with both old flag values, and `test_media_probe_and_prepare.test_oversize_image_accepted_and_normalized_even_if_compress_oversize_false` verifies actual preparation. Keep both; remove the contradictory unused-helper test.
+- The old malformed-caption-limit test only promises custom validation for arbitrary `[]`, invalid strings and nonpositive values to the unused API. Runtime config already validates its numeric limits, and no product path sends these objects to that helper. The custom error-message contract is not retained. The old malformed returned-topic-ID assertion also only exercises the unused parser; actual lookup requests a numeric topic through TDLib and handles its native error. Keep actual lookup/error behavior without adding a new response-validation layer merely to preserve an unused parser.
+- All four send-result mapping tests stay intact because that mapper is called by real `TDJsonClient.wait_for_send_results`.
+
+## Runtime findings to reproduce before fixing
+
+- `TDJsonClient._prompt` applies `.strip()` to every response, including a two-step verification password. A password such as `" secret "` is silently changed before `checkAuthenticationPassword`. Add an actual login regression before fixing; preserve password bytes while trimming phone/code/email text as before.
+- Engine cancellation queries catch every `Exception` and treat a broken cancellation provider as false. This turns a provider failure into permission to keep scanning/sending. The actual `CancelToken` contract supplies `is_cancelled`; no source/test depends on swallowing its failures. Remove that catch while preserving optional legacy shape detection, so a failed stop query reaches the caller before transport.
+
+## Verification
+
+- Pre-change `test_v2_telegram`: 17 tests passed (`audit/core-telegram-baseline.log`).
+- Password regression before its fix: actual login sends `secret` instead of `" secret "`; five other actual-client migrations already passed (`audit/core-telegram-red.log`). The two cancellation regressions failed before removing exception swallowing (`audit/core-cancel-red.log`). All three now pass; no failing product test was deleted.
+- Final relevant core/config/process/upload/Telegram suite: **197 tests passed**, no skips (`audit/core-related-final.log`). This includes checkpoint atomicity, durable journal recovery, duplicate confirmations, source snapshots, cancellation, safe stop, prefetch, GUI upload consistency, filesystem failures and config isolation.
+- Final runtime Telegram/remaining helper/size-planning validation: **43 tests passed** (`audit/core-telegram-final.log`). The final Telegram-specific total is 7 retained/migrated tests in `test_v2_telegram`, 8 actual-client tests in `test_telegram_runtime` and 2 cancellation regressions. The old helper suite had 17 tests; count alone does not prove coverage, so the behavior mapping above is the deletion evidence.
+- Core/config/process/Telegram/upload plus changed/new tests pass `compileall`, Ruff undefined-name check (`F821`) and `git diff --check`.
+- Final symbol/module search across source, tests, runtime resources, tools, README, spec, benchmarks and workflows finds no residual import/caller of the deleted modules, aliases or factories.
+- Four unused parallel Telegram files remove 1,084 lines, the unused config model removes 27, the eager Telegram facade shrinks from 134 lines to one. Scoped production changes net **1,391 fewer lines**; useful test behavior is migrated to the actual runtime rather than left attached to an unused implementation.
+
+No commits or pushes were made. No live Telegram login/send or native Windows/macOS packaged build was run in this subtask; those remain external validation boundaries, not silently claimed checks. The root audit owns final whole-project and FFmpeg integration verification.
+
+## Further redundant defense evidence (before removal)
+
+`core.filesystem.is_transient_fs_error` checks a transient errno set, selected Windows errors and a long English/Chinese message list, returning `True` at every matching branch; its final fallback also returns `True`. After the five permanent errnos are rejected, none of these distinctions can change the result. A pre-change comparison of 4,128 combinations (errno `None` and -1 through 255, four error strings, four Windows error values) plus three non-`OSError` values confirms exact equivalence to `isinstance(exc, OSError) and exc.errno not in {EACCES, EPERM, EINVAL, ENAMETOOLONG, ENOTDIR}`. Keep the live function and bounded retry behavior; remove the outcome-equivalent branches. Existing `test_regression_gui_configuration` covers permanent, transient and unknown errors through the actual filesystem module.

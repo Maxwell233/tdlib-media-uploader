@@ -1,4 +1,4 @@
-"""Main-Agent-owned service protocols for the V2 migration."""
+"""Service protocols shared by media strategies and the upload lifecycle."""
 
 from __future__ import annotations
 
@@ -38,8 +38,8 @@ class UploadContext:
 
     The context is deliberately dependency-injected.  ``state``, ``journal``,
     ``sender``, ``stager`` and ``preflight`` are opaque to the public contract
-    so the package can be tested with small fakes and the GUI layer can later
-    provide the durable V1.9 adapters without importing GUI code here.
+    so the GUI can provide durable adapters and tests can use small fakes
+    without importing GUI code here.
     """
 
     source_root: Path
@@ -108,8 +108,8 @@ class UploadEngine(Protocol):
     ) -> UploadRunResult:
         """Run one media strategy while preserving the durable state machine.
 
-        ``context`` is optional for compatibility with the Phase 0 protocol;
-        an engine implementation may use it to receive injected adapters.
+        ``context`` supplies existing adapters and precomputed scan/plans;
+        the engine creates missing run data when it is omitted.
         """
 
 

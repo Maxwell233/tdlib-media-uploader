@@ -47,7 +47,7 @@ def _load_legacy_module() -> Any:
 
 
 def _is_cancelled(token: CancelToken | None) -> bool:
-    return _shared_is_cancelled(token, fallback_on_error=True)
+    return _shared_is_cancelled(token)
 
 
 def _raise_if_cancelled(token: CancelToken | None) -> None:
@@ -56,7 +56,7 @@ def _raise_if_cancelled(token: CancelToken | None) -> None:
     raiser = getattr(token, "raise_if_cancelled", None)
     if callable(raiser):
         raiser()
-    elif _is_cancelled(token):
+    if _is_cancelled(token):
         raise RuntimeError("混合媒体内容构建已取消")
 
 
@@ -392,6 +392,7 @@ class MixedMediaStrategy:
         """Delegate discovery and translate its immutable snapshots."""
 
         del context
+        _raise_if_cancelled(cancel_token)
         root = Path(source_root)
         cancel_event = _LegacyCancelEvent(cancel_token)
         with self._legacy_scope(root):

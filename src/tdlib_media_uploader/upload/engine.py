@@ -1,12 +1,11 @@
-"""Main-Agent-owned UploadEngine reference implementation.
+"""Shared upload lifecycle for image, mixed and video strategies.
 
 The engine owns the generic lifecycle shared by image, mixed and video
 strategies: state filtering, Album-boundary preservation, preflight, optional
 staging, journal transitions, transport invocation and durable checkpointing.
 Media-specific code is injected through :class:`MediaStrategy` and the small
-collaborator protocols below.  The reference stores are intentionally
-in-memory; production adapters can wrap the existing V1.9 state, journal and
-TDLib implementations without making this package import GUI code.
+collaborator protocols below. The GUI injects durable state, journal and
+TDLib adapters; in-memory stores support standalone engine use and tests.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-import inspect
 import json
 from pathlib import Path
 import threading
@@ -217,10 +215,7 @@ def _item_payload(item: MediaItem) -> dict[str, Any]:
 def _is_cancel_requested(token: CancelToken) -> bool:
     checker = getattr(token, "is_cancelled", None)
     if callable(checker):
-        try:
-            return bool(checker())
-        except Exception:
-            return False
+        return bool(checker())
     return bool(getattr(token, "cancelled", False))
 
 
@@ -229,10 +224,7 @@ def _stop_after_current_requested(token: CancelToken) -> bool:
 
     checker = getattr(token, "stop_after_current", None)
     if callable(checker):
-        try:
-            return bool(checker())
-        except Exception:
-            return False
+        return bool(checker())
     return bool(getattr(token, "stop_after_current_requested", False))
 
 
@@ -371,7 +363,7 @@ class MemoryJournalStore:
 
 
 class UploadEngine:
-    """Reference implementation of the V2 generic upload lifecycle."""
+    """Coordinate preparation, confirmed delivery and durable checkpoints."""
 
     def __init__(
         self,
@@ -381,8 +373,6 @@ class UploadEngine:
         journal: JournalStore | Any | None = None,
         stager: Stager | Any | None = None,
         preflight: Callable[..., Any] | Any | None = None,
-        state_factory: Callable[[UploadContext], Any] | None = None,
-        journal_factory: Callable[[UploadContext], Any] | None = None,
         prefetch_next: bool | None = None,
     ):
         self.sender = sender
@@ -390,8 +380,6 @@ class UploadEngine:
         self.journal = journal
         self.stager = stager
         self.preflight = preflight
-        self.state_factory = state_factory
-        self.journal_factory = journal_factory
         self.prefetch_next = prefetch_next
 
     def _context(
@@ -431,37 +419,6 @@ class UploadEngine:
             scan_result=context.scan_result if context else None,
             plans=context.plans if context else None,
         )
-
-    @staticmethod
-    def _make_collaborator(
-        current: Any | None,
-        factory: Callable[[UploadContext], Any] | None,
-        context: UploadContext,
-        fallback: Callable[[], Any],
-    ) -> Any:
-        if current is not None:
-            return current
-        if factory is not None:
-            try:
-                signature = inspect.signature(factory)
-            except (TypeError, ValueError):
-                value = factory(context)
-            else:
-                positional = [
-                    parameter
-                    for parameter in signature.parameters.values()
-                    if parameter.kind
-                    in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-                ]
-                if positional:
-                    value = factory(context)
-                elif "context" in signature.parameters:
-                    value = factory(context=context)
-                else:
-                    value = factory()
-            if value is not None:
-                return value
-        return fallback()
 
     @staticmethod
     def _emit(sink: EventSink, event: Any) -> None:
@@ -1036,19 +993,9 @@ class UploadEngine:
                 cancelled=True,
             )
 
-        state = self._make_collaborator(
-            run_context.state,
-            self.state_factory,
-            run_context,
-            MemoryStateStore,
-        )
+        state = run_context.state if run_context.state is not None else MemoryStateStore()
         run_context = replace(run_context, state=state)
-        journal = self._make_collaborator(
-            run_context.journal,
-            self.journal_factory,
-            run_context,
-            MemoryJournalStore,
-        )
+        journal = run_context.journal if run_context.journal is not None else MemoryJournalStore()
         run_context = replace(run_context, journal=journal)
 
         batches: list[UploadBatchResult] = []
@@ -1620,9 +1567,6 @@ class UploadEngine:
         )
 
 
-ReferenceUploadEngine = UploadEngine
-
-
 __all__ = [
     "JournalStore",
     "MemoryJournalStore",
@@ -1644,5 +1588,4 @@ __all__ = [
     "UNKNOWN",
     "UploadCancelled",
     "UploadEngine",
-    "ReferenceUploadEngine",
 ]
