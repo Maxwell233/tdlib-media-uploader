@@ -428,7 +428,11 @@ jobs:
             rmdir "$MOUNT_POINT" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
-          hdiutil attach "$DMG" -readonly -nobrowse -mountpoint "$MOUNT_POINT" >/dev/null
+          for attempt in 1 2 3; do
+            if hdiutil attach "$DMG" -readonly -nobrowse -mountpoint "$MOUNT_POINT" >/dev/null; then break; fi
+            [[ "$attempt" == 3 ]] && exit 1
+            sleep "$((attempt * 2))"
+          done
           test -d "$MOUNT_POINT/TDLib Media Uploader.app"
           test -L "$MOUNT_POINT/Applications"
 
