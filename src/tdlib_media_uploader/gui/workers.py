@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import importlib
-import inspect
 from pathlib import Path
 import threading
 import time
@@ -19,16 +18,7 @@ from ..core.logging import write_exception
 from PySide6.QtCore import QThread, Signal
 
 from .events import AuthBridge, GuiConsoleUI
-
-
-MEDIA_KINDS = ("video", "image", "mixed")
-
-
-def _require_kind(kind: str) -> str:
-    normalized = str(kind).strip().lower()
-    if normalized not in MEDIA_KINDS:
-        raise ValueError(f"未知媒体类型：{kind}")
-    return normalized
+from .tools import require_kind as _require_kind
 
 
 def _load_upload_runner() -> Callable[..., Any]:
@@ -72,10 +62,6 @@ class ScanWorker(QThread):
         """Request cancellation without terminating the worker thread."""
 
         self.cancel_event.set()
-
-    def cancel(self):
-        """Backward-compatible alias for request_stop."""
-        self.request_stop()
 
     def _report_progress(self, payload: dict):
         now = time.monotonic()
@@ -221,34 +207,19 @@ class UploadWorker(QThread):
     def request_immediate_stop(self):
         self.ui.request_immediate_stop()
 
-    @staticmethod
-    def _runner_kwargs(runner, kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Keep custom/offline runners compatible with the added stop hook."""
-
-        try:
-            parameters = inspect.signature(runner).parameters
-        except (TypeError, ValueError):
-            return kwargs
-        if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
-            return kwargs
-        return {key: value for key, value in kwargs.items() if key in parameters}
-
     def run(self):
         try:
-            runner_kwargs = self._runner_kwargs(
-                self.upload_runner,
-                {
-                    "ui": self.ui,
-                    "source_root": self._source_root(),
-                    "target": self._target(),
-                    "cancel_event": self.ui.cancel_event,
-                    "stop_after_current": self.ui.stop_after_current_event,
-                    "preview_result": self.preview_result,
-                    "config": self._config(),
-                    "runtime_paths": self._runtime_paths(),
-                },
+            result = self.upload_runner(
+                self.kind,
+                ui=self.ui,
+                source_root=self._source_root(),
+                target=self._target(),
+                cancel_event=self.ui.cancel_event,
+                stop_after_current=self.ui.stop_after_current_event,
+                preview_result=self.preview_result,
+                config=self._config(),
+                runtime_paths=self._runtime_paths(),
             )
-            result = self.upload_runner(self.kind, **runner_kwargs)
             status = str(getattr(result, "status", "")).upper()
             if status == "COMPLETED":
                 self.completed.emit(True, "上传任务完成。")
@@ -282,9 +253,10 @@ class UploadWorker(QThread):
                 message = str(getattr(result, "error", "") or "任务未完成")
                 self.completed.emit(False, f"任务失败：{message}")
         except Exception as exc:
-            if self.ui.safe_stop_requested and not self.ui.stop_requested:
+            cancelled = bool(getattr(exc, "cancelled", False)) or type(exc).__name__ == "TDLibCancelled"
+            if cancelled and self.ui.safe_stop_requested and not self.ui.stop_requested:
                 self.completed.emit(False, "已安全停止；当前 Album 已完成，未开始后续 Album。")
-            elif bool(getattr(exc, "cancelled", False)) or type(exc).__name__ == "TDLibCancelled" or self.ui.stop_requested:
+            elif cancelled or self.ui.stop_requested:
                 self.completed.emit(
                     False,
                     "已立即中断；当前 Album 可能已部分或全部提交，结果已保留为 UNKNOWN，"

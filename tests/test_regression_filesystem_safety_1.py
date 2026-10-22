@@ -23,7 +23,8 @@ from tdlib_media_uploader.core import album as metadata
 from tdlib_media_uploader.core import logging as app_logging
 from tdlib_media_uploader.gui import main_window as gui
 from tdlib_media_uploader.gui import config_service, tools, cache_service
-from tdlib_media_uploader.core import filesystem_legacy as path_utils
+from tdlib_media_uploader.processes.runner import run_cancellable_process
+from tdlib_media_uploader.core import filesystem as path_utils, readiness, concurrency
 from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
 
 
@@ -39,7 +40,7 @@ class ImprovementsTest(unittest.TestCase):
             "sys.stdout.write(data); sys.stdout.flush(); "
             "sys.stderr.write('e'*1200000); sys.stderr.flush()"
         )
-        result = path_utils.run_cancellable_process(
+        result = run_cancellable_process(
             [sys.executable, "-u", "-c", script],
             input="中文输入",
             stdout=subprocess.PIPE,
@@ -60,7 +61,7 @@ class ImprovementsTest(unittest.TestCase):
             "import sys; sys.stdout.write('o'*1200000); sys.stdout.flush(); "
             "sys.stderr.write('e'*1200000); sys.stderr.flush()"
         )
-        result = path_utils.run_cancellable_process(
+        result = run_cancellable_process(
             [sys.executable, "-u", "-c", script],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -79,7 +80,7 @@ class ImprovementsTest(unittest.TestCase):
         timer.start()
         try:
             with self.assertRaises(TimeoutError):
-                path_utils.run_cancellable_process(
+                run_cancellable_process(
                     [sys.executable, "-u", "-c", "import time; time.sleep(30)"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -91,7 +92,7 @@ class ImprovementsTest(unittest.TestCase):
             timer.cancel()
         started = time.monotonic()
         with self.assertRaises(subprocess.TimeoutExpired):
-            path_utils.run_cancellable_process(
+            run_cancellable_process(
                 [sys.executable, "-u", "-c", "import time; time.sleep(30)"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -113,7 +114,7 @@ class ImprovementsTest(unittest.TestCase):
         started = time.monotonic()
         try:
             with self.assertRaises(TimeoutError):
-                path_utils.run_cancellable_process(
+                run_cancellable_process(
                     [sys.executable, "-u", "-c", script],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -201,7 +202,7 @@ class ImprovementsTest(unittest.TestCase):
                 initial_delay=1,
                 cancel_event=cancel,
             )
-        result = path_utils.ScanResult([], ["read failed"], ["link skipped"], True)
+        result = path_utils.DirectoryScanResult([], ["read failed"], ["link skipped"], True)
         self.assertEqual(result.errors, ["read failed"])
         self.assertEqual(result.warnings, ["link skipped"])
         self.assertTrue(result.cancelled)
@@ -274,7 +275,7 @@ class ImprovementsTest(unittest.TestCase):
             return value
 
         with ThreadPoolExecutor(max_workers=2) as executor:
-            values = list(path_utils.ordered_bounded_map(executor, range(6), worker, 2))
+            values = list(concurrency.ordered_bounded_map(executor, range(6), worker, 2))
         self.assertEqual(values, list(range(6)))
         self.assertTrue({2, 3}.issubset(started))
 
@@ -282,7 +283,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_image_plan_preserves_complete_groups_and_custom_titles(self):
-        from tdlib_media_uploader.media import legacy_image as core
+        from tdlib_media_uploader.media import image_pipeline as core
         with tempfile.TemporaryDirectory() as directory:
             files = [Path(directory) / f"{i}.jpg" for i in range(23)]
             for file in files:
@@ -346,7 +347,7 @@ class ImprovementsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "stable.bin"
             path.write_bytes(b"stable")
-            result = path_utils.check_file_readiness(
+            result = readiness.check_file_readiness(
                 path,
                 stable_checks=3,
                 stable_interval=0,
@@ -389,7 +390,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_cancelled_video_scan_is_not_reported_as_normal_empty_result(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -418,7 +419,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_jit_revalidation_detects_video_changes_after_scan(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         class UI:
             def warning(self, _text):
@@ -479,7 +480,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_embedded_date_does_not_probe_ffmpeg(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "clip.mp4"

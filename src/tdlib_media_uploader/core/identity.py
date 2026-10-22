@@ -12,7 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from .filesystem_legacy import relative_name
+from .sorting import relative_name
 
 
 def _snapshot_values(size=None, mtime_ns=None, snapshot=None) -> tuple[int, int]:

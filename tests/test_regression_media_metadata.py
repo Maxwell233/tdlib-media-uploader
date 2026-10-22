@@ -23,7 +23,7 @@ from tdlib_media_uploader.core import album as metadata
 from tdlib_media_uploader.core import logging as app_logging
 from tdlib_media_uploader.gui import main_window as gui
 from tdlib_media_uploader.gui import config_service, tools, cache_service
-from tdlib_media_uploader.core import filesystem_legacy as path_utils
+from tdlib_media_uploader.core import filesystem as path_utils
 from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
 
 
@@ -69,7 +69,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_exiftool_empty_output_is_a_nonfatal_empty_result(self):
         import subprocess
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -86,7 +86,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_exiftool_progress_is_monotonic_for_large_scan(self):
         import subprocess
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -123,7 +123,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_exiftool_warning_accepts_complete_rows_without_bisection(self):
         import subprocess
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -148,7 +148,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_exiftool_retries_only_missing_source_files(self):
         import subprocess
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -196,7 +196,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_video_date_priority_and_optional_media_date(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "clip.mp4"
@@ -231,7 +231,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_mtime_fallback_does_not_probe_ffmpeg_when_media_dates_disabled(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "clip.mp4"
@@ -249,7 +249,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_disabled_video_dates_uses_filename_only(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -288,7 +288,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_exiftool_date_query_keeps_full_time_batch(self):
         import subprocess
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -328,7 +328,7 @@ class ImprovementsTest(unittest.TestCase):
         import datetime
         import threading
         import time
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -372,7 +372,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_media_date_reader_uses_one_ffmpeg_invocation(self):
         import subprocess
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "clip.mp4"
@@ -399,7 +399,7 @@ class ImprovementsTest(unittest.TestCase):
 
     def test_media_date_failure_is_not_negative_cached(self):
         import datetime
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         core._media_creation_metadata.cache_clear()
         successful = (

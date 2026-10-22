@@ -15,7 +15,7 @@ from PySide6.QtCore import QLibraryInfo
 from PySide6.QtGui import QIcon
 
 from ..config.paths import DATA_DIR, RESOURCE_DIR
-from ..core.filesystem_legacy import run_cancellable_process
+from ..processes.runner import run_cancellable_process
 
 PROJECT_DIR = RESOURCE_DIR
 
@@ -208,20 +208,6 @@ def application_icon() -> QIcon:
     return QIcon()
 
 
-# Compatibility aliases for legacy private naming
-_require_kind = require_kind
-_kind_label = kind_label
-_fmt_size = format_size
-_fmt_eta = format_eta
-_fmt_date = format_date
-_path_text = path_text
-_hidden_subprocess_kwargs = hidden_subprocess_kwargs
-_validate_exiftool_path = validate_exiftool_path
-_prepare_windows_app_identity = prepare_windows_app_identity
-_prepare_qt_plugins = prepare_qt_plugins
-_application_icon = application_icon
-
-
 __all__ = [
     "CAPTION_EDITOR_SOFT_LIMIT",
     "ICON_NAME",
@@ -232,17 +218,6 @@ __all__ = [
     "MEDIA_KINDS",
     "PROJECT_DIR",
     "WINDOWS_APP_USER_MODEL_ID",
-    "_application_icon",
-    "_fmt_date",
-    "_fmt_eta",
-    "_fmt_size",
-    "_hidden_subprocess_kwargs",
-    "_kind_label",
-    "_path_text",
-    "_prepare_qt_plugins",
-    "_prepare_windows_app_identity",
-    "_require_kind",
-    "_validate_exiftool_path",
     "application_icon",
     "detect_ffmpeg",
     "format_date",

@@ -189,8 +189,7 @@ class HomePage(QWidget):
         self.connection_value.style().polish(self.connection_value)
         self.task_icon_label.setPixmap(get_svg_pixmap("task", color=THEME.text_muted, size=22))
         for card in (self.video_card, self.image_card, self.mixed_card):
-            if hasattr(card, "refresh_theme"):
-                card.refresh_theme()
+            card.refresh_theme()
 
 
 __all__ = ["HomePage", "format_size"]

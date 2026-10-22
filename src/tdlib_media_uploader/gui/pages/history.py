@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..components.cards import StatCard
-from ..history_service import clear_history, load_history, save_history
+from ..history_service import load_history, save_history
 from ..theme import THEME
 from ..tools import format_size, kind_label
 
@@ -65,7 +65,6 @@ class HistoryPage(QWidget):
         self.total_runs_card = StatCard("历史任务数", "0 次", "累计执行批次")
         self.total_files_card = StatCard("已上传文件数", "0 个", "累计处理文件")
         self.total_bytes_card = StatCard("累计数据量", "0 B", "总传输体积")
-        self.success_rate_card = self.total_files_card  # Backward compatibility alias
 
         metrics_layout.addWidget(self.total_runs_card, 0, 0)
         metrics_layout.addWidget(self.total_files_card, 0, 1)

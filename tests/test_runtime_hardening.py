@@ -18,7 +18,7 @@ if str(SRC_ROOT) not in sys.path:
 from tdlib_media_uploader.core import album as album_metadata
 from tdlib_media_uploader.config import loader as app_config
 from tdlib_media_uploader.gui import main_window as gui_app
-from tdlib_media_uploader.core import filesystem_legacy as path_utils
+from tdlib_media_uploader.core import filesystem as path_utils
 from tdlib_media_uploader.core import self_test
 from tdlib_media_uploader.core.instance_lock import InstanceLock, run_with_instance_lock
 
@@ -39,8 +39,8 @@ class V190HardeningTest(unittest.TestCase):
         self.assertEqual(app_config.video_size_status(premium + 1, is_premium=True), "oversize")
 
     def test_video_and_mixed_scanners_apply_the_same_video_limits(self):
-        from tdlib_media_uploader.media import legacy_mixed as mixed_core
-        from tdlib_media_uploader.media import legacy_video as video_core
+        from tdlib_media_uploader.media import mixed_pipeline as mixed_core
+        from tdlib_media_uploader.media import video_pipeline as video_core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

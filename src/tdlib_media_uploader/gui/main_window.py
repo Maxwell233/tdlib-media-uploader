@@ -8,20 +8,10 @@ truth for scanning, Album creation, TDLib requests and resumable state.
 from __future__ import annotations
 
 import datetime as _dt
-import functools
-import importlib
-import importlib.util
-import json
 import os
-import re
-import shutil
-import stat
-import subprocess
 import sys
 import tomllib
-from collections.abc import Mapping
-from collections import defaultdict
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
 
 if __name__ == "__main__" and not getattr(sys, "frozen", False):
@@ -31,90 +21,39 @@ if __name__ == "__main__" and not getattr(sys, "frozen", False):
     )
     raise SystemExit(2)
 
-from ..core.album import (
-    CaptionLimitError,
-    CaptionStore,
-    album_key,
-    compose_caption,
-    validate_caption,
-    with_filename_description,
-)
-from ..core.logging import APP_LOG_PATH, LOG_DIR, TDLIB_LOG_PATH, write_app_log
-from ..core.filesystem_legacy import (
-    file_mtime,
-    is_link_or_junction,
-    iter_files,
-    media_path_sort,
-    retry_fs_operation,
-    stable_path,
-    iter_directory_entries_with_retry,
-    run_cancellable_process,
-    validate_scan_root,
-)
-from PySide6.QtCore import QLibraryInfo, QTimer, Signal, Slot, Qt, QLockFile
-from PySide6.QtGui import QColor, QIcon, QPalette
+from ..core.album import album_key
+from ..core.logging import write_app_log
+from PySide6.QtCore import Slot, Qt
 from PySide6.QtWidgets import (
     QApplication,
-    QAbstractItemView,
-    QCheckBox,
-    QComboBox,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
-    QFormLayout,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QInputDialog,
-    QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QPlainTextEdit,
-    QProgressBar,
-    QPushButton,
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
-    QTableWidget,
-    QTableWidgetItem,
-    QTreeWidget,
-    QTreeWidgetItem,
-    QVBoxLayout,
     QWidget,
 )
 from ..config.paths import (
-    APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH,
-    DATA_DIR, VIDEO_STATE_DIR, IMAGE_STATE_DIR, MIXED_STATE_DIR,
-    CAPTIONS_DIR, UPLOAD_INFLIGHT_DIR, THUMBNAIL_CACHE_DIR,
-    IMAGE_COMPRESSION_CACHE_DIR, STAGING_CACHE_DIR,
-    HISTORY_PATH as RUNTIME_HISTORY_PATH,
-    TDLIB_DATABASE_DIR as RUNTIME_TDLIB_DATABASE_DIR,
-    TDLIB_FILES_DIR as RUNTIME_TDLIB_FILES_DIR,
+    APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH, DATA_DIR,
     read_version, ensure_data_dirs,
 )
 from ..core.instance_lock import InstanceLock
 from ..core.self_test import run_self_test
-from .events import AuthBridge, GuiConsoleUI
-from .models import (
-    caption_payload as _v2_caption_payload,
-    group_key as _v2_group_key,
-    item_dict as _v2_item_dict,
-    item_identity as _v2_item_identity,
-    plan_dict as _v2_plan_dict,
-    scan_result as _translate_v2_scan_result,
-)
+from .events import AuthBridge
 from .pages import (
     HomePage,
-    ImagePage as _PackageImagePage,
-    MixedPage as _PackageMixedPage,
+    ImagePage,
+    MixedPage,
     TaskPage,
     UploadHubPage,
-    UploadPage as _PackageUploadPage,
-    UploadPageServices,
-    VideoPage as _PackageVideoPage,
+    UploadPage,
+    VideoPage,
 )
 from .workers import ScanWorker, UploadWorker
 
@@ -124,20 +63,13 @@ APP_VERSION = read_version()
 
 from .tools import (
     MEDIA_KINDS,
-    KIND_LABELS,
     CAPTION_EDITOR_SOFT_LIMIT,
     KIND_PATH_KEYS,
     KIND_PATH_CONFIG_KEYS,
-    ICON_NAME,
-    ICON_PATH,
-    WINDOWS_APP_USER_MODEL_ID,
     require_kind as _require_kind,
     kind_label as _kind_label,
     format_size as _fmt_size,
     format_eta as _fmt_eta,
-    format_date as _fmt_date,
-    path_text as _path_text,
-    hidden_subprocess_kwargs as _hidden_subprocess_kwargs,
     validate_exiftool_path,
     prepare_windows_app_identity as _prepare_windows_app_identity,
     prepare_qt_plugins as _prepare_qt_plugins,
@@ -147,49 +79,19 @@ from .config_service import (
     ensure_config_file as _ensure_config_file_service,
     _CONFIG_CREATED,
     cfg,
-    reload_config as _reload_config,
     get_cfg as _cfg,
     target_for as _target_for,
     source_root_for as _source_root_for,
-    get_section_re as _get_section_re,
-    get_key_re as _get_key_re,
     update_toml_value as _update_toml_value,
     write_config_values,
 )
-from .history_service import (
-    HISTORY_PATH,
-    load_history as _load_history,
-    save_history as _save_history,
-    clear_history as _clear_history,
-)
-from .cache_service import (
-    CACHE_TARGETS,
-    ALL_CACHE_KEYS,
-    current_cache_targets,
-    cache_usage as _cache_usage,
-    cache_status_text as _cache_status_text,
-    remove_cache_path as _remove_cache_path,
-    clear_cache,
-)
-from .scanner import (
-    BASIC_SCAN_SNAPSHOTS,
-    basic_paths as _basic_paths,
-    path_size as _path_size,
-    item_size as _item_size,
-    apply_size_limits as _apply_size_limits,
-    basic_mixed_scan as _basic_mixed_scan,
-    cancelled_scan_result as _cancelled_scan_result,
-    legacy_scan_result as _legacy_scan_result,
-    load_v2_gui_integration as _load_v2_gui_integration,
-    v2_scan_result as _v2_scan_result,
-    scan_result as _scan_result,
-)
+from .history_service import load_history as _load_history, save_history as _save_history
+from .cache_service import ALL_CACHE_KEYS, current_cache_targets, cache_usage as _cache_usage
+from .scanner import basic_paths as _basic_paths, scan_result as _scan_result
 
 
 _validate_exiftool_path = validate_exiftool_path
 _write_config_values = write_config_values
-_current_cache_targets = current_cache_targets
-_clear_cache = clear_cache
 
 
 def _ensure_config_file() -> bool:
@@ -208,39 +110,7 @@ from .pages import (
     SettingsPage,
 )
 from .components import NavigationSidebar
-from .theme import APP_STYLE, THEME
-
-
-def _upload_page_services() -> UploadPageServices:
-    """Inject legacy globals while the package owns the upload page widget."""
-
-    return UploadPageServices(
-        require_kind=_require_kind,
-        kind_label=_kind_label,
-        config_getter=_cfg,
-        target_getter=_target_for,
-        path_keys=KIND_PATH_KEYS,
-        project_dir=PROJECT_DIR,
-        path_text=_path_text,
-        size_formatter=_fmt_size,
-        item_size=_item_size,
-        stable_path=stable_path,
-        filename_description=with_filename_description,
-        compose_caption=compose_caption,
-        validate_caption=validate_caption,
-        caption_store_factory=CaptionStore,
-        caption_limit=CAPTION_EDITOR_SOFT_LIMIT,
-        dialog_class=QDialog,
-        message_box_class=QMessageBox,
-        file_dialog_class=QFileDialog,
-    )
-
-
-class UploadPage(_PackageUploadPage):
-    """Bridge legacy root references to the package-owned upload widget."""
-
-    def __init__(self, kind: str, *, services: UploadPageServices | None = None):
-        super().__init__(kind, services=services or _upload_page_services())
+from .theme import APP_STYLE
 
 
 class MainWindow(QMainWindow):
@@ -285,10 +155,9 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.home = HomePage()
-        page_services = _upload_page_services()
-        self.video_page = _PackageVideoPage(services=page_services)
-        self.image_page = _PackageImagePage(services=page_services)
-        self.mixed_page = _PackageMixedPage(services=page_services)
+        self.video_page = VideoPage()
+        self.image_page = ImagePage()
+        self.mixed_page = MixedPage()
         self.upload_hub = UploadHubPage(self.video_page, self.image_page, self.mixed_page)
         self.task_page = TaskPage()
         self.inflight_page = InflightPage()
@@ -352,21 +221,16 @@ class MainWindow(QMainWindow):
 
     def refresh_theme(self):
         """Re-apply styling across composite widgets on theme switch."""
-        targets = [
-            getattr(self, "nav_sidebar", None),
-            getattr(self, "home", None),
-            getattr(self, "upload_hub", None),
-            getattr(self, "video_page", None),
-            getattr(self, "image_page", None),
-            getattr(self, "mixed_page", None),
-            getattr(self, "task_page", None),
-            getattr(self, "inflight_page", None),
-            getattr(self, "history_page", None),
-            getattr(self, "settings_page", None),
-        ]
-        for target in targets:
-            if target is not None and hasattr(target, "refresh_theme"):
-                target.refresh_theme()
+        for target in (
+            self.nav_sidebar,
+            self.home,
+            self.upload_hub,
+            self.task_page,
+            self.inflight_page,
+            self.history_page,
+            self.settings_page,
+        ):
+            target.refresh_theme()
 
     def _refresh_pages(self):
         self.video_page.refresh_config()
@@ -385,8 +249,7 @@ class MainWindow(QMainWindow):
 
     def _open_upload(self, kind: str):
         self.sidebar.setCurrentRow(self._sidebar_row(kind))
-        if hasattr(self, "upload_hub"):
-            self.upload_hub.set_current_kind(kind)
+        self.upload_hub.set_current_kind(kind)
         self._scan(kind)
 
     def _scan(self, kind: str):
@@ -399,9 +262,6 @@ class MainWindow(QMainWindow):
             return
         if any(scanner.isRunning() for scanner in self.scanners.values()):
             QMessageBox.warning(self, "扫描运行中", "当前已有目录扫描，请等待扫描完成后再扫描另一个类型。")
-            return
-        old = self.scanners.get(kind)
-        if old is not None and old.isRunning():
             return
         worker = ScanWorker(kind, scan_runner=_scan_result)
         self.scanners[kind] = worker
@@ -885,8 +745,10 @@ class MainWindow(QMainWindow):
     def _show_auth_dialog(self, prompt: str, password: bool):
         echo = QLineEdit.EchoMode.Password if password else QLineEdit.EchoMode.Normal
         value, accepted = QInputDialog.getText(self, "Telegram 登录", prompt, echo)
-        if accepted and value.strip():
-            self.auth_bridge.answer(value.strip())
+        if not password:
+            value = value.strip()
+        if accepted and value:
+            self.auth_bridge.answer(value)
         else:
             self.auth_bridge.answer("")
             if self.worker is not None:
@@ -924,10 +786,7 @@ class MainWindow(QMainWindow):
             return
         for scanner in list(self.scanners.values()):
             if scanner.isRunning():
-                if hasattr(scanner, "request_stop"):
-                    scanner.request_stop()
-                elif hasattr(scanner, "cancel"):
-                    scanner.cancel()
+                scanner.request_stop()
                 if not scanner.wait(5000):
                     QMessageBox.warning(self, "仍在扫描", "扫描任务尚未结束，请稍候再关闭窗口。")
                     event.ignore()

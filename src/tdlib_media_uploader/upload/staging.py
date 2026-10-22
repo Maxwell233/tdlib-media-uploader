@@ -16,14 +16,9 @@ import re
 import time
 from pathlib import Path
 
-from ..core.filesystem_legacy import (
-    FileSnapshot,
-    is_link_or_junction,
-    is_network_path,
-    probe_readable,
-    snapshot_file,
-    stable_path,
-)
+from ..core.models import FileSnapshot
+from ..core.filesystem import is_link_or_junction, is_network_path, snapshot_file, stable_path
+from ..core.readiness import probe_readable
 
 
 MARKER_NAME = ".marker.json"

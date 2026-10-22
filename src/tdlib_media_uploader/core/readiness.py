@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .concurrency import cancelable_sleep, is_cancelled
 from .models import FileSnapshot
-from .filesystem import is_transient_fs_error, snapshot_file_with_code
+from .filesystem import is_transient_fs_error, revalidate_file, snapshot_file_with_code
 
 
 READY = "READY"
@@ -286,19 +286,6 @@ def is_file_stable(
         cancel_token=cancel_token,
     )
     return result.ready
-
-
-def revalidate_file(path, *, expected_size=None, expected_mtime_ns=None) -> FileSnapshot:
-    """Return a current snapshot only when it matches the scan facts."""
-
-    snapshot, _code = snapshot_file_with_code(path)
-    if snapshot is None:
-        raise RuntimeError(f"文件暂时不可读取或已被删除：{path}")
-    if expected_size is not None and int(expected_size) != snapshot.size:
-        raise RuntimeError(f"文件在扫描后发生变化：{path}")
-    if expected_mtime_ns is not None and int(expected_mtime_ns) != snapshot.mtime_ns:
-        raise RuntimeError(f"文件在扫描后发生变化：{path}")
-    return snapshot
 
 
 __all__ = [

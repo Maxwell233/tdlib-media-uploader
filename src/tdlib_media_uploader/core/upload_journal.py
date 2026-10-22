@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .identity import canonical_target
-from .filesystem_legacy import file_snapshot, stable_path
+from .filesystem import file_snapshot, stable_path
 from ..config.paths import APP_DATA_DIR
 
 

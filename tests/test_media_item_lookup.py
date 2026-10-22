@@ -12,8 +12,9 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tdlib_media_uploader import FileSnapshot, MediaItem, ScanResult  # noqa: E402
+from tdlib_media_uploader import AlbumPlan, FileSnapshot, MediaItem, ScanResult  # noqa: E402
 from tdlib_media_uploader.media.image import ImageStrategy  # noqa: E402
+from tdlib_media_uploader.media.mixed import MixedMediaStrategy  # noqa: E402
 from tdlib_media_uploader.media.video import VideoStrategy  # noqa: E402
 
 
@@ -35,6 +36,62 @@ def _items(kind: str, count: int = 4):
 
 
 class MediaItemLookupTest(unittest.TestCase):
+
+    def test_bundled_strategies_keep_filename_captions_after_partial_skip(self):
+        from tdlib_media_uploader.media import image_pipeline, mixed_pipeline, video_pipeline
+
+        token = SimpleNamespace(is_cancelled=lambda: False, raise_if_cancelled=lambda: None)
+        sink = SimpleNamespace(emit=lambda _event: None)
+        for kind, factory, pipeline, builder_name in (
+            ("image", ImageStrategy, image_pipeline, "build_image_contents"),
+            ("video", VideoStrategy, video_pipeline, "build_video_contents"),
+            ("mixed", MixedMediaStrategy, mixed_pipeline, "build_mixed_contents"),
+        ):
+            with self.subTest(kind=kind):
+                root = Path("/media")
+                items = tuple(
+                    MediaItem(root / name, root, "image" if kind == "mixed" else kind,
+                              FileSnapshot(str(root / name), 100, 1000))
+                    for name in ("skipped.jpg", "kept.jpg")
+                )
+                plan = AlbumPlan("album", kind, root, "Trip", 1, items, items, "Trip")
+
+                def build(values, caption, **_kwargs):
+                    skipped = values[0]
+                    path = skipped["path"] if isinstance(skipped, dict) else skipped
+                    return ([{"caption": pipeline.formatted_text(caption)}], [values[1]],
+                            [{"item": skipped, "path": path, "category": "deferred"}])
+
+                with patch.object(pipeline.cfg, f"{kind.upper()}_CAPTION_INCLUDE_FILENAMES", True), \
+                     patch.object(pipeline, builder_name, side_effect=build):
+                    result = factory().build_contents(plan, cancel_token=token, event_sink=sink)
+                caption = result.contents[0]["caption"]["text"]
+                self.assertIn("kept", caption)
+                self.assertNotIn("skipped", caption)
+                self.assertEqual(result.ready_items, (items[1],))
+                self.assertEqual(result.deferred_items, (items[0],))
+
+    def test_bundled_strategies_propagate_broken_cancellation_checker_before_scan(self):
+        from tdlib_media_uploader.media import image_pipeline, mixed_pipeline, video_pipeline
+
+        class BrokenToken:
+            def is_cancelled(self):
+                raise RuntimeError("cancellation checker failed")
+
+            def raise_if_cancelled(self):
+                pass
+
+        sink = SimpleNamespace(emit=lambda _event: None)
+        for factory, pipeline, scanner_name in (
+            (ImageStrategy, image_pipeline, "scan_images"),
+            (VideoStrategy, video_pipeline, "scan_videos"),
+            (MixedMediaStrategy, mixed_pipeline, "scan_mixed_groups"),
+        ):
+            with self.subTest(strategy=factory.__name__), \
+                 patch.object(pipeline, scanner_name, return_value=[]) as scan:
+                with self.assertRaisesRegex(RuntimeError, "cancellation checker failed"):
+                    factory().scan(Path("/media"), cancel_token=BrokenToken(), event_sink=sink)
+                scan.assert_not_called()
 
     def test_file_snapshot_keeps_v19_tuple_compatibility(self):
         snapshot = FileSnapshot("/media/clip.mp4", 12, 34)

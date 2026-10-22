@@ -1,7 +1,7 @@
 """Qt-free adapters between the GUI window and the V2 upload lifecycle.
 
 This module connects the three V2 media strategies to the durable V1.9 state,
-journal and TDLib helpers. Legacy media modules still own media-specific
+journal and TDLib helpers. Media pipelines own media-specific
 probing and input construction; the V2 engine owns plan traversal, send state
 transitions and checkpoints.
 """
@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..core.compat import call_supported as _call_supported
-from ..core.filesystem_legacy import stable_path
+from ..core.filesystem import stable_path
 
 from ..contracts import UploadContext
 from ..config.snapshot import snapshot_config
@@ -43,10 +43,10 @@ from ..upload.engine import (
 )
 
 
-_LEGACY_MODULES = {
-    "image": "tdlib_media_uploader.media.legacy_image",
-    "mixed": "tdlib_media_uploader.media.legacy_mixed",
-    "video": "tdlib_media_uploader.media.legacy_video",
+_MEDIA_PIPELINES = {
+    "image": "tdlib_media_uploader.media.image_pipeline",
+    "mixed": "tdlib_media_uploader.media.mixed_pipeline",
+    "video": "tdlib_media_uploader.media.video_pipeline",
 }
 _STRATEGIES = {
     "image": ImageStrategy,
@@ -78,14 +78,14 @@ class V2IntegrationUnavailable(ImportError):
 
 def _normalize_kind(kind: str) -> str:
     value = str(kind).strip().lower()
-    if value not in _LEGACY_MODULES:
+    if value not in _MEDIA_PIPELINES:
         raise ValueError(f"未知媒体类型：{kind}")
     return value
 
 
-def _load_legacy(kind: str) -> Any:
+def _load_pipeline(kind: str) -> Any:
     try:
-        return importlib.import_module(_LEGACY_MODULES[_normalize_kind(kind)])
+        return importlib.import_module(_MEDIA_PIPELINES[_normalize_kind(kind)])
     except (ImportError, ModuleNotFoundError) as error:
         raise V2IntegrationUnavailable(str(error)) from error
 
@@ -258,7 +258,7 @@ def scan_v2(
     if callable(activate):
         activate(normalized)
 
-    legacy = _load_legacy(normalized)
+    legacy = _load_pipeline(normalized)
     state_dir = _state_directory(normalized, runtime_paths)
     if state_dir is not None:
         legacy.STATE_DIR = state_dir
@@ -684,11 +684,11 @@ def _premium_checker(strategy: Any, client: Any):
     def check(item: MediaItem, *, context=None):
         metadata = item.metadata if isinstance(item.metadata, Mapping) else {}
         if item.media_kind == "video" and metadata.get("requires_premium"):
-            from ..media import legacy_video
+            from ..media import video_pipeline
             token = getattr(context, "cancel_token", None)
             event = getattr(token, "event", None)
             if (getattr(client, "is_premium", None) is not True
-                    and not legacy_video.can_remux_video(item.path, cancel_event=event)):
+                    and not video_pipeline.can_remux_video(item.path, cancel_event=event)):
                 return {
                     "status": "FAILED",
                     "reason": "视频超过约 2 GB，需要 Telegram Premium 才能上传",
@@ -726,9 +726,9 @@ def run_v2_upload(kind: str, **kwargs) -> UploadRunResult:
         config = importlib.import_module("tdlib_media_uploader.config.loader")
     frozen = snapshot_config(config, kind, kwargs.get("target"), immutable=True,
         overrides={_ROOT_NAMES[name]: Path(kwargs["source_root"]) for name in _ROOT_NAMES})
-    legacy = _load_legacy(kind)
+    legacy = _load_pipeline(kind)
     modules = [legacy]
-    for name in _LEGACY_MODULES.values():
+    for name in _MEDIA_PIPELINES.values():
         module = sys.modules.get(name)
         if module is not None and all(module is not value for value in modules):
             modules.append(module)
@@ -801,7 +801,7 @@ def _run_v2_upload(
     activate = getattr(config, "activate_target", None)
     if callable(activate):
         activate(normalized)
-    legacy = _load_legacy(normalized)
+    legacy = _load_pipeline(normalized)
     state_dir = _state_directory(normalized, runtime_paths)
     if state_dir is not None:
         legacy.STATE_DIR = state_dir
@@ -922,7 +922,7 @@ def _run_v2_upload(
                     pass
         if normalized == "mixed":
             try:
-                image_legacy = importlib.import_module("tdlib_media_uploader.media.legacy_image")
+                image_legacy = importlib.import_module("tdlib_media_uploader.media.image_pipeline")
                 cleanup_compressed = getattr(image_legacy, "cleanup_compressed_images", None)
                 if callable(cleanup_compressed):
                     cleanup_compressed()

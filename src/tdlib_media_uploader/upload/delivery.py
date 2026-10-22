@@ -101,6 +101,9 @@ def _normalize_send_result(value: Any, expected_count: int) -> _ObservedSend:
     if status is BatchStatus.CONFIRMED and len(succeeded or message_ids) != expected_count:
         status = BatchStatus.UNKNOWN
         error = error or "发送器确认的消息数量少于 Album 项数"
+    if status is BatchStatus.CONFIRMED and len(set(succeeded or message_ids)) != expected_count:
+        status = BatchStatus.UNKNOWN
+        error = error or "发送器确认结果包含重复消息 ID"
     if status is BatchStatus.FAILED and (succeeded or pending):
         status = BatchStatus.UNKNOWN
         error = error or "发送结果同时包含成功或待确认消息"

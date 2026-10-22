@@ -183,7 +183,7 @@ class UploadReconciliationTest(unittest.TestCase):
 
     def test_manual_sent_reconciliation_writes_checkpoint_before_removing_journal(self):
         from tdlib_media_uploader.telegram import tdlib_common
-        from tdlib_media_uploader.media import legacy_image as image_core
+        from tdlib_media_uploader.media import image_pipeline as image_core
 
         target = _target()
         with tempfile.TemporaryDirectory() as directory:
@@ -216,7 +216,7 @@ class UploadReconciliationTest(unittest.TestCase):
 
     def test_manual_sent_state_failure_keeps_journal(self):
         from tdlib_media_uploader.telegram import tdlib_common
-        from tdlib_media_uploader.media import legacy_image as image_core
+        from tdlib_media_uploader.media import image_pipeline as image_core
 
         target = {"target_mode": "forum_topic", "chat_id": -1001, "forum_topic_id": 7}
         with tempfile.TemporaryDirectory() as directory:
@@ -247,9 +247,9 @@ class UploadReconciliationTest(unittest.TestCase):
 
     def test_legacy_reconciliation_uses_kind_target_instead_of_global_target(self):
         from tdlib_media_uploader.telegram import tdlib_common
-        from tdlib_media_uploader.media import legacy_image as image_core
-        from tdlib_media_uploader.media import legacy_mixed as mixed_core
-        from tdlib_media_uploader.media import legacy_video as video_core
+        from tdlib_media_uploader.media import image_pipeline as image_core
+        from tdlib_media_uploader.media import mixed_pipeline as mixed_core
+        from tdlib_media_uploader.media import video_pipeline as video_core
 
         modules = {
             "video": (video_core, "VIDEO_DIR", "VIDEO_RESET_STATE", "video_file.mp4"),
@@ -311,7 +311,7 @@ class UploadReconciliationTest(unittest.TestCase):
 
     def test_journal_target_takes_precedence_over_state_fallback_target(self):
         from tdlib_media_uploader.telegram import tdlib_common
-        from tdlib_media_uploader.media import legacy_image as image_core
+        from tdlib_media_uploader.media import image_pipeline as image_core
         from tdlib_media_uploader.core.upload_journal import normalize_target
 
         target_a = normalize_target(

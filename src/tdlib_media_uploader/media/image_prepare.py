@@ -13,7 +13,6 @@ import io
 import math
 import os
 from pathlib import Path
-from typing import Any
 
 from PIL import Image, ImageOps
 

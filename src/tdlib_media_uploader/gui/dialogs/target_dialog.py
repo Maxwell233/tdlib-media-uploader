@@ -4,18 +4,16 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
-    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QLabel,
     QMessageBox,
     QVBoxLayout,
-    QWidget,
 )
 
 from ...config.paths import read_version
 from ..components.telegram_target_editor import TelegramTargetEditor
-from ..config_service import get_cfg as _cfg, write_config_values as _write_config_values
+from ..config_service import write_config_values as _write_config_values
 from ..tools import kind_label as _kind_label, require_kind as _require_kind
 
 
@@ -23,9 +21,6 @@ class TargetDialog(QDialog):
     """Lightweight dialog editing ONLY the Telegram destination target for the selected media kind."""
 
     def __init__(self, kind="video", parent=None):
-        if not isinstance(kind, str):
-            parent = kind if parent is None else parent
-            kind = "video"
         kind = _require_kind(kind)
         super().__init__(parent)
         self.kind = kind
@@ -62,14 +57,6 @@ class TargetDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-
-        # Hidden media container for backward compatibility with legacy tests
-        self.media_box = QWidget(self)
-        self.media_box.setVisible(False)
-        self.video_filename_numbers = QCheckBox(self.media_box)
-        self.video_filename_numbers.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS", True)))
-        self.mixed_filename_numbers = QCheckBox(self.media_box)
-        self.mixed_filename_numbers.setChecked(bool(_cfg("MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS", True)))
 
     @property
     def target_mode(self):

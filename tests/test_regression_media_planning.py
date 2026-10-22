@@ -23,7 +23,7 @@ from tdlib_media_uploader.core import album as metadata
 from tdlib_media_uploader.core import logging as app_logging
 from tdlib_media_uploader.gui import main_window as gui
 from tdlib_media_uploader.gui import config_service, tools, cache_service
-from tdlib_media_uploader.core import filesystem_legacy as path_utils
+from tdlib_media_uploader.core import filesystem as path_utils
 from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
 
 
@@ -90,7 +90,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_mixed_scan_groups_and_splits_albums(self):
-        from tdlib_media_uploader.media import legacy_mixed as core
+        from tdlib_media_uploader.media import mixed_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "mixed"
@@ -127,7 +127,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_mixed_contents_keep_photo_video_order(self):
-        from tdlib_media_uploader.media import legacy_mixed as core
+        from tdlib_media_uploader.media import mixed_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -150,7 +150,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_mixed_extension_conflicts_are_rejected(self):
-        from tdlib_media_uploader.media import legacy_mixed as core
+        from tdlib_media_uploader.media import mixed_pipeline as core
 
         with patch.object(core.cfg, "MIXED_IMAGE_EXTENSIONS", {".jpg"}), \
                 patch.object(core.cfg, "MIXED_VIDEO_EXTENSIONS", {".jpg"}):
@@ -159,8 +159,8 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_media_scan_applies_telegram_size_limits(self):
-        from tdlib_media_uploader.media import legacy_image as image_core
-        from tdlib_media_uploader.media import legacy_video as video_core
+        from tdlib_media_uploader.media import image_pipeline as image_core
+        from tdlib_media_uploader.media import video_pipeline as video_core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -207,7 +207,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_oversize_image_compression_is_deferred_until_upload(self):
-        from tdlib_media_uploader.media import legacy_image as core
+        from tdlib_media_uploader.media import image_pipeline as core
         from PIL import Image
 
         class UI:
@@ -250,7 +250,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_video_monthly_and_forced_grouping(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
         import datetime
         with tempfile.TemporaryDirectory() as directory:
             items = []
@@ -269,7 +269,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_unreadable_video_does_not_abort_album_content_build(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

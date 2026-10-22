@@ -12,6 +12,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -78,9 +79,11 @@ class SortingExtractionTest(unittest.TestCase):
             root / "A" / "x.100.jpg",
             root / "B10" / "x.2.jpg",
         ]
-        ordered = sorting.media_path_sort(paths, root)
+        # Exercise the filesystem-facing sort route used by discovery callers;
+        # sorting.natural_sort is covered directly by the adjacent tests.
+        ordered = filesystem.media_path_sort(paths, root)
         self.assertEqual(
-            [sorting.relative_name(path, root) for path in ordered],
+            [filesystem.relative_name(path, root) for path in ordered],
             ["A/x.1.jpg", "A/x.100.jpg", "B2/x.41.jpg", "B2/x.410.jpg", "B10/x.2.jpg"],
         )
 
@@ -93,6 +96,28 @@ class SortingExtractionTest(unittest.TestCase):
 
 
 class FilesystemExtractionTest(unittest.TestCase):
+    def test_windows_unc_identity_and_display_do_not_resolve_network_paths(self):
+        source = r"\\server\Share\Folder\..\Photo.JPG"
+        with patch.object(filesystem.os, "name", "nt"), \
+                patch.object(Path, "resolve", side_effect=AssertionError("network resolution")):
+            self.assertTrue(filesystem.is_unc_path(source))
+            self.assertEqual(filesystem.stable_path(source), r"\\server\share\photo.jpg")
+            self.assertEqual(filesystem.display_path(source), r"\\server\Share\Photo.JPG")
+
+    def test_windows_mapped_drive_network_classification_controls_io_limit(self):
+        import ctypes
+
+        def drive_type(root):
+            return 4 if root == "Z:\\" else 3
+
+        windows_api = SimpleNamespace(kernel32=SimpleNamespace(GetDriveTypeW=drive_type))
+        with patch.object(filesystem.os, "name", "nt"), \
+                patch.object(ctypes, "windll", windows_api, create=True):
+            self.assertTrue(filesystem.is_network_path(r"Z:\Media"))
+            self.assertFalse(filesystem.is_network_path(r"C:\Media"))
+            self.assertEqual(filesystem.io_worker_count(r"Z:\Media", local=8, network=2), 2)
+            self.assertEqual(filesystem.io_worker_count(r"C:\Media", local=8, network=2), 8)
+
     def test_discovery_captures_one_stat_snapshot_for_matching_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -187,6 +212,27 @@ class FilesystemExtractionTest(unittest.TestCase):
 
 
 class ReadinessExtractionTest(unittest.TestCase):
+    def test_revalidation_preserves_snapshot_contract_and_rejects_changed_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "clip.mp4"
+            path.write_bytes(b"media")
+            snapshot = filesystem.snapshot_file(path)
+            for helpers in (filesystem, readiness):
+                with self.subTest(entry=helpers.__name__):
+                    current = helpers.revalidate_file(
+                        path, expected_size=snapshot.size, expected_mtime_ns=snapshot.mtime_ns,
+                    )
+                    self.assertIsInstance(current, FileSnapshot)
+                    self.assertEqual(tuple(current), snapshot.as_tuple())
+                    with self.assertRaisesRegex(RuntimeError, "发生变化"):
+                        helpers.revalidate_file(path, expected_mtime_ns=snapshot.mtime_ns + 1)
+            path.write_bytes(b"changed media")
+            with self.assertRaisesRegex(RuntimeError, "发生变化"):
+                readiness.revalidate_file(path, expected_size=snapshot.size)
+            path.unlink()
+            with self.assertRaisesRegex(RuntimeError, "不可读取或已被删除"):
+                readiness.revalidate_file(path)
+
     def test_readiness_ready_and_uses_expected_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "clip.mp4"

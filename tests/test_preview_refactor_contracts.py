@@ -36,7 +36,7 @@ class PreviewRefactorContracts(unittest.TestCase):
             root = Path(directory)
             for kind in ('video', 'image', 'mixed'):
                 with self.subTest(kind=kind):
-                    core = types.ModuleType(f'tdlib_media_uploader.media.legacy_{kind}')
+                    core = types.ModuleType(f'tdlib_media_uploader.media.{kind}_pipeline')
                     observed = []
                     def state():
                         observed.append(core.STATE_DIR)
@@ -48,7 +48,7 @@ class PreviewRefactorContracts(unittest.TestCase):
                     core.scan_mixed = lambda *args, **kwargs: []
                     values = {f'{kind.upper()}_DIR': root, 'VIDEO_READ_DATES': False}
                     selected = root / f'{kind}-injected'
-                    with patch.object(media, f'legacy_{kind}', core, create=True), \
+                    with patch.object(media, f'{kind}_pipeline', core, create=True), \
                          patch.dict(sys.modules, {core.__name__: core}), \
                          patch.object(scanner, 'get_config', return_value=SimpleNamespace()), \
                          patch.object(scanner, 'get_cfg', side_effect=lambda name, default=None: values.get(name, default)), \

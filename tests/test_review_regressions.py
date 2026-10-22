@@ -214,17 +214,17 @@ class MediaTests(unittest.TestCase):
                                 self.assertTrue(all(abs(a-b) <= 2 for a, b in zip(output.getpixel((0, 0)), expected)))
 
     def test_image_probe_cache_reuses_full_info_but_invalidates_changed_source(self):
-        from tdlib_media_uploader.media import legacy_image
+        from tdlib_media_uploader.media import image_pipeline
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "photo.jpg"
             Image.new("RGB", (64, 64), "red").save(source)
-            with patch.object(legacy_image, "probe_image", wraps=legacy_image.probe_image) as probe:
-                first = legacy_image.cached_image_probe(source)
-                self.assertEqual(legacy_image.image_info(source), (64, 64))
-                self.assertIs(legacy_image.cached_image_probe(source), first)
+            with patch.object(image_pipeline, "probe_image", wraps=image_pipeline.probe_image) as probe:
+                first = image_pipeline.cached_image_probe(source)
+                self.assertEqual(image_pipeline.image_info(source), (64, 64))
+                self.assertIs(image_pipeline.cached_image_probe(source), first)
                 self.assertEqual(probe.call_count, 1)
                 Image.new("RGB", (320, 240), "blue").save(source)
-                self.assertEqual(legacy_image.image_info(source), (320, 240))
+                self.assertEqual(image_pipeline.image_info(source), (320, 240))
                 self.assertEqual(probe.call_count, 2)
 
     def test_prepared_artifact_and_source_are_both_validated(self):
@@ -245,7 +245,7 @@ class MediaTests(unittest.TestCase):
                 prepared.validate()
 
     def test_album_source_change_during_real_image_preparation_never_submits(self):
-        from tdlib_media_uploader.media import legacy_image
+        from tdlib_media_uploader.media import image_pipeline
         from tdlib_media_uploader.media.image import ImageStrategy
         from tdlib_media_uploader.core.concurrency import CancellationToken
         from tdlib_media_uploader.upload.engine import UploadContext, UploadEngine
@@ -259,18 +259,18 @@ class MediaTests(unittest.TestCase):
             plan = AlbumPlan(key="source-change", kind="image", source_root=root,
                 group_label="1", number=1, items=items, pending_items=items, caption="")
             state = UploadState(kind="image", source_root=root, state_dir=root / "state")
-            real = legacy_image.input_photo
+            real = image_pipeline.input_photo
             def mutate_previous(path, *args, **kwargs):
                 result = real(path, *args, **kwargs)
                 if path == paths[1]:
                     Image.new("RGB", (320, 240), "blue").save(paths[0])
                 return result
-            config = snapshot_config(legacy_image.cfg)
+            config = snapshot_config(image_pipeline.cfg)
             config.STAGING_MODE = "off"
             config.STAGING_ENABLED = False
             sender = Mock()
-            with patch.object(legacy_image, "cfg", config), patch.object(legacy_image, "input_photo", mutate_previous):
-                strategy = ImageStrategy(legacy_module=legacy_image, source_root=root)
+            with patch.object(image_pipeline, "cfg", config), patch.object(image_pipeline, "input_photo", mutate_previous):
+                strategy = ImageStrategy(legacy_module=image_pipeline, source_root=root)
                 context = UploadContext(source_root=root, target={}, cancel_token=CancellationToken(),
                     event_sink=SimpleNamespace(emit=lambda _: None), kind="image", scan_result=ScanResult(items=items),
                     plans=(plan,), state=state, sender=sender, preflight=strategy.preflight_item)
@@ -406,7 +406,7 @@ class BackgroundMaintenanceTests(unittest.TestCase):
 class PreparationBoundaryTests(unittest.TestCase):
     def test_batch_preflight_creates_one_pool_and_reuses_probed_images(self):
         from concurrent.futures import ThreadPoolExecutor
-        from tdlib_media_uploader.media import legacy_image
+        from tdlib_media_uploader.media import image_pipeline
         from tdlib_media_uploader.media.image import ImageStrategy
         from tdlib_media_uploader.gui.integration import _premium_checker
         from tdlib_media_uploader.upload.preflight import preflight_items
@@ -418,17 +418,17 @@ class PreparationBoundaryTests(unittest.TestCase):
                 path = root / f"{index}.jpg"
                 Image.new("RGB", (64, 64), "red").save(path)
                 items.append(item_for(path, root))
-            config = snapshot_config(legacy_image.cfg, overrides={"IMAGE_DIR": root,
+            config = snapshot_config(image_pipeline.cfg, overrides={"IMAGE_DIR": root,
                 "STABILITY_CHECKS_LOCAL": 1, "STABILITY_INTERVAL_LOCAL_SECONDS": 0,
                 "IO_WORKERS_LOCAL": 2, "STAGING_MODE": "off", "STAGING_ENABLED": False})
-            with patch.object(legacy_image, "cfg", config), patch.object(legacy_image, "ThreadPoolExecutor", wraps=ThreadPoolExecutor) as pool, patch.object(legacy_image, "probe_image", wraps=legacy_image.probe_image) as probe:
-                strategy = ImageStrategy(legacy_image)
+            with patch.object(image_pipeline, "cfg", config), patch.object(image_pipeline, "ThreadPoolExecutor", wraps=ThreadPoolExecutor) as pool, patch.object(image_pipeline, "probe_image", wraps=image_pipeline.probe_image) as probe:
+                strategy = ImageStrategy(image_pipeline)
                 result = preflight_items(items, _premium_checker(strategy, SimpleNamespace()))
                 self.assertEqual(result.ready_items, tuple(items))
                 pool.assert_called_once()
                 self.assertEqual(pool.call_args.kwargs["max_workers"], 2)
                 for item in items:
-                    legacy_image.input_photo(item.path)
+                    image_pipeline.input_photo(item.path)
                 self.assertEqual(probe.call_count, len(items))
 
     def test_image_changed_during_encoding_does_not_publish_cache(self):

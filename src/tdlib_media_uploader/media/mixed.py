@@ -22,10 +22,17 @@ from ..core.models import (
     AlbumPlan,
     ContentBuildResult,
     FileSnapshot,
-    LogEvent,
     MediaItem,
     ProgressEvent,
     ScanResult,
+)
+
+from .strategy_support import (
+    StrategyLogUI,
+    is_cancelled as _shared_is_cancelled,
+    model_identity as _model_identity,
+    raw_snapshot as _shared_raw_snapshot,
+    state_completed as _shared_state_completed,
 )
 
 
@@ -36,19 +43,11 @@ _MISSING = object()
 def _load_legacy_module() -> Any:
     """Load the bundled mixed-media compatibility module."""
 
-    return importlib.import_module("tdlib_media_uploader.media.legacy_mixed")
+    return importlib.import_module("tdlib_media_uploader.media.mixed_pipeline")
 
 
 def _is_cancelled(token: CancelToken | None) -> bool:
-    if token is None:
-        return False
-    checker = getattr(token, "is_cancelled", None)
-    if callable(checker):
-        try:
-            return bool(checker())
-        except Exception:
-            pass
-    return bool(getattr(token, "cancelled", False))
+    return _shared_is_cancelled(token)
 
 
 def _raise_if_cancelled(token: CancelToken | None) -> None:
@@ -57,7 +56,7 @@ def _raise_if_cancelled(token: CancelToken | None) -> None:
     raiser = getattr(token, "raise_if_cancelled", None)
     if callable(raiser):
         raiser()
-    elif _is_cancelled(token):
+    if _is_cancelled(token):
         raise RuntimeError("混合媒体内容构建已取消")
 
 
@@ -71,64 +70,13 @@ class _LegacyCancelEvent:
         return _is_cancelled(self._token)
 
 
-class _EventUI:
-    """Small GUI-free presentation facade required by the legacy builder."""
-
+class _EventUI(StrategyLogUI):
     def __init__(self, event_sink: EventSink | None):
-        self._event_sink = event_sink
-
-    def _emit(self, level: str, message: Any) -> None:
-        emit = getattr(self._event_sink, "emit", None)
-        if not callable(emit):
-            return
-        try:
-            emit(LogEvent(level=level, message=str(message), source="mixed-strategy"))
-        except Exception:
-            # A progress/log consumer must not change a source-read decision.
-            pass
-
-    def warning(self, message: Any) -> None:
-        self._emit("WARNING", message)
-
-    def info(self, message: Any) -> None:
-        self._emit("INFO", message)
-
-    def log(self, message: Any) -> None:
-        self._emit("INFO", message)
-
-
-def _model_identity(item: MediaItem) -> tuple[object, ...]:
-    return (
-        str(Path(item.path)),
-        str(Path(item.source_root)),
-        str(item.media_kind),
-        item.snapshot.path,
-        item.snapshot.size,
-        item.snapshot.mtime_ns,
-    )
+        super().__init__(event_sink, source="mixed-strategy")
 
 
 def _raw_snapshot(raw: Mapping[str, Any], path: Path) -> FileSnapshot:
-    value = raw.get("snapshot")
-    if isinstance(value, FileSnapshot):
-        return value
-    if value is not None:
-        size = getattr(value, "size", None)
-        mtime_ns = getattr(value, "mtime_ns", None)
-        snapshot_path = getattr(value, "path", str(path))
-        if size is None or mtime_ns is None:
-            try:
-                size, mtime_ns = value[0], value[1]
-            except (IndexError, KeyError, TypeError):
-                size = mtime_ns = None
-        if size is not None and mtime_ns is not None:
-            return FileSnapshot(str(snapshot_path), int(size), int(mtime_ns))
-
-    size = raw.get("scan_size", raw.get("size"))
-    mtime_ns = raw.get("scan_mtime_ns", raw.get("mtime_ns"))
-    if size is None or mtime_ns is None:
-        raise ValueError(f"混合媒体项缺少扫描快照：{path}")
-    return FileSnapshot(str(path), int(size), int(mtime_ns))
+    return _shared_raw_snapshot(raw, path, item_label="混合媒体")
 
 
 def _raw_identity(raw: Any, default_source_root: Path) -> tuple[object, ...] | None:
@@ -347,19 +295,7 @@ class MixedMediaStrategy:
         )
 
     def _state_completed(self, state: Any, item: MediaItem) -> bool:
-        if state is None:
-            return False
-        checker = getattr(state, "is_completed", None)
-        if not callable(checker):
-            raise TypeError("state 必须提供 is_completed()")
-        legacy_item = self._legacy_item(item)
-        for candidate in (item, legacy_item):
-            try:
-                if bool(checker(candidate)):
-                    return True
-            except (OSError, TypeError, ValueError, AttributeError):
-                continue
-        return False
+        return _shared_state_completed(state, item, self._legacy_item)
 
     @classmethod
     def _groups_for_scan(
@@ -456,6 +392,7 @@ class MixedMediaStrategy:
         """Delegate discovery and translate its immutable snapshots."""
 
         del context
+        _raise_if_cancelled(cancel_token)
         root = Path(source_root)
         cancel_event = _LegacyCancelEvent(cancel_token)
         with self._legacy_scope(root):

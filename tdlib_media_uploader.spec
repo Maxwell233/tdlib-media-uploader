@@ -17,16 +17,6 @@ PACKAGE_NAME = "tdlib_media_uploader"
 PACKAGE_DIR = SRC_DIR / PACKAGE_NAME
 
 
-def collect_package(name: str):
-    try:
-        return collect_all(name)
-    except Exception:
-        # Some packages (notably a single-file native extension) do not expose
-        # package metadata to collect_all.  The explicit hidden import below
-        # still lets Analysis include the module in that case.
-        return [], [], []
-
-
 def is_embedded_ffmpeg(item) -> bool:
     """Exclude imageio-ffmpeg's wheel binary from the portable build.
 
@@ -36,17 +26,14 @@ def is_embedded_ffmpeg(item) -> bool:
     build before invoking this spec.
     """
 
-    for value in item[:2]:
-        path = Path(str(value))
-        parts = {part.lower() for part in path.parts}
-        lower_name = path.name.lower()
-        if ("ffmpeg" in lower_name or "ffprobe" in lower_name) and (
-            path.suffix.lower() == ".exe"
-            or "binaries" in parts
-            or "imageio_ffmpeg" in parts
-        ):
-            return True
-    return False
+    # Inspect the source file, since a destination directory can itself be
+    # named imageio_ffmpeg and says nothing about whether this is executable.
+    path = Path(str(item[0]))
+    name = path.name.lower()
+    return "imageio_ffmpeg" in {part.lower() for part in path.parts} and (
+        name in {"ffmpeg", "ffprobe", "ffmpeg.exe", "ffprobe.exe"}
+        or name.startswith(("ffmpeg-", "ffprobe-"))
+    )
 
 
 RESOURCE_DATA = (
@@ -83,104 +70,16 @@ ffmpeg_build_info = PROJECT_DIR / "tools" / "ffmpeg" / "BUILD_INFO.txt"
 if ffmpeg_build_info.is_file():
     datas.append((str(ffmpeg_build_info), "tools/ffmpeg"))
 
-# Keep the package's public modules explicit for deterministic builds.
-# ``collect_submodules`` below also covers packages added during the staged V2
-# migration without requiring another spec change for every new module.
-PACKAGE_HIDDENIMPORTS = [
-    "tdlib_media_uploader",
-    "tdlib_media_uploader.app",
-    "tdlib_media_uploader.contracts",
-    "tdlib_media_uploader.config",
-    "tdlib_media_uploader.config.model",
-    "tdlib_media_uploader.config.loader",
-    "tdlib_media_uploader.config.paths",
-    "tdlib_media_uploader.core",
-    "tdlib_media_uploader.core.models",
-    "tdlib_media_uploader.core.sorting",
-    "tdlib_media_uploader.core.filesystem",
-    "tdlib_media_uploader.core.filesystem_legacy",
-    "tdlib_media_uploader.core.readiness",
-    "tdlib_media_uploader.core.concurrency",
-    "tdlib_media_uploader.core.album",
-    "tdlib_media_uploader.core.identity",
-    "tdlib_media_uploader.core.upload_state",
-    "tdlib_media_uploader.core.upload_journal",
-    "tdlib_media_uploader.core.logging",
-    "tdlib_media_uploader.core.instance_lock",
-    "tdlib_media_uploader.core.self_test",
-    "tdlib_media_uploader.gui",
-    "tdlib_media_uploader.gui.application",
-    "tdlib_media_uploader.gui.main_window",
-    "tdlib_media_uploader.gui.tools",
-    "tdlib_media_uploader.gui.config_service",
-    "tdlib_media_uploader.gui.history_service",
-    "tdlib_media_uploader.gui.cache_service",
-    "tdlib_media_uploader.gui.scanner",
-    "tdlib_media_uploader.gui.events",
-    "tdlib_media_uploader.gui.integration",
-    "tdlib_media_uploader.gui.models",
-    "tdlib_media_uploader.gui.workers",
-    "tdlib_media_uploader.gui.theme",
-    "tdlib_media_uploader.gui.components",
-    "tdlib_media_uploader.gui.components.status_pill",
-    "tdlib_media_uploader.gui.components.cards",
-    "tdlib_media_uploader.gui.components.sidebar",
-    "tdlib_media_uploader.gui.dialogs",
-    "tdlib_media_uploader.gui.dialogs.caption_dialog",
-    "tdlib_media_uploader.gui.dialogs.target_dialog",
-    "tdlib_media_uploader.gui.dialogs.config_dialog",
-    "tdlib_media_uploader.gui.dialogs.scan_tools_dialog",
-    "tdlib_media_uploader.gui.pages",
-    "tdlib_media_uploader.gui.pages.home",
-    "tdlib_media_uploader.gui.pages.task",
-    "tdlib_media_uploader.gui.pages.upload",
-    "tdlib_media_uploader.gui.pages.video",
-    "tdlib_media_uploader.gui.pages.image",
-    "tdlib_media_uploader.gui.pages.mixed",
-    "tdlib_media_uploader.gui.pages.inflight",
-    "tdlib_media_uploader.gui.pages.history",
-    "tdlib_media_uploader.gui.pages.settings",
-    "tdlib_media_uploader.media",
-    "tdlib_media_uploader.media.image",
-    "tdlib_media_uploader.media.mixed",
-    "tdlib_media_uploader.media.video",
-    "tdlib_media_uploader.media.video_probe",
-    "tdlib_media_uploader.media.image_probe",
-    "tdlib_media_uploader.media.image_prepare",
-    "tdlib_media_uploader.media.legacy_image",
-    "tdlib_media_uploader.media.legacy_mixed",
-    "tdlib_media_uploader.media.legacy_video",
-    "tdlib_media_uploader.processes",
-    "tdlib_media_uploader.processes.runner",
-    "tdlib_media_uploader.telegram",
-    "tdlib_media_uploader.telegram.client",
-    "tdlib_media_uploader.telegram.auth",
-    "tdlib_media_uploader.telegram.target",
-    "tdlib_media_uploader.telegram.limits",
-    "tdlib_media_uploader.telegram.send_result",
-    "tdlib_media_uploader.telegram.tdlib_common",
-    "tdlib_media_uploader.upload",
-    "tdlib_media_uploader.upload.engine",
-    "tdlib_media_uploader.upload.planner",
-    "tdlib_media_uploader.upload.preflight",
-    "tdlib_media_uploader.upload.staging",
-]
-
+# Include dynamic GUI/media imports without maintaining a second module list.
 hiddenimports = [
     "tdjson",
     "PIL",
     "imageio_ffmpeg",
+    *collect_submodules(PACKAGE_NAME),
 ]
-hiddenimports.extend(PACKAGE_HIDDENIMPORTS)
-try:
-    hiddenimports.extend(collect_submodules(PACKAGE_NAME))
-except Exception:
-    # The explicit package list above keeps the current build usable if a
-    # future optional package cannot be enumerated by PyInstaller's hook.
-    pass
 
 for package_name in ("tdjson", "imageio_ffmpeg"):
-    package_datas, package_binaries, package_hiddenimports = collect_package(package_name)
+    package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
     datas.extend(item for item in package_datas if not is_embedded_ffmpeg(item))
     binaries.extend(item for item in package_binaries if not is_embedded_ffmpeg(item))
     hiddenimports.extend(package_hiddenimports)

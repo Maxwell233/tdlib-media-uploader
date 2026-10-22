@@ -31,9 +31,9 @@ if str(SRC_ROOT) not in sys.path:
 
 from PIL import Image
 
-from tdlib_media_uploader.media import legacy_image as image_core
-from tdlib_media_uploader.media import legacy_mixed as mixed_core
-from tdlib_media_uploader.media import legacy_video as video_core
+from tdlib_media_uploader.media import image_pipeline as image_core
+from tdlib_media_uploader.media import mixed_pipeline as mixed_core
+from tdlib_media_uploader.media import video_pipeline as video_core
 from tdlib_media_uploader.media.image_prepare import prepare_image_for_telegram
 from tdlib_media_uploader.media.image_probe import TELEGRAM_PHOTO_MAX_BYTES, probe_image
 from tdlib_media_uploader.media.video_probe import VideoMediaInfo, determine_supports_streaming, format_unsupported_reason, probe_video
@@ -324,7 +324,7 @@ class VideoProbeAndPayloadTest(unittest.TestCase):
                 probe_count += 1
                 return native_info
 
-            with patch("tdlib_media_uploader.media.legacy_video.probe_video", side_effect=mock_probe):
+            with patch("tdlib_media_uploader.media.video_pipeline.probe_video", side_effect=mock_probe):
                 info1 = video_core.video_info(video_path)
                 info2 = video_core.video_info(video_path)
                 self.assertEqual(probe_count, 1)
@@ -664,6 +664,34 @@ class ImageProbeAndPrepareTest(unittest.TestCase):
 
 class MixedMediaIntegrationTest(unittest.TestCase):
     """Test mixed upload processing containing video and image formats."""
+
+    def test_changed_image_rebuilds_normalized_copy_instead_of_reusing_old_upload_path(self):
+        from tdlib_media_uploader.media import image_pipeline as images
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "photo.bmp"
+            with patch("tdlib_media_uploader.media.image_prepare.IMAGE_COMPRESSION_CACHE_DIR", root / "cache"), \
+                 patch.object(images, "IMAGE_UPLOAD_PATHS", {}), \
+                 patch.object(images, "IMAGE_SCAN_SNAPSHOTS", {}), \
+                 patch.object(images.cfg, "STAGING_MODE", "off"), \
+                 patch.object(images.cfg, "STAGING_ENABLED", False):
+                def contents(color):
+                    Image.new("RGB", (64, 48), color).save(source)
+                    stat = source.stat()
+                    item = {"path": source, "media_kind": "image",
+                            "scan_size": stat.st_size, "scan_mtime_ns": stat.st_mtime_ns}
+                    built, valid, skipped = mixed_core.build_mixed_contents([item], "")
+                    self.assertEqual(valid, [item])
+                    self.assertEqual(skipped, [])
+                    return Path(built[0]["photo"]["path"])
+
+                first = contents("red")
+                second = contents("blue")
+                self.assertNotEqual(first, second)
+                with Image.open(second) as image:
+                    red, _green, blue = image.getpixel((32, 24))
+                    self.assertGreater(blue, red)
 
     def test_mixed_preflight_and_payloads(self):
         with tempfile.TemporaryDirectory() as td:

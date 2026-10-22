@@ -6,7 +6,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import stat
-from typing import Any
 
 from ..config.paths import (
     CAPTIONS_DIR,
@@ -21,7 +20,7 @@ from ..config.paths import (
     VIDEO_PROCESSED_CACHE_DIR,
     VIDEO_STATE_DIR,
 )
-from ..core.filesystem_legacy import is_link_or_junction
+from ..core.filesystem import is_link_or_junction
 from .config_service import get_cfg
 from .tools import format_size
 
@@ -124,30 +123,25 @@ def remove_cache_path(path: Path, *, cancel_event=None, progress=None) -> None:
     elif path.is_file():
         path.unlink()
     elif path.is_dir():
-        try:
-            entries = list(os.scandir(path))
-        except OSError:
-            raise
+        with os.scandir(path) as iterator:
+            entries = list(iterator)
         for entry in entries:
             if cancel_event is not None and cancel_event.is_set():
                 return
             child = Path(entry.path)
-            try:
-                junction = getattr(entry, "is_junction", None)
-                if entry.is_symlink() or (callable(junction) and junction()):
-                    if entry.is_dir(follow_symlinks=False) and not entry.is_symlink():
-                        child.rmdir()
-                    else:
-                        child.unlink(missing_ok=True)
-                elif entry.is_file(follow_symlinks=False):
-                    child.unlink(missing_ok=True)
-                elif entry.is_dir(follow_symlinks=False):
-                    remove_cache_path(child, cancel_event=cancel_event, progress=progress)
-                    if cancel_event is not None and cancel_event.is_set():
-                        return
+            junction = getattr(entry, "is_junction", None)
+            if entry.is_symlink() or (callable(junction) and junction()):
+                if entry.is_dir(follow_symlinks=False) and not entry.is_symlink():
                     child.rmdir()
-            except OSError:
-                raise
+                else:
+                    child.unlink(missing_ok=True)
+            elif entry.is_file(follow_symlinks=False):
+                child.unlink(missing_ok=True)
+            elif entry.is_dir(follow_symlinks=False):
+                remove_cache_path(child, cancel_event=cancel_event, progress=progress)
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                child.rmdir()
 
 
 def clear_cache(
@@ -181,22 +175,9 @@ def clear_cache(
     return removed, errors
 
 
-# Compatibility aliases
-_current_cache_targets = current_cache_targets
-_cache_usage = cache_usage
-_cache_status_text = cache_status_text
-_remove_cache_path = remove_cache_path
-_clear_cache = clear_cache
-
-
 __all__ = [
     "ALL_CACHE_KEYS",
     "CACHE_TARGETS",
-    "_cache_status_text",
-    "_cache_usage",
-    "_clear_cache",
-    "_current_cache_targets",
-    "_remove_cache_path",
     "cache_status_text",
     "cache_usage",
     "clear_cache",

@@ -23,7 +23,8 @@ from tdlib_media_uploader.core import album as metadata
 from tdlib_media_uploader.core import logging as app_logging
 from tdlib_media_uploader.gui import main_window as gui
 from tdlib_media_uploader.gui import config_service, tools, cache_service
-from tdlib_media_uploader.core import filesystem_legacy as path_utils
+from tdlib_media_uploader.gui.settings.upload_panel import UploadPanel
+from tdlib_media_uploader.core import filesystem as path_utils
 from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
 
 
@@ -34,20 +35,23 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_filename_number_checkbox_can_be_disabled(self):
-        for kind, attribute in (
-            ("video", "video_filename_numbers"),
-            ("mixed", "mixed_filename_numbers"),
-        ):
-            dialog = gui.TargetDialog(kind)
-            checkbox = getattr(dialog, attribute)
-            self.assertTrue(checkbox.isEnabled())
-            checkbox.setChecked(False)
-            self.assertFalse(checkbox.isChecked())
-            dialog.deleteLater()
+        panel = UploadPanel()
+        try:
+            for kind, checkbox in (
+                ("video", panel.video_filename_numbers),
+                ("mixed", panel.mixed_filename_numbers),
+            ):
+                with self.subTest(kind=kind):
+                    self.assertTrue(checkbox.isEnabled())
+                    checkbox.setChecked(False)
+                    self.assertFalse(checkbox.isChecked())
+                    self.assertFalse(panel.collect_values()[(kind, "caption_include_filename_numbers")])
+        finally:
+            panel.deleteLater()
 
 
     def test_video_scan_builds_all_months_once(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
         import datetime
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -69,7 +73,7 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_unreadable_videos_are_isolated_before_upload(self):
-        from tdlib_media_uploader.media import legacy_video as core
+        from tdlib_media_uploader.media import video_pipeline as core
 
         class UI:
             def __init__(self):

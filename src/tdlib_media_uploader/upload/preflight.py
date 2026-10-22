@@ -65,10 +65,7 @@ def _is_cancelled(token: CancelToken | None) -> bool:
         return False
     checker = getattr(token, "is_cancelled", None)
     if callable(checker):
-        try:
-            return bool(checker())
-        except Exception:
-            return False
+        return bool(checker())
     return bool(getattr(token, "cancelled", False))
 
 

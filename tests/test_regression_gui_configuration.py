@@ -23,7 +23,7 @@ from tdlib_media_uploader.core import album as metadata
 from tdlib_media_uploader.core import logging as app_logging
 from tdlib_media_uploader.gui import main_window as gui
 from tdlib_media_uploader.gui import config_service, tools, cache_service
-from tdlib_media_uploader.core import filesystem_legacy as path_utils
+from tdlib_media_uploader.core import filesystem as path_utils, readiness
 from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
 
 
@@ -124,8 +124,8 @@ class ImprovementsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "stable.bin"
             path.write_bytes(b"stable")
-            with patch.object(path_utils, "cancelable_sleep", return_value=True) as sleep:
-                result = path_utils.check_file_readiness(path, stable_interval=1.2, stable_checks=2, probe=False)
+            with patch.object(readiness, "cancelable_sleep", return_value=True) as sleep:
+                result = readiness.check_file_readiness(path, stable_interval=1.2, stable_checks=2, probe=False)
             self.assertTrue(result.ready)
             self.assertEqual(sleep.call_args.args[0], 1.2)
 

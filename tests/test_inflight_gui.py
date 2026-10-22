@@ -24,7 +24,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from tdlib_media_uploader.core.upload_journal import InflightJournal  # noqa: E402
-from tdlib_media_uploader.core.filesystem_legacy import stable_path  # noqa: E402
+from tdlib_media_uploader.core.filesystem import stable_path
 
 if GUI_AVAILABLE:
     from tdlib_media_uploader.gui import main_window as gui  # noqa: E402
@@ -135,17 +135,6 @@ class InflightGuiTest(unittest.TestCase):
         )
         self.assertIn("缺少源文件信息", InflightPage._detail_text(legacy))
 
-    def test_gui_inflight_page_loads_unresolved_records(self):
-        with tempfile.TemporaryDirectory() as directory:
-            journal = InflightJournal(Path(directory) / "upload_inflight")
-            journal.prepare("image", "gui-album", [{"path": "photo.jpg"}])
-            journal.unknown("image", "gui-album", "timeout")
-            with patch.object(gui, "APP_DATA_DIR", Path(directory)), \
-                    patch("tdlib_media_uploader.core.upload_journal.APP_DATA_DIR", Path(directory)):
-                page = InflightPage()
-                self.addCleanup(page.deleteLater)
-                self.assertEqual(page.table.rowCount(), 1)
-
     def test_gui_legacy_target_warning_is_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = InflightJournal(Path(directory) / "upload_inflight")
@@ -155,6 +144,7 @@ class InflightGuiTest(unittest.TestCase):
                     patch("tdlib_media_uploader.core.upload_journal.APP_DATA_DIR", Path(directory)):
                 page = InflightPage()
                 self.addCleanup(page.deleteLater)
+                self.assertEqual(page.table.rowCount(), 1)
                 self.assertEqual(page.table.item(0, 5).text(), "⚠ 旧版记录：目标未知")
                 page.table.selectRow(0)
                 with patch.object(

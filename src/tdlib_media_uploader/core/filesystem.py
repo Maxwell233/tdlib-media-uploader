@@ -20,6 +20,7 @@ from .concurrency import (
     is_cancelled,
 )
 from .models import FileSnapshot
+from ..processes.runner import run_cancellable_process
 from .sorting import (
     media_path_sort,
     natural_compare,
@@ -207,7 +208,7 @@ def _macos_filesystem_type(path: str) -> str | None:
             try:
                 # This diagnostic is bounded and does not depend on GUI or
                 # TDLib.  Keep it local so ordinary path checks stay cheap.
-                result = subprocess.run(
+                result = run_cancellable_process(
                     ["/sbin/mount"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -265,76 +266,11 @@ def is_transient_fs_error(exc: BaseException) -> bool:
 
     if not isinstance(exc, OSError):
         return False
-    permanent = {
-        code
-        for code in (
-            getattr(errno, "EACCES", None),
-            getattr(errno, "EPERM", None),
-            getattr(errno, "EINVAL", None),
-            getattr(errno, "ENAMETOOLONG", None),
-            getattr(errno, "ENOTDIR", None),
-        )
-        if code is not None
-    }
-    if getattr(exc, "errno", None) in permanent:
-        return False
-    transient = {
-        code
-        for code in (
-            getattr(errno, "ETIMEDOUT", None),
-            getattr(errno, "ECONNRESET", None),
-            getattr(errno, "ECONNABORTED", None),
-            getattr(errno, "ENETUNREACH", None),
-            getattr(errno, "EHOSTUNREACH", None),
-            getattr(errno, "ENOTCONN", None),
-            getattr(errno, "EAGAIN", None),
-            getattr(errno, "EBUSY", None),
-            getattr(errno, "ESTALE", None),
-            getattr(errno, "EIO", None),
-        )
-        if code is not None
-    }
-    if getattr(exc, "errno", None) in transient:
-        return True
-    if getattr(exc, "winerror", None) in {
-        21,
-        32,
-        33,
-        53,
-        64,
-        121,
-        1231,
-        1236,
-        1450,
-        995,
-    }:
-        return True
-    text = str(exc).casefold()
-    markers = (
-        "timed out",
-        "timeout",
-        "temporarily unavailable",
-        "try again",
-        "connection reset",
-        "connection aborted",
-        "network is unreachable",
-        "network path",
-        "sharing violation",
-        "resource busy",
-        "stale file",
-        "network name",
-        "device not ready",
-        "再试",
-        "暂时不可用",
-        "网络",
-        "连接重置",
-        "共享冲突",
-    )
-    if any(marker in text for marker in markers):
-        return True
     # Unknown platform-specific OSErrors remain retryable, but the caller's
     # attempt limit guarantees termination.
-    return True
+    return exc.errno not in {
+        errno.EACCES, errno.EPERM, errno.EINVAL, errno.ENAMETOOLONG, errno.ENOTDIR,
+    }
 
 
 def retry_fs_operation(
@@ -567,7 +503,7 @@ def _entry_suffix(name: str) -> str:
 
 def iter_files(
     root,
-    extensions: Iterable[str] | str,
+    extensions: Iterable[str] | str | None,
     cancel_event=None,
     *,
     cancel_token=None,
@@ -575,11 +511,15 @@ def iter_files(
     discovery_initial_delay: float = DISCOVERY_INITIAL_DELAY_SECONDS,
     discovery_max_delay: float = DISCOVERY_MAX_DELAY_SECONDS,
 ) -> DirectoryScanResult:
-    """Walk a tree without following links and capture one file snapshot."""
+    """Walk a tree without following links and capture one file snapshot.
+
+    ``extensions=None`` includes every non-empty regular file, preserving
+    the unfiltered discovery contract used by directory inspection tools.
+    """
 
     if isinstance(extensions, (str, bytes)):
         extensions = (extensions,)
-    accepted = {str(ext).casefold() for ext in extensions}
+    accepted = None if extensions is None else {str(ext).casefold() for ext in extensions}
     paths: list[Path] = []
     errors: list[str] = []
     warnings: list[str] = []
@@ -634,7 +574,7 @@ def iter_files(
                     if stat.S_ISDIR(info.st_mode):
                         stack.append(entry.path)
                         continue
-                    if _entry_suffix(entry.name).casefold() not in accepted:
+                    if accepted is not None and _entry_suffix(entry.name).casefold() not in accepted:
                         continue
                     snapshot = _snapshot_from_info(entry.path, info)
                     if snapshot is None:

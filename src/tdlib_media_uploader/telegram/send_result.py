@@ -226,7 +226,11 @@ def map_send_result(
     failed = _ids(records, "failed")
     pending = _ids(records, "pending")
     expected = len(records) if expected_count is None else max(0, int(expected_count))
-    forced_unknown = timed_out or cancelled or incomplete
+    # One Telegram message cannot confirm two different Album items.
+    # Keep the observed IDs for manual recovery, but never checkpoint them
+    # as a complete Album merely because a response/update repeated an ID.
+    duplicate_confirmations = len(set(succeeded)) != len(succeeded)
+    forced_unknown = timed_out or cancelled or incomplete or duplicate_confirmations
     status = status_for_delivery(
         len(succeeded),
         len(failed),

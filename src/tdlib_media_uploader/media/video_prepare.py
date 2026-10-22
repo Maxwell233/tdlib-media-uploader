@@ -23,15 +23,14 @@ import uuid
 
 from ..core.source_snapshot import capture_snapshot, validate_snapshots
 from ..config import loader as cfg
-from ..config.paths import THUMBNAIL_CACHE_DIR, VIDEO_PROCESSED_CACHE_DIR
+from ..config.paths import VIDEO_PROCESSED_CACHE_DIR
 from ..core.filesystem import stable_path
-from ..core.filesystem_legacy import display_path, run_cancellable_process
-from .legacy_video import build_thumbnail, format_size, video_limit_text
+from ..core.filesystem import display_path
+from ..processes.runner import run_cancellable_process
 from .video_probe import (
     VideoMediaInfo,
     _find_ffmpeg,
     _hidden_subprocess_kwargs,
-    determine_supports_streaming,
     format_unsupported_reason,
     probe_video,
 )
@@ -195,8 +194,6 @@ def resolve_processed_filename(orig_path: Path, group_dir: Path, manifest: dict[
         # Neither manifest nor disk has this slot -> free!
         return cand_name
 
-    return f"{orig_path.stem}.mp4"
-
 
 def _valid_stream_copy(info: VideoMediaInfo, expected_info: VideoMediaInfo | None = None) -> bool:
     """Require a readable MP4 with unchanged selected video and audio codecs."""
@@ -224,7 +221,7 @@ def remux_video_lossless(
     """Losslessly remux a probed video to MP4 using stream copy.
 
     Invokes:
-        ffmpeg -y -v error -i <source> -map 0:v:0 -map 0:a:0? -c copy -movflags +faststart <temp>
+        ffmpeg -y -v error -i <source> -map 0:V:0 -map 0:a:0? -c copy -movflags +faststart <temp>
     Outputs to temporary file first, verifies output, and atomically renames.
     Any temporary file is deleted immediately on error or cancellation.
     """
@@ -247,7 +244,7 @@ def remux_video_lossless(
         "-i",
         display_path(source_path),
         "-map",
-        "0:v:0",
+        "0:V:0",
         "-map",
         "0:a:0?",
         "-c",
@@ -367,7 +364,7 @@ def prepare_video_for_telegram(
     if compat in {"native", "legacy"}:
         size = w_path.stat().st_size
         if size > effective_max:
-            from .legacy_video import format_size, video_limit_text
+            from .video_pipeline import format_size, video_limit_text
             raise RuntimeError(
                 f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
                 f"{video_limit_text(effective_max)}"
@@ -375,7 +372,7 @@ def prepare_video_for_telegram(
 
         thumb_path, tw, th = None, 0, 0
         if generate_thumbnail:
-            from .legacy_video import build_thumbnail
+            from .video_pipeline import build_thumbnail
             dur = getattr(info, "duration", None)
             if dur is None and isinstance(info, Mapping):
                 dur = info.get("duration")
@@ -489,7 +486,7 @@ def prepare_video_for_telegram(
 
         p_size = processed_path.stat().st_size
         if p_size > effective_max:
-            from .legacy_video import format_size, video_limit_text
+            from .video_pipeline import format_size, video_limit_text
             raise RuntimeError(
                 f"重新封装后的文件大小 {format_size(p_size)} 超过 Telegram 视频上限 "
                 f"{video_limit_text(effective_max)}"
@@ -497,7 +494,7 @@ def prepare_video_for_telegram(
 
         thumb_path, tw, th = None, 0, 0
         if generate_thumbnail:
-            from .legacy_video import build_thumbnail
+            from .video_pipeline import build_thumbnail
             thumb_kwargs = {
                 "timestamp_seconds": thumbnail_timestamp_seconds,
                 "duration": processed_info.duration,

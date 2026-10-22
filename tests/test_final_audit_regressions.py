@@ -13,13 +13,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from tdlib_media_uploader.core.album import album_key
-from tdlib_media_uploader.core.filesystem_legacy import stable_path
+from tdlib_media_uploader.core.filesystem import stable_path
 from tdlib_media_uploader.gui import models, scanner
 from tdlib_media_uploader.gui import history_service
 from tdlib_media_uploader.gui.dialogs.scan_tools_dialog import ScanToolsDialog
 from tdlib_media_uploader.gui.pages.upload import UploadPage, UploadPageServices
 from tdlib_media_uploader.gui.settings import AdvancedPanel, TelegramPanel, UploadPanel
-from tdlib_media_uploader.media import legacy_image
+from tdlib_media_uploader.media import image_pipeline
 
 
 class _State:
@@ -61,10 +61,10 @@ class FinalAuditRegressionTest(unittest.TestCase):
                 patch.object(scanner, "get_cfg", side_effect=get_cfg), \
                 patch.object(scanner, "target_for", return_value={}), \
                 patch.object(scanner, "CaptionStore", _Captions), \
-                patch.object(legacy_image, "scan_images", return_value=[media_path]), \
-                patch.object(legacy_image, "UploadState", return_value=_State()), \
+                patch.object(image_pipeline, "scan_images", return_value=[media_path]), \
+                patch.object(image_pipeline, "UploadState", return_value=_State()), \
                 patch.object(
-                    legacy_image,
+                    image_pipeline,
                     "IMAGE_SCAN_SNAPSHOTS",
                     {stable_path(media_path): snapshot},
                 ):
@@ -136,9 +136,9 @@ class FinalAuditRegressionTest(unittest.TestCase):
                 patch.object(scanner, "get_cfg", side_effect=get_cfg), \
                 patch.object(scanner, "target_for", return_value={}), \
                 patch.object(scanner, "CaptionStore", _Captions), \
-                patch.object(legacy_image, "scan_images", return_value=paths), \
-                patch.object(legacy_image, "UploadState", return_value=_State()), \
-                patch.object(legacy_image, "IMAGE_SCAN_SNAPSHOTS", snapshots):
+                patch.object(image_pipeline, "scan_images", return_value=paths), \
+                patch.object(image_pipeline, "UploadState", return_value=_State()), \
+                patch.object(image_pipeline, "IMAGE_SCAN_SNAPSHOTS", snapshots):
                 result = scanner.legacy_scan_result("image")
 
             self.assertEqual(len(result["groups"]), 2)
