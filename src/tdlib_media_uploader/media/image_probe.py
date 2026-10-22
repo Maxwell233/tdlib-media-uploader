@@ -119,15 +119,7 @@ def probe_image(path: Path | str) -> ImageMediaInfo:
     )
     needs_compression = file_size > TELEGRAM_PHOTO_TARGET_BYTES
 
-    if fmt in ("BMP", "TIFF", "WEBP"):
-        needs_transcode = True
-    elif fmt == "PNG":
-        # PNG remains PNG if within size and geometry limits
-        needs_transcode = False
-    elif fmt == "JPEG":
-        needs_transcode = False
-    else:
-        needs_transcode = True
+    needs_transcode = fmt not in {"JPEG", "PNG"}
 
     telegram_compatible = (
         fmt in ("JPEG", "PNG")

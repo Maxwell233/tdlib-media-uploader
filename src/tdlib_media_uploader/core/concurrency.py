@@ -180,18 +180,6 @@ def ordered_bounded_map(
         raise
 
 
-def map_bounded(
-    executor,
-    items: Iterable[_T],
-    worker: Callable[[_T], object],
-    max_workers: int,
-    **kwargs,
-) -> list:
-    """List-returning convenience wrapper around :func:`ordered_bounded_map`."""
-
-    return list(ordered_bounded_map(executor, items, worker, max_workers, **kwargs))
-
-
 def io_worker_count(
     root=None,
     *,
@@ -219,7 +207,6 @@ __all__ = [
     "cancelable_sleep",
     "is_cancelled",
     "io_worker_count",
-    "map_bounded",
     "ordered_bounded_map",
     "raise_if_cancelled",
 ]

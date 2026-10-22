@@ -156,12 +156,10 @@ class AdvancedPanel(SettingsPanel):
         self.exiftool_timeout = self._int_spin(1, 3600, " 秒")
         self.ffmpeg_metadata_timeout = self._int_spin(1, 3600, " 秒")
         self.ffmpeg_thumbnail_timeout = self._int_spin(1, 3600, " 秒")
-        self.ffmpeg_compress_timeout = self._int_spin(1, 3600, " 秒")
 
         proc_form.addRow("ExifTool 超时", self.exiftool_timeout)
         proc_form.addRow("FFmpeg 日期超时", self.ffmpeg_metadata_timeout)
         proc_form.addRow("FFmpeg 封面超时", self.ffmpeg_thumbnail_timeout)
-        proc_form.addRow("FFmpeg 压缩超时", self.ffmpeg_compress_timeout)
         layout.addWidget(proc_card)
 
         # 5. Collapsible: Retries & Batching
@@ -192,7 +190,7 @@ class AdvancedPanel(SettingsPanel):
         for spin in (
             self.scan_workers_local, self.scan_workers_network,
             self.scan_stability_checks, self.scan_stability_checks_local, self.scan_stability_checks_network,
-            self.exiftool_timeout, self.ffmpeg_metadata_timeout, self.ffmpeg_thumbnail_timeout, self.ffmpeg_compress_timeout,
+            self.exiftool_timeout, self.ffmpeg_metadata_timeout, self.ffmpeg_thumbnail_timeout,
             self.scan_discovery_attempts, self.scan_readiness_attempts, self.scan_probe_bytes,
             self.exiftool_batch_size, self.exiftool_retries,
         ):
@@ -248,9 +246,6 @@ class AdvancedPanel(SettingsPanel):
         self.exiftool_timeout.setValue(int(_cfg("EXIFTOOL_TIMEOUT_SECONDS", 120)))
         self.ffmpeg_metadata_timeout.setValue(int(_cfg("FFMPEG_METADATA_TIMEOUT_SECONDS", 30)))
         self.ffmpeg_thumbnail_timeout.setValue(int(_cfg("FFMPEG_THUMBNAIL_TIMEOUT_SECONDS", 30)))
-        self.ffmpeg_compress_timeout.setValue(
-            int(_cfg("FFMPEG_COMPRESSION_TIMEOUT_SECONDS", 45))
-        )
 
         self.scan_discovery_attempts.setValue(int(_cfg("SCAN_DISCOVERY_ATTEMPTS", 3)))
         self.scan_discovery_initial_delay.setValue(float(_cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15)))
@@ -278,7 +273,6 @@ class AdvancedPanel(SettingsPanel):
             "exiftool_timeout": self.exiftool_timeout.value(),
             "ffmpeg_metadata_timeout": self.ffmpeg_metadata_timeout.value(),
             "ffmpeg_thumbnail_timeout": self.ffmpeg_thumbnail_timeout.value(),
-            "ffmpeg_compress_timeout": self.ffmpeg_compress_timeout.value(),
             "scan_discovery_attempts": self.scan_discovery_attempts.value(),
             "scan_discovery_initial_delay": self.scan_discovery_initial_delay.value(),
             "scan_discovery_max_delay": self.scan_discovery_max_delay.value(),
@@ -313,7 +307,6 @@ class AdvancedPanel(SettingsPanel):
             ("process", "exiftool_timeout_seconds"): c["exiftool_timeout"],
             ("process", "ffmpeg_metadata_timeout_seconds"): c["ffmpeg_metadata_timeout"],
             ("process", "ffmpeg_thumbnail_timeout_seconds"): c["ffmpeg_thumbnail_timeout"],
-            ("process", "ffmpeg_compression_timeout_seconds"): c["ffmpeg_compress_timeout"],
             ("scan", "discovery_attempts"): c["scan_discovery_attempts"],
             ("scan", "discovery_initial_delay_seconds"): c["scan_discovery_initial_delay"],
             ("scan", "discovery_max_delay_seconds"): c["scan_discovery_max_delay"],

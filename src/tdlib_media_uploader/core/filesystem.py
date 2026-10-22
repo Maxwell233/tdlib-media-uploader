@@ -12,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, TypeVar
+from typing import Callable, Iterable
 
 from .concurrency import (
     cancelable_sleep,
@@ -37,7 +37,6 @@ DISCOVERY_MAX_DELAY_SECONDS = 1.0
 
 _MAC_MOUNT_CACHE_LOCK = threading.Lock()
 _MAC_MOUNT_CACHE: tuple[float, tuple[tuple[str, str], ...]] | None = None
-_T = TypeVar("_T")
 
 
 def _text(path: object) -> str:
@@ -307,41 +306,6 @@ def retry_fs_operation(
     raise RuntimeError("文件系统重试未返回结果")
 
 
-def retry_with_backoff(
-    operation: Callable[[], _T],
-    *,
-    attempts: int = 3,
-    initial_delay: float = 0.12,
-    backoff: float = 2.0,
-    retry_if: Callable[[BaseException], bool] | None = None,
-    cancel_event=None,
-    cancel_token=None,
-) -> _T:
-    """Run a small I/O operation with generic bounded retry semantics."""
-
-    limit = max(1, int(attempts))
-    for attempt in range(1, limit + 1):
-        if _cancelled(cancel_token, cancel_event):
-            raise TimeoutError("操作已取消")
-        try:
-            return operation()
-        except Exception as exc:
-            should_retry = (
-                retry_if(exc)
-                if retry_if is not None
-                else isinstance(exc, (OSError, TimeoutError))
-            )
-            if not should_retry or attempt >= limit:
-                raise
-            if not cancelable_sleep(
-                initial_delay * (float(backoff) ** (attempt - 1)),
-                cancel_event,
-                cancel_token=cancel_token,
-            ):
-                raise TimeoutError("操作已取消") from exc
-    raise RuntimeError("重试操作未返回结果")
-
-
 def _open_scandir(
     directory,
     *,
@@ -491,11 +455,6 @@ class DirectoryScanResult:
         return (self.paths, legacy_errors)[index]
 
 
-# Keep the low-level result explicitly named so it cannot be confused with
-# the strategy-level ``core.models.ScanResult`` contract.
-FileScanResult = DirectoryScanResult
-
-
 def _entry_suffix(name: str) -> str:
     dot = name.rfind(".")
     return name[dot:] if 0 < dot < len(name) - 1 else ""
@@ -620,7 +579,6 @@ __all__ = [
     "DISCOVERY_INITIAL_DELAY_SECONDS",
     "DISCOVERY_MAX_DELAY_SECONDS",
     "DirectoryScanResult",
-    "FileScanResult",
     "FileSnapshot",
     "display_path",
     "file_mtime",
@@ -639,7 +597,6 @@ __all__ = [
     "relative_name",
     "relative_path_compare",
     "retry_fs_operation",
-    "retry_with_backoff",
     "snapshot_file",
     "snapshot_file_with_code",
     "stable_path",

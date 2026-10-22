@@ -52,7 +52,7 @@ class OfflineClient(td.TDJsonClient):
         messages = [{'id': i + 100} for i, _ in enumerate(contents)]
         return messages[0] if query['@type'] == 'sendMessage' else {'messages': messages}
 
-    def wait_for_send_results(self, messages, timeout=None):
+    def wait_for_send_results(self, messages, timeout=None, **_kwargs):
         self.submitted_records.extend(json.loads(p.read_text()) for p in self.journal_root.glob('*.json'))
         if self.outcome is not None:
             raise self.outcome

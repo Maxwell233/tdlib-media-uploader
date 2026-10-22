@@ -105,7 +105,7 @@ class MixedInputFileRegressionTest(unittest.TestCase):
             queries.append(query)
             or {"messages": [{"id": 101}, {"id": 102}]}
         )
-        client.wait_for_send_results = lambda _messages: {
+        client.wait_for_send_results = lambda _messages, **_kwargs: {
             "succeeded": [101, 102],
             "failed": [],
             "pending": [],

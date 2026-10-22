@@ -25,7 +25,6 @@ from ..tools import format_eta, format_size, kind_label
 class TaskPage(QWidget):
     """Mission Control center displaying real-time upload progress, speed and diagnostics."""
 
-    stop_requested = Signal()
     safe_stop_requested = Signal()
     immediate_stop_requested = Signal()
 
@@ -137,7 +136,7 @@ class TaskPage(QWidget):
         self.stop_button = QPushButton("安全停止（当前 Album 发送完毕后退出）")
         self.stop_button.setObjectName("secondaryButton")
         self.stop_button.setEnabled(False)
-        self.stop_button.clicked.connect(self._emit_safe_stop)
+        self.stop_button.clicked.connect(self.safe_stop_requested)
 
         self.immediate_stop_button = QPushButton("立即中断")
         self.immediate_stop_button.setObjectName("dangerButton")
@@ -147,10 +146,6 @@ class TaskPage(QWidget):
         bottom.addWidget(self.stop_button)
         bottom.addWidget(self.immediate_stop_button)
         layout.addLayout(bottom)
-
-    def _emit_safe_stop(self):
-        self.safe_stop_requested.emit()
-        self.stop_requested.emit()
 
     def start_session(self, kind: str, result: dict):
         self.title.setText(f"任务中心 · {kind_label(kind)}")

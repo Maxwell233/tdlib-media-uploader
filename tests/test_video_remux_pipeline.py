@@ -38,20 +38,9 @@ if str(SRC_ROOT) not in sys.path:
 from PIL import Image
 
 from tdlib_media_uploader.config import loader as cfg
-from tdlib_media_uploader.config.paths import (
-    THUMBNAIL_CACHE_DIR,
-    VIDEO_PROCESSED_CACHE_DIR,
-)
 from tdlib_media_uploader.contracts import UploadContext
 from tdlib_media_uploader.upload.engine import _NeverCancelToken, _NullEventSink
-from tdlib_media_uploader.core.models import (
-    AlbumPlan,
-    BatchStatus,
-    FileSnapshot,
-    MediaItem,
-    ScanResult,
-    UploadBatchResult,
-)
+from tdlib_media_uploader.core.models import AlbumPlan, BatchStatus, FileSnapshot, MediaItem, ScanResult
 from tdlib_media_uploader.telegram.send_result import SendResult
 
 
@@ -76,28 +65,10 @@ def make_album_plan(key: str, source_root: Path, items: tuple[MediaItem, ...], k
         pending_items=items,
         caption="Caption",
     )
-from tdlib_media_uploader.gui.cache_service import (
-    CACHE_TARGETS,
-    clear_cache,
-)
 from tdlib_media_uploader.media import mixed_pipeline as mixed_core
 from tdlib_media_uploader.media import video_pipeline as video_core
-from tdlib_media_uploader.media.video_prepare import (
-    PreparedVideo,
-    cleanup_processed_group,
-    cleanup_stale_processed_videos,
-    clear_all_processed_videos,
-    get_video_process_cache_key,
-    prepare_video_for_telegram,
-    remux_video_lossless,
-    safe_group_key,
-)
-from tdlib_media_uploader.media.video_probe import (
-    VideoMediaInfo,
-    determine_supports_streaming,
-    format_unsupported_reason,
-    probe_video,
-)
+from tdlib_media_uploader.media.video_prepare import cleanup_processed_group, clear_all_processed_videos, prepare_video_for_telegram, remux_video_lossless, safe_group_key
+from tdlib_media_uploader.media.video_probe import VideoMediaInfo, determine_supports_streaming, probe_video
 from tdlib_media_uploader.upload.engine import UploadEngine
 
 

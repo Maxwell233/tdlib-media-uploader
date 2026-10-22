@@ -37,7 +37,6 @@ VIDEO_STANDARD_MAX_BYTES = 4000 * TELEGRAM_UPLOAD_PART_SIZE_MAX
 VIDEO_PREMIUM_MAX_BYTES = 8000 * TELEGRAM_UPLOAD_PART_SIZE_MAX
 VIDEO_MAX_BYTES = VIDEO_PREMIUM_MAX_BYTES
 IMAGE_MAX_BYTES = 10 * 1024 ** 2
-IMAGE_COMPRESSION_TARGET_BYTES = int(9.5 * 1024 ** 2)
 
 
 def video_size_status(size: int, *, is_premium: bool | None = None) -> str:
@@ -510,13 +509,6 @@ VIDEO_THUMB_TARGET_BYTES = int(
     )
 ) * 1024
 
-VIDEO_SHOW_FILE_LIST = bool(
-    video.get(
-        "show_file_list",
-        True
-    )
-)
-
 VIDEO_VERIFY_ALL_METADATA = bool(
     video.get(
         "verify_all_metadata_before_upload",
@@ -613,13 +605,6 @@ if IMAGE_SORT_MODE not in {"mtime", "name"}:
         '"mtime" 或 "name"。'
     )
 
-IMAGE_SHOW_FILE_LIST = bool(
-    image.get(
-        "show_file_list",
-        True
-    )
-)
-
 IMAGE_VERIFY_ALL_IMAGES = bool(
     image.get(
         "verify_all_images_before_upload",
@@ -704,13 +689,6 @@ FFMPEG_INFO_TIMEOUT_SECONDS = _bounded_float(
 )
 FFMPEG_THUMBNAIL_TIMEOUT_SECONDS = _bounded_float(
     process, "ffmpeg_thumbnail_timeout_seconds", 45.0, 1.0, 86_400.0
-)
-FFMPEG_COMPRESSION_TIMEOUT_SECONDS = _bounded_float(
-    process,
-    "ffmpeg_compression_timeout_seconds",
-    float(process.get("ffmpeg_compress_timeout_seconds", 45.0)),
-    1.0,
-    86_400.0,
 )
 EXIFTOOL_BATCH_SIZE = _bounded_int(process, "exiftool_batch_size", 256, 1, 4096)
 EXIFTOOL_RETRIES = _bounded_int(process, "exiftool_retries", 2, 0, 5)

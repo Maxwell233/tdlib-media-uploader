@@ -65,11 +65,6 @@ class SendResult:
             result["message_ids"] = list(self.message_ids)
         return result
 
-    @property
-    def is_resolved(self) -> bool:
-        return self.status in {BatchStatus.CONFIRMED, BatchStatus.FAILED}
-
-
 @dataclass
 class _MessageRecord:
     old_id: int | None

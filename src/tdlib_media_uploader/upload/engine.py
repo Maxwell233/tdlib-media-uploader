@@ -484,8 +484,6 @@ class UploadEngine:
     def _stage(stager: Any, plan: AlbumPlan, context: UploadContext) -> AlbumPlan:
         function = getattr(stager, "stage", None)
         if not callable(function):
-            function = getattr(stager, "stage_plan", None)
-        if not callable(function):
             raise TypeError("stager 必须提供 stage(plan) 方法")
         staged = _call_supported(function, (plan,), context=context)
         effective = plan if staged is None else staged

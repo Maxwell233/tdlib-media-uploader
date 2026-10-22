@@ -122,8 +122,6 @@ class GuiConsoleUI(QObject):
             "log": "INFO",
             "info": "INFO",
             "success": "INFO",
-            "banner": "INFO",
-            "summary": "INFO",
             "warning": "WARNING",
             "error": "ERROR",
         }.get(level, "INFO")
@@ -144,24 +142,6 @@ class GuiConsoleUI(QObject):
 
     def error(self, text):
         self._message("error", text)
-
-    def banner(self, title: str, subtitle: str = "", *, accent="cyan"):
-        del accent
-        self._message("banner", f"{title}\n{subtitle}".strip())
-
-    def summary(self, title, rows, *, kind="VIDEO"):
-        del kind
-        body = [str(title)] + [f"{key}: {value}" for key, value in rows]
-        self._message("summary", "\n".join(body))
-
-    def files(self, title, columns, rows, *, kind="VIDEO", caption=None):
-        del columns, kind
-        suffix = f"\n{caption}" if caption else ""
-        self._message("info", f"{title} · {len(list(rows))} 项{suffix}")
-
-    def groups(self, title, rows, *, kind="VIDEO"):
-        del kind
-        self._message("info", f"{title} · {len(list(rows))} 组")
 
     def target(self, chat_title, topic_name, chat_id, topic_id):
         target_mode = "forum_topic"
@@ -189,12 +169,6 @@ class GuiConsoleUI(QObject):
             "subtitle": subtitle,
             "rows": list(rows or []),
         })
-
-    def confirm_upload(self) -> bool:
-        return not self.stop_requested
-
-    def cancelled(self):
-        self.warning("已取消，没有开始上传。")
 
     def progress(self, **kwargs):
         self.progress_changed.emit(dict(kwargs))

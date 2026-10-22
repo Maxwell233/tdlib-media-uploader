@@ -19,7 +19,6 @@ from pathlib import Path
 import tdjson
 
 from ..config import loader as cfg
-from ..core.compat import call_supported
 from ..core.identity import validate_send_target
 from ..core.logging import TDLIB_LOG_PATH, write_app_log, write_exception
 from ..core.readiness import probe_readable
@@ -30,7 +29,6 @@ from ..core.upload_journal import (
     FAILED,
     InflightJournal,
     UNKNOWN,
-    _record_target,
     normalize_target,
 )
 from .send_result import _error_text as _send_failure_text
@@ -368,44 +366,26 @@ def validate_input_message_contents(contents, *, items=None) -> None:
                 actual=content_type,
                 content=content,
             )
-        if content_type == "inputMessagePhoto":
-            _validate_input_file(
-                content.get("photo"),
+        media_field = "photo" if content_type == "inputMessagePhoto" else "video"
+        _validate_input_file(
+            content.get(media_field),
+            index=index,
+            content_type=content_type,
+            source=source,
+            field=media_field,
+            content=content,
+        )
+        thumbnail = content.get("thumbnail")
+        if thumbnail is not None:
+            _validate_input_thumbnail(
+                thumbnail,
                 index=index,
                 content_type=content_type,
                 source=source,
-                field="photo",
+                field="thumbnail",
                 content=content,
             )
-            thumbnail = content.get("thumbnail")
-            if thumbnail is not None:
-                _validate_input_thumbnail(
-                    thumbnail,
-                    index=index,
-                    content_type=content_type,
-                    source=source,
-                    field="thumbnail",
-                    content=content,
-                )
-        else:
-            _validate_input_file(
-                content.get("video"),
-                index=index,
-                content_type=content_type,
-                source=source,
-                field="video",
-                content=content,
-            )
-            thumbnail = content.get("thumbnail")
-            if thumbnail is not None:
-                _validate_input_thumbnail(
-                    thumbnail,
-                    index=index,
-                    content_type=content_type,
-                    source=source,
-                    field="thumbnail",
-                    content=content,
-                )
+        if content_type == "inputMessageVideo":
             cover = content.get("cover")
             if cover is not None:
                 _validate_input_file(
@@ -419,13 +399,7 @@ def validate_input_message_contents(contents, *, items=None) -> None:
 
 
 class HeadlessUI:
-    """Minimal internal adapter used when the GUI is not active.
-
-    Upload modules still call a small presentation interface while scanning
-    and sending.  Keeping this lightweight implementation in the backend lets
-    the project retain its command-line-compatible core while recording the
-    same durable diagnostics as the GUI.
-    """
+    """Default logging adapter for media helpers outside the GUI worker."""
 
     def register_client(self, client):
         self.client = client
@@ -449,21 +423,6 @@ class HeadlessUI:
     def error(self, text):
         self._write_log("ERROR", text)
 
-    def banner(self, title, subtitle="", *, accent="cyan"):
-        self._write_log("INFO", f"{title}\n{subtitle}".strip())
-
-    def summary(self, title, rows, *, kind="VIDEO"):
-        self._write_log("INFO", "\n".join([str(title)] + [f"{key}: {value}" for key, value in rows]))
-
-    def files(self, title, columns, rows, *, kind="VIDEO", caption=None):
-        text = str(title)
-        if caption:
-            text += f"\n{caption}"
-        self._write_log("INFO", text)
-
-    def groups(self, title, rows, *, kind="VIDEO"):
-        self._write_log("INFO", title)
-
     def target(self, chat_title, topic_name, chat_id, topic_id):
         self._write_log("INFO", f"Telegram 目标：{chat_title} / {topic_name or '频道'} ({chat_id})")
 
@@ -476,23 +435,8 @@ class HeadlessUI:
     def finish(self):
         self._write_log("INFO", "当前媒体组处理结束")
 
-    def cancelled(self):
-        self._write_log("WARNING", "上传任务已取消")
-
-    def confirm_upload(self):
-        return True
-
     def prompt(self, text: str, *, password: bool = False):
         return getpass.getpass(text) if password else input(text)
-
-
-def topic_object() -> dict | None:
-    if getattr(cfg, "TARGET_MODE", "forum_topic") == "channel":
-        return None
-    return {
-        "@type": "messageTopicForum",
-        "forum_topic_id": int(cfg.FORUM_TOPIC_ID),
-    }
 
 
 def build_tdlib_parameters(device_model: str, config=None) -> dict:
@@ -1378,11 +1322,6 @@ class TDJsonClient:
                 f"TDLib 本地输入文件不存在或不可读取：{preview}"
             )
 
-    def _validate_input_message_contents(self, contents, items=None) -> None:
-        """Validate TDLib media content before persisting PREPARED."""
-
-        validate_input_message_contents(contents, items=items)
-
     @staticmethod
     def _input_file_diagnostic(value):
         """Return a compact InputFile diagnostic without exposing credentials."""
@@ -1460,17 +1399,6 @@ class TDJsonClient:
             "forum_topic_id": getattr(self.config, "FORUM_TOPIC_ID", 0),
             "channel_chat_id": getattr(self.config, "CHANNEL_CHAT_ID", 0),
         })
-
-    @staticmethod
-    def _journal_target(record: dict) -> dict:
-        # Keep journal record parsing in one place so legacy v2 records and
-        # current canonical targets use identical mode-aware semantics.
-        return _record_target(record)
-
-    @staticmethod
-    def _journal_items(record: dict) -> list[dict]:
-        from ..upload.reconciliation import ReconciliationService
-        return ReconciliationService._journal_items(record)
 
     def _state_for_journal(self, kind: str, record: dict, **kwargs):
         from ..upload.reconciliation import ReconciliationService
@@ -1567,7 +1495,7 @@ class TDJsonClient:
         # persisted.  Path validation remains separate so a disappearing
         # temporary artifact keeps its actionable FileNotFoundError class.
         try:
-            self._validate_input_message_contents(contents, items=items)
+            validate_input_message_contents(contents, items=items)
             self._validate_local_input_paths(contents)
             if prepared_media is not None:
                 prepared_media.validate()
@@ -1641,8 +1569,8 @@ class TDJsonClient:
                 if on_delivery is not None:
                     on_delivery(value)
 
-            result = call_supported(
-                self.wait_for_send_results, (messages,), on_result=persist_delivery,
+            result = self.wait_for_send_results(
+                messages, on_result=persist_delivery,
                 chat_id=send_target["chat_id"],
                 on_messages=(lambda values: progress.register_messages(values, items))
                             if progress is not None and items is not None else None,

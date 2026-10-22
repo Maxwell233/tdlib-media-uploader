@@ -21,12 +21,6 @@ from zoneinfo import ZoneInfo
 import imageio_ffmpeg
 from PIL import Image
 
-# Some embedding environments expose ``imageio_ffmpeg`` as a namespace
-# package while loading its helpers lazily.  Keep the public lookup available
-# for those environments and for integrations that patch the executable.
-if not hasattr(imageio_ffmpeg, "get_ffmpeg_exe"):
-    imageio_ffmpeg.get_ffmpeg_exe = lambda: shutil.which("ffmpeg") or "ffmpeg"
-
 from ..core.album import CaptionStore, album_key, compose_caption
 from ..core.album import with_filename_description as with_filename_description
 from ..core.identity import media_file_signature

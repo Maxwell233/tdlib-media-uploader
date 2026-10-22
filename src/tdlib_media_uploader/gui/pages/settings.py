@@ -191,7 +191,7 @@ class SettingsPage(QWidget):
         if not self.can_save():
             self._set_status("任务运行中，暂时不能保存配置", "warning")
             return
-        for panel, conflicts in getattr(self, "_conflicts", {}).items():
+        for panel, conflicts in self._conflicts.items():
             current = panel.collect_values()
             if any(current.get(key) == value and value != self._baselines[panel].get(key)
                    for key, value in conflicts.items()):

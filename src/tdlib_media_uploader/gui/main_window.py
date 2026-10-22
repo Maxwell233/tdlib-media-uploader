@@ -76,7 +76,6 @@ from .tools import (
     application_icon as _application_icon,
 )
 from .config_service import (
-    ensure_config_file as _ensure_config_file_service,
     _CONFIG_CREATED,
     cfg,
     get_cfg as _cfg,
@@ -93,13 +92,6 @@ from .scanner import basic_paths as _basic_paths, scan_result as _scan_result
 
 _validate_exiftool_path = validate_exiftool_path
 _write_config_values = write_config_values
-
-
-def _ensure_config_file() -> bool:
-    """Ensure the user config.toml exists on startup, copying the bundled template."""
-    if "--self-test" in sys.argv[1:]:
-        return False
-    return _ensure_config_file_service()
 
 
 _prepare_qt_plugins()
@@ -255,7 +247,7 @@ class MainWindow(QMainWindow):
         self._scan(kind)
 
     def _scan(self, kind: str):
-        if getattr(self, "_cache_clear_worker", None) is not None:
+        if self._cache_clear_worker is not None:
             self.statusBar().showMessage("请等待缓存清理结束，或先取消清理")
             return False
         kind = _require_kind(kind)
@@ -279,7 +271,7 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _reset_upload_state(self, kind: str):
         kind = _require_kind(kind)
-        if getattr(self, "_cache_clear_worker", None) is not None:
+        if self._cache_clear_worker is not None:
             self.statusBar().showMessage("请等待缓存清理结束后再重置断点")
             return
         if (self.worker is not None and self.worker.isRunning()) or any(
@@ -388,7 +380,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("目录配置已保存")
 
     def _start_upload(self, kind: str):
-        if getattr(self, "_cache_clear_worker", None) is not None:
+        if self._cache_clear_worker is not None:
             self.statusBar().showMessage("请等待缓存清理结束，或先取消清理")
             return False
         kind = _require_kind(kind)
@@ -523,11 +515,6 @@ class MainWindow(QMainWindow):
                 self.task_page.task_status.setText("正在立即中断…")
                 self.statusBar().showMessage("正在立即中断上传任务；当前 Album 可能进入 UNKNOWN…")
 
-    def _stop_upload(self):
-        """Compatibility alias for older integrations; uses safe stop."""
-
-        self._safe_stop_upload()
-
     def _upload_finished(self, success: bool, message: str):
         write_app_log(
             "INFO" if success else "ERROR",
@@ -570,7 +557,7 @@ class MainWindow(QMainWindow):
     def _reconcile_inflight(self, record: object, sent: bool):
         """Apply a confirmed manual decision without querying Telegram."""
 
-        if getattr(self, "_cache_clear_worker", None) is not None:
+        if self._cache_clear_worker is not None:
             self.statusBar().showMessage("请等待缓存清理结束")
             return
         if not isinstance(record, dict):
@@ -626,7 +613,7 @@ class MainWindow(QMainWindow):
         if TDJsonClient.unclosed_instance() is not None:
             self.statusBar().showMessage("请等待 Telegram 任务和数据库关闭后再清理缓存")
             return False
-        if getattr(self, "_cache_clear_worker", None) is not None:
+        if self._cache_clear_worker is not None:
             self.statusBar().showMessage("请等待缓存清理结束，或先取消清理")
             return False
         if self.worker is not None and self.worker.isRunning():
@@ -747,7 +734,7 @@ class MainWindow(QMainWindow):
         self.settings_page.open_upload_parameters(kind)
 
     def _can_change_configuration(self):
-        if getattr(self, "_cache_clear_worker", None) is not None:
+        if self._cache_clear_worker is not None:
             self.statusBar().showMessage("请等待缓存清理结束，或先取消清理")
             return False
         if (self.worker is not None and self.worker.isRunning()) or any(scanner.isRunning() for scanner in self.scanners.values()):
@@ -774,7 +761,7 @@ class MainWindow(QMainWindow):
                 self.worker.request_stop()
 
     def closeEvent(self, event):
-        cleanup = getattr(self, "_cache_clear_worker", None)
+        cleanup = self._cache_clear_worker
         if cleanup is not None and cleanup.isRunning():
             cleanup.request_stop()
             if not cleanup.wait(1000):

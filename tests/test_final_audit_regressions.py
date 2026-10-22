@@ -188,8 +188,14 @@ class FinalAuditRegressionTest(unittest.TestCase):
             self.assertNotIn(("image", "compress_oversize"), upload_values)
             self.assertFalse(hasattr(upload, "image_compress"))
 
+            advanced.exiftool_timeout.setValue(90)
+            advanced.ffmpeg_metadata_timeout.setValue(25)
+            advanced.ffmpeg_thumbnail_timeout.setValue(40)
             advanced_values = advanced.collect_values()
-            self.assertIn(
+            self.assertEqual(advanced_values[("process", "exiftool_timeout_seconds")], 90)
+            self.assertEqual(advanced_values[("process", "ffmpeg_metadata_timeout_seconds")], 25)
+            self.assertEqual(advanced_values[("process", "ffmpeg_thumbnail_timeout_seconds")], 40)
+            self.assertNotIn(
                 ("process", "ffmpeg_compression_timeout_seconds"),
                 advanced_values,
             )

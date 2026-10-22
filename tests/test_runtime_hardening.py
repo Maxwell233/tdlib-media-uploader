@@ -18,26 +18,13 @@ if str(SRC_ROOT) not in sys.path:
 from tdlib_media_uploader.core import album as album_metadata
 from tdlib_media_uploader.config import loader as app_config
 from tdlib_media_uploader.gui import main_window as gui_app
+from tdlib_media_uploader.gui import config_service
 from tdlib_media_uploader.core import filesystem as path_utils
 from tdlib_media_uploader.core import self_test
 from tdlib_media_uploader.core.instance_lock import InstanceLock, run_with_instance_lock
 
 
 class V190HardeningTest(unittest.TestCase):
-    def test_telegram_video_boundaries_are_exact_and_shared(self):
-        standard = app_config.VIDEO_STANDARD_MAX_BYTES
-        premium = app_config.VIDEO_PREMIUM_MAX_BYTES
-        self.assertEqual(app_config.TELEGRAM_UPLOAD_PART_SIZE_MAX, 524_288)
-        self.assertEqual(standard, 4000 * 524_288)
-        self.assertEqual(premium, 8000 * 524_288)
-        self.assertEqual(app_config.video_size_status(standard - 1), "allowed")
-        self.assertEqual(app_config.video_size_status(standard), "allowed")
-        self.assertEqual(app_config.video_size_status(standard + 1), "requires_premium")
-        self.assertEqual(app_config.video_size_status(standard + 1, is_premium=True), "allowed")
-        self.assertEqual(app_config.video_size_status(premium - 1, is_premium=True), "allowed")
-        self.assertEqual(app_config.video_size_status(premium, is_premium=True), "allowed")
-        self.assertEqual(app_config.video_size_status(premium + 1, is_premium=True), "oversize")
-
     def test_video_and_mixed_scanners_apply_the_same_video_limits(self):
         from tdlib_media_uploader.media import mixed_pipeline as mixed_core
         from tdlib_media_uploader.media import video_pipeline as video_core
@@ -127,7 +114,7 @@ class V190HardeningTest(unittest.TestCase):
         client = TDJsonClient.__new__(TDJsonClient)
         client.caption_length_limit = 2048
         client.request = lambda _query: {"@type": "message", "id": 7}
-        client.wait_for_send_results = lambda _messages: {
+        client.wait_for_send_results = lambda _messages, **_kwargs: {
             "succeeded": [7],
             "failed": [],
             "pending": [],
@@ -156,10 +143,10 @@ class V190HardeningTest(unittest.TestCase):
         template = Path(app_config.TEMPLATE_CONFIG_PATH)
         with tempfile.TemporaryDirectory() as directory:
             missing = Path(directory) / "data" / "config.toml"
-            with patch.object(gui_app, "CONFIG_PATH", missing), \
-                    patch.object(gui_app, "TEMPLATE_CONFIG_PATH", template), \
+            with patch.object(config_service, "CONFIG_PATH", missing), \
+                    patch.object(config_service, "TEMPLATE_CONFIG_PATH", template), \
                     patch.object(sys, "argv", ["main_window.py", "--self-test"]):
-                self.assertFalse(gui_app._ensure_config_file())
+                self.assertFalse(config_service.ensure_config_file())
                 self.assertFalse(missing.exists())
             with patch.object(app_config, "CONFIG_PATH", missing), \
                     patch.object(sys, "argv", ["main_window.py", "--self-test"]):

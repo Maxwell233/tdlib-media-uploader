@@ -32,7 +32,7 @@ class SettingsDataSafetyTest(unittest.TestCase):
         panel.validate.return_value = (True, '')
         panel.is_dirty.return_value = True
         panel.collect_values.return_value = {'image.dir': '/old', 'image.album_size': 7}
-        page = SimpleNamespace(can_save=lambda: True, panels=[panel],
+        page = SimpleNamespace(can_save=lambda: True, panels=[panel], _conflicts={},
             _baselines={panel: {'image.dir': '/old', 'image.album_size': 10}},
             _set_status=Mock(), _on_dirty_changed=Mock(), config_saved=Mock(), refresh=Mock())
         with patch('tdlib_media_uploader.gui.pages.settings._write_config_values', return_value=None) as write:
@@ -127,7 +127,8 @@ class SettingsDataSafetyTest(unittest.TestCase):
         from tdlib_media_uploader.gui.main_window import MainWindow
         worker = Mock(); worker.isRunning.return_value = True
         page = SimpleNamespace(storage_panel=SimpleNamespace(_cache_worker=worker))
-        window = SimpleNamespace(worker=None, scanners={}, settings_page=page, statusBar=Mock())
+        window = SimpleNamespace(worker=None, scanners={}, settings_page=page, statusBar=Mock(),
+            _cache_clear_worker=None)
         for finished in (False, True):
             with self.subTest(finished=finished):
                 worker.wait.return_value = finished
