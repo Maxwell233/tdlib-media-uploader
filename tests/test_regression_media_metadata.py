@@ -3,7 +3,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import json
-import random
 import subprocess
 import sys
 import tempfile
@@ -19,12 +18,10 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tdlib_media_uploader.core import album as metadata
-from tdlib_media_uploader.core import logging as app_logging
 from tdlib_media_uploader.gui import main_window as gui
-from tdlib_media_uploader.gui import config_service, tools, cache_service
+from tdlib_media_uploader.gui import tools
 from tdlib_media_uploader.core import filesystem as path_utils
-from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
+from PySide6.QtWidgets import QApplication
 
 
 class ImprovementsTest(unittest.TestCase):
@@ -274,8 +271,7 @@ class ImprovementsTest(unittest.TestCase):
             self.assertEqual([item["capture_time"] for item in items], [None, None])
             with patch.object(core.cfg, "VIDEO_READ_DATES", False), \
                     patch.object(core.cfg, "VIDEO_GROUP_MODE", "date"), \
-                    patch.object(core, "STATE_DIR", root / "state"), \
-                    patch.object(core.cfg, "VIDEO_RESET_STATE", False):
+                    patch.object(core, "STATE_DIR", root / "state"):
                 self.assertTrue(core.force_ten_per_album())
                 self.assertEqual({item["month_key"] for item in items}, {core.FORCED_GROUP_KEY})
                 plans = core.build_album_plans(items)

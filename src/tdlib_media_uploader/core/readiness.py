@@ -269,25 +269,6 @@ def wait_for_file_ready(
     return last
 
 
-def is_file_stable(
-    path,
-    interval: float = 0.03,
-    stable_checks: int = 2,
-    *,
-    cancel_event=None,
-    cancel_token=None,
-) -> bool:
-    result = check_file_readiness(
-        path,
-        stable_interval=interval,
-        stable_checks=stable_checks,
-        probe=False,
-        cancel_event=cancel_event,
-        cancel_token=cancel_token,
-    )
-    return result.ready
-
-
 __all__ = [
     "CANCELLED",
     "CHANGED",
@@ -297,7 +278,6 @@ __all__ = [
     "READY",
     "UNREADABLE",
     "check_file_readiness",
-    "is_file_stable",
     "is_transient_fs_error",
     "probe_readable",
     "readiness_category",

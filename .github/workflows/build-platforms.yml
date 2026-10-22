@@ -58,9 +58,10 @@ jobs:
           $version = (Get-Content -Raw -LiteralPath ".\VERSION").Trim()
           if ([string]::IsNullOrWhiteSpace($version)) { throw "VERSION 文件为空。" }
 
-          $ffmpegTag = "autobuild-2026-08-31-13-27"
-          $ffmpegArchiveName = "ffmpeg-N-126342-gf88b741dbf-win64-lgpl.zip"
-          $ffmpegSha256 = "7a7d7ad65d5d53aefc57fc3f78e00febe7b65156c03d14d43efc1393ef46a111"
+          $ffmpegManifest = Get-Content -Raw -LiteralPath "tools/ffmpeg-windows.json" | ConvertFrom-Json
+          $ffmpegTag = $ffmpegManifest.release_tag
+          $ffmpegArchiveName = $ffmpegManifest.archive
+          $ffmpegSha256 = $ffmpegManifest.sha256
           $ffmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$ffmpegTag/$ffmpegArchiveName"
           $ffmpegStage = Join-Path $projectDir "tools\ffmpeg"
           $ffmpegPath = Join-Path $ffmpegStage "ffmpeg.exe"

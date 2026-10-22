@@ -2,16 +2,11 @@
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import json
 import random
-import subprocess
 import sys
 import tempfile
-import threading
-import time
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -19,12 +14,9 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tdlib_media_uploader.core import album as metadata
-from tdlib_media_uploader.core import logging as app_logging
 from tdlib_media_uploader.gui import main_window as gui
-from tdlib_media_uploader.gui import config_service, tools, cache_service
 from tdlib_media_uploader.core import filesystem as path_utils
-from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
+from PySide6.QtWidgets import QApplication
 
 
 class ImprovementsTest(unittest.TestCase):

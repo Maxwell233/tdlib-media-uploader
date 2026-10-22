@@ -158,8 +158,6 @@ def prepare_image_for_telegram(
     target_bytes: int = TELEGRAM_PHOTO_TARGET_BYTES,
     aspect_policy: str = "pad",
     background: str = "#FFFFFF",
-    extreme_aspect_policy: str | None = None,
-    transparency_background: str | None = None,
 ) -> PreparedImage:
     """Prepare an image for Telegram Photo upload.
 
@@ -170,10 +168,6 @@ def prepare_image_for_telegram(
     if cancel_event is not None and cancel_event.is_set():
         raise TimeoutError("图片准备已取消")
 
-    if extreme_aspect_policy is not None:
-        aspect_policy = extreme_aspect_policy
-    if transparency_background is not None:
-        background = transparency_background
     source_path = Path(path).resolve()
     source_snapshot = capture_snapshot(source_path)
     if source_info is None:
@@ -323,10 +317,6 @@ def prepare_image_for_telegram(
         encoded_bytes, out_w, out_h = encode_jpeg_under_limit(
             img, target_bytes=target_bytes, cancel_event=cancel_event
         )
-        if len(encoded_bytes) > target_bytes:
-            raise RuntimeError(
-                f"规范化后图片大小（{len(encoded_bytes)} 字节）仍超过目标上限（{target_bytes} 字节）"
-            )
 
     validate_snapshots((source_snapshot,))
 

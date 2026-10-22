@@ -283,7 +283,6 @@ class UploadState(SharedUploadState):
             source_root=cfg.MIXED_DIR,
             target=target or getattr(cfg, "target_for", lambda _kind: {}) ("mixed"),
             state_dir=STATE_DIR,
-            reset=getattr(cfg, "MIXED_RESET_STATE", False),
             filename_prefix="mixed_upload_state",
         )
 

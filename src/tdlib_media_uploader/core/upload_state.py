@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .identity import canonical_target, media_file_signature, relative_media_path, target_identity
 from .filesystem import file_snapshot, stable_path
+from .persistence import atomic_write_json, ensure_private_directory
 
 
 def _snapshot_for_item(item, path, snapshot_provider=None):
@@ -59,7 +60,7 @@ class UploadState:
         self.source_root = Path(source_root)
         self.snapshot_provider = snapshot_provider
         self.state_dir = Path(state_dir)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(self.state_dir)
         self.target = canonical_target(target or {})
         self._target_mode = self.target.get("target_mode", "")
         self._chat_id = int(self.target.get("chat_id", 0) or 0)
@@ -108,15 +109,7 @@ class UploadState:
 
     def _save(self, data):
         data["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        try:
-            with temporary.open("w", encoding="utf-8") as stream:
-                json.dump(data, stream, ensure_ascii=False, indent=2)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        atomic_write_json(self.path, data)
 
     def signature(self, item_or_path, snapshot=None) -> str:
         item = item_or_path if isinstance(item_or_path, dict) else None

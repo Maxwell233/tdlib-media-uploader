@@ -1,5 +1,5 @@
 # ============================================================
-# TDLib Media Uploader V1.9.1
+# TDLib Media Uploader V1.9.5
 #
 # 首次使用：
 #   1. 复制本文件为 data/config.toml
@@ -150,11 +150,7 @@ thumbnail_timestamp_seconds = 1.00
 thumb_max_edge = 320
 thumb_target_kib = 80
 
-show_file_list = true
 verify_all_metadata_before_upload = false
-
-# 仅在需要清空视频断点时临时改为 true
-reset_state = false
 
 # 上传当前组时是否后台提前准备/扫描下一组（最多提前1组，避免占用过多资源）
 prefetch_next_album = true
@@ -183,7 +179,6 @@ generate_thumbnail = true
 # 混合上传中的视频使用该截图时间，单位秒，支持 0.01 秒精度；未配置时继承 [video]。
 thumbnail_timestamp_seconds = 1.00
 verify_media_before_upload = false
-reset_state = false
 
 
 [staging]
@@ -227,7 +222,6 @@ exiftool_timeout_seconds = 120
 ffmpeg_metadata_timeout_seconds = 30
 ffmpeg_info_timeout_seconds = 30
 ffmpeg_thumbnail_timeout_seconds = 45
-ffmpeg_compression_timeout_seconds = 45
 exiftool_batch_size = 256
 exiftool_retries = 2
 
@@ -261,15 +255,11 @@ caption_include_filenames = false
 # 旧版 "path" 会自动转换为 "name"。
 sort_mode = "mtime"
 
-show_file_list = true
 verify_all_images_before_upload = false
 
 # 支持的静态图片（JPG/PNG/WebP/BMP/TIFF）在超过 10 MiB、尺寸超限或长宽比极端时，
 # 将自动安全规范化为临时 JPEG 副本（写入本地缓存）作为 Photo 上传，原文件始终不会被修改。
 # 动画 WebP 或损坏图片等无法转换为静态 Photo 的文件将在预检阶段跳过。
-
-# 仅在需要清空图片断点时临时改为 true
-reset_state = false
 
 
 [tdlib]

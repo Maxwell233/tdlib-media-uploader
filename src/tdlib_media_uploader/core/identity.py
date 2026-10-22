@@ -130,6 +130,16 @@ def target_identity(target=None) -> str:
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
 
 
+def validate_send_target(target) -> dict:
+    """Validate destinations only when sending, preserving legacy identity hashes."""
+    normalized = canonical_target(dict(target)) if isinstance(target, dict) else {}
+    if not normalized or normalized["chat_id"] == 0:
+        raise ValueError("请填写有效且非零的 Telegram Chat ID")
+    if normalized["target_mode"] == "forum_topic" and normalized["forum_topic_id"] <= 0:
+        raise ValueError("群组话题模式必须填写大于零的 Forum Topic ID")
+    return normalized
+
+
 __all__ = [
     "relative_media_path",
     "media_file_identity",

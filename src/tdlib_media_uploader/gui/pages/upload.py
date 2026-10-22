@@ -88,6 +88,7 @@ class UploadPage(QWidget):
     path_selected = Signal(str, str)
     scan_requested = Signal(str)
     scan_cancel_requested = Signal(str)
+    reset_state_requested = Signal(str)
     edit_target_requested = Signal(str)
     edit_parameters_requested = Signal(str)
 
@@ -295,12 +296,17 @@ class UploadPage(QWidget):
         self.scan_button.setObjectName("secondaryButton")
         self.scan_button.clicked.connect(self._scan_button_clicked)
 
+        self.reset_state_button = QPushButton("重置本类型断点")
+        self.reset_state_button.setObjectName("secondaryButton")
+        self.reset_state_button.clicked.connect(lambda: self.reset_state_requested.emit(self.kind))
+
         self.start_button = QPushButton("开始上传")
         self.start_button.setObjectName("primaryButton")
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(lambda: self.start_requested.emit(self.kind))
 
         bottom.addWidget(self.status_label, 1)
+        bottom.addWidget(self.reset_state_button)
         bottom.addWidget(self.scan_button)
         bottom.addWidget(self.start_button)
         layout.addLayout(bottom)
@@ -349,6 +355,7 @@ class UploadPage(QWidget):
         self._scanning = active
         self.scan_button.setText("停止扫描" if active else "扫描目录")
         self.scan_button.setEnabled(not self._running)
+        self.reset_state_button.setEnabled(not active and not self._running)
         if active:
             self.clear_scan_result()
             self.status_label.setText("正在扫描目录…")
@@ -660,7 +667,9 @@ class UploadPage(QWidget):
             caption = self.services.compose_caption(new_base, new_custom, separator)
             try:
                 rendered = self.services.validate_caption(caption, limit=caption_limit)
-            except CaptionLimitError:
+            except CaptionLimitError as exc:
+                self.status_label.setText(f"标题未保存：{exc}")
+                QMessageBox.warning(self, "标题过长", str(exc))
                 return
             try:
                 store = self.services.caption_store_factory(self.kind)
@@ -756,6 +765,7 @@ class UploadPage(QWidget):
         self._running = active
         self._update_edit_button()
         self.scan_button.setEnabled(not active)
+        self.reset_state_button.setEnabled(not active and not self._scanning)
         self.start_button.setEnabled(
             not active
             and bool(

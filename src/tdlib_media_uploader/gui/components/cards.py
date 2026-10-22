@@ -52,18 +52,6 @@ class StatCard(QFrame):
             self.value_label.style().unpolish(self.value_label)
             self.value_label.style().polish(self.value_label)
 
-    def set_subtitle(self, text: str):
-        if self.subtitle_label is None:
-            self.subtitle_label = QLabel(text)
-            self.subtitle_label.setObjectName("mutedLabel")
-            self.layout().addWidget(self.subtitle_label)
-        else:
-            self.subtitle_label.setText(text)
-
-    def set_description(self, text: str):
-        self.set_subtitle(text)
-
-
 from ..icons import get_svg_pixmap
 
 

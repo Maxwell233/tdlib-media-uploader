@@ -10,6 +10,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
+    QDialogButtonBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from ..theme import THEME
 from ..tools import kind_label as _kind_label
+from ...upload.reconciliation import has_item_delivery, item_delivery
 
 
 class InflightPage(QWidget):
@@ -235,6 +238,14 @@ class InflightPage(QWidget):
             lines.append(f"journal 文件：{record['journal_path']}")
         if record.get("error"):
             lines.append(f"错误信息：{record['error']}")
+        if has_item_delivery(dict(record)):
+            try:
+                labels = {"succeeded": "已确认成功", "failed": "明确失败", "pending": "待确认"}
+                lines.append("逐项发送结果：")
+                for row in item_delivery(dict(record)):
+                    lines.append(f"第 {row['index'] + 1} 项：{labels[row['status']]}")
+            except ValueError as error:
+                lines.append(str(error))
         return "\n".join(lines)
 
     def _selected_record(self):
@@ -261,12 +272,68 @@ class InflightPage(QWidget):
         status = str(record.get("status", "")).upper() if record else ""
         corrupt = status == "CORRUPT"
         confirmed = status == "CONFIRMED"
+        individual = bool(record) and has_item_delivery(record)
         self.details_button.setEnabled(record is not None)
         self.sent_button.setEnabled(record is not None and not corrupt)
-        self.sent_button.setText("修复本地断点" if confirmed else "标记为已发送")
+        self.sent_button.setText("逐项核对" if individual else "修复本地断点" if confirmed else "标记为已发送")
         self.not_sent_button.setEnabled(
-            record is not None and status in {"PREPARED", "SUBMITTED", "UNKNOWN"}
+            record is not None and not individual and status in {"PREPARED", "SUBMITTED", "UNKNOWN"}
         )
+
+    def _emit_item_choice(self, record):
+        try:
+            results = item_delivery(record)
+        except ValueError as error:
+            QMessageBox.warning(self, "无法核对", str(error))
+            return
+        if len(self._item_paths(record)) != len(results):
+            QMessageBox.warning(self, "无法核对", "上传日志缺少源文件路径，已保留保护记录。")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("逐项核对 Telegram 发送结果")
+        dialog.resize(820, 480)
+        layout = QVBoxLayout(dialog)
+        hint = QLabel("请在 Telegram 中核对每个文件。已确认成功的文件不会重发；待确认文件继续保留保护。")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        if not record.get("item_results"):
+            legacy = QLabel("旧记录缺少文件与消息的对应关系，请逐项核对，不会按消息 ID 的排列猜测。")
+            legacy.setWordWrap(True)
+            layout.addWidget(legacy)
+        table = QTableWidget(len(results), 3)
+        table.setHorizontalHeaderLabels(["源文件", "已知结果", "核对结果"])
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.horizontalHeader().setStretchLastSection(True)
+        paths = self._item_paths(record)
+        labels = {"succeeded": "已确认成功", "failed": "明确失败", "pending": "待确认"}
+        choices = []
+        for row in results:
+            index = row["index"]
+            table.setItem(index, 0, QTableWidgetItem(paths[index]))
+            table.setItem(index, 1, QTableWidgetItem(labels[row["status"]]))
+            choice = QComboBox()
+            choice.addItem("保留待确认", "keep")
+            choice.addItem("Telegram 中存在", "sent")
+            choice.addItem("Telegram 中不存在，允许重试", "not_sent")
+            if row["status"] == "succeeded":
+                choice.setCurrentIndex(1)
+                choice.setEnabled(False)
+            elif row["status"] == "failed":
+                choice.setCurrentIndex(2)
+            table.setCellWidget(index, 2, choice)
+            choices.append(choice)
+        table.resizeColumnToContents(0)
+        layout.addWidget(table)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存核对结果")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            decisions = {index: choice.currentData() for index, choice in enumerate(choices)
+                         if choice.currentData() != "keep"}
+            if decisions:
+                self.reconciliation_requested.emit({**record, "item_decisions": decisions}, True)
 
     def _show_details(self, row: int):
         item = self.table.item(row, 0)
@@ -303,6 +370,9 @@ class InflightPage(QWidget):
                 "记录损坏",
                 f"这条记录无法安全处理，文件已保留：\n{record.get('journal_path', '')}",
             )
+            return
+        if has_item_delivery(record):
+            self._emit_item_choice(record)
             return
         if not sent and status == "CONFIRMED":
             return

@@ -73,6 +73,10 @@ ASSETS_DIR = RESOURCE_DIR / "assets"
 TOOLS_DIR = RESOURCE_DIR / "tools"
 FFMPEG_DIR = TOOLS_DIR / "ffmpeg"
 
+# Filled during normal startup; the settings page only displays this result.
+# This is a diagnostic, not a prerequisite for using a portable Windows build.
+DATA_PERMISSION_DIAGNOSTIC = None
+
 
 def read_version(default: str = "0.0.0") -> str:
     """Read the packaged VERSION file without ever failing application boot."""
@@ -87,8 +91,12 @@ def read_version(default: str = "0.0.0") -> str:
 def ensure_data_dirs() -> Path:
     """Create the standard writable directories and return ``DATA_DIR``."""
 
+    global DATA_PERMISSION_DIAGNOSTIC
+    from ..core.persistence import ensure_private_directory
+
     for directory in (
         DATA_DIR,
+        STATE_DIR,
         VIDEO_STATE_DIR,
         IMAGE_STATE_DIR,
         MIXED_STATE_DIR,
@@ -97,12 +105,22 @@ def ensure_data_dirs() -> Path:
         TDLIB_FILES_DIR,
         CAPTIONS_DIR,
         UPLOAD_INFLIGHT_DIR,
+        CACHE_DIR,
         THUMBNAIL_CACHE_DIR,
         IMAGE_COMPRESSION_CACHE_DIR,
+        VIDEO_PROCESSED_CACHE_DIR,
         STAGING_CACHE_DIR,
         LOG_DIR,
     ):
-        directory.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(directory)
+    if sys.platform == "win32":
+        from ..core.windows_permissions import check_data_directory_permissions
+
+        DATA_PERMISSION_DIAGNOSTIC = check_data_directory_permissions(DATA_DIR)
+        if DATA_PERMISSION_DIAGNOSTIC.status == "warn":
+            from ..core.logging import write_app_log
+
+            write_app_log("WARNING", DATA_PERMISSION_DIAGNOSTIC.text, source="data-permissions")
     return DATA_DIR
 
 

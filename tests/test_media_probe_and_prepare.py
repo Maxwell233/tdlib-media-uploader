@@ -525,7 +525,7 @@ class ImageProbeAndPrepareTest(unittest.TestCase):
 
             prepared = prepare_image_for_telegram(
                 img_path,
-                transparency_background="#FFFFFF",
+                background="#FFFFFF",
             )
             self.assertTrue(prepared.transformed)
             self.assertEqual(prepared.output_format, "JPEG")
@@ -545,7 +545,7 @@ class ImageProbeAndPrepareTest(unittest.TestCase):
 
             prepared = prepare_image_for_telegram(
                 img_path,
-                extreme_aspect_policy="pad",
+                aspect_policy="pad",
             )
             self.assertTrue(prepared.transformed)
             # Long side is 2560 (since 3000 > 2560).
@@ -568,7 +568,7 @@ class ImageProbeAndPrepareTest(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 prepare_image_for_telegram(
                     img_path,
-                    extreme_aspect_policy="skip",
+                    aspect_policy="skip",
                 )
             self.assertIn("长宽比", str(ctx.exception))
 

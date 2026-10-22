@@ -52,13 +52,6 @@ class PreflightResult:
     reasons: tuple[tuple[str, str], ...] = ()
     cancelled: bool = False
 
-    def reason_for(self, item: MediaItem) -> str:
-        path = str(item.path)
-        for candidate, reason in self.reasons:
-            if candidate == path:
-                return reason
-        return ""
-
 
 def _is_cancelled(token: CancelToken | None) -> bool:
     if token is None:

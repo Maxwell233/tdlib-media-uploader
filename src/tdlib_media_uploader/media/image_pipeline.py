@@ -426,7 +426,6 @@ class UploadState(SharedUploadState):
             source_root=cfg.IMAGE_DIR,
             target=target or getattr(cfg, "target_for", lambda _kind: {}) ("image"),
             state_dir=STATE_DIR,
-            reset=getattr(cfg, "IMAGE_RESET_STATE", False),
             filename_prefix="image_upload_state",
             snapshot_provider=_snapshot_for_path,
         )

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .identity import canonical_target
 from .filesystem import file_snapshot, stable_path
+from .persistence import atomic_write_json, durable_unlink, ensure_private_directory
 from ..config.paths import APP_DATA_DIR
 
 
@@ -102,7 +103,7 @@ class InflightJournal:
         # embedders/tests can redirect the data root without re-importing the
         # module.  V1.9's APP_DATA_DIR is already DATA_DIR.
         self.root = Path(root) if root is not None else APP_DATA_DIR / "upload_inflight"
-        self.root.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(self.root)
         self._lock = threading.RLock()
         self._index = None
         self._records = []
@@ -124,14 +125,11 @@ class InflightJournal:
         return self.root / f"{self._key_hash(kind, album_key, target)}.json"
 
     def _write(self, path: Path, record: dict) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        with temporary.open("w", encoding="utf-8") as stream:
-            json.dump(record, stream, ensure_ascii=False, indent=2)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        self._index = None
+        try:
+            atomic_write_json(path, record)
+        finally:
+            # A directory fsync can fail after replace has changed the file.
+            self._index = None
 
     @staticmethod
     def _corrupt_record(
@@ -389,6 +387,9 @@ class InflightJournal:
         succeeded_ids=None,
         failed_ids=None,
         pending_ids=None,
+        item_results=None,
+        items=None,
+        reconciled: bool | None = None,
         target=None,
     ) -> dict:
         normalized = str(status).strip().upper()
@@ -417,6 +418,12 @@ class InflightJournal:
                 record["failed_ids"] = list(failed_ids)
             if pending_ids is not None:
                 record["pending_ids"] = list(pending_ids)
+            if item_results is not None:
+                record["item_results"] = list(item_results)
+            if items is not None:
+                record["items"] = self._normalize_items(items)
+            if reconciled is not None:
+                record["reconciled"] = bool(reconciled)
             if error:
                 record["error"] = str(error)
             self._write(path, record)
@@ -439,8 +446,10 @@ class InflightJournal:
                 return False
             if _record.get("status") == CORRUPT:
                 raise RuntimeError("不能删除损坏的上传记录")
-            path.unlink(missing_ok=True)
-            self.invalidate()
+            try:
+                durable_unlink(path)
+            finally:
+                self.invalidate()
             return True
 
     def confirmed(self, kind: str, album_key: str, message_ids=None, *, target=None) -> None:
@@ -468,8 +477,10 @@ class InflightJournal:
             if _record and _record.get("status") in {CONFIRMED, CORRUPT}:
                 raise ValueError("Telegram 已确认或记录损坏，不能标记为未发送")
             if path is not None:
-                path.unlink(missing_ok=True)
-                self.invalidate()
+                try:
+                    durable_unlink(path)
+                finally:
+                    self.invalidate()
 
     def list_unresolved(self, *, refresh=False) -> list[dict]:
         with self._lock:

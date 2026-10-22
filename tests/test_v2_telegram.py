@@ -21,28 +21,26 @@ from tdlib_media_uploader.telegram.send_result import (  # noqa: E402
 
 class TelegramLimitsTest(unittest.TestCase):
     def test_video_boundaries_are_exact(self):
+        standard = config.VIDEO_STANDARD_MAX_BYTES
+        premium = config.VIDEO_PREMIUM_MAX_BYTES
         self.assertEqual(config.IMAGE_MAX_BYTES, 10 * 1024**2)
-        self.assertEqual(config.VIDEO_STANDARD_MAX_BYTES, 4000 * 524_288)
-        self.assertEqual(config.VIDEO_PREMIUM_MAX_BYTES, 8000 * 524_288)
-        self.assertEqual(config.video_size_status(config.VIDEO_STANDARD_MAX_BYTES), "allowed")
-        self.assertEqual(
-            config.video_size_status(config.VIDEO_STANDARD_MAX_BYTES + 1),
-            "requires_premium",
-        )
-        self.assertEqual(
-            config.video_size_status(config.VIDEO_STANDARD_MAX_BYTES + 1, is_premium=True),
-            "allowed",
-        )
-        self.assertEqual(
-            config.video_size_status(config.VIDEO_PREMIUM_MAX_BYTES),
-            "requires_premium",
-        )
-        self.assertEqual(
-            config.video_size_status(config.VIDEO_PREMIUM_MAX_BYTES, is_premium=True),
-            "allowed",
-        )
-        self.assertEqual(config.video_size_status(config.VIDEO_PREMIUM_MAX_BYTES + 1), "oversize")
-
+        self.assertEqual(config.TELEGRAM_UPLOAD_PART_SIZE_MAX, 524_288)
+        self.assertEqual(standard, 4000 * 524_288)
+        self.assertEqual(premium, 8000 * 524_288)
+        for size, premium_user, expected in (
+            (standard - 1, None, "allowed"),
+            (standard, None, "allowed"),
+            (standard + 1, None, "requires_premium"),
+            (standard + 1, True, "allowed"),
+            (premium - 1, True, "allowed"),
+            (premium, None, "requires_premium"),
+            (premium, True, "allowed"),
+            (premium + 1, None, "oversize"),
+            (premium + 1, True, "oversize"),
+        ):
+            with self.subTest(size=size, is_premium=premium_user):
+                options = {} if premium_user is None else {"is_premium": premium_user}
+                self.assertEqual(config.video_size_status(size, **options), expected)
 
     def test_caption_limit_is_runtime_authoritative(self):
         self.assertEqual(validate_caption("x" * 1024, 1024), "x" * 1024)

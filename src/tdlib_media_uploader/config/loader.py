@@ -9,6 +9,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from ..core.persistence import atomic_write_text
+
 from .paths import (
     APP_DATA_DIR,
     CONFIG_PATH,
@@ -35,7 +37,6 @@ VIDEO_STANDARD_MAX_BYTES = 4000 * TELEGRAM_UPLOAD_PART_SIZE_MAX
 VIDEO_PREMIUM_MAX_BYTES = 8000 * TELEGRAM_UPLOAD_PART_SIZE_MAX
 VIDEO_MAX_BYTES = VIDEO_PREMIUM_MAX_BYTES
 IMAGE_MAX_BYTES = 10 * 1024 ** 2
-IMAGE_COMPRESSION_TARGET_BYTES = int(9.5 * 1024 ** 2)
 
 
 def video_size_status(size: int, *, is_premium: bool | None = None) -> str:
@@ -73,12 +74,10 @@ def _load():
         template = TEMPLATE_CONFIG_PATH
         # Never look for or import a config from the old application root.
         try:
-            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             if template.exists():
-                import shutil
-                shutil.copyfile(template, CONFIG_PATH)
-        except OSError:
-            pass
+                atomic_write_text(CONFIG_PATH, template.read_text(encoding="utf-8"))
+        except OSError as error:
+            raise RuntimeError(f"配置文件创建失败：{CONFIG_PATH}\n{error}") from error
         if not CONFIG_PATH.exists():
             raise RuntimeError(
                 "找不到配置模板：\n"
@@ -510,24 +509,10 @@ VIDEO_THUMB_TARGET_BYTES = int(
     )
 ) * 1024
 
-VIDEO_SHOW_FILE_LIST = bool(
-    video.get(
-        "show_file_list",
-        True
-    )
-)
-
 VIDEO_VERIFY_ALL_METADATA = bool(
     video.get(
         "verify_all_metadata_before_upload",
         video.get("validate_media", False),
-    )
-)
-
-VIDEO_RESET_STATE = bool(
-    video.get(
-        "reset_state",
-        False
     )
 )
 
@@ -620,24 +605,10 @@ if IMAGE_SORT_MODE not in {"mtime", "name"}:
         '"mtime" 或 "name"。'
     )
 
-IMAGE_SHOW_FILE_LIST = bool(
-    image.get(
-        "show_file_list",
-        True
-    )
-)
-
 IMAGE_VERIFY_ALL_IMAGES = bool(
     image.get(
         "verify_all_images_before_upload",
         image.get("validate_media", False),
-    )
-)
-
-IMAGE_RESET_STATE = bool(
-    image.get(
-        "reset_state",
-        False
     )
 )
 
@@ -719,13 +690,6 @@ FFMPEG_INFO_TIMEOUT_SECONDS = _bounded_float(
 FFMPEG_THUMBNAIL_TIMEOUT_SECONDS = _bounded_float(
     process, "ffmpeg_thumbnail_timeout_seconds", 45.0, 1.0, 86_400.0
 )
-FFMPEG_COMPRESSION_TIMEOUT_SECONDS = _bounded_float(
-    process,
-    "ffmpeg_compression_timeout_seconds",
-    float(process.get("ffmpeg_compress_timeout_seconds", 45.0)),
-    1.0,
-    86_400.0,
-)
 EXIFTOOL_BATCH_SIZE = _bounded_int(process, "exiftool_batch_size", 256, 1, 4096)
 EXIFTOOL_RETRIES = _bounded_int(process, "exiftool_retries", 2, 0, 5)
 
@@ -769,8 +733,6 @@ MIXED_THUMBNAIL_TIMESTAMP_SECONDS = _thumbnail_timestamp_seconds(
 MIXED_VERIFY_MEDIA = bool(
     mixed.get("verify_media_before_upload", mixed.get("validate_media", False))
 )
-MIXED_RESET_STATE = bool(mixed.get("reset_state", False))
-
 
 # 可选本地暂存：源文件仍以原路径参与断点和标题键，发送前才复制到本地
 # 缓存，适合不稳定的 SMB/NAS。旧配置没有此段时保持关闭。

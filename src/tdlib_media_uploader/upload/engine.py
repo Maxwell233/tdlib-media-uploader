@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+import hashlib
 import json
 from pathlib import Path
 import threading
@@ -483,8 +484,6 @@ class UploadEngine:
     def _stage(stager: Any, plan: AlbumPlan, context: UploadContext) -> AlbumPlan:
         function = getattr(stager, "stage", None)
         if not callable(function):
-            function = getattr(stager, "stage_plan", None)
-        if not callable(function):
             raise TypeError("stager 必须提供 stage(plan) 方法")
         staged = _call_supported(function, (plan,), context=context)
         effective = plan if staged is None else staged
@@ -591,6 +590,7 @@ class UploadEngine:
             return _PreparedBatch(plan=plan, cancelled=True)
 
         plan_deferred: tuple[MediaItem, ...] = ()
+        protected_items: tuple[MediaItem, ...] = ()
         try:
             validate_plan(plan)
             try:
@@ -620,6 +620,22 @@ class UploadEngine:
                     [_item_payload(item) for item in plan.pending_items],
                     target=run_context.target,
                 )
+            if unresolved is not None and unresolved.get("reconciled") and callable(overlap_check):
+                protected_items = tuple(item for item in plan.pending_items
+                                        if overlap_check(kind, [_item_payload(item)],
+                                                         target=run_context.target) is not None)
+                protected_keys = {_item_key(item) for item in protected_items}
+                retryable = tuple(item for item in plan.pending_items
+                                  if _item_key(item) not in protected_keys
+                                  and not self._state_completed(state, item))
+                if retryable:
+                    # The old Album key still guards its pending members. Use
+                    # a stable attempt key for only the released source snapshots.
+                    suffix = hashlib.sha256(repr(tuple(_item_key(item) for item in retryable)).encode()).hexdigest()[:16]
+                    plan = replace(restrict_plan(plan, retryable), key=f"{plan.key}:retry:{suffix}")
+                    plan_deferred = protected_items
+                    unresolved = self._journal_call(journal, "unresolved", kind, plan.key,
+                                                    target=run_context.target)
             if unresolved is not None:
                 protected_key = str(unresolved.get("album_key") or plan.key)
                 status = str(unresolved.get("status", "UNKNOWN")).upper()
@@ -706,7 +722,7 @@ class UploadEngine:
                     extra_failed_items=tuple(plan.pending_items),
                     batch_result=UploadBatchResult(plan.key, BatchStatus.FAILED, error=message),
                 )
-            plan_deferred = preflight_result.deferred_items
+            plan_deferred = tuple((*plan_deferred, *preflight_result.deferred_items))
             preflight_deferred = plan_deferred
             preflight_failed = preflight_result.failed_items
             if preflight_result.cancelled:
@@ -947,6 +963,7 @@ class UploadEngine:
         return _PreparedBatch(
             plan=plan,
             effective_plan=effective_plan,
+            ambiguous=bool(protected_items),
             send_plan=send_plan,
             contents=contents,
             ready_items=ready_items,
@@ -1127,6 +1144,7 @@ class UploadEngine:
                         kind,
                     )
 
+                plan = prep.plan
                 errors.extend(prep.errors)
                 failed_items.extend(prep.extra_failed_items)
                 failed_items.extend(prep.preflight_failed)
@@ -1374,6 +1392,7 @@ class UploadEngine:
                             succeeded_ids=observed.succeeded_ids,
                             failed_ids=observed.failed_ids,
                             pending_ids=observed.pending_ids,
+                            item_results=observed.item_results or None,
                             target=run_context.target,
                         )
                     elif observed.status is BatchStatus.PREPARED:
