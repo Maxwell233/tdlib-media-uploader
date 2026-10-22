@@ -9,6 +9,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from ..core.persistence import atomic_write_text
+
 from .paths import (
     APP_DATA_DIR,
     CONFIG_PATH,
@@ -73,12 +75,10 @@ def _load():
         template = TEMPLATE_CONFIG_PATH
         # Never look for or import a config from the old application root.
         try:
-            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             if template.exists():
-                import shutil
-                shutil.copyfile(template, CONFIG_PATH)
-        except OSError:
-            pass
+                atomic_write_text(CONFIG_PATH, template.read_text(encoding="utf-8"))
+        except OSError as error:
+            raise RuntimeError(f"配置文件创建失败：{CONFIG_PATH}\n{error}") from error
         if not CONFIG_PATH.exists():
             raise RuntimeError(
                 "找不到配置模板：\n"
@@ -524,13 +524,6 @@ VIDEO_VERIFY_ALL_METADATA = bool(
     )
 )
 
-VIDEO_RESET_STATE = bool(
-    video.get(
-        "reset_state",
-        False
-    )
-)
-
 VIDEO_PREFETCH_NEXT_ALBUM = bool(
     video.get(
         "prefetch_next_album",
@@ -631,13 +624,6 @@ IMAGE_VERIFY_ALL_IMAGES = bool(
     image.get(
         "verify_all_images_before_upload",
         image.get("validate_media", False),
-    )
-)
-
-IMAGE_RESET_STATE = bool(
-    image.get(
-        "reset_state",
-        False
     )
 )
 
@@ -769,8 +755,6 @@ MIXED_THUMBNAIL_TIMESTAMP_SECONDS = _thumbnail_timestamp_seconds(
 MIXED_VERIFY_MEDIA = bool(
     mixed.get("verify_media_before_upload", mixed.get("validate_media", False))
 )
-MIXED_RESET_STATE = bool(mixed.get("reset_state", False))
-
 
 # 可选本地暂存：源文件仍以原路径参与断点和标题键，发送前才复制到本地
 # 缓存，适合不稳定的 SMB/NAS。旧配置没有此段时保持关闭。

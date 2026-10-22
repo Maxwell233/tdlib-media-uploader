@@ -41,9 +41,9 @@ Windows x64 构建、PyInstaller macOS arm64 `.app` 构建，以及源码中实�
 | TDLib | `tdjson` wheel 内的原生库 | Boost Software License 1.0 | 否 | 允许组合和再分发；保留上游许可链接。 |
 | Pillow | `>=11.0` | MIT-CMU | 否 | 许可宽松，但分发时保留上游许可与署名说明。 |
 | `imageio-ffmpeg` | `>=0.6.0`；平台构建 workflow 使用 `--no-binary imageio-ffmpeg` | BSD 2-Clause | 否 | 仅使用 Python wrapper；不把其 wheel 内置的 FFmpeg 二进制放进发布包。 |
-| FFmpeg（Windows） | BtbN `autobuild-2026-09-03-13-17`，`ffmpeg-N-126390-g9fc8c785e2-win64-lgpl.zip` | LGPLv3（随包 `tools/ffmpeg/LICENSE.txt`） | 否，LGPL 为弱传染 | 构建 SHA-256：`ba8bf7dec00022c2dbf2cbeb9a601d7e0d131990e276b8c5f88954775735ec8a`；构建标志不含 `--enable-gpl` / `--enable-nonfree`。本项目通过子进程调用可执行文件，不与 Python 源码静态合并；发布包保留许可证、固定资产来源和可替换/源码获取信息。 |
+| FFmpeg（Windows） | BtbN `autobuild-2026-08-31-13-27`，`ffmpeg-N-126342-gf88b741dbf-win64-lgpl.zip`；[构建来源清单](tools/ffmpeg-windows.json) | LGPLv3（随包 `tools/ffmpeg/LICENSE.txt`） | 否，LGPL 为弱传染 | 构建 SHA-256：`7a7d7ad65d5d53aefc57fc3f78e00febe7b65156c03d14d43efc1393ef46a111`；构建标志不含 `--enable-gpl` / `--enable-nonfree`。本项目通过子进程调用可执行文件，不与 Python 源码静态合并；发布包保留许可证、固定资产来源和可替换/源码获取信息。 |
 | FFmpeg（macOS） | 官方源码 `7.1.1`，macOS 构建 workflow 编译 arm64 | LGPLv3（随包 `tools/ffmpeg/LICENSE.txt`） | 否，LGPL 为弱传染 | 使用 `--disable-gpl --disable-nonfree --enable-version3 --enable-static --disable-shared`；源码归档 SHA-256：`733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1`；构建信息写入 macOS 包的 `FFMPEG_BUILD_INFO.txt`，并检查 `-version` 输出与 arm64 架构。 |
-| PySide6 / Qt for Python | `>=6.8.0` | Community Edition：LGPLv3/GPLv3（另有商业版） | LGPL 为弱传染；GPL 模块为强传染 | 当前代码只导入 `QtCore`、`QtGui`、`QtWidgets`；不要新增 GPL-only Qt 模块。便携包不能阻止替换 Qt DLL，并应保留许可入口。 |
+| PySide6 / Qt for Python | `>=6.8.0` | Community Edition：LGPLv3/GPLv3（另有商业版） | LGPL 为弱传染；GPL 模块为强传染 | 当前代码导入 `QtCore`、`QtGui`、`QtWidgets`、`QtSvg`；不要新增 GPL-only Qt 模块。便携包不能阻止替换 Qt DLL，并应保留许可入口。 |
 | PyInstaller | `6.22.2`，仅构建依赖 | GPL-2-or-later + Bootloader Exception；运行时 hook 为 Apache-2.0 | 例外覆盖嵌入 bootloader | one-folder EXE 可继续使用；不把 PyInstaller 的普通 GPL 源码当作项目代码分发。 |
 | Python | 3.13 运行时/构建环境 | PSF License 2.0 | 否 | PyInstaller 可能带入 Python 运行时；保留 Python 许可来源。 |
 | ExifTool | 可选外部工具，不随仓库提交 | 由 ExifTool 上游另行规定 | 不纳入本包审计 | 用户自行放入 `tools/exiftool.exe` 或 `tools/exiftool` 时，应同时遵守 ExifTool 的分发条款。 |

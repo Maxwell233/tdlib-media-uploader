@@ -85,8 +85,9 @@ from .config_service import (
     update_toml_value as _update_toml_value,
     write_config_values,
 )
+from . import config_service
 from .history_service import load_history as _load_history, save_history as _save_history
-from .cache_service import ALL_CACHE_KEYS, current_cache_targets, cache_usage as _cache_usage
+from .cache_service import ALL_CACHE_KEYS, clear_cache, current_cache_targets, cache_usage as _cache_usage
 from .scanner import basic_paths as _basic_paths, scan_result as _scan_result
 
 
@@ -103,7 +104,7 @@ def _ensure_config_file() -> bool:
 
 _prepare_qt_plugins()
 
-from .dialogs import ConfigDialog, ScanToolsDialog, TargetDialog
+from .dialogs import TargetDialog
 from .pages import (
     HistoryPage,
     InflightPage,
@@ -116,6 +117,8 @@ from .theme import APP_STYLE
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        global cfg
+        cfg = config_service.get_config()
         application = QApplication.instance()
         if application is not None:
             self.setWindowIcon(application.windowIcon())
@@ -200,6 +203,7 @@ class MainWindow(QMainWindow):
         for page in self.upload_pages.values():
             page.scan_requested.connect(self._scan)
             page.scan_cancel_requested.connect(self._stop_scan)
+            page.reset_state_requested.connect(self._reset_upload_state)
             page.start_requested.connect(self._start_upload)
             page.path_selected.connect(self._save_source_path)
             page.edit_target_requested.connect(self._edit_target)
@@ -207,8 +211,6 @@ class MainWindow(QMainWindow):
         self.task_page.safe_stop_requested.connect(self._safe_stop_upload)
         self.task_page.immediate_stop_requested.connect(self._immediate_stop_upload)
         self.inflight_page.reconciliation_requested.connect(self._reconcile_inflight)
-        self.settings_page.open_editor.connect(self._edit_config)
-        self.settings_page.open_scan_tools.connect(self._edit_scan_tools)
         self.settings_page.clear_all_requested.connect(self._clear_all_cache)
         self.settings_page.clear_thumb_requested.connect(self._clear_thumb_cache)
         self.settings_page.clear_video_processed_requested.connect(
@@ -273,6 +275,38 @@ class MainWindow(QMainWindow):
         worker.progress_changed.connect(self._scan_progress)
         worker.finished.connect(worker.deleteLater)
         worker.start()
+
+    @Slot(str)
+    def _reset_upload_state(self, kind: str):
+        kind = _require_kind(kind)
+        if getattr(self, "_cache_clear_worker", None) is not None:
+            self.statusBar().showMessage("请等待缓存清理结束后再重置断点")
+            return
+        if (self.worker is not None and self.worker.isRunning()) or any(
+            scanner.isRunning() for scanner in self.scanners.values()
+        ):
+            QMessageBox.warning(self, "任务运行中", "请等待扫描完成或安全停止上传后再重置断点。")
+            return
+        label = _kind_label(kind)
+        answer = QMessageBox.warning(
+            self,
+            f"确认重置{label}断点",
+            f"将一次性清空{label}类型的全部本地断点（包括不同来源目录和上传目标的记录）。\n"
+            "已上传文件下次扫描会重新列为待上传，继续上传可能产生重复消息。\n\n"
+            "其他类型断点和未确认上传记录会保留；未确认上传仍需核对处理。是否重置？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        _removed, errors = clear_cache((f"{kind}_state",), targets=current_cache_targets())
+        self._upload_page(kind).clear_scan_result()
+        self.home.clear_scan()
+        if errors:
+            QMessageBox.warning(self, "断点重置未完成", "\n".join(errors))
+            self.statusBar().showMessage(f"{label}断点重置未完成，请重新扫描")
+            return
+        self.statusBar().showMessage(f"{label}断点已重置，请重新扫描；未确认上传记录已保留")
 
     @Slot(str)
     def _stop_scan(self, kind: str):
@@ -415,6 +449,7 @@ class MainWindow(QMainWindow):
         self.worker = worker
         worker.ui.message_added.connect(self.task_page.add_message)
         worker.ui.progress_changed.connect(self._on_worker_progress)
+        worker.ui.rate_limit_changed.connect(self.task_page.show_rate_limit)
         worker.ui.album_changed.connect(self.task_page.show_album)
         worker.ui.target_changed.connect(self._target_from_worker)
         worker.completed.connect(self._upload_finished)
@@ -566,14 +601,16 @@ class MainWindow(QMainWindow):
             }
             from tdlib_media_uploader.upload.reconciliation import SourceRootRequired
             try:
-                client.reconcile_inflight(album_key, sent=bool(sent), kind=kind, target=target or None)
+                client.reconcile_inflight(album_key, sent=bool(sent), kind=kind, target=target or None,
+                                          item_decisions=record.get("item_decisions"))
             except SourceRootRequired:
                 source_root = QFileDialog.getExistingDirectory(
                     self, "旧记录缺少来源目录：请选择当时扫描的根目录")
                 if not source_root:
                     return
                 client.reconcile_inflight(album_key, sent=bool(sent), kind=kind,
-                                         target=target or None, source_root=source_root)
+                                         target=target or None, source_root=source_root,
+                                         item_decisions=record.get("item_decisions"))
         except Exception as exc:
             QMessageBox.warning(
                 self,
@@ -709,24 +746,6 @@ class MainWindow(QMainWindow):
         self.sidebar.setCurrentRow(self.sidebar_rows["settings"])
         self.settings_page.open_upload_parameters(kind)
 
-    def _edit_config(self):
-        if not self._can_change_configuration():
-            return
-        dialog = ConfigDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._invalidate_previews()
-            self._refresh_pages()
-            self.statusBar().showMessage("配置已保存")
-
-    def _edit_scan_tools(self):
-        if not self._can_change_configuration():
-            return
-        dialog = ScanToolsDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._invalidate_previews()
-            self._refresh_pages()
-            self.statusBar().showMessage("扫描与外部工具设置已保存")
-
     def _can_change_configuration(self):
         if getattr(self, "_cache_clear_worker", None) is not None:
             self.statusBar().showMessage("请等待缓存清理结束，或先取消清理")
@@ -802,6 +821,7 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    global cfg, _CONFIG_CREATED
     if not getattr(sys, "frozen", False):
         print(
             "此应用仅支持从发布包运行，请从 GitHub Releases 下载对应平台的程序包。",
@@ -810,14 +830,25 @@ def main() -> int:
         return 2
     if "--self-test" in sys.argv[1:]:
         return run_self_test()
+    _prepare_windows_app_identity()
+    _prepare_qt_plugins()
+    app = QApplication.instance() or QApplication(sys.argv)
     try:
         ensure_data_dirs()
     except OSError as exc:
-        print(f"无法初始化数据目录：{exc}", file=sys.stderr)
+        error = f"无法初始化数据目录：{DATA_DIR}\n{type(exc).__name__}: {exc}"
+        print(error, file=sys.stderr)
+        write_app_log("ERROR", error, source="startup")
+        QMessageBox.critical(app.activeWindow(), "启动失败", error)
         return 1
-    _prepare_windows_app_identity()
-    _prepare_qt_plugins()
-    app = QApplication(sys.argv)
+    error = config_service.initialize_config()
+    if error:
+        print(error, file=sys.stderr)
+        write_app_log("ERROR", error, source="startup")
+        QMessageBox.critical(app.activeWindow(), "配置初始化失败", error)
+        return 1
+    cfg = config_service.get_config()
+    _CONFIG_CREATED = config_service._CONFIG_CREATED
     instance_lock = InstanceLock(DATA_DIR / "app.lock")
     if not instance_lock.acquire():
         QMessageBox.warning(app.activeWindow(), "程序已在运行", "TDLib Media Uploader 已在运行。")

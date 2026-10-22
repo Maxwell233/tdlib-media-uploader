@@ -23,6 +23,7 @@ from tdlib_media_uploader.core import album as metadata
 from tdlib_media_uploader.core import logging as app_logging
 from tdlib_media_uploader.gui import main_window as gui
 from tdlib_media_uploader.gui import config_service, tools, cache_service
+from tdlib_media_uploader.gui.pages.settings import SettingsPage
 from tdlib_media_uploader.core import filesystem as path_utils, readiness
 from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
 
@@ -55,69 +56,54 @@ class ImprovementsTest(unittest.TestCase):
             self.app.processEvents()
 
 
-    def test_scan_tools_have_a_separate_scrollable_dialog(self):
-        config = gui.ConfigDialog()
-        scan_tools = gui.ScanToolsDialog()
+    def test_scan_tools_have_a_separate_scrollable_inline_panel(self):
+        page = SettingsPage()
         try:
-            config_boxes = {
-                box.title() for box in config.findChildren(QGroupBox)
-            }
-            scan_boxes = {
-                box.title() for box in scan_tools.findChildren(QGroupBox)
-            }
-            self.assertNotIn("扫描与外部工具", config_boxes)
-            self.assertIn("扫描稳定性与并发", scan_boxes)
-            self.assertIn("外部工具", scan_boxes)
-            self.assertTrue(config.findChildren(QScrollArea))
-            self.assertTrue(scan_tools.findChildren(QScrollArea))
-            self.assertNotIn("exiftool_path", config.fields)
-            self.assertIn("exiftool_path", scan_tools.fields)
+            page.nav_list.setCurrentRow(3)
+            self.assertIs(page.stack.currentWidget(), page.advanced_panel)
+            self.assertTrue(page.general_panel.findChildren(QScrollArea))
+            self.assertTrue(page.advanced_panel.findChildren(QScrollArea))
+            self.assertNotIn(("paths", "exiftool_path"), page.general_panel.collect_values())
+            advanced_values = page.advanced_panel.collect_values()
+            self.assertIn(("paths", "exiftool_path"), advanced_values)
+            self.assertIn(("scan", "readiness_attempts"), advanced_values)
+            self.assertIn(("process", "exiftool_timeout_seconds"), advanced_values)
+        finally:
+            page.deleteLater()
+            self.app.processEvents()
 
-            window = gui.MainWindow()
+
+    def test_inline_settings_save_only_edited_general_and_scan_values(self):
+        target = {"target_mode": "channel", "channel_chat_id": -100123}
+        with patch.object(config_service.cfg, "API_ID", 42), \
+                patch.object(config_service.cfg, "API_HASH", "valid-api-hash"), \
+                patch.object(config_service.cfg, "target_for", return_value=target):
+            page = SettingsPage()
             try:
-                self.assertTrue(hasattr(window.settings_page, "open_scan_tools"))
+                video_dir = page.general_panel.video_dir.text() + "_edited"
+                page.general_panel.video_dir.setText(video_dir)
+                with patch("tdlib_media_uploader.gui.pages.settings._write_config_values", return_value="") as save, \
+                        patch.object(tools, "validate_exiftool_path", return_value=""):
+                    page.save_changes()
+                    save.assert_called_once_with({("paths", "video_dir"): video_dir})
+
+                page.revert_changes()
+                advanced = page.advanced_panel
+                advanced.exiftool_path.setText(advanced.exiftool_path.text() + "_edited")
+                advanced.scan_readiness_attempts.setValue(advanced.scan_readiness_attempts.value() % 8 + 1)
+                advanced.exiftool_timeout.setValue(advanced.exiftool_timeout.value() % 3600 + 1)
+                expected = {
+                    ("paths", "exiftool_path"): advanced.exiftool_path.text(),
+                    ("scan", "readiness_attempts"): advanced.scan_readiness_attempts.value(),
+                    ("process", "exiftool_timeout_seconds"): advanced.exiftool_timeout.value(),
+                }
+                with patch("tdlib_media_uploader.gui.pages.settings._write_config_values", return_value="") as save, \
+                        patch.object(tools, "validate_exiftool_path", return_value=""):
+                    page.save_changes()
+                    save.assert_called_once_with(expected)
             finally:
-                window.close()
-                window.deleteLater()
+                page.deleteLater()
                 self.app.processEvents()
-        finally:
-            config.close()
-            config.deleteLater()
-            scan_tools.close()
-            scan_tools.deleteLater()
-            self.app.processEvents()
-
-
-    def test_config_dialog_and_scan_tools_save_only_their_own_sections(self):
-        config = gui.ConfigDialog()
-        scan_tools = gui.ScanToolsDialog()
-        try:
-            with patch.object(config_service, "write_config_values", return_value="") as save, \
-                    patch.object(tools, "validate_exiftool_path", return_value=""):
-                config.fields["api_hash"].setText("valid-api-hash")
-                config._save()
-                config_values = save.call_args.args[0]
-            self.assertIn(("telegram", "api_id"), config_values)
-            self.assertIn(("paths", "video_dir"), config_values)
-            self.assertIn(("proxy", "enabled"), config_values)
-            self.assertNotIn(("paths", "exiftool_path"), config_values)
-            self.assertFalse(any(section in {"scan", "process"} for section, _ in config_values))
-
-            with patch.object(config_service, "write_config_values", return_value="") as save:
-                with patch.object(tools, "validate_exiftool_path", return_value=""):
-                    scan_tools._save()
-                scan_values = save.call_args.args[0]
-            self.assertIn(("paths", "exiftool_path"), scan_values)
-            self.assertIn(("scan", "readiness_attempts"), scan_values)
-            self.assertIn(("process", "exiftool_timeout_seconds"), scan_values)
-            self.assertNotIn(("telegram", "api_id"), scan_values)
-            self.assertNotIn(("proxy", "enabled"), scan_values)
-        finally:
-            config.close()
-            config.deleteLater()
-            scan_tools.close()
-            scan_tools.deleteLater()
-            self.app.processEvents()
 
 
     def test_stability_interval_honours_configured_value(self):

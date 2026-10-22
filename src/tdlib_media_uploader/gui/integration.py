@@ -621,14 +621,28 @@ class TDLibSender:
         prepared_media=None,
     ) -> SendResult:
         del caption_limit, timeout
-        if plan is None:
-            raise TypeError("TDLibSender 需要 AlbumPlan")
-        items = tuple(plan.pending_items)
-        self.progress.begin_album(items, plan, self.total_albums)
-        legacy_items = tuple(_legacy_item(item) for item in items)
+        try:
+            if plan is None:
+                raise TypeError("TDLibSender 需要 AlbumPlan")
+            items = tuple(plan.pending_items)
+            self.progress.begin_album(items, plan, self.total_albums)
+            legacy_items = tuple(_legacy_item(item) for item in items)
+        except Exception as error:
+            error.submitted = False
+            raise
         def on_submitted(message_ids):
             if context is not None and context.journal is not None:
                 context.journal.submitted(plan.kind, plan.key, message_ids, target=dict(target or {}))
+        def on_delivery(value):
+            if context is not None and context.journal is not None:
+                context.journal.update(
+                    plan.kind, plan.key, BatchStatus.UNKNOWN.value,
+                    message_ids=value.get("message_ids"),
+                    succeeded_ids=value.get("succeeded", []),
+                    failed_ids=value.get("failed", []),
+                    pending_ids=value.get("pending", []),
+                    item_results=value.get("item_results"), target=dict(target or {}),
+                )
         try:
             value = _call_supported(
                 self.client.send_contents,
@@ -637,6 +651,7 @@ class TDLibSender:
                 items=legacy_items,
                 target=dict(target or {}),
                 on_submitted=on_submitted,
+                on_delivery=on_delivery,
                 prepared_media=prepared_media,
             )
             if isinstance(value, SendResult):
@@ -653,6 +668,7 @@ class TDLibSender:
                     tuple(int(value) for value in value.get("failed", value.get("failed_ids", ())) or ()),
                     tuple(int(value) for value in value.get("pending", value.get("pending_ids", ())) or ()),
                     str(value.get("error")) if value.get("error") else None,
+                    tuple(value.get("item_results") or ()),
                 )
             else:
                 result = SendResult(
@@ -674,7 +690,10 @@ class TDLibSender:
                     pass
             finish = getattr(self.ui, "finish", None)
             if callable(finish):
-                finish()
+                try:
+                    finish()
+                except Exception:
+                    pass
             raise
 
 
@@ -796,6 +815,8 @@ def _run_v2_upload(
     """Run one GUI upload through ``UploadEngine`` and a legacy TDLib client."""
 
     normalized = _normalize_kind(kind)
+    from ..core.identity import validate_send_target
+    target = validate_send_target(dict(target))
     if config is None:
         config = importlib.import_module("tdlib_media_uploader.config.loader")
     activate = getattr(config, "activate_target", None)
@@ -906,13 +927,27 @@ def _run_v2_upload(
             context=context,
         )
     finally:
+        def cleanup_call(label, callback):
+            try:
+                callback()
+            except Exception as error:
+                from ..core.logging import write_exception
+                message = f"{label}未完成：{error}"
+                try:
+                    write_exception(message, error, source="upload/cleanup")
+                    warning = getattr(ui, "warning", None)
+                    if callable(warning):
+                        warning(message)
+                except Exception:
+                    pass
+
         if callback_added:
             remove_callback = getattr(client, "remove_update_callback", None)
             if callable(remove_callback):
-                remove_callback(progress.handle_update)
+                cleanup_call("移除上传进度监听", lambda: remove_callback(progress.handle_update))
         close = getattr(client, "close", None)
         if callable(close):
-            close()
+            cleanup_call("关闭 Telegram 数据库", close)
         for method_name in ("cleanup_staging_cache", "cleanup_compressed_images"):
             method = getattr(legacy, method_name, None)
             if callable(method):

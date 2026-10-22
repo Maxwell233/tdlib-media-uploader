@@ -110,7 +110,6 @@ class ImprovementsTest(unittest.TestCase):
                     patch.object(core.cfg, "MIXED_VIDEO_EXTENSIONS", {".mp4", ".mov"}), \
                     patch.object(core.cfg, "MIXED_EXTENSIONS", {".jpg", ".png", ".mp4", ".mov"}), \
                     patch.object(core.cfg, "MIXED_ALBUM_SIZE", 2), \
-                    patch.object(core.cfg, "MIXED_RESET_STATE", False), \
                     patch.object(core, "STATE_DIR", state_dir), \
                     patch.object(metadata, "PROJECT_DIR", Path(directory)):
                 groups = core.scan_mixed_groups()

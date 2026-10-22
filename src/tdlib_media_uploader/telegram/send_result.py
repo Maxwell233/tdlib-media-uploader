@@ -24,9 +24,13 @@ class SendResult:
     failed_ids: tuple[int, ...] = ()
     pending_ids: tuple[int, ...] = ()
     error: str | None = None
+    item_results: tuple[dict[str, Any], ...] = ()
 
     @property
     def message_ids(self) -> tuple[int, ...]:
+        if self.item_results:
+            return tuple(value for item in self.item_results
+                         if (value := item.get("message_id") or item.get("old_message_id")) is not None)
         return self.succeeded_ids + self.failed_ids + self.pending_ids
 
     @property
@@ -56,6 +60,9 @@ class SendResult:
         }
         if self.error:
             result["error"] = self.error
+        if self.item_results:
+            result["item_results"] = [dict(item) for item in self.item_results]
+            result["message_ids"] = list(self.message_ids)
         return result
 
     @property
@@ -69,6 +76,22 @@ class _MessageRecord:
     state: str
     resolved_id: int | None
     error: str | None = None
+    can_retry: bool = False
+    retry_after: float = 0.0
+    requires_action: bool = False
+
+
+def _failure_options(value):
+    message = value.get("message", value)
+    state = message.get("sending_state") or {}
+    return {
+        "can_retry": bool(state.get("can_retry", False)),
+        "retry_after": max(0.0, float(state.get("retry_after", 0) or 0)),
+        "requires_action": any(state.get(key) for key in (
+            "need_another_sender", "need_another_reply_quote", "need_drop_reply",
+            "required_paid_message_star_count",
+        )),
+    }
 
 
 def _as_id(value: Any) -> int | None:
@@ -141,6 +164,7 @@ def _records(messages: Iterable[Any]) -> list[_MessageRecord]:
                 state=state,
                 resolved_id=message_id if state == "succeeded" else None,
                 error=_error_text(message),
+                **(_failure_options(message) if state == "failed" else {}),
             )
         )
     return values
@@ -166,8 +190,12 @@ def _apply_updates(records: list[_MessageRecord], updates: Iterable[Any]) -> Non
             record.resolved_id = new_id if new_id is not None else old_id
         elif update_type == "updateMessageSendFailed":
             record.state = "failed"
-            record.resolved_id = None
+            record.resolved_id = _as_id((update.get("message") or {}).get("id")) or old_id
             record.error = _error_text(update) or record.error
+            options = _failure_options(update)
+            record.can_retry = options["can_retry"]
+            record.retry_after = options["retry_after"]
+            record.requires_action = options["requires_action"]
 
 
 def _ids(records: Iterable[_MessageRecord], state: str) -> tuple[int, ...]:
@@ -175,7 +203,7 @@ def _ids(records: Iterable[_MessageRecord], state: str) -> tuple[int, ...]:
     for record in records:
         if record.state != state:
             continue
-        value = record.resolved_id if state == "succeeded" else record.old_id
+        value = (record.resolved_id or record.old_id) if state in {"succeeded", "failed"} else record.old_id
         if value is not None:
             result.append(value)
     return tuple(result)
@@ -250,30 +278,12 @@ def map_send_result(
         failed,
         pending,
         str(observed_error) if observed_error else None,
+        tuple({"index": index, "old_message_id": record.old_id,
+               "message_id": record.resolved_id, "status": record.state,
+               "error": record.error, "can_retry": record.can_retry,
+               "retry_after": record.retry_after, "requires_action": record.requires_action}
+              for index, record in enumerate(records)),
     )
-
-
-def classify_exception(
-    error: BaseException,
-    *,
-    submitted: bool = False,
-    terminal: bool = False,
-) -> BatchStatus:
-    """Classify an exception at the request boundary.
-
-    A timeout/cancellation or any error after submission is ambiguous.  A
-    pre-send ordinary failure is ``FAILED``.  ``terminal`` is used when the
-    caller already has a complete all-failed result and should not overwrite
-    it with ``UNKNOWN``.
-    """
-
-    if terminal:
-        return BatchStatus.FAILED
-    if isinstance(error, TimeoutError) or bool(getattr(error, "cancelled", False)):
-        return BatchStatus.UNKNOWN
-    if submitted:
-        return BatchStatus.UNKNOWN
-    return BatchStatus.FAILED
 
 
 __all__ = [
@@ -283,7 +293,6 @@ __all__ = [
     "SendResult",
     "SUBMITTED",
     "UNKNOWN",
-    "classify_exception",
     "map_send_result",
     "message_state",
     "status_for_delivery",

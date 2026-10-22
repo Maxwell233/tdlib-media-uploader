@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import importlib
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -104,7 +103,7 @@ def run_self_test(*, emit=print) -> int:
     if not TEMPLATE_CONFIG_PATH.is_file():
         failures.append(f"缺少配置模板：{TEMPLATE_CONFIG_PATH}")
     for module_name in (
-        "tdjson", "PySide6", "PIL", "tdlib_media_uploader.telegram.tdlib_common",
+        "tdjson", "PySide6", "PySide6.QtSvg", "PIL", "tdlib_media_uploader.telegram.tdlib_common",
         "tdlib_media_uploader.media.video_pipeline", "tdlib_media_uploader.media.image_pipeline",
         "tdlib_media_uploader.media.mixed_pipeline",
     ):
@@ -112,31 +111,35 @@ def run_self_test(*, emit=print) -> int:
             importlib.import_module(module_name)
         except Exception as exc:
             failures.append(f"导入 {module_name} 失败：{type(exc).__name__}: {exc}")
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        for candidate in (
-            RESOURCE_DIR / "tools" / "ffmpeg" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg"),
-            RESOURCE_DIR / "tools" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg"),
-        ):
-            if candidate.is_file():
-                ffmpeg = str(candidate)
-                break
-    if ffmpeg:
-        try:
-            import subprocess
-            from ..processes.runner import run_cancellable_process
+    try:
+        import subprocess
+        from ..media.video_probe import _find_ffmpeg, _find_ffprobe, _hidden_subprocess_kwargs
+        from ..processes.runner import run_cancellable_process
 
-            run_cancellable_process(
-                [ffmpeg, "-version"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-                check=True,
-            )
-        except Exception as exc:
-            failures.append(f"FFmpeg 检查失败：{exc}")
-    else:
-        emit("提示：未找到 FFmpeg（可选，封面/媒体读取功能将在实际使用时提示）")
+        for name, executable in (("FFmpeg", _find_ffmpeg()), ("FFprobe", _find_ffprobe())):
+            if not executable:
+                if IS_FROZEN:
+                    failures.append(f"发布包缺少必需的 {name}，请重新安装完整发布包。")
+                else:
+                    emit(f"提示：源码检查未找到 {name}（可选依赖）；视频探测、重新封装或封面功能受限。")
+                continue
+            if IS_FROZEN and not _is_within(Path(executable).resolve(), RESOURCE_DIR.resolve()):
+                failures.append(f"发布包缺少内置 {name}，检测到的外部工具不能代替发布包文件：{executable}")
+                continue
+            emit(f"{name}：{executable}")
+            try:
+                run_cancellable_process(
+                    [executable, "-version"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                    check=True,
+                    **_hidden_subprocess_kwargs(),
+                )
+            except Exception as exc:
+                failures.append(f"{name} 检查失败：{exc}")
+    except Exception as exc:
+        failures.append(f"媒体工具查找失败：{exc}")
     if failures:
         for failure in failures:
             emit(f"失败：{failure}")

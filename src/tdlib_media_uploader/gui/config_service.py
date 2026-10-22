@@ -9,12 +9,12 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import sys
 import tomllib
 from typing import Any
 
 from ..config.paths import CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH
+from ..core.persistence import atomic_write_text
 from .tools import KIND_PATH_KEYS, require_kind
 
 PROJECT_DIR = RESOURCE_DIR
@@ -24,20 +24,39 @@ def ensure_config_file() -> bool:
     """Ensure the user config.toml exists on startup, copying the bundled template."""
     if "--self-test" in sys.argv[1:]:
         return False
-    if CONFIG_PATH.exists() or not TEMPLATE_CONFIG_PATH.exists():
+    if CONFIG_PATH.exists():
+        if os.name == "posix":
+            CONFIG_PATH.chmod(0o600)
         return False
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(TEMPLATE_CONFIG_PATH, CONFIG_PATH)
+    if not TEMPLATE_CONFIG_PATH.exists():
+        return False
+    atomic_write_text(CONFIG_PATH, TEMPLATE_CONFIG_PATH.read_text(encoding="utf-8"))
     return True
 
 
-_CONFIG_CREATED = ensure_config_file()
+_CONFIG_CREATED = False
 _CONFIG_ERROR = ""
+cfg = None
 try:
-    from ..config import loader as cfg
+    # GUI imports must remain safe on a fresh or unwritable installation.
+    # Creation is deferred until main() can display a startup error dialog.
+    if CONFIG_PATH.exists() or "--self-test" in sys.argv[1:]:
+        from ..config import loader as cfg
 except Exception as exc:
-    cfg = None
     _CONFIG_ERROR = str(exc)
+
+
+def initialize_config() -> str:
+    """Create and load the user config at the controlled GUI startup boundary."""
+
+    global cfg, _CONFIG_CREATED, _CONFIG_ERROR
+    try:
+        _CONFIG_CREATED = ensure_config_file() or _CONFIG_CREATED
+    except OSError as exc:
+        cfg = None
+        _CONFIG_ERROR = f"无法初始化配置文件：{CONFIG_PATH}\n{type(exc).__name__}: {exc}"
+        return _CONFIG_ERROR
+    return reload_config()
 
 
 def reload_config() -> str:
@@ -59,6 +78,10 @@ def reload_config() -> str:
 def get_config() -> Any:
     """Return the active config loader module or None."""
     global cfg
+    # A media/test entry point may have initialized the file after this
+    # module was imported. Reuse it without creating files during import.
+    if cfg is None and not _CONFIG_ERROR and CONFIG_PATH.exists():
+        reload_config()
     return cfg
 
 
@@ -145,21 +168,17 @@ def write_config_values(
         if not path.exists():
             if not TEMPLATE_CONFIG_PATH.exists():
                 return "找不到 config.toml 和默认配置资源。"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(TEMPLATE_CONFIG_PATH, path)
+            atomic_write_text(path, TEMPLATE_CONFIG_PATH.read_text(encoding="utf-8"))
         with path.open(encoding="utf-8", newline="") as stream:
             previous = stream.read()
         text = previous
         for (section, key), value in values.items():
             text = update_toml_value(text, section, key, value)
         tomllib.loads(text)
-        temp = path.with_suffix(".toml.tmp")
-        temp.write_text(text, encoding="utf-8", newline="")
-        os.replace(temp, path)
+        atomic_write_text(path, text)
         error = reloader_fn()
         if error:
-            temp.write_text(previous, encoding="utf-8", newline="")
-            os.replace(temp, path)
+            atomic_write_text(path, previous)
             reloader_fn()
         return error
     except Exception as exc:
@@ -175,6 +194,7 @@ __all__ = [
     "get_config",
     "get_key_re",
     "get_section_re",
+    "initialize_config",
     "reload_config",
     "source_root_for",
     "target_for",

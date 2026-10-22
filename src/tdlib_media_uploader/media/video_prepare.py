@@ -21,7 +21,8 @@ from collections.abc import Mapping
 from typing import Any, Sequence
 import uuid
 
-from ..core.source_snapshot import capture_snapshot, validate_snapshots
+from ..core.source_snapshot import SourceChanged, capture_snapshot, validate_snapshots
+from ..core.concurrency import CancellationRequested, raise_if_cancelled
 from ..config import loader as cfg
 from ..config.paths import VIDEO_PROCESSED_CACHE_DIR
 from ..core.filesystem import stable_path
@@ -36,6 +37,30 @@ from .video_probe import (
 )
 
 MANIFEST_FILE_NAME = "manifest.json"
+
+
+def _optional_thumbnail(path, *, cancel_event=None, **kwargs):
+    """Allow Telegram to supply a cover when local extraction fails."""
+    from .video_pipeline import UI, build_thumbnail
+
+    raise_if_cancelled(cancel_event=cancel_event)
+    try:
+        result = (
+            build_thumbnail(path, **kwargs)
+            if cancel_event is None
+            else build_thumbnail(path, cancel_event, **kwargs)
+        )
+    except (CancellationRequested, SourceChanged):
+        raise
+    except Exception as exc:
+        # Some extractors wrap cancellation in an ordinary media error.
+        raise_if_cancelled(cancel_event=cancel_event)
+        if getattr(exc, "cancelled", False):
+            raise
+        UI.warning(f"视频封面生成失败，将继续上传并由 Telegram 生成封面：{Path(path).name} · {exc}")
+        return None, 0, 0
+    raise_if_cancelled(cancel_event=cancel_event)
+    return result
 
 
 @dataclass(frozen=True)
@@ -372,7 +397,6 @@ def prepare_video_for_telegram(
 
         thumb_path, tw, th = None, 0, 0
         if generate_thumbnail:
-            from .video_pipeline import build_thumbnail
             dur = getattr(info, "duration", None)
             if dur is None and isinstance(info, Mapping):
                 dur = info.get("duration")
@@ -382,17 +406,9 @@ def prepare_video_for_telegram(
             }
             if orig_path != w_path:
                 thumb_kwargs["logical_path"] = orig_path
-            if cancel_event is not None:
-                thumb_path, tw, th = build_thumbnail(
-                    w_path,
-                    cancel_event,
-                    **thumb_kwargs,
-                )
-            else:
-                thumb_path, tw, th = build_thumbnail(
-                    w_path,
-                    **thumb_kwargs,
-                )
+            thumb_path, tw, th = _optional_thumbnail(
+                w_path, cancel_event=cancel_event, **thumb_kwargs,
+            )
 
         validate_snapshots(source_snapshots)
         source_sig = get_video_process_cache_key(orig_path, original_snapshot[1], original_snapshot[2])
@@ -494,23 +510,14 @@ def prepare_video_for_telegram(
 
         thumb_path, tw, th = None, 0, 0
         if generate_thumbnail:
-            from .video_pipeline import build_thumbnail
             thumb_kwargs = {
                 "timestamp_seconds": thumbnail_timestamp_seconds,
                 "duration": processed_info.duration,
                 "logical_path": orig_path,
             }
-            if cancel_event is not None:
-                thumb_path, tw, th = build_thumbnail(
-                    processed_path,
-                    cancel_event,
-                    **thumb_kwargs,
-                )
-            else:
-                thumb_path, tw, th = build_thumbnail(
-                    processed_path,
-                    **thumb_kwargs,
-                )
+            thumb_path, tw, th = _optional_thumbnail(
+                processed_path, cancel_event=cancel_event, **thumb_kwargs,
+            )
 
         validate_snapshots(source_snapshots)
         return PreparedVideo(

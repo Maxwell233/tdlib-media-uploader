@@ -252,9 +252,9 @@ class UploadReconciliationTest(unittest.TestCase):
         from tdlib_media_uploader.media import video_pipeline as video_core
 
         modules = {
-            "video": (video_core, "VIDEO_DIR", "VIDEO_RESET_STATE", "video_file.mp4"),
-            "image": (image_core, "IMAGE_DIR", "IMAGE_RESET_STATE", "image_file.jpg"),
-            "mixed": (mixed_core, "MIXED_DIR", "MIXED_RESET_STATE", "mixed_file.jpg"),
+            "video": (video_core, "VIDEO_DIR", "video_file.mp4"),
+            "image": (image_core, "IMAGE_DIR", "image_file.jpg"),
+            "mixed": (mixed_core, "MIXED_DIR", "mixed_file.jpg"),
         }
         target_a = {
             "target_mode": "forum_topic",
@@ -269,7 +269,7 @@ class UploadReconciliationTest(unittest.TestCase):
             "channel_chat_id": 0,
         }
 
-        for kind, (module, config_dir, reset_name, filename) in modules.items():
+        for kind, (module, config_dir, filename) in modules.items():
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory) / "media"
                 root.mkdir()
@@ -297,10 +297,9 @@ class UploadReconciliationTest(unittest.TestCase):
                     patch.object(tdlib_common.cfg, "FORUM_TOPIC_ID", target_b["forum_topic_id"]),
                     patch.object(tdlib_common.cfg, "CHANNEL_CHAT_ID", 0),
                     patch.object(tdlib_common.cfg, config_dir, root),
-                    patch.object(tdlib_common.cfg, reset_name, False),
                     patch.object(module, "STATE_DIR", Path(directory) / "state"),
                 ]
-                with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+                with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
                     client.reconcile_inflight("legacy-kind-album", sent=True, kind=kind, source_root=root)
                     state_a = module.UploadState(target=target_a)
                     state_b = module.UploadState(target=target_b)
@@ -327,7 +326,6 @@ class UploadReconciliationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(image_core, "STATE_DIR", Path(directory) / "state"), \
                     patch.object(image_core.cfg, "IMAGE_DIR", Path(directory) / "images"), \
-                    patch.object(image_core.cfg, "IMAGE_RESET_STATE", False), \
                     patch.object(tdlib_common.cfg, "target_for", return_value=target_c), \
                     patch.object(tdlib_common.cfg, "TARGET_MODE", "forum_topic"), \
                     patch.object(tdlib_common.cfg, "CHAT_ID", target_c["chat_id"]), \

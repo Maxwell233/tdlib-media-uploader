@@ -106,7 +106,7 @@ class Phase2PyInstallerLayoutTest(unittest.TestCase):
         hooks.collect_submodules.assert_called_once_with("tdlib_media_uploader")
         self.assertEqual(set(call.kwargs["hiddenimports"]), {
             *hooks.collect_submodules.return_value,
-            "tdjson", "PIL", "imageio_ffmpeg", "tdjson.native", "imageio_ffmpeg.native",
+            "tdjson", "PIL", "imageio_ffmpeg", "PySide6.QtSvg", "tdjson.native", "imageio_ffmpeg.native",
         })
         self.assertIn(("/native/tdjson.dylib", "."), call.kwargs["binaries"])
         self.assertFalse(any("ffmpeg-osx" in source for source, _dest in call.kwargs["binaries"]))

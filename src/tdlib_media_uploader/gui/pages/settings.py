@@ -37,8 +37,6 @@ from ..settings import (
 class SettingsPage(QWidget):
     """Inline settings hub with instant sub-navigation and unified persistence."""
 
-    open_editor = Signal()
-    open_scan_tools = Signal()
     clear_all_requested = Signal()
     clear_thumb_requested = Signal()
     clear_video_processed_requested = Signal()

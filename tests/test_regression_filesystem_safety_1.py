@@ -23,6 +23,7 @@ from tdlib_media_uploader.core import album as metadata
 from tdlib_media_uploader.core import logging as app_logging
 from tdlib_media_uploader.gui import main_window as gui
 from tdlib_media_uploader.gui import config_service, tools, cache_service
+from tdlib_media_uploader.gui.pages.settings import SettingsPage
 from tdlib_media_uploader.processes.runner import run_cancellable_process
 from tdlib_media_uploader.core import filesystem as path_utils, readiness, concurrency
 from PySide6.QtWidgets import QApplication, QGroupBox, QHBoxLayout, QScrollArea
@@ -499,9 +500,11 @@ class ImprovementsTest(unittest.TestCase):
 
 
     def test_invalid_api_id_is_not_silently_replaced(self):
-        dialog = gui.ConfigDialog()
-        dialog.fields["api_id"].setText("invalid")
-        with patch.object(gui.QMessageBox, "warning") as warning, patch.object(gui, "_write_config_values") as save:
-            dialog._save()
-            warning.assert_called_once()
+        page = SettingsPage()
+        self.addCleanup(page.deleteLater)
+        page.telegram_panel.api_id.setText("invalid")
+        with patch("tdlib_media_uploader.gui.pages.settings._write_config_values") as save:
+            page.save_changes()
             save.assert_not_called()
+        self.assertIn("API ID", page.save_status_label.text())
+        self.assertEqual(page.save_status_label.property("status"), "danger")

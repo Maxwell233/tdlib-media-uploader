@@ -62,9 +62,12 @@ class TelegramPanel(SettingsPanel):
 
         helper_label = QLabel(
             '获取官方 API ID 与 API Hash：'
-            '<a href="https://my.telegram.org">my.telegram.org</a>'
+            '<a href="https://my.telegram.org">my.telegram.org</a><br>'
+            'API Hash 与代理凭据会以明文保存在本机 data/config.toml，'
+            '登录会话保存在 data/telegram。请勿分享这些文件或目录。'
         )
         helper_label.setObjectName("mutedLabel")
+        helper_label.setWordWrap(True)
         helper_label.setOpenExternalLinks(True)
         helper_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
 
@@ -140,7 +143,7 @@ class TelegramPanel(SettingsPanel):
         proxy_form.addRow(self.proxy_http_only_label, self.proxy_http_only)
 
         proxy_hint = QLabel(
-            "API Hash、代理认证凭据与 MTProto Secret 仅安全保存在本地 config.toml 中。"
+            "API Hash、代理认证凭据与 MTProto Secret 以明文保存在本机 config.toml 中，请勿分享该文件。"
         )
         proxy_hint.setObjectName("mutedLabel")
         proxy_hint.setWordWrap(True)

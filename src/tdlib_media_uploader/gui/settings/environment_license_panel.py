@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sys
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...config import paths
 from ...config.paths import read_version
 from ..config_service import get_cfg as _cfg, get_config
 from ..icons import get_svg_icon
@@ -86,6 +88,10 @@ class EnvironmentLicensePanel(SettingsPanel):
             env_grid.addWidget(card, row, col)
 
         d_layout.addLayout(env_grid)
+        self.data_permissions_label = QLabel()
+        self.data_permissions_label.setObjectName("envStatus")
+        self.data_permissions_label.setWordWrap(True)
+        d_layout.addWidget(self.data_permissions_label)
         layout.addWidget(diag_card)
 
         # 2. Section: Application Info & Open-Source Licenses
@@ -135,6 +141,13 @@ class EnvironmentLicensePanel(SettingsPanel):
         QDesktopServices.openUrl(QUrl(REPO_URL))
 
     def load(self):
+        self.data_permissions_label.setVisible(sys.platform == "win32")
+        if sys.platform == "win32":
+            diagnostic = paths.DATA_PERMISSION_DIAGNOSTIC
+            text = diagnostic.text if diagnostic else "尚未检查"
+            self.data_permissions_label.setText(f"数据目录权限：{text}")
+            self.data_permissions_label.setToolTip(diagnostic.detail if diagnostic else "启动时检查 data 目录的读取授权。")
+            self.data_permissions_label.setProperty("status", diagnostic.status if diagnostic else "muted")
         current_cfg = get_config()
         exiftool_path = _cfg("EXIFTOOL_PATH", None)
         checks = {

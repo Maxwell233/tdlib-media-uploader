@@ -28,6 +28,7 @@ class _ObservedSend:
     failed_ids: tuple[int, ...] = ()
     pending_ids: tuple[int, ...] = ()
     error: str | None = None
+    item_results: tuple[Mapping[str, Any], ...] = ()
 
 
 def _normalize_status(value: Any) -> BatchStatus | None:
@@ -55,8 +56,10 @@ def _normalize_send_result(value: Any, expected_count: int) -> _ObservedSend:
     message_ids: tuple[int, ...] = ()
     error: str | None = None
     status: BatchStatus | None = None
+    item_results = ()
 
     if isinstance(value, Mapping):
+        item_results = tuple(value.get("item_results") or ())
         status = _normalize_status(value.get("status"))
         succeeded = _as_ids(value.get("succeeded_ids", value.get("succeeded")))
         failed = _as_ids(value.get("failed_ids", value.get("failed")))
@@ -70,6 +73,7 @@ def _normalize_send_result(value: Any, expected_count: int) -> _ObservedSend:
         succeeded = message_ids
         error = value.error
     elif value is not None and not isinstance(value, (str, bytes)):
+        item_results = tuple(getattr(value, "item_results", ()) or ())
         status = _normalize_status(getattr(value, "status", None))
         succeeded = _as_ids(
             getattr(value, "succeeded_ids", getattr(value, "confirmed_ids", getattr(value, "succeeded", ())))
@@ -109,4 +113,4 @@ def _normalize_send_result(value: Any, expected_count: int) -> _ObservedSend:
         error = error or "发送结果同时包含成功或待确认消息"
     if status is BatchStatus.CONFIRMED and not succeeded:
         succeeded = message_ids
-    return _ObservedSend(status, message_ids, succeeded, failed, pending, error)
+    return _ObservedSend(status, message_ids, succeeded, failed, pending, error, item_results)

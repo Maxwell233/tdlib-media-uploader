@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError as FutureTimeoutError, wait
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1127,7 +1127,8 @@ def build_items(videos, metadata_index, progress_callback=None, cancel_event=Non
     return items, missing
 
 
-_VIDEO_INFO_CACHE = {}
+_VIDEO_INFO_CACHE_MAX_ENTRIES = 512
+_VIDEO_INFO_CACHE = OrderedDict()
 _VIDEO_INFO_CACHE_LOCK = threading.Lock()
 
 
@@ -1178,6 +1179,8 @@ def video_info(path: Path, cancel_event=None):
     key = (stable_path(path), snapshot[0], snapshot[1])
     with _VIDEO_INFO_CACHE_LOCK:
         cached = _VIDEO_INFO_CACHE.get(key)
+        if cached is not None:
+            _VIDEO_INFO_CACHE.move_to_end(key)
     if cached is not None:
         return cached
 
@@ -1194,6 +1197,9 @@ def video_info(path: Path, cancel_event=None):
         )
     with _VIDEO_INFO_CACHE_LOCK:
         _VIDEO_INFO_CACHE[key] = info
+        _VIDEO_INFO_CACHE.move_to_end(key)
+        while len(_VIDEO_INFO_CACHE) > _VIDEO_INFO_CACHE_MAX_ENTRIES:
+            _VIDEO_INFO_CACHE.popitem(last=False)
     return info
 
 
@@ -1367,10 +1373,9 @@ def prepare_video(path: Path, cancel_event=None):
         Path(path).stat().st_size <= cfg.VIDEO_MAX_BYTES
         or can_remux_video(path, info=info)
     ):
-        if cancel_event is None:
-            build_thumbnail(path, duration=info.get("duration"))
-        else:
-            build_thumbnail(path, cancel_event, duration=info.get("duration"))
+        from .video_prepare import _optional_thumbnail
+
+        _optional_thumbnail(path, cancel_event=cancel_event, duration=info.get("duration"))
     return info
 
 
@@ -1649,7 +1654,6 @@ class UploadState(SharedUploadState):
             source_root=cfg.VIDEO_DIR,
             target=target or getattr(cfg, "target_for", lambda _kind: {}) ("video"),
             state_dir=STATE_DIR,
-            reset=getattr(cfg, "VIDEO_RESET_STATE", False),
             filename_prefix="video_upload_state",
             snapshot_provider=_snapshot_for_path,
         )

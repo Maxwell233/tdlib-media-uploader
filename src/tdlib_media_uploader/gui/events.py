@@ -47,6 +47,7 @@ class GuiConsoleUI(QObject):
     progress_changed = Signal(object)
     album_changed = Signal(object)
     target_changed = Signal(object)
+    rate_limit_changed = Signal(int)
 
     def __init__(
         self,
@@ -197,6 +198,9 @@ class GuiConsoleUI(QObject):
 
     def progress(self, **kwargs):
         self.progress_changed.emit(dict(kwargs))
+
+    def rate_limit(self, seconds: int):
+        self.rate_limit_changed.emit(seconds)
 
     def finish(self):
         return None

@@ -70,7 +70,6 @@ class UploadConsistencyTest(unittest.TestCase):
         self.runtime = SimpleNamespace(IMAGE_STATE_DIR=self.root/'state', UPLOAD_INFLIGHT_DIR=self.root/'journal')
         self.config = snapshot_config(cfg, 'image', TARGET)
         self.config.IMAGE_DIR = self.source
-        self.config.IMAGE_RESET_STATE = False
         self.config.STAGING_MODE = 'off'; self.config.STAGING_ENABLED = False
         self.config.IMAGE_COMPRESS_OVERSIZE = False
         self.config.IMAGE_ALBUM_SIZE = 10
@@ -147,7 +146,7 @@ class UploadConsistencyTest(unittest.TestCase):
         self.run_upload(preview)
         journal = InflightJournal(self.runtime.UPLOAD_INFLIGHT_DIR)
         record = journal.list_unresolved()[0]
-        self.config.IMAGE_DIR = self.root/'different'; self.config.IMAGE_RESET_STATE = True
+        self.config.IMAGE_DIR = self.root/'different'
         ReconciliationService(journal).reconcile_inflight(record['album_key'], kind='image', sent=True, target=TARGET)
         state = UploadState(kind='image', source_root=self.source, target=TARGET, state_dir=self.runtime.IMAGE_STATE_DIR)
         self.assertTrue(state.is_completed(record['items'][0]))

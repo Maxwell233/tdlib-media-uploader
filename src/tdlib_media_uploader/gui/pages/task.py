@@ -194,6 +194,10 @@ class TaskPage(QWidget):
             f"{self._size_formatter(payload.get('total_bytes', 0))}"
         )
 
+    @Slot(int)
+    def show_rate_limit(self, seconds: int):
+        self.task_status.setText(f"Telegram 限流，{seconds} 秒后重试" if seconds else "上传中")
+
     def finish_session(self, success: bool, message: str):
         self.stop_button.setEnabled(False)
         self.immediate_stop_button.setEnabled(False)

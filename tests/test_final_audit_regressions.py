@@ -16,7 +16,6 @@ from tdlib_media_uploader.core.album import album_key
 from tdlib_media_uploader.core.filesystem import stable_path
 from tdlib_media_uploader.gui import models, scanner
 from tdlib_media_uploader.gui import history_service
-from tdlib_media_uploader.gui.dialogs.scan_tools_dialog import ScanToolsDialog
 from tdlib_media_uploader.gui.pages.upload import UploadPage, UploadPageServices
 from tdlib_media_uploader.gui.settings import AdvancedPanel, TelegramPanel, UploadPanel
 from tdlib_media_uploader.media import image_pipeline
@@ -178,7 +177,6 @@ class FinalAuditRegressionTest(unittest.TestCase):
     def test_settings_write_runtime_keys(self):
         upload = UploadPanel()
         advanced = AdvancedPanel()
-        scan_tools = ScanToolsDialog()
         try:
             upload_values = upload.collect_values()
             self.assertIn(("video", "verify_all_metadata_before_upload"), upload_values)
@@ -199,15 +197,9 @@ class FinalAuditRegressionTest(unittest.TestCase):
                 ("process", "ffmpeg_compress_timeout_seconds"),
                 advanced_values,
             )
-            self.assertIn(
-                "ffmpeg_compression_timeout_seconds",
-                scan_tools.process_timeouts,
-            )
-            self.assertNotIn("ffmpeg_compress_timeout_seconds", scan_tools.process_timeouts)
         finally:
             upload.deleteLater()
             advanced.deleteLater()
-            scan_tools.deleteLater()
 
     def test_telegram_panel_rejects_missing_api_hash(self):
         panel = TelegramPanel()

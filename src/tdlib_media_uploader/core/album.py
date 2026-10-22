@@ -123,6 +123,9 @@ def filename_description(
     max_chars: int = 950,
 ) -> str:
     """Format an Album's local filenames for a generated caption."""
+    max_chars = max(0, int(max_chars))
+    if not max_chars:
+        return ""
     lines = []
     for index, item in enumerate(items, 1):
         # Captions identify the media rather than its transport format. Remove
@@ -133,7 +136,10 @@ def filename_description(
     text = "\n".join(lines)
     if len(text) <= max_chars:
         return text
-    return text[: max(0, max_chars - 1)].rstrip() + "…"
+    omission = "…（文件名已省略）"
+    if max_chars < len(omission):
+        omission = "…"
+    return text[: max_chars - len(omission)].rstrip() + omission
 
 
 def with_filename_description(
@@ -151,12 +157,13 @@ def with_filename_description(
         )
     if not enabled:
         return caption
-    remaining = max(1, limit - len(caption) - (1 if caption else 0))
+    remaining = limit - len(caption) - (1 if caption else 0)
+    if remaining <= 0:
+        return caption
     description = filename_description(items, numbered=numbered, max_chars=remaining)
     if not description:
         return caption
-    result = f"{caption}\n{description}" if caption else description
-    return result[:limit].rstrip() if len(result) > limit else result
+    return f"{caption}\n{description}" if caption else description
 
 
 def validate_caption(caption: str, limit: int = 1024) -> str:

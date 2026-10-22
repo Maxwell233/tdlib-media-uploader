@@ -45,6 +45,7 @@ RESOURCE_DATA = (
     (PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.ico", "assets"),
     (PROJECT_DIR / "assets" / "tdlib_media_uploader_icon.png", "assets"),
     (PROJECT_DIR / "tools" / "README.txt", "tools"),
+    (PROJECT_DIR / "tools" / "ffmpeg-windows.json", "tools"),
 )
 
 datas = []
@@ -75,6 +76,7 @@ hiddenimports = [
     "tdjson",
     "PIL",
     "imageio_ffmpeg",
+    "PySide6.QtSvg",
     *collect_submodules(PACKAGE_NAME),
 ]
 
