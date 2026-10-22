@@ -286,10 +286,12 @@ class ReleaseMediaDiagnosticsTests(unittest.TestCase):
                 self.assertTrue(any("发布包缺少必需的" in line for line in output))
 
     def test_production_tool_paths_are_executed_and_failure_is_reported(self):
-        result, output, calls = self.run_check(frozen=False, ffmpeg="/chosen/ffmpeg", ffprobe="/chosen/ffprobe")
+        ffmpeg = str(Path("chosen/ffmpeg").resolve())
+        ffprobe = str(Path("chosen/ffprobe").resolve())
+        result, output, calls = self.run_check(frozen=False, ffmpeg=ffmpeg, ffprobe=ffprobe)
         self.assertEqual(result, 0)
-        self.assertEqual([call.args[0] for call in calls], [["/chosen/ffmpeg", "-version"], ["/chosen/ffprobe", "-version"]])
-        result, output, _calls = self.run_check(frozen=False, ffmpeg="/chosen/ffmpeg", ffprobe="/chosen/ffprobe", process_error=OSError("broken tool"))
+        self.assertEqual([call.args[0] for call in calls], [[ffmpeg, "-version"], [ffprobe, "-version"]])
+        result, output, _calls = self.run_check(frozen=False, ffmpeg=ffmpeg, ffprobe=ffprobe, process_error=OSError("broken tool"))
         self.assertEqual(result, 1)
         self.assertTrue(any("FFprobe 检查失败" in line for line in output))
 
