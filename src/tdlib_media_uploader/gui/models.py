@@ -231,11 +231,24 @@ def _build_scan_result_groups(bundle, models, plans, kind):
     for key in ordered_keys:
         group_items = grouped_items.get(key, [])
         plans_for_group = group_plans.get(key, [])
-        pending = sum(len(plan.get("pending_items", ())) for plan in plans_for_group)
-        total = sum(len(plan.get("items", ())) for plan in plans_for_group)
+
+        pending = 0
+        total = 0
+        albums = 0
+        for plan in plans_for_group:
+            pending_items = plan.get("pending_items")
+            if pending_items:
+                pending += len(pending_items)
+                albums += 1
+
+            items = plan.get("items")
+            if items:
+                total += len(items)
+
         if not plans_for_group:
             total = len(group_items)
             pending = len(group_items)
+
         groups.append(
             {
                 "label": group_labels.get(key, key[1]),
@@ -247,9 +260,7 @@ def _build_scan_result_groups(bundle, models, plans, kind):
                 "items": group_items,
                 "pending": pending,
                 "completed": max(0, total - pending),
-                "albums": sum(
-                    bool(plan.get("pending_items")) for plan in plans_for_group
-                ),
+                "albums": albums,
                 "album_plans": plans_for_group,
             }
         )
@@ -374,12 +385,19 @@ def scan_result(
         logger,
     )
 
-    total_bytes = sum(size_of(item) for item in item_values)
-    pending_bytes = sum(
-        size_of(item_dict(item))
-        for model_plan in bundle.plans
-        for item in model_plan.pending_items
-    )
+    total_bytes = 0
+    pending_bytes = 0
+    for item_model, item_val in zip(models, item_values):
+        sz = size_of(item_val)
+        total_bytes += sz
+        if item_identity(item_model) not in completed_keys:
+            pending_bytes += sz
+
+    album_count = 0
+    for plan in plans:
+        if plan.get("pending_items"):
+            album_count += 1
+
     return {
         "kind": kind,
         "scan_result": scan,
@@ -392,7 +410,7 @@ def scan_result(
         "pending_files": len(item_values) - len(completed_keys),
         "total_bytes": total_bytes,
         "pending_bytes": pending_bytes,
-        "album_count": sum(bool(plan.get("pending_items")) for plan in plans),
+        "album_count": album_count,
         "completed_paths": completed_paths,
         "source_dir": str(bundle.source_root),
         "state_path": str(getattr(bundle.state, "path", "") or ""),

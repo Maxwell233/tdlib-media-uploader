@@ -369,6 +369,10 @@ def _video_pipeline_groups(items, group_size, source_root, scan_snapshot, store,
                 snapshot_provider=scan_snapshot,
             )
             caption = store.get(key, f"第 {index} 组")
+            completed_count = 0
+            for item in chunk:
+                if completed(item):
+                    completed_count += 1
             groups.append({
                 "album_key": key,
                 "number": index,
@@ -377,8 +381,8 @@ def _video_pipeline_groups(items, group_size, source_root, scan_snapshot, store,
                 "caption": caption,
                 "caption_warning": validate_caption(caption, 4096),
                 "items": chunk,
-                "completed": all(completed(item) for item in chunk),
-                "completed_count": sum(1 for item in chunk if completed(item)),
+                "completed": completed_count == len(chunk),
+                "completed_count": completed_count,
             })
     else:
         by_month = defaultdict(list)
@@ -396,6 +400,10 @@ def _video_pipeline_groups(items, group_size, source_root, scan_snapshot, store,
                     snapshot_provider=scan_snapshot,
                 )
                 caption = store.get(key, f"{month_key} · 第 {index} 组")
+                completed_count = 0
+                for item in chunk:
+                    if completed(item):
+                        completed_count += 1
                 groups.append({
                     "album_key": key,
                     "number": index,
@@ -404,8 +412,8 @@ def _video_pipeline_groups(items, group_size, source_root, scan_snapshot, store,
                     "caption": caption,
                     "caption_warning": validate_caption(caption, 4096),
                     "items": chunk,
-                    "completed": all(completed(item) for item in chunk),
-                    "completed_count": sum(1 for item in chunk if completed(item)),
+                    "completed": completed_count == len(chunk),
+                    "completed_count": completed_count,
                 })
     return groups
 
@@ -426,6 +434,10 @@ def _image_pipeline_groups(items, group_size, source_root, scan_snapshot, store,
             snapshot_provider=scan_snapshot,
         )
         caption = store.get(key, f"第 {index} 组")
+        completed_count = 0
+        for item in chunk:
+            if completed(item):
+                completed_count += 1
         groups.append({
             "album_key": key,
             "number": album_number,
@@ -434,8 +446,8 @@ def _image_pipeline_groups(items, group_size, source_root, scan_snapshot, store,
             "caption": caption,
             "caption_warning": validate_caption(caption, 4096),
             "items": chunk,
-            "completed": all(completed(item) for item in chunk),
-            "completed_count": sum(1 for item in chunk if completed(item)),
+            "completed": completed_count == len(chunk),
+            "completed_count": completed_count,
         })
     return groups
 
@@ -458,6 +470,10 @@ def _mixed_pipeline_groups(mixed_groups, group_size, source_root, scan_snapshot,
             )
             default_caption = folder_name if total_items <= group_size else f"{folder_name} ({index})"
             caption = store.get(key, default_caption)
+            completed_count = 0
+            for item in chunk:
+                if completed(item):
+                    completed_count += 1
             groups.append({
                 "album_key": key,
                 "number": index,
@@ -466,8 +482,8 @@ def _mixed_pipeline_groups(mixed_groups, group_size, source_root, scan_snapshot,
                 "caption": caption,
                 "caption_warning": validate_caption(caption, 4096),
                 "items": chunk,
-                "completed": all(completed(item) for item in chunk),
-                "completed_count": sum(1 for item in chunk if completed(item)),
+                "completed": completed_count == len(chunk),
+                "completed_count": completed_count,
             })
     return groups
 
