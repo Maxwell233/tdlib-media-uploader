@@ -186,8 +186,9 @@ def media_path_sort(
             except (OSError, TypeError, ValueError):
                 mtime = 0
 
-        parts = _relative_components_parts(path, root)
-        raw_str = "/".join(_relative_components(path, root))
+        components = _relative_components(path, root)
+        parts = tuple(_natural_parts(c) for c in components)
+        raw_str = "/".join(components)
 
         decorated.append((mtime, parts, raw_str, index, value))
 
