@@ -655,8 +655,8 @@ QPushButton#ghostButton:hover {{
     color: {palette.text_primary};
 }}
 
-/* Form Inputs */
-QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
+/* Form Inputs. Qt 6.12 collapses the editor if a buttonless spin box has a styled frame. */
+QLineEdit, QComboBox, QPlainTextEdit, QTextEdit {{
     background-color: {palette.bg_input};
     color: {palette.text_primary};
     border: 1px solid {palette.border_subtle};
@@ -666,24 +666,8 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
     selection-color: {palette.text_selection};
 }}
 
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{
+QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{
     border-color: {palette.border_focus};
-}}
-
-/* Hide SpinBox / DoubleSpinBox up/down buttons */
-QSpinBox::up-button, QSpinBox::down-button,
-QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
-    width: 0px;
-    height: 0px;
-    border: none;
-    background: transparent;
-}}
-
-QSpinBox::up-arrow, QSpinBox::down-arrow,
-QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow {{
-    image: none;
-    width: 0px;
-    height: 0px;
 }}
 
 QComboBox::drop-down {{
