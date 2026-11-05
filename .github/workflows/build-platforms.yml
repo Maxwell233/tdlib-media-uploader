@@ -190,7 +190,7 @@ jobs:
 
   build-macos-arm64:
     name: PyInstaller macOS arm64 build
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 75
 
     steps:
@@ -228,6 +228,8 @@ jobs:
 
       - name: Build macOS arm64 app
         shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
         run: |
           set -Eeuo pipefail
           PROJECT_DIR="$PWD"
