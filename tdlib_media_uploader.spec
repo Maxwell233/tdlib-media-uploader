@@ -79,6 +79,8 @@ hiddenimports = [
     "PIL",
     "imageio_ffmpeg",
     "PySide6.QtSvg",
+    # PyInstaller's Qt hook checks the full PySide6 metapackage for this helper.
+    "PySide6.support.deprecated",
     *collect_submodules(PACKAGE_NAME),
 ]
 

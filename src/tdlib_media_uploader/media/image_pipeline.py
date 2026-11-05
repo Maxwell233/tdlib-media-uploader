@@ -355,11 +355,15 @@ def input_photo(
         width, height = info.width, info.height
     return {
         "@type": "inputMessagePhoto",
-        "photo": {"@type": "inputFileLocal", "path": display_path(source_path)},
-        "thumbnail": None,
-        "added_sticker_file_ids": [],
-        "width": width,
-        "height": height,
+        "photo": {
+            "@type": "inputPhoto",
+            "photo": {"@type": "inputFileLocal", "path": display_path(source_path)},
+            "thumbnail": None,
+            "video": None,
+            "added_sticker_file_ids": [],
+            "width": width,
+            "height": height,
+        },
         "caption": formatted_text(caption),
         "show_caption_above_media": False,
         "self_destruct_type": None,

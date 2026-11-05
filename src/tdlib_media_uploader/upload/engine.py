@@ -925,7 +925,7 @@ class UploadEngine:
                 pass
             for c in contents:
                 if isinstance(c, Mapping) and c.get("@type") == "inputMessageVideo":
-                    raw_vp = c.get("video", {}).get("path", "")
+                    raw_vp = c.get("video", {}).get("video", {}).get("path")
                     if raw_vp:
                         vp = Path(str(raw_vp)).resolve()
                         try:

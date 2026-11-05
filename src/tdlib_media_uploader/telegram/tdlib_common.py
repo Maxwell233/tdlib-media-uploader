@@ -33,7 +33,7 @@ from ..core.upload_journal import (
 )
 from .send_result import _error_text as _send_failure_text
 
-REQUIRED_TDJSON_VERSION = "1.8.64.post1"
+REQUIRED_TDJSON_VERSION = "1.8.69"
 
 
 class TDLibError(RuntimeError):
@@ -365,34 +365,46 @@ def validate_input_message_contents(contents, *, items=None) -> None:
                 actual=content_type,
                 content=content,
             )
-        media_field = "photo" if content_type == "inputMessagePhoto" else "video"
+        media_field, media_type = (
+            ("photo", "inputPhoto") if content_type == "inputMessagePhoto" else ("video", "inputVideo")
+        )
+        media = content.get(media_field)
+        if not isinstance(media, dict) or media.get("@type") != media_type:
+            raise _invalid_payload(
+                index=index,
+                content_type=content_type,
+                source=source,
+                field=f"{media_field}.@type",
+                actual=media,
+                content=content,
+            )
         _validate_input_file(
-            content.get(media_field),
+            media.get(media_field),
             index=index,
             content_type=content_type,
             source=source,
-            field=media_field,
+            field=f"{media_field}.{media_field}",
             content=content,
         )
-        thumbnail = content.get("thumbnail")
+        thumbnail = media.get("thumbnail")
         if thumbnail is not None:
             _validate_input_thumbnail(
                 thumbnail,
                 index=index,
                 content_type=content_type,
                 source=source,
-                field="thumbnail",
+                field=f"{media_field}.thumbnail",
                 content=content,
             )
         if content_type == "inputMessageVideo":
-            cover = content.get("cover")
+            cover = media.get("cover")
             if cover is not None:
                 _validate_input_file(
                     cover,
                     index=index,
                     content_type=content_type,
                     source=source,
-                    field="cover",
+                    field="video.cover",
                     content=content,
                 )
 
@@ -1360,12 +1372,13 @@ class TDJsonClient:
             content_type = content.get("@type") if isinstance(content, dict) else None
             media_field = "photo" if content_type == "inputMessagePhoto" else "video"
             media = content.get(media_field) if isinstance(content, dict) else None
+            fields = media if isinstance(media, dict) else {}
             line = (
                 f"[{index}] source={source!s} content={content_type!s} "
-                f"{media_field}={self._input_file_diagnostic(media)}"
+                f"{media_field}={self._input_file_diagnostic(fields.get(media_field))}"
             )
-            if isinstance(content, dict):
-                thumbnail = content.get("thumbnail")
+            if fields:
+                thumbnail = fields.get("thumbnail")
                 if thumbnail is None:
                     line += " thumbnail=None"
                 elif isinstance(thumbnail, dict):
@@ -1377,7 +1390,7 @@ class TDJsonClient:
                 else:
                     line += f" thumbnail={thumbnail!r}"
                 if content_type == "inputMessageVideo":
-                    cover = content.get("cover")
+                    cover = fields.get("cover")
                     line += (
                         " cover="
                         f"{self._input_file_diagnostic(cover) if cover is not None else 'None'}"

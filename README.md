@@ -135,7 +135,7 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 
 遇到 Telegram 明确返回的限流拒绝，程序按服务器给出的时间显示倒计时，等待后重试一次；点击“立即中断”可以取消等待。已接受的消息只有在 TDLib 明确标记为失败、允许重试且无需额外操作时，才会使用 `resendMessages` 重发一次，并保留文件顺序和逐项断点。成功和待确认消息不会随之重发；超时等结果未知的请求仍需要人工核对。
 
-发送前会递归校验混合 Album 中每个 Photo/Video 的 `InputFile` 结构，并检查临时本地文件是否仍可读取；空的 `photo`/`video` 不会被提交给 TDLib，也不会先写入发送 journal。当前正式版固定使用 `tdjson 1.8.64.post1`。
+发送前会递归校验混合 Album 中每个 Photo/Video 的 `InputFile` 结构，并检查临时本地文件是否仍可读取；空的 `photo`/`video` 不会被提交给 TDLib，也不会先写入发送 journal。源码构建固定使用 `tdjson 1.8.69`。
 
 如果源文件位于 SMB/NAS，可在“设置与诊断”中选择本地暂存模式，或在配置中设置 `[staging] mode`：`off` 直接读取源文件，`network` 只暂存网络盘，`always` 暂存所有文件。程序会在 `data/cache/staging` 或你指定的受管目录中创建带 marker 的暂存副本，只清理自己创建的文件，不会递归删除 base directory 中的其他用户文件。
 
@@ -202,7 +202,7 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 
 应用仅支持从 [GitHub Releases](https://github.com/Maxwell233/tdlib-media-uploader/releases) 下载 Windows 便携包或 macOS arm64 DMG 后运行；仓库不再提供源码启动方式。源码仅用于开发和 CI 的离线回归验证，不作为用户运行入口。
 
-依赖由 `requirements-build-lock.txt` 固定版本，其中包含 `tdjson==1.8.64.post1`、Pillow、imageio-ffmpeg、PySide6 和 PyInstaller。固定 TDLib 版本是为了兼容现有上传实现，请勿随意升级。
+构建使用 Python 3.13 和 `requirements-build-lock.txt` 中的固定版本。界面依赖 PySide6 Essentials，上传请求使用 TDLib 1.8.69 的媒体结构。
 
 发布包支持 `--self-test` 离线诊断。全新包即使还没有 `data/config.toml` 也可以直接运行该命令，检查资源、可写数据目录、TDLib 路径和内置 FFmpeg/FFprobe。
 
