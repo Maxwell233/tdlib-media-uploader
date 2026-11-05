@@ -46,17 +46,6 @@ RUN_FAILED = "FAILED"
 RUN_CANCELLED = "CANCELLED"
 RUN_UNKNOWN = "UNKNOWN"
 
-# These are the only durable per-Album states.  Run-level summaries above are
-# deliberately separate and must never be written into a journal record.
-PREPARED = BatchStatus.PREPARED.value
-SUBMITTED = BatchStatus.SUBMITTED.value
-CONFIRMED = BatchStatus.CONFIRMED.value
-FAILED = BatchStatus.FAILED.value
-UNKNOWN = BatchStatus.UNKNOWN.value
-SEND_STATES = (PREPARED, SUBMITTED, CONFIRMED, FAILED, UNKNOWN)
-SEND_STATE_FLOW = (PREPARED, SUBMITTED, CONFIRMED)
-
-
 class UploadCancelled(RuntimeError):
     """Cooperative cancellation before a send outcome is ambiguous."""
 
@@ -638,8 +627,8 @@ class UploadEngine:
                                                     target=run_context.target)
             if unresolved is not None:
                 protected_key = str(unresolved.get("album_key") or plan.key)
-                status = str(unresolved.get("status", "UNKNOWN")).upper()
-                if status == CONFIRMED:
+                status = str(unresolved.get("status", BatchStatus.UNKNOWN.value)).upper()
+                if status == BatchStatus.CONFIRMED.value:
                     from .reconciliation import ReconciliationService
 
                     try:
@@ -1387,7 +1376,7 @@ class UploadEngine:
                             "update",
                             kind,
                             plan.key,
-                            UNKNOWN,
+                            BatchStatus.UNKNOWN.value,
                             error=observed.error or "Album 发送结果无法确认",
                             succeeded_ids=observed.succeeded_ids,
                             failed_ids=observed.failed_ids,
@@ -1590,21 +1579,14 @@ __all__ = [
     "JournalStore",
     "MemoryJournalStore",
     "MemoryStateStore",
-    "CONFIRMED",
-    "FAILED",
-    "PREPARED",
     "RUN_CANCELLED",
     "RUN_COMPLETED",
     "RUN_FAILED",
     "RUN_PARTIAL",
     "RUN_UNKNOWN",
-    "SEND_STATES",
-    "SEND_STATE_FLOW",
     "Sender",
     "StateStore",
     "Stager",
-    "SUBMITTED",
-    "UNKNOWN",
     "UploadCancelled",
     "UploadEngine",
 ]

@@ -71,11 +71,6 @@ _DEVICE_MODELS = {
 _MISSING = object()
 
 
-class V2IntegrationUnavailable(ImportError):
-    """Raised when the GUI must use its dependency-free preview fallback."""
-
-
-
 def _normalize_kind(kind: str) -> str:
     value = str(kind).strip().lower()
     if value not in _MEDIA_PIPELINES:
@@ -84,10 +79,7 @@ def _normalize_kind(kind: str) -> str:
 
 
 def _load_pipeline(kind: str) -> Any:
-    try:
-        return importlib.import_module(_MEDIA_PIPELINES[_normalize_kind(kind)])
-    except (ImportError, ModuleNotFoundError) as error:
-        raise V2IntegrationUnavailable(str(error)) from error
+    return importlib.import_module(_MEDIA_PIPELINES[_normalize_kind(kind)])
 
 
 def _state_directory(kind: str, runtime_paths: Any | None) -> Path | None:
@@ -97,11 +89,11 @@ def _state_directory(kind: str, runtime_paths: Any | None) -> Path | None:
     return Path(value) if value is not None else None
 
 
-def _new_state(legacy: Any, target: Mapping[str, Any]) -> Any:
+def _new_state(legacy: Any, target: Mapping[str, Any], state_dir: Path | None) -> Any:
     state_type = getattr(legacy, "UploadState", None)
     if not callable(state_type):
         raise TypeError("legacy uploader 缺少 UploadState()")
-    return _call_supported(state_type, target=dict(target or {}))
+    return _call_supported(state_type, target=dict(target or {}), state_dir=state_dir)
 
 
 @contextmanager
@@ -217,7 +209,7 @@ class GuiEventSink:
 
 @dataclass(frozen=True, slots=True)
 class V2ScanBundle:
-    """The V2 scan objects needed to render the migration-period preview."""
+    """The scan and Album plans used by the preview."""
 
     kind: str
     source_root: Path
@@ -260,14 +252,12 @@ def scan_v2(
 
     legacy = _load_pipeline(normalized)
     state_dir = _state_directory(normalized, runtime_paths)
-    if state_dir is not None:
-        legacy.STATE_DIR = state_dir
     root = Path(source_root)
     strategy = _strategy(normalized, legacy, config, root)
     token = GuiCancelToken(cancel_event)
     sink = GuiEventSink(progress_callback=progress_callback, kind=normalized)
     with _legacy_root_scope(legacy, config, normalized, root):
-        state = _new_state(legacy, target)
+        state = _new_state(legacy, target, state_dir)
     try:
         scan_result = strategy.scan(
             root,
@@ -288,7 +278,7 @@ def scan_v2(
             strategy,
             legacy,
             state,
-            ScanResult(cancelled=True),
+            replace(scan_result, items=(), cancelled=True),
             (),
         )
 
@@ -330,14 +320,6 @@ def _legacy_item(item: MediaItem) -> dict[str, Any]:
         }
     )
     return metadata
-
-
-def legacy_item(item: MediaItem) -> dict[str, Any]:
-    """Expose the V2-to-legacy item translation for GUI upload adapters."""
-
-    if not isinstance(item, MediaItem):
-        raise TypeError("legacy_item() 需要 MediaItem")
-    return _legacy_item(item)
 
 
 class _ConfirmedStateAdapter:
@@ -824,8 +806,6 @@ def _run_v2_upload(
         activate(normalized)
     legacy = _load_pipeline(normalized)
     state_dir = _state_directory(normalized, runtime_paths)
-    if state_dir is not None:
-        legacy.STATE_DIR = state_dir
     root = Path(source_root)
     strategy = _strategy(normalized, legacy, config, root)
     token = GuiCancelToken(cancel_event, stop_after_current)
@@ -865,7 +845,7 @@ def _run_v2_upload(
             callback_added = True
 
         with _legacy_root_scope(legacy, config, normalized, root):
-            state = _new_state(legacy, target)
+            state = _new_state(legacy, target, state_dir)
         state_adapter = _ConfirmedStateAdapter(
             state,
             _cleanup_for(legacy, normalized),
@@ -970,9 +950,7 @@ __all__ = [
     "GuiEventSink",
     "GuiUploadProgress",
     "TDLibSender",
-    "V2IntegrationUnavailable",
     "V2ScanBundle",
-    "legacy_item",
     "run_v2_upload",
     "scan_v2",
 ]

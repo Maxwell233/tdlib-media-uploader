@@ -420,12 +420,12 @@ def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
 class UploadState(SharedUploadState):
     """Image-specific facade over the shared V1.9 checkpoint format."""
 
-    def __init__(self, target=None):
+    def __init__(self, target=None, *, state_dir: Path | None = None):
         super().__init__(
             kind="image",
             source_root=cfg.IMAGE_DIR,
             target=target or getattr(cfg, "target_for", lambda _kind: {}) ("image"),
-            state_dir=STATE_DIR,
+            state_dir=STATE_DIR if state_dir is None else state_dir,
             filename_prefix="image_upload_state",
             snapshot_provider=_snapshot_for_path,
         )

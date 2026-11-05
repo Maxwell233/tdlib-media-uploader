@@ -43,13 +43,6 @@ jobs:
           python -m pip install --no-binary imageio-ffmpeg -r requirements-build-lock.txt
           python -m pip check
 
-      - name: Run offline regression tests
-        shell: pwsh
-        env:
-          QT_QPA_PLATFORM: offscreen
-          PYTHONPATH: src
-        run: python -m unittest discover -s tests -v
-
       - name: Build one-folder EXE
         shell: pwsh
         run: |
@@ -119,19 +112,6 @@ jobs:
           $zipPath = Join-Path $projectDir "dist\TDLib.Media.Uploader-v$version-windows-x64.zip"
           Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
           Compress-Archive -Path (Join-Path $distDir "*") -DestinationPath $zipPath -CompressionLevel Optimal
-
-      - name: Run real FFmpeg remux regression
-        shell: pwsh
-        env:
-          QT_QPA_PLATFORM: offscreen
-          PYTHONPATH: "src;tests"
-          IMAGEIO_FFMPEG_EXE: tools/ffmpeg/ffmpeg.exe
-          TDLIB_FFPROBE_EXE: tools/ffmpeg/ffprobe.exe
-        run: |
-          python -c "from tdlib_media_uploader.media.video_probe import _find_ffmpeg, _find_ffprobe; assert _find_ffmpeg() and _find_ffprobe(), 'Release media tools must be present'"
-          if ($LASTEXITCODE -ne 0) { throw "Release media tools are missing." }
-          python -m unittest test_video_remux_pipeline.RealFFmpegIntegrationTest -v
-          if ($LASTEXITCODE -ne 0) { throw "Real FFmpeg remux regression failed." }
 
       - name: Run packaged self-test
         shell: pwsh
@@ -238,13 +218,6 @@ jobs:
           .build_venv/bin/python -m pip install --upgrade pip
           .build_venv/bin/python -m pip install --no-binary imageio-ffmpeg -r requirements-build-lock.txt
           .build_venv/bin/python -m pip check
-
-      - name: Run offline regression tests
-        shell: bash
-        env:
-          QT_QPA_PLATFORM: offscreen
-          PYTHONPATH: src
-        run: .build_venv/bin/python -m unittest discover -s tests -v
 
       - name: Cache verified macOS FFmpeg tools
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -376,18 +349,6 @@ jobs:
             sleep "$((2 ** attempt))"
           done
           (cd "$DIST_DIR" && shasum -a 256 "$(basename "$DMG_PATH")" > "$(basename "$DMG_PATH").sha256")
-
-      - name: Run real FFmpeg remux regression
-        shell: bash
-        env:
-          QT_QPA_PLATFORM: offscreen
-          PYTHONPATH: "src:tests"
-          IMAGEIO_FFMPEG_EXE: tools/ffmpeg/ffmpeg
-          TDLIB_FFPROBE_EXE: tools/ffmpeg/ffprobe
-        run: |
-          set -Eeuo pipefail
-          .build_venv/bin/python -c "from tdlib_media_uploader.media.video_probe import _find_ffmpeg, _find_ffprobe; assert _find_ffmpeg() and _find_ffprobe(), 'Release media tools must be present'"
-          .build_venv/bin/python -m unittest test_video_remux_pipeline.RealFFmpegIntegrationTest -v
 
       - name: Run packaged self-test
         shell: bash

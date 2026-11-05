@@ -204,27 +204,17 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 
 依赖由 `requirements-build-lock.txt` 固定版本，其中包含 `tdjson==1.8.64.post1`、Pillow、imageio-ffmpeg、PySide6 和 PyInstaller。固定 TDLib 版本是为了兼容现有上传实现，请勿随意升级。
 
-离线回归测试（安装依赖后运行）：
-
-```powershell
-$env:PYTHONPATH = "src"
-$env:QT_QPA_PLATFORM = "offscreen"
-python -m unittest discover -s tests -v
-```
-
-测试按功能组织，`test_regression_*` 保留跨模块行为回归；优先为实际故障增加最小复现，避免重复的测试名称索引。
-
-便携包支持 `--self-test` 离线检查。全新包即使还没有 `data/config.toml` 也可以直接运行；检查只验证资源、可写数据目录、TDLib 路径和可选 FFmpeg，不会连接 Telegram 或修改正式配置。
+发布包支持 `--self-test` 离线诊断。全新包即使还没有 `data/config.toml` 也可以直接运行该命令，检查资源、可写数据目录、TDLib 路径和内置 FFmpeg/FFprobe。
 
 ## 构建 Windows 和 macOS 包
 
-仓库不再提供本地源码构建脚本。GitHub Actions 在 Windows x64 和 macOS arm64 原生 runner 上直接读取 `tdlib_media_uploader.spec`，先执行离线回归测试，再构建并校验发布包。构建流程会排除 `imageio-ffmpeg` wheel 自带的 FFmpeg 二进制，分别准备经过许可和构建标志检查的 LGPL FFmpeg，并验证应用架构、图标、许可文件、DMG/ZIP 和打包后自测结果。
+GitHub Actions 在 Windows x64 和 macOS arm64 runner 上读取 `tdlib_media_uploader.spec`，构建发布包并运行包内自检。构建流程排除 `imageio-ffmpeg` wheel 自带的 FFmpeg 二进制，分别准备经过许可和构建标志检查的 LGPL FFmpeg，并验证应用架构、图标、许可文件和 DMG/ZIP。
 
 输出为 Windows 的 `dist/TDLib Media Uploader/TDLib Media Uploader.exe` 及 Windows x64 ZIP，和 macOS 的 `dist/TDLib Media Uploader.app` 及带版本号的 macOS arm64 DMG。DMG 根目录包含应用和指向系统 `/Applications` 的 `Applications` 文件夹别名，便于拖放安装。Windows 构建同时校验 EXE 嵌入图标、Qt 图标资源和稳定的 AppUserModelID，避免打包后任务栏图标缺失或归组异常。构建包不包含个人配置、断点、封面缓存、媒体文件或登录数据；macOS 包另附 FFmpeg 构建信息。
 
-核心文件位于 `src/tdlib_media_uploader/`：`app.py`（打包入口）、`gui/application.py`（GUI 启动与自检边界）、`gui/events.py` 与 `gui/workers.py`（GUI 事件和线程边界）、`gui/models.py`（预览模型适配）、`gui/main_window.py`（界面与生命周期）、`config/loader.py` 与 `config/paths.py`（配置和路径）、`media/video_pipeline.py`、`media/image_pipeline.py`、`media/mixed_pipeline.py`（媒体扫描、分组及内容构建）以及 `telegram/tdlib_common.py`（TDLib）。上传流程入口也会复用 `data/app.lock`；内部模块不提供独立启动入口。构建配置集中在根目录 `tdlib_media_uploader.spec`，平台构建只在 GitHub Actions 中执行。
+核心文件位于 `src/tdlib_media_uploader/`：`app.py`（打包入口）、`gui/application.py`（GUI 启动与自检边界）、`gui/events.py` 与 `gui/workers.py`（GUI 事件和线程边界）、`gui/models.py`（预览模型适配）、`gui/main_window.py`（界面与生命周期）、`config/loader.py` 与 `config/paths.py`（配置和路径）、`media/video_pipeline.py`、`media/image_pipeline.py`、`media/mixed_pipeline.py`（媒体扫描、分组及内容构建）以及 `telegram/tdlib_common.py`（TDLib）。GUI 运行期间持有 `data/app.lock`，上传任务在同一应用实例内执行。构建配置集中在根目录 `tdlib_media_uploader.spec`，平台构建只在 GitHub Actions 中执行。
 
-版本使用“主版本.功能版本.修订版本”：日常优化增加最后一位，较大功能更新增加中间一位。版本号唯一存放在根目录 `VERSION`，程序、界面和平台构建 workflow 会从该文件读取。此次修改见 [CHANGELOG.md](CHANGELOG.md)。推送 main 只构建和测试；发布需创建与 VERSION 一致的新版本标签，既有标签和 Release 不自动覆盖。下载资产与 SHA256SUMS 放在同一目录后，可执行 `shasum -a 256 -c SHA256SUMS` 校验。
+版本使用“主版本.功能版本.修订版本”：日常优化增加最后一位，较大功能更新增加中间一位。版本号唯一存放在根目录 `VERSION`，程序、界面和平台构建 workflow 会从该文件读取。此次修改见 [CHANGELOG.md](CHANGELOG.md)。推送 main 只构建并校验产物；发布需创建与 VERSION 一致的新版本标签，既有标签和 Release 不自动覆盖。下载资产与 SHA256SUMS 放在同一目录后，可执行 `shasum -a 256 -c SHA256SUMS` 校验。
 
 ## 断点与维护
 
@@ -234,11 +224,9 @@ python -m unittest discover -s tests -v
 
 发送前会分别校验扫描源文件和准备后的本地文件。准备期间变化、消失或无法读取的文件需重新扫描；同组最终检查失败时整组延期。转换图片和封装视频仅在源文件快照仍一致时发布可复用缓存。直接上传仍由 TDLib 异步读取源路径，因此上传期间应保持源目录不变；持续写入的目录可启用本地暂存来固定待发送副本。
 
-## 测试与构建缓存
+## 构建缓存
 
-快速 CI 在 Linux 上执行离线行为回归和结构边界检查，不创建 Telegram 会话。平台 CI 在 Windows/macOS 上执行同一套测试、真实 FFmpeg 封装与原生路径测试、打包自测及 ZIP/DMG 校验；两类 CI 都需通过后再合并。
-
-离线测试命令、覆盖范围及模块职责见 [开发与验证说明](docs/DEVELOPMENT.md)。
+构建验证与模块职责见 [开发与验证说明](docs/DEVELOPMENT.md)。
 
 macOS CI 缓存完整 FFmpeg/FFprobe 工具目录，缓存键包括源码校验和、平台、架构和包含构建选项的 workflow 摘要。命中后仍验证工具可执行、架构、版本及许可配置；失效时重新构建。构建禁用可选外部库自动探测，避免把构建机偶然存在的动态依赖带入工具。Python 依赖继续按锁文件安装，并复用下载缓存。
 

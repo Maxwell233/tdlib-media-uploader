@@ -486,28 +486,11 @@ class VideoStrategy:
             if _token_cancelled(cancel_token):
                 return ScanResult(cancelled=True)
 
-            warnings = [str(value) for value in getattr(self.legacy, "LAST_SCAN_WARNINGS", ())]
-            errors = [str(value) for value in getattr(self.legacy, "LAST_SCAN_ERRORS", ())]
-            size_records = getattr(self.legacy, "LAST_SCAN_SIZE_SKIPS", ()) or ()
-            for record in size_records:
-                if isinstance(record, Mapping) and record.get("reason"):
-                    warnings.append(str(record["reason"]))
-            preflight_count = sum(
-                1 for record in size_records
-                if isinstance(record, Mapping) and record.get("action") == "preflight"
-            )
-            if preflight_count:
-                warnings.append(
-                    f"已扫描到 {preflight_count} 个源文件超过视频大小上限；"
-                    "上传前将检查能否无损转封装，并按输出大小复核。"
-                )
-
             metadata, metadata_errors = self._metadata_index(
                 paths,
                 cancel_event=cancel_event,
                 event_sink=event_sink,
             )
-            errors.extend(metadata_errors)
             _check_cancel(cancel_token)
 
             builder = getattr(self.legacy, "build_items", None)
@@ -525,8 +508,27 @@ class VideoStrategy:
             else:
                 raw_items, missing = paths, ()
 
+            warnings = [str(value) for value in getattr(self.legacy, "LAST_SCAN_WARNINGS", ())]
+            errors = [str(value) for value in getattr(self.legacy, "LAST_SCAN_ERRORS", ())]
+            errors.extend(metadata_errors)
+            size_records = getattr(self.legacy, "LAST_SCAN_SIZE_SKIPS", ()) or ()
+            for record in size_records:
+                if isinstance(record, Mapping) and record.get("reason"):
+                    warnings.append(str(record["reason"]))
+            preflight_count = sum(
+                1 for record in size_records
+                if isinstance(record, Mapping) and record.get("action") == "preflight"
+            )
+            if preflight_count:
+                warnings.append(
+                    f"已扫描到 {preflight_count} 个源文件超过视频大小上限；"
+                    "上传前将检查能否无损转封装，并按输出大小复核。"
+                )
+
             items: list[MediaItem] = []
             for raw_item in raw_items or ():
+                if _token_cancelled(cancel_token):
+                    break
                 try:
                     items.append(self._media_item(raw_item, root))
                 except (OSError, TypeError, ValueError) as error:

@@ -361,61 +361,6 @@ class UploadPage(QWidget):
             self.status_label.setText("正在扫描目录…")
         self._update_edit_button()
 
-    def _normalize_legacy_group(self, value: Mapping[str, Any], completed_paths: set[str]) -> dict:
-        """Keep older scanner payloads renderable during the V2 migration."""
-        group = dict(value or {})
-        if all(key in group for key in ("label", "completed", "pending", "albums")):
-            return group
-
-        items = list(group.get("items", []) or [])
-        pending_items = [
-            item
-            for item in items
-            if self._stable(_item_path(item)) not in completed_paths
-        ]
-        label = str(group.get("label") or group.get("title") or group.get("subtitle") or "")
-        raw_caption = group.get("caption", "")
-        if isinstance(raw_caption, Mapping):
-            base_label = str(raw_caption.get("base_label", label) or label)
-            custom_text = str(raw_caption.get("custom_text", "") or "")
-            separator_key = {
-                "video": "VIDEO_ALBUM_CAPTION_SEPARATOR",
-                "image": "IMAGE_ALBUM_CAPTION_SEPARATOR",
-                "mixed": "MIXED_ALBUM_CAPTION_SEPARATOR",
-            }[self.kind]
-            caption_text = self.services.compose_caption(
-                base_label,
-                custom_text,
-                str(self._cfg(separator_key, " · ")),
-            )
-        else:
-            caption_text = str(raw_caption or label)
-            base_label = caption_text
-            custom_text = ""
-        group.update(
-            {
-                "label": label,
-                "caption": caption_text,
-                "completed": len(items) - len(pending_items),
-                "pending": len(pending_items),
-                "albums": 1 if pending_items else 0,
-                "album_plans": [
-                    {
-                        "key": group.get("album_key", ""),
-                        "number": 1,
-                        "items": items,
-                        "pending_items": pending_items,
-                        "caption": {
-                            "text": caption_text,
-                            "base_label": base_label,
-                            "custom_text": custom_text,
-                        },
-                    }
-                ],
-            }
-        )
-        return group
-
     def _update_scan_summary_chips_and_labels(self, result: dict):
         self.chip_files.setText(f"{result['total_files']} 个")
         self.chip_bytes.setText(self.services.size_formatter(result["total_bytes"]))
@@ -448,14 +393,11 @@ class UploadPage(QWidget):
             self.status_label.setText("目录中没有支持的媒体文件，请检查目录或文件格式")
         elif result["pending_files"] == 0:
             self.status_label.setText("全部项目已在断点记录中")
-        elif not result["core_available"]:
-            self.status_label.setText("预览可用；安装完整依赖后才能上传")
         else:
             self.status_label.setText("扫描完成，可开始上传")
         self.start_button.setEnabled(
             bool(
                 result["pending_files"]
-                and result["core_available"]
                 and not result.get("cancelled")
                 and not self._running
             )
@@ -473,24 +415,7 @@ class UploadPage(QWidget):
             if self.kind in {"video", "mixed"}:
                 self.tree.addTopLevelItem(top)
                 top.setExpanded(True)
-            plans = group.get("album_plans") or [
-                {
-                    "key": "",
-                    "number": 1,
-                    "items": group["items"],
-                    "pending_items": [
-                        item
-                        for item in group["items"]
-                        if self._stable(_item_path(item)) not in completed_paths
-                    ],
-                    "caption": {
-                        "text": group.get("caption", ""),
-                        "base_label": group.get("caption", ""),
-                        "custom_text": "",
-                    },
-                }
-            ]
-            for plan in plans:
+            for plan in group["album_plans"]:
                 album_items = plan.get("items", [])
                 pending_count = len(plan.get("pending_items", []))
                 completed_count = len(album_items) - pending_count
@@ -569,10 +494,6 @@ class UploadPage(QWidget):
                 completed_paths.add(stable)
                 normalized_completed_paths.append(stable)
         result["completed_paths"] = normalized_completed_paths
-        result["groups"] = [
-            self._normalize_legacy_group(group, completed_paths)
-            for group in result.get("groups", [])
-        ]
         self.result = result
         self.tree.setUpdatesEnabled(False)
         try:
@@ -771,7 +692,7 @@ class UploadPage(QWidget):
             and bool(
                 self.result
                 and self.result.get("pending_files")
-                and self.result.get("core_available")
+                and not self.result.get("cancelled")
             )
         )
         if active:
