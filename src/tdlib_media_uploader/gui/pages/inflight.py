@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Modern unconfirmed upload (inflight reconciliation) page for Beta 4."""
+"""Review unconfirmed Telegram uploads by Album."""
 
 from __future__ import annotations
 
@@ -9,26 +9,18 @@ from pathlib import Path, PureWindowsPath
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QDialog,
-    QDialogButtonBox,
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QListWidget,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
-    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from ..theme import THEME
 from ..tools import kind_label as _kind_label
-from ...upload.reconciliation import has_item_delivery, item_delivery
 
 
 class InflightPage(QWidget):
@@ -62,21 +54,12 @@ class InflightPage(QWidget):
         banner_text = QLabel(
             "当网络波动、超时或强制中断时，TDLib 可能已成功向 Telegram 提交了媒体组，但尚未收到服务端的确认回复。"
             "为了防止重复发送，系统会将批次转入“未确认状态”（UNKNOWN）。\n"
-            "请前往对应频道或群组核验该批文件：如已成功发送，点击“Telegram 中存在”以修复断点；如未发送，点击“Telegram 中不存在”以便重新上传。"
+            "请先在 Telegram 核对整组文件。整组已发送时选择“标记为已发送”，需要补传时选择“允许重新上传”。"
         )
         banner_text.setWordWrap(True)
         banner_text.setObjectName("mutedLabel")
         banner_layout.addWidget(banner_text)
         layout.addWidget(banner)
-
-        # Splitter: Table on top, File details drawer on bottom
-        splitter = QSplitter(Qt.Orientation.Vertical)
-
-        # Table container
-        table_container = QWidget()
-        table_layout = QVBoxLayout(table_container)
-        table_layout.setContentsMargins(0, 0, 0, 0)
-        table_layout.setSpacing(8)
 
         self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(
@@ -97,42 +80,13 @@ class InflightPage(QWidget):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(True)
-        self.table.cellDoubleClicked.connect(lambda row, _column: self._show_details(row))
         self.table.horizontalHeader().setStretchLastSection(True)
-        table_layout.addWidget(self.table)
-        splitter.addWidget(table_container)
-
-        # Detail drawer container
-        drawer_container = QFrame()
-        drawer_container.setObjectName("bannerFrame")
-        drawer_layout = QVBoxLayout(drawer_container)
-        drawer_layout.setContentsMargins(12, 10, 12, 10)
-        drawer_layout.setSpacing(6)
-
-        drawer_header = QHBoxLayout()
-        self.drawer_title = QLabel("选中记录包含的源文件")
-        self.drawer_title.setObjectName("valueLabel")
-        drawer_header.addWidget(self.drawer_title)
-        drawer_header.addStretch(1)
-        drawer_layout.addLayout(drawer_header)
-
-        self.file_list = QListWidget()
-        self.file_list.setMaximumHeight(140)
-        drawer_layout.addWidget(self.file_list)
-        splitter.addWidget(drawer_container)
-
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter, 1)
+        layout.addWidget(self.table, 1)
 
         # Action buttons
         buttons = QHBoxLayout()
         refresh = QPushButton("刷新列表")
         refresh.clicked.connect(self.reload_records)
-
-        self.details_button = QPushButton("查看完整文件列表")
-        self.details_button.clicked.connect(self._show_selected_details)
-        self.details_button.setEnabled(False)
 
         self.sent_button = QPushButton("标记为已发送")
         self.sent_button.setObjectName("primaryButton")
@@ -143,14 +97,12 @@ class InflightPage(QWidget):
         self.not_sent_button.clicked.connect(lambda: self._emit_choice(False))
 
         buttons.addWidget(refresh)
-        buttons.addWidget(self.details_button)
         buttons.addStretch(1)
         buttons.addWidget(self.sent_button)
         buttons.addWidget(self.not_sent_button)
         layout.addLayout(buttons)
 
         self.table.itemSelectionChanged.connect(self._update_actions)
-        self.table.itemSelectionChanged.connect(self._update_drawer)
         self.reload_records()
 
     @staticmethod
@@ -219,35 +171,6 @@ class InflightPage(QWidget):
             return f"频道 · Chat ID {chat_id}"
         return f"群组 · Chat ID {chat_id} · Topic {target.get('forum_topic_id', '')}"
 
-    @classmethod
-    def _detail_text(cls, record: Mapping) -> str:
-        paths = cls._item_paths(record)
-        lines = [
-            f"媒体类型：{_kind_label(record.get('kind', 'unknown'))}",
-            f"状态：{cls._status_text(str(record.get('status', '')))}",
-            f"Telegram 目标：{cls._target_text(record)}",
-            f"文件数量：{len(paths)}" if paths else "文件数量：未知",
-            f"内部 Album ID：{record.get('album_key', '未知')}",
-        ]
-        if paths:
-            lines.append("源文件：")
-            lines.extend(f"{index}. {path}" for index, path in enumerate(paths, start=1))
-        else:
-            lines.append("源文件：旧版记录，缺少源文件信息")
-        if record.get("journal_path"):
-            lines.append(f"journal 文件：{record['journal_path']}")
-        if record.get("error"):
-            lines.append(f"错误信息：{record['error']}")
-        if has_item_delivery(dict(record)):
-            try:
-                labels = {"succeeded": "已确认成功", "failed": "明确失败", "pending": "待确认"}
-                lines.append("逐项发送结果：")
-                for row in item_delivery(dict(record)):
-                    lines.append(f"第 {row['index'] + 1} 项：{labels[row['status']]}")
-            except ValueError as error:
-                lines.append(str(error))
-        return "\n".join(lines)
-
     def _selected_record(self):
         row = self.table.currentRow()
         if row < 0:
@@ -256,107 +179,11 @@ class InflightPage(QWidget):
         value = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         return value if isinstance(value, dict) else None
 
-    def _update_drawer(self):
-        record = self._selected_record()
-        self.file_list.clear()
-        if not record:
-            self.drawer_title.setText("未选中记录")
-            return
-        paths = self._item_paths(record)
-        self.drawer_title.setText(f"包含 {len(paths)} 个文件（Album ID: {record.get('album_key', '')}）")
-        for p in paths:
-            self.file_list.addItem(p)
-
     def _update_actions(self):
         record = self._selected_record()
         status = str(record.get("status", "")).upper() if record else ""
-        corrupt = status == "CORRUPT"
-        confirmed = status == "CONFIRMED"
-        individual = bool(record) and has_item_delivery(record)
-        self.details_button.setEnabled(record is not None)
-        self.sent_button.setEnabled(record is not None and not corrupt)
-        self.sent_button.setText("逐项核对" if individual else "修复本地断点" if confirmed else "标记为已发送")
-        self.not_sent_button.setEnabled(
-            record is not None and not individual and status in {"PREPARED", "SUBMITTED", "UNKNOWN"}
-        )
-
-    def _emit_item_choice(self, record):
-        try:
-            results = item_delivery(record)
-        except ValueError as error:
-            QMessageBox.warning(self, "无法核对", str(error))
-            return
-        if len(self._item_paths(record)) != len(results):
-            QMessageBox.warning(self, "无法核对", "上传日志缺少源文件路径，已保留保护记录。")
-            return
-        dialog = QDialog(self)
-        dialog.setWindowTitle("逐项核对 Telegram 发送结果")
-        dialog.resize(820, 480)
-        layout = QVBoxLayout(dialog)
-        hint = QLabel("请在 Telegram 中核对每个文件。已确认成功的文件不会重发；待确认文件继续保留保护。")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        if not record.get("item_results"):
-            legacy = QLabel("旧记录缺少文件与消息的对应关系，请逐项核对，不会按消息 ID 的排列猜测。")
-            legacy.setWordWrap(True)
-            layout.addWidget(legacy)
-        table = QTableWidget(len(results), 3)
-        table.setHorizontalHeaderLabels(["源文件", "已知结果", "核对结果"])
-        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        table.horizontalHeader().setStretchLastSection(True)
-        paths = self._item_paths(record)
-        labels = {"succeeded": "已确认成功", "failed": "明确失败", "pending": "待确认"}
-        choices = []
-        for row in results:
-            index = row["index"]
-            table.setItem(index, 0, QTableWidgetItem(paths[index]))
-            table.setItem(index, 1, QTableWidgetItem(labels[row["status"]]))
-            choice = QComboBox()
-            choice.addItem("保留待确认", "keep")
-            choice.addItem("Telegram 中存在", "sent")
-            choice.addItem("Telegram 中不存在，允许重试", "not_sent")
-            if row["status"] == "succeeded":
-                choice.setCurrentIndex(1)
-                choice.setEnabled(False)
-            elif row["status"] == "failed":
-                choice.setCurrentIndex(2)
-            table.setCellWidget(index, 2, choice)
-            choices.append(choice)
-        table.resizeColumnToContents(0)
-        layout.addWidget(table)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存核对结果")
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            decisions = {index: choice.currentData() for index, choice in enumerate(choices)
-                         if choice.currentData() != "keep"}
-            if decisions:
-                self.reconciliation_requested.emit({**record, "item_decisions": decisions}, True)
-
-    def _show_details(self, row: int):
-        item = self.table.item(row, 0)
-        record = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-        if not isinstance(record, dict):
-            return
-        dialog = QDialog(self)
-        dialog.setWindowTitle("未确认上传详情")
-        dialog.resize(760, 520)
-        layout = QVBoxLayout(dialog)
-        text = QPlainTextEdit()
-        text.setReadOnly(True)
-        text.setPlainText(self._detail_text(record))
-        layout.addWidget(text)
-        close = QPushButton("关闭")
-        close.clicked.connect(dialog.accept)
-        layout.addWidget(close)
-        dialog.exec()
-
-    def _show_selected_details(self):
-        row = self.table.currentRow()
-        if row >= 0:
-            self._show_details(row)
+        self.sent_button.setEnabled(record is not None and status != "CORRUPT")
+        self.not_sent_button.setEnabled(status in {"PREPARED", "SUBMITTED", "UNKNOWN"})
 
     def _emit_choice(self, sent: bool):
         record = self._selected_record()
@@ -370,9 +197,6 @@ class InflightPage(QWidget):
                 "记录损坏",
                 f"这条记录无法安全处理，文件已保留：\n{record.get('journal_path', '')}",
             )
-            return
-        if has_item_delivery(record):
-            self._emit_item_choice(record)
             return
         if not sent and status == "CONFIRMED":
             return
@@ -393,8 +217,12 @@ class InflightPage(QWidget):
             f"源文件：{self._source_text(paths)}\n"
             f"文件数量：{len(paths) if paths else '未知'}\n"
             f"Telegram 目标：{target}\n\n"
-            "请确认你已经核对 Telegram 中的目标和 Album。"
+            "请确认你已经核对 Telegram 中的目标和整个 Album。"
         )
+        if not sent:
+            message += "\n\n下次上传将跳过日志中已确认成功的文件。请确认其余文件可以重新上传。"
+            if record.get("succeeded_ids") and not record.get("item_results"):
+                message += "\n旧日志无法区分已发送的文件，整组重新上传可能产生重复消息。"
         if sent and target.startswith("⚠"):
             message += (
                 "\n\n这是一条旧版未记录 Telegram 目标的上传记录。"
@@ -424,7 +252,7 @@ class InflightPage(QWidget):
         except Exception as exc:
             self.table.setRowCount(0)
             self.hint.setText(f"读取未确认记录失败：{exc}")
-            self._update_drawer()
+            self._update_actions()
             return
         self.table.setRowCount(len(records))
         for row, record in enumerate(records):
@@ -447,7 +275,6 @@ class InflightPage(QWidget):
                 self.table.setItem(row, column, cell)
         self.table.resizeColumnsToContents()
         self._update_actions()
-        self._update_drawer()
         self.hint.setText(
             f"当前有 {len(records)} 条未确认记录。处理“已发送”前必须先核对 Telegram。"
             if records else "没有未确认上传记录。"

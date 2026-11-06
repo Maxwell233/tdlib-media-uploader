@@ -17,15 +17,7 @@ class SourceRootRequired(ValueError):
     """An old journal needs an explicitly selected original source root."""
 
 
-def has_item_delivery(record: dict) -> bool:
-    return record.get("status") != CONFIRMED and bool(
-        record.get("item_results") or record.get("succeeded_ids")
-        or record.get("failed_ids") or record.get("pending_ids")
-        or record.get("reconciled")
-    )
-
-
-def item_delivery(record: dict) -> list[dict]:
+def _item_delivery(record: dict) -> list[dict]:
     """Keep source positions authoritative; legacy grouped IDs cannot identify files."""
     items = record.get("items", [])
     rows = [{"index": index, "status": "pending", "message_id": None,
@@ -180,9 +172,8 @@ class ReconciliationService:
         message_ids=None,
         target=None,
         source_root=None,
-        item_decisions=None,
     ) -> None:
-        """Manually resolve an UNKNOWN send without querying Telegram history."""
+        """Apply an Album-level decision without querying Telegram history."""
 
         requested_target = normalize_target(target)
         lookup_target = requested_target or self._target_identity()
@@ -194,27 +185,31 @@ class ReconciliationService:
             raise RuntimeError("损坏的上传记录，已保留保护")
         if record.get("status") == CONFIRMED and not sent:
             raise ValueError("Telegram 已确认，不能标记为未发送")
-        if record.get("status") == CONFIRMED and item_decisions is not None:
-            if not isinstance(item_decisions, dict) or any(value != "sent" for value in item_decisions.values()):
-                raise ValueError("Telegram 已确认的批次只能修复本地断点")
-            item_decisions = None
-        if has_item_delivery(record) or item_decisions is not None:
-            if not sent and item_decisions is None:
-                raise ValueError("此批次包含逐项发送结果，请逐项核对，不能整组重新发送")
-            if sent and item_decisions is None and len(record.get("items", [])) == 1:
-                # A manual assertion for a single source has no positional ambiguity.
-                item_decisions = {0: "sent"}
-            self._reconcile_items(
-                selected_kind, album_key, record, lookup_target=lookup_target,
-                fallback_target=requested_target or None, source_root=source_root,
-                decisions=item_decisions,
-            )
-            return
+        confirmed = record.get("status") == CONFIRMED
+        rows = _item_delivery(record) if not confirmed and record.get("item_results") else ()
         if not sent:
+            successful = [row for row in rows if row["status"] == "succeeded"]
+            if successful:
+                snapshots = self._snapshot_items(record)
+                state = self._state_for_journal(
+                    selected_kind, record, fallback_target=requested_target or None, source_root=source_root,
+                )
+                state.mark_album_completed(
+                    [snapshots[row["index"]] for row in successful],
+                    [row["message_id"] for row in successful],
+                )
             self.inflight_journal.mark_not_sent(selected_kind, album_key, target=lookup_target)
             return
         items = self._snapshot_items(record)
-        ids = list(message_ids if message_ids is not None else record.get("message_ids", []))
+        if message_ids is not None:
+            ids = list(message_ids)
+        elif rows:
+            ids = [row["message_id"] if row["status"] == "succeeded" else None for row in rows]
+        elif not confirmed and any(record.get(key) for key in ("succeeded_ids", "failed_ids", "pending_ids")):
+            # Legacy grouped IDs do not establish which file was delivered.
+            ids = []
+        else:
+            ids = list(record.get("message_ids", []))
         state = self._state_for_journal(
             selected_kind,
             record,
@@ -232,50 +227,6 @@ class ReconciliationService:
             target=lookup_target,
         )
         self.inflight_journal.finalize(selected_kind, album_key, target=lookup_target)
-
-    def _reconcile_items(
-        self, kind, album_key, record, *, lookup_target, fallback_target, source_root, decisions,
-    ):
-        rows = item_delivery(record)
-        choices = decisions or {}
-        if not isinstance(choices, dict):
-            raise ValueError("逐项核对结果必须按文件编号记录")
-        for index, choice in choices.items():
-            if type(index) is not int or not 0 <= index < len(rows) or choice not in {"sent", "not_sent"}:
-                raise ValueError("逐项核对结果包含无效的文件编号或操作")
-            if choice == "not_sent" and rows[index]["status"] == "succeeded":
-                raise ValueError("Telegram 已确认成功的文件不能允许重新发送")
-        succeeded, ids, remaining, remaining_results = [], [], [], []
-        snapshots = None
-        for row in rows:
-            index = row["index"]
-            status = row["status"]
-            choice = choices.get(index)
-            if choice == "sent" or status == "succeeded":
-                if snapshots is None:
-                    snapshots = self._snapshot_items(record)
-                succeeded.append(snapshots[index])
-                ids.append(row.get("message_id"))
-            elif choice == "not_sent" or status == "failed":
-                continue
-            else:
-                remaining.append(record["items"][index])
-                remaining_results.append({**row, "index": len(remaining_results)})
-        if succeeded:
-            state = self._state_for_journal(kind, record, fallback_target=fallback_target,
-                                            source_root=source_root)
-            # A failed checkpoint must leave every original protection intact.
-            state.mark_album_completed(succeeded, ids)
-        if remaining:
-            pending_ids = [row.get("old_message_id") for row in remaining_results
-                           if row.get("old_message_id") is not None]
-            self.inflight_journal.update(
-                kind, album_key, "UNKNOWN", items=remaining, item_results=remaining_results,
-                message_ids=pending_ids, succeeded_ids=[], failed_ids=[], pending_ids=pending_ids,
-                reconciled=True, target=lookup_target,
-            )
-        else:
-            self.inflight_journal.finalize(kind, album_key, target=lookup_target)
 
     def recover_confirmed(
         self,

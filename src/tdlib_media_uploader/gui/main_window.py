@@ -571,7 +571,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "记录无效", "这条未确认记录缺少媒体类型或 Album 标识。")
             return
         try:
-            from tdlib_media_uploader.upload.reconciliation import ReconciliationService
+            from ..upload.reconciliation import ReconciliationService, SourceRootRequired
 
             client = ReconciliationService()
             target = record.get("target") if isinstance(record.get("target"), dict) else {
@@ -579,18 +579,16 @@ class MainWindow(QMainWindow):
                 for key in ("target_mode", "chat_id", "forum_topic_id", "channel_chat_id")
                 if key in record
             }
-            from tdlib_media_uploader.upload.reconciliation import SourceRootRequired
             try:
-                client.reconcile_inflight(album_key, sent=bool(sent), kind=kind, target=target or None,
-                                          item_decisions=record.get("item_decisions"))
+                client.reconcile_inflight(album_key, sent=bool(sent), kind=kind, target=target or None)
             except SourceRootRequired:
                 source_root = QFileDialog.getExistingDirectory(
                     self, "旧记录缺少来源目录：请选择当时扫描的根目录")
                 if not source_root:
                     return
-                client.reconcile_inflight(album_key, sent=bool(sent), kind=kind,
-                                         target=target or None, source_root=source_root,
-                                         item_decisions=record.get("item_decisions"))
+                client.reconcile_inflight(
+                    album_key, sent=bool(sent), kind=kind, target=target or None, source_root=source_root,
+                )
         except Exception as exc:
             QMessageBox.warning(
                 self,
