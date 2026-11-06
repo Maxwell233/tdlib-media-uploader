@@ -411,11 +411,7 @@ class UploadPanel(SettingsPanel):
         idx = self.video_sort.findData(_cfg("VIDEO_SORT_MODE", "mtime"))
         self.video_sort.setCurrentIndex(idx if idx >= 0 else 0)
 
-        group_mode = _cfg(
-            "VIDEO_GROUP_MODE",
-            "fixed" if _cfg("VIDEO_FORCE_TEN_PER_ALBUM", False) else "date",
-        )
-        idx = self.video_group_mode.findData(str(group_mode).lower())
+        idx = self.video_group_mode.findData(_cfg("VIDEO_GROUP_MODE", "date"))
         self.video_group_mode.setCurrentIndex(idx if idx >= 0 else 0)
         self.video_album.setValue(int(_cfg("VIDEO_ALBUM_SIZE", 10)))
         self.video_group_title.setChecked(bool(_cfg("VIDEO_CAPTION_INCLUDE_GROUP_TITLE", True)))

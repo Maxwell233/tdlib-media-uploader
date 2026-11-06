@@ -355,11 +355,15 @@ def input_photo(
         width, height = info.width, info.height
     return {
         "@type": "inputMessagePhoto",
-        "photo": {"@type": "inputFileLocal", "path": display_path(source_path)},
-        "thumbnail": None,
-        "added_sticker_file_ids": [],
-        "width": width,
-        "height": height,
+        "photo": {
+            "@type": "inputPhoto",
+            "photo": {"@type": "inputFileLocal", "path": display_path(source_path)},
+            "thumbnail": None,
+            "video": None,
+            "added_sticker_file_ids": [],
+            "width": width,
+            "height": height,
+        },
         "caption": formatted_text(caption),
         "show_caption_above_media": False,
         "self_destruct_type": None,
@@ -420,12 +424,12 @@ def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
 class UploadState(SharedUploadState):
     """Image-specific facade over the shared V1.9 checkpoint format."""
 
-    def __init__(self, target=None):
+    def __init__(self, target=None, *, state_dir: Path | None = None):
         super().__init__(
             kind="image",
             source_root=cfg.IMAGE_DIR,
             target=target or getattr(cfg, "target_for", lambda _kind: {}) ("image"),
-            state_dir=STATE_DIR,
+            state_dir=STATE_DIR if state_dir is None else state_dir,
             filename_prefix="image_upload_state",
             snapshot_provider=_snapshot_for_path,
         )

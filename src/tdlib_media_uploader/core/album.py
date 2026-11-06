@@ -16,10 +16,7 @@ from pathlib import Path
 
 from .filesystem import stable_path
 from .identity import media_file_identity
-from ..config.paths import APP_DATA_DIR, CAPTIONS_DIR
-
-
-PROJECT_DIR = CAPTIONS_DIR
+from ..config.paths import CAPTIONS_DIR
 
 
 class CaptionLimitError(ValueError):
@@ -35,17 +32,7 @@ def path_for(kind: str) -> Path:
     normalized = str(kind).strip().lower()
     if normalized not in names:
         raise ValueError(f"未知媒体类型：{kind}")
-    # A patched CaptionStore project directory is an explicit integration
-    # override (used by tools/tests); retain its requested filename. The
-    # normal V1.9 path is always DATA_DIR/captions/<kind>.json.
-    if PROJECT_DIR != CAPTIONS_DIR:
-        legacy_names = {
-            "video": ".video_album_captions.json",
-            "image": ".image_album_captions.json",
-            "mixed": ".mixed_album_captions.json",
-        }
-        return PROJECT_DIR / legacy_names[normalized]
-    return PROJECT_DIR / names[normalized]
+    return CAPTIONS_DIR / names[normalized]
 
 
 def _item_path(item):

@@ -23,7 +23,7 @@ from ..core.identity import validate_send_target
 from ..core.logging import TDLIB_LOG_PATH, write_app_log, write_exception
 from ..core.readiness import probe_readable
 from ..core.filesystem import snapshot_file, stable_path
-from ..config.paths import APP_DATA_DIR, TDLIB_DATABASE_DIR, TDLIB_FILES_DIR
+from ..config.paths import TDLIB_DATABASE_DIR, TDLIB_FILES_DIR
 from ..core.upload_journal import (
     CONFIRMED,
     FAILED,
@@ -33,8 +33,7 @@ from ..core.upload_journal import (
 )
 from .send_result import _error_text as _send_failure_text
 
-REQUIRED_TDJSON_VERSION = "1.8.64.post1"
-PROJECT_DIR = APP_DATA_DIR
+REQUIRED_TDJSON_VERSION = "1.8.69"
 
 
 class TDLibError(RuntimeError):
@@ -366,34 +365,46 @@ def validate_input_message_contents(contents, *, items=None) -> None:
                 actual=content_type,
                 content=content,
             )
-        media_field = "photo" if content_type == "inputMessagePhoto" else "video"
+        media_field, media_type = (
+            ("photo", "inputPhoto") if content_type == "inputMessagePhoto" else ("video", "inputVideo")
+        )
+        media = content.get(media_field)
+        if not isinstance(media, dict) or media.get("@type") != media_type:
+            raise _invalid_payload(
+                index=index,
+                content_type=content_type,
+                source=source,
+                field=f"{media_field}.@type",
+                actual=media,
+                content=content,
+            )
         _validate_input_file(
-            content.get(media_field),
+            media.get(media_field),
             index=index,
             content_type=content_type,
             source=source,
-            field=media_field,
+            field=f"{media_field}.{media_field}",
             content=content,
         )
-        thumbnail = content.get("thumbnail")
+        thumbnail = media.get("thumbnail")
         if thumbnail is not None:
             _validate_input_thumbnail(
                 thumbnail,
                 index=index,
                 content_type=content_type,
                 source=source,
-                field="thumbnail",
+                field=f"{media_field}.thumbnail",
                 content=content,
             )
         if content_type == "inputMessageVideo":
-            cover = content.get("cover")
+            cover = media.get("cover")
             if cover is not None:
                 _validate_input_file(
                     cover,
                     index=index,
                     content_type=content_type,
                     source=source,
-                    field="cover",
+                    field="video.cover",
                     content=content,
                 )
 
@@ -520,7 +531,7 @@ class TDJsonClient:
         self.pending: dict[str, queue.Queue] = {}
         self.pending_lock = threading.Lock()
         self.auth_queue: queue.Queue = queue.Queue()
-        self.send_events: dict[int, tuple[str, dict]] = {}
+        self.send_events: dict[int, dict] = {}
         self.send_condition = threading.Condition()
         # Keep close idempotent because a stop request can arrive while a
         # sendMessage request is still waiting for its response.
@@ -722,15 +733,10 @@ class TDJsonClient:
                         if state.get("@type") == "authorizationStateClosed":
                             self.stop_event.set()
                             self.closed_event.set()
-                elif kind == "updateMessageSendSucceeded":
+                elif kind in {"updateMessageSendSucceeded", "updateMessageSendFailed"}:
                     old_id = obj.get("old_message_id")
                     with self.send_condition:
-                        self.send_events[old_id] = ("success", obj)
-                        self.send_condition.notify_all()
-                elif kind == "updateMessageSendFailed":
-                    old_id = obj.get("old_message_id")
-                    with self.send_condition:
-                        self.send_events[old_id] = ("failed", obj)
+                        self.send_events[old_id] = obj
                         self.send_condition.notify_all()
                 for callback in list(self.update_callbacks):
                     try:
@@ -1017,12 +1023,9 @@ class TDJsonClient:
             with self.send_condition:
                 ids = [message.get("id") for message in messages]
                 for old_id in ids:
-                    event = self.send_events.pop(old_id, None)
-                    if event is not None:
-                        status, update = event
-                        # Legacy embedders may omit fields supplied by TDLib.
-                        updates[old_id] = {**update, "old_message_id": old_id,
-                            "@type": "updateMessageSendSucceeded" if status == "success" else "updateMessageSendFailed"}
+                    update = self.send_events.pop(old_id, None)
+                    if update is not None:
+                        updates[old_id] = update
             result = map_send_result(messages, updates.values())
             payload = result.as_dict()
             failures = []
@@ -1098,10 +1101,14 @@ class TDJsonClient:
                 return payload
             if self.cancel_event.is_set():
                 raise SendResultUnknown("上传在 Telegram 状态确认前被取消", payload)
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise SendResultUnknown("等待 Telegram 确认发送成功超时", payload)
             with self.send_condition:
+                # A confirmation can arrive while the result callback writes
+                # the journal. Consume queued updates before waiting again.
+                if any(old_id in self.send_events for old_id in ids):
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SendResultUnknown("等待 Telegram 确认发送成功超时", payload)
                 self.send_condition.wait(min(1, remaining))
 
     @staticmethod
@@ -1365,12 +1372,13 @@ class TDJsonClient:
             content_type = content.get("@type") if isinstance(content, dict) else None
             media_field = "photo" if content_type == "inputMessagePhoto" else "video"
             media = content.get(media_field) if isinstance(content, dict) else None
+            fields = media if isinstance(media, dict) else {}
             line = (
                 f"[{index}] source={source!s} content={content_type!s} "
-                f"{media_field}={self._input_file_diagnostic(media)}"
+                f"{media_field}={self._input_file_diagnostic(fields.get(media_field))}"
             )
-            if isinstance(content, dict):
-                thumbnail = content.get("thumbnail")
+            if fields:
+                thumbnail = fields.get("thumbnail")
                 if thumbnail is None:
                     line += " thumbnail=None"
                 elif isinstance(thumbnail, dict):
@@ -1382,7 +1390,7 @@ class TDJsonClient:
                 else:
                     line += f" thumbnail={thumbnail!r}"
                 if content_type == "inputMessageVideo":
-                    cover = content.get("cover")
+                    cover = fields.get("cover")
                     line += (
                         " cover="
                         f"{self._input_file_diagnostic(cover) if cover is not None else 'None'}"
@@ -1399,55 +1407,6 @@ class TDJsonClient:
             "forum_topic_id": getattr(self.config, "FORUM_TOPIC_ID", 0),
             "channel_chat_id": getattr(self.config, "CHANNEL_CHAT_ID", 0),
         })
-
-    def _state_for_journal(self, kind: str, record: dict, **kwargs):
-        from ..upload.reconciliation import ReconciliationService
-        return ReconciliationService()._state_for_journal(kind, record, **kwargs)
-
-    def finalize_inflight(
-        self,
-        album_key: str,
-        *,
-        kind: str | None = None,
-        message_ids=None,
-        target=None,
-    ) -> None:
-        """Remove a confirmed journal after the uploader persisted its state."""
-
-        if not album_key:
-            return
-        selected_kind = kind or self._journal_kind_for(album_key)
-        target = normalize_target(target) or self._target_identity()
-        # The send path already wrote CONFIRMED before the uploader checkpoint
-        # call.  This operation only removes the durable guard after that
-        # checkpoint has succeeded.
-        self.inflight_journal.finalize(selected_kind, album_key, target=target)
-
-    def reconcile_inflight(
-        self,
-        album_key: str,
-        *,
-        sent: bool,
-        kind: str | None = None,
-        message_ids=None,
-        target=None,
-        source_root=None,
-    ) -> None:
-        """Compatibility entry point for local checkpoint reconciliation."""
-        from tdlib_media_uploader.upload.reconciliation import ReconciliationService
-        service = ReconciliationService(self.inflight_journal)
-        service._state_for_journal = self._state_for_journal
-        service._target_identity = self._target_identity
-        service.reconcile_inflight(album_key, sent=sent, kind=kind,
-                                   message_ids=message_ids, target=target, source_root=source_root)
-
-    def _journal_kind_for(self, album_key: str, *, target=None) -> str:
-        record = self.inflight_journal.find_album(album_key, target=target)
-        if record:
-            value = str(record.get("kind", "")).strip().lower()
-            if value:
-                return value
-        return "unknown"
 
     def _send_contents(
         self,

@@ -277,12 +277,12 @@ def scan_mixed_groups(cancel_event=None) -> list[dict]:
 class UploadState(SharedUploadState):
     """Mixed-specific facade over the shared V1.9 checkpoint format."""
 
-    def __init__(self, target=None):
+    def __init__(self, target=None, *, state_dir: Path | None = None):
         super().__init__(
             kind="mixed",
             source_root=cfg.MIXED_DIR,
             target=target or getattr(cfg, "target_for", lambda _kind: {}) ("mixed"),
-            state_dir=STATE_DIR,
+            state_dir=STATE_DIR if state_dir is None else state_dir,
             filename_prefix="mixed_upload_state",
         )
 

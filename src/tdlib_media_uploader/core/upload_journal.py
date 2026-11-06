@@ -400,14 +400,17 @@ class InflightJournal:
             path = existing_path or self.path_for(kind, album_key, target)
             if record and record.get("status") == CORRUPT:
                 raise RuntimeError(f"损坏的上传记录：{record.get('journal_path')}")
-            record = record or {
-                "version": 2,
-                "kind": str(kind).strip().lower(),
-                "album_key": str(album_key),
-                "items": [],
-                "created_at": _now(),
-            }
-            self._with_target(record, target)
+            # The lookup target may match an older target-less record. Keep
+            # that record's scope so any pending files stay protected.
+            if record is None:
+                record = {
+                    "version": 2,
+                    "kind": str(kind).strip().lower(),
+                    "album_key": str(album_key),
+                    "items": [],
+                    "created_at": _now(),
+                }
+                self._with_target(record, target)
             record["status"] = normalized
             record["updated_at"] = _now()
             if message_ids is not None:
@@ -451,17 +454,6 @@ class InflightJournal:
             finally:
                 self.invalidate()
             return True
-
-    def confirmed(self, kind: str, album_key: str, message_ids=None, *, target=None) -> None:
-        """Backward-compatible finalization helper.
-
-        New code should call :meth:`mark_confirmed` followed by
-        :meth:`finalize`; older integrations historically used ``confirmed``
-        as the final delete operation, so retain that behavior here.
-        """
-
-        self.mark_confirmed(kind, album_key, message_ids, target=target)
-        self.finalize(kind, album_key, target=target)
 
     def failed(self, kind: str, album_key: str, error: str = "", *, target=None) -> dict:
         return self.update(kind, album_key, FAILED, error=error, target=target)

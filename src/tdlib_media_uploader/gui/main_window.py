@@ -87,7 +87,7 @@ from .config_service import (
 from . import config_service
 from .history_service import load_history as _load_history, save_history as _save_history
 from .cache_service import ALL_CACHE_KEYS, clear_cache, current_cache_targets, cache_usage as _cache_usage
-from .scanner import basic_paths as _basic_paths, scan_result as _scan_result
+from .scanner import scan_result as _scan_result
 
 
 _validate_exiftool_path = validate_exiftool_path
@@ -394,13 +394,6 @@ class MainWindow(QMainWindow):
         result = page.result
         if not result or not result.get("pending_files"):
             QMessageBox.information(self, "无需上传", "当前没有待上传项目。")
-            return
-        if not result.get("core_available"):
-            QMessageBox.warning(
-                self,
-                "依赖不完整",
-                "当前环境只能预览，无法启动 TDLib 上传。请从 GitHub Releases 下载完整发布包。",
-            )
             return
         api_hash = str(_cfg("API_HASH", "")).strip()
         if (

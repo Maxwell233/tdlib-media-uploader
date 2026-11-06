@@ -67,15 +67,17 @@ def is_link_or_junction(value) -> bool:
     return _is_reparse_info(info)
 
 
-def _snapshot_from_info(path: object, info) -> FileSnapshot | None:
-    if _is_reparse_info(info) or not stat.S_ISREG(info.st_mode):
-        return None
+def _snapshot_from_info(path: object, info) -> tuple[FileSnapshot | None, str]:
+    if _is_reparse_info(info):
+        return None, "link_or_junction"
+    if not stat.S_ISREG(info.st_mode):
+        return None, "not_regular"
     if int(info.st_size) <= 0:
-        return None
+        return None, "empty"
     mtime_ns = getattr(info, "st_mtime_ns", None)
     if mtime_ns is None:
         mtime_ns = int(float(info.st_mtime) * 1_000_000_000)
-    return FileSnapshot(_text(path), int(info.st_size), int(mtime_ns))
+    return FileSnapshot(_text(path), int(info.st_size), int(mtime_ns)), "ready"
 
 
 def snapshot_file_with_code(path) -> tuple[FileSnapshot | None, str]:
@@ -86,14 +88,7 @@ def snapshot_file_with_code(path) -> tuple[FileSnapshot | None, str]:
         info = os.lstat(value)
     except OSError:
         return None, "stat_failed"
-    if _is_reparse_info(info):
-        return None, "link_or_junction"
-    if not stat.S_ISREG(info.st_mode):
-        return None, "not_regular"
-    if int(info.st_size) <= 0:
-        return None, "empty"
-    snapshot = _snapshot_from_info(value, info)
-    return (snapshot, "ready") if snapshot is not None else (None, "unreadable")
+    return _snapshot_from_info(value, info)
 
 
 def snapshot_file(path) -> FileSnapshot | None:
@@ -428,31 +423,13 @@ def iter_directory_entries_with_retry(
 
 @dataclass
 class DirectoryScanResult:
-    """Low-level discovery result with the V1 two-value unpacking adapter."""
+    """Paths, snapshots and diagnostics returned by directory discovery."""
 
     paths: list[Path] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     cancelled: bool = False
     snapshots: dict[str, FileSnapshot] = field(default_factory=dict)
-
-    def __iter__(self):
-        legacy_errors = list(self.errors) + list(self.warnings)
-        if self.cancelled:
-            legacy_errors.append("目录扫描已取消")
-        yield self.paths
-        yield legacy_errors
-
-    def __len__(self) -> int:
-        return 2
-
-    def __getitem__(self, index: int):
-        if index not in (0, 1, -2, -1):
-            raise IndexError(index)
-        legacy_errors = list(self.errors) + list(self.warnings)
-        if self.cancelled:
-            legacy_errors.append("目录扫描已取消")
-        return (self.paths, legacy_errors)[index]
 
 
 def _entry_suffix(name: str) -> str:
@@ -535,7 +512,7 @@ def iter_files(
                         continue
                     if accepted is not None and _entry_suffix(entry.name).casefold() not in accepted:
                         continue
-                    snapshot = _snapshot_from_info(entry.path, info)
+                    snapshot, _ = _snapshot_from_info(entry.path, info)
                     if snapshot is None:
                         continue
                     path = Path(entry.path)
