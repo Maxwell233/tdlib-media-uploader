@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import datetime as _dt
 import os
 from pathlib import Path
 import stat
@@ -57,17 +56,6 @@ def format_eta(seconds: float | int | None) -> str:
     mins, secs = divmod(seconds, 60)
     hours, mins = divmod(mins, 60)
     return f"{hours:02d}:{mins:02d}:{secs:02d}" if hours else f"{mins:02d}:{secs:02d}"
-
-
-def format_date(value: Any, fmt: str = "%Y-%m-%d %H:%M:%S", missing: str = "—") -> str:
-    if not value:
-        return missing
-    try:
-        if isinstance(value, (int, float)):
-            return _dt.datetime.fromtimestamp(value).strftime(fmt)
-        return str(value)
-    except Exception:
-        return str(value)
 
 
 def path_text(value: Any) -> str:
@@ -220,7 +208,6 @@ __all__ = [
     "WINDOWS_APP_USER_MODEL_ID",
     "application_icon",
     "detect_ffmpeg",
-    "format_date",
     "format_eta",
     "format_size",
     "hidden_subprocess_kwargs",

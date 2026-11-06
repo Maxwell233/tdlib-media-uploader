@@ -199,15 +199,7 @@ def cleanup_confirmed_staging(paths) -> None:
 
 
 def force_ten_per_album() -> bool:
-    if not video_dates_enabled():
-        return True
-    group_mode = getattr(cfg, "VIDEO_GROUP_MODE", None)
-    legacy_enabled = bool(getattr(cfg, "VIDEO_FORCE_TEN_PER_ALBUM", False))
-    if group_mode is not None:
-        # Keep extensions that still set the legacy flag working while the
-        # parser's alias remains synchronized with the new group_mode value.
-        return str(group_mode).strip().lower() == "fixed" or legacy_enabled
-    return legacy_enabled
+    return not video_dates_enabled() or cfg.VIDEO_GROUP_MODE == "fixed"
 
 
 def include_group_title() -> bool:
@@ -782,8 +774,6 @@ def _clear_media_metadata_cache():
     with _media_metadata_cache_lock:
         _media_metadata_cache.clear()
 
-_media_creation_metadata.cache_clear = _clear_media_metadata_cache
-
 
 def read_media_creation_time(path: Path, cancel_event=None):
     if not video_dates_enabled():
@@ -1012,12 +1002,6 @@ def build_items(videos, metadata_index, progress_callback=None, cancel_event=Non
     items, missing = [], []
     metadata_index = metadata_index or {}
 
-    def snapshot_fields(path):
-        snapshot = LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or file_snapshot(path)
-        if snapshot is None:
-            return {}
-        return {"scan_size": snapshot[0], "scan_mtime_ns": snapshot[1]}
-
     if not video_dates_enabled():
         _emit_scan_progress(
             progress_callback,
@@ -1025,6 +1009,8 @@ def build_items(videos, metadata_index, progress_callback=None, cancel_event=Non
         )
         filename_items = []
         for path in videos:
+            if _cancel_requested(cancel_event):
+                break
             item = {
                 "path": path,
                 "capture_time": None,
@@ -1623,15 +1609,18 @@ def input_video(
         }
     return {
         "@type": "inputMessageVideo",
-        "video": {"@type": "inputFileLocal", "path": display_path(prep.upload_path)},
-        "thumbnail": thumbnail,
-        "cover": None,
-        "start_timestamp": 0,
-        "added_sticker_file_ids": [],
-        "duration": int(max(1, round(info["duration"]))),
-        "width": int(info["width"]),
-        "height": int(info["height"]),
-        "supports_streaming": supports_streaming,
+        "video": {
+            "@type": "inputVideo",
+            "video": {"@type": "inputFileLocal", "path": display_path(prep.upload_path)},
+            "thumbnail": thumbnail,
+            "cover": None,
+            "start_timestamp": 0,
+            "added_sticker_file_ids": [],
+            "duration": int(max(1, round(info["duration"]))),
+            "width": int(info["width"]),
+            "height": int(info["height"]),
+            "supports_streaming": supports_streaming,
+        },
         "caption": formatted_text(caption),
         "show_caption_above_media": False,
         "self_destruct_type": None,
@@ -1642,12 +1631,12 @@ def input_video(
 class UploadState(SharedUploadState):
     """Video-specific facade over the shared V1.9 checkpoint format."""
 
-    def __init__(self, target=None):
+    def __init__(self, target=None, *, state_dir: Path | None = None):
         super().__init__(
             kind="video",
             source_root=cfg.VIDEO_DIR,
             target=target or getattr(cfg, "target_for", lambda _kind: {}) ("video"),
-            state_dir=STATE_DIR,
+            state_dir=STATE_DIR if state_dir is None else state_dir,
             filename_prefix="video_upload_state",
             snapshot_provider=_snapshot_for_path,
         )

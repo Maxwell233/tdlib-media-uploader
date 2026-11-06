@@ -95,11 +95,6 @@ class ReconciliationService:
                 item["scan_size"] = item["size"]
             if item.get("mtime_ns") is not None and item.get("scan_mtime_ns") is None:
                 item["scan_mtime_ns"] = item["mtime_ns"]
-            # Manual reconciliation must reproduce the exact source identity
-            # that was sent.  UploadState therefore prefers these stored
-            # values over a fresh stat (the source may have changed or gone
-            # offline since the ambiguous request).
-            item["_journal_snapshot"] = True
             capture_time = item.get("capture_time")
             if isinstance(capture_time, str) and capture_time:
                 try:
@@ -190,9 +185,9 @@ class ReconciliationService:
         """Manually resolve an UNKNOWN send without querying Telegram history."""
 
         requested_target = normalize_target(target)
-        effective_target = requested_target or self._target_identity()
-        selected_kind = kind or self._journal_kind_for(album_key, target=effective_target)
-        _path, record = self.inflight_journal.get_entry(selected_kind, album_key, effective_target)
+        lookup_target = requested_target or self._target_identity()
+        selected_kind = kind or self._journal_kind_for(album_key, target=lookup_target)
+        _path, record = self.inflight_journal.get_entry(selected_kind, album_key, lookup_target)
         if record is None:
             raise RuntimeError(f"未找到未确认上传记录：{selected_kind} / {album_key}")
         if record.get("status") == CORRUPT:
@@ -209,12 +204,14 @@ class ReconciliationService:
             if sent and item_decisions is None and len(record.get("items", [])) == 1:
                 # A manual assertion for a single source has no positional ambiguity.
                 item_decisions = {0: "sent"}
-            self._reconcile_items(selected_kind, album_key, record,
-                                  target=effective_target, source_root=source_root,
-                                  decisions=item_decisions)
+            self._reconcile_items(
+                selected_kind, album_key, record, lookup_target=lookup_target,
+                fallback_target=requested_target or None, source_root=source_root,
+                decisions=item_decisions,
+            )
             return
         if not sent:
-            self.inflight_journal.mark_not_sent(selected_kind, album_key, target=effective_target)
+            self.inflight_journal.mark_not_sent(selected_kind, album_key, target=lookup_target)
             return
         items = self._snapshot_items(record)
         ids = list(message_ids if message_ids is not None else record.get("message_ids", []))
@@ -232,11 +229,13 @@ class ReconciliationService:
             selected_kind,
             album_key,
             ids,
-            target=effective_target,
+            target=lookup_target,
         )
-        self.inflight_journal.finalize(selected_kind, album_key, target=effective_target)
+        self.inflight_journal.finalize(selected_kind, album_key, target=lookup_target)
 
-    def _reconcile_items(self, kind, album_key, record, *, target, source_root, decisions):
+    def _reconcile_items(
+        self, kind, album_key, record, *, lookup_target, fallback_target, source_root, decisions,
+    ):
         rows = item_delivery(record)
         choices = decisions or {}
         if not isinstance(choices, dict):
@@ -263,7 +262,7 @@ class ReconciliationService:
                 remaining.append(record["items"][index])
                 remaining_results.append({**row, "index": len(remaining_results)})
         if succeeded:
-            state = self._state_for_journal(kind, record, fallback_target=target or None,
+            state = self._state_for_journal(kind, record, fallback_target=fallback_target,
                                             source_root=source_root)
             # A failed checkpoint must leave every original protection intact.
             state.mark_album_completed(succeeded, ids)
@@ -273,10 +272,10 @@ class ReconciliationService:
             self.inflight_journal.update(
                 kind, album_key, "UNKNOWN", items=remaining, item_results=remaining_results,
                 message_ids=pending_ids, succeeded_ids=[], failed_ids=[], pending_ids=pending_ids,
-                reconciled=True, target=target,
+                reconciled=True, target=lookup_target,
             )
         else:
-            self.inflight_journal.finalize(kind, album_key, target=target)
+            self.inflight_journal.finalize(kind, album_key, target=lookup_target)
 
     def recover_confirmed(
         self,

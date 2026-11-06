@@ -93,20 +93,8 @@ def restrict_plan(plan: AlbumPlan, items: Iterable[MediaItem]) -> AlbumPlan:
     return replace(plan, pending_items=selected)
 
 
-def pending_plans(plans: Iterable[AlbumPlan]) -> tuple[AlbumPlan, ...]:
-    """Validate and return only plans that still contain pending items."""
-
-    result: list[AlbumPlan] = []
-    for plan in plans:
-        validate_plan(plan)
-        if plan.pending_items:
-            result.append(plan)
-    return tuple(result)
-
-
 __all__ = [
     "item_identity",
-    "pending_plans",
     "restrict_plan",
     "validate_plan",
 ]

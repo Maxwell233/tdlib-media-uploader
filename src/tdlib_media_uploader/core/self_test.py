@@ -7,6 +7,7 @@ import importlib
 import os
 import sys
 from pathlib import Path
+from tempfile import TemporaryFile
 
 from ..config.paths import (
     DATA_DIR,
@@ -95,9 +96,8 @@ def run_self_test(*, emit=print) -> int:
             failures.append("TDLib 参数中的 database_directory 不在 DATA_DIR 内。")
         if not _is_within(Path(parameters["files_directory"]), DATA_DIR):
             failures.append("TDLib 参数中的 files_directory 不在 DATA_DIR 内。")
-        probe = DATA_DIR / ".self-test.tmp"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink(missing_ok=True)
+        with TemporaryFile(dir=DATA_DIR) as probe:
+            probe.write(b"ok")
     except OSError as exc:
         failures.append(f"data 不可写：{exc}")
     if not TEMPLATE_CONFIG_PATH.is_file():

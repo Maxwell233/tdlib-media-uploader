@@ -63,6 +63,6 @@ FFmpeg（发布包内置）
 运行，不提供源码启动方式，也不需要用户自行准备 FFmpeg。
 
 Windows 构建 workflow 会从 BtbN/FFmpeg-Builds 固定版本下载 Windows x64 LGPL 构建，校验
-SHA-256；macOS 构建 workflow 从 FFmpeg 7.1.1 官方源码编译 arm64 LGPL 构建。两者都会把
+SHA-256；macOS 构建 workflow 从 FFmpeg 9.0.2 官方源码编译 arm64 LGPL 构建。两者都会把
 LICENSE.txt 一起放进应用，并检查 `-version` 输出。不要把启用 GPL/nonfree 编码器的
 FFmpeg 二进制替换进发布包；详情见根目录 THIRD_PARTY_LICENSES.md。

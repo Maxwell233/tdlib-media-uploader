@@ -123,7 +123,12 @@ def get_section_re(section: str):
 
 @functools.lru_cache(maxsize=128)
 def get_key_re(key: str):
-    return re.compile(rf"(?m)^([ \t]*{re.escape(key)}[ \t]*=[ \t]*)[^\r\n]*")
+    # A hash starts a comment only outside a basic or literal string.
+    value_part = r"""(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'[^'\r\n]*'|[^"'#\r\n])"""
+    return re.compile(
+        rf"(?m)^[ \t]*{re.escape(key)}[ \t]*=[ \t]*"
+        rf"(?P<value>{value_part}*?)(?=[ \t]*(?:\#[^\r\n]*)?\r?$)"
+    )
 
 
 def update_toml_value(text: str, section: str, key: str, value: Any) -> str:
@@ -148,7 +153,8 @@ def update_toml_value(text: str, section: str, key: str, value: Any) -> str:
     key_re = get_key_re(key)
     key_match = key_re.search(body)
     if key_match:
-        body = body[: key_match.start()] + key_match.group(1) + literal + body[key_match.end() :]
+        start, end = key_match.span("value")
+        body = body[:start] + literal + body[end:]
     else:
         if not body or not body.endswith("\n"):
             body += newline

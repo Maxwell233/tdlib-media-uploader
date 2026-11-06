@@ -472,9 +472,6 @@ if not VIDEO_READ_DATES:
     VIDEO_SORT_MODE = "name"
     VIDEO_GROUP_MODE = "fixed"
 
-# Keep the old constant available to extensions and older integrations.
-VIDEO_FORCE_TEN_PER_ALBUM = VIDEO_GROUP_MODE == "fixed"
-
 VIDEO_CAPTION_YEAR_DIGITS = int(
     video.get(
         "caption_year_digits",

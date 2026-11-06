@@ -154,17 +154,9 @@ def group_key(kind: str, item: Any, fallback: str = "") -> tuple[str, str]:
     return kind, stable_path(item.path)
 
 
-def _default_cancelled_result(
-    bundle: Any,
-    kind: str,
-    *,
-    core_available: bool,
-    warning: str,
-    scan_errors,
-    scan_warnings,
-) -> dict:
+def _cancelled_result(bundle: Any) -> dict:
     return {
-        "kind": kind,
+        "kind": bundle.kind,
         "status": "cancelled",
         "cancelled": True,
         "items": [],
@@ -179,10 +171,9 @@ def _default_cancelled_result(
         "completed_paths": [],
         "source_dir": str(bundle.source_root),
         "state_path": str(getattr(bundle.state, "path", "") or ""),
-        "core_available": core_available,
-        "warning": warning,
-        "scan_errors": list(scan_errors or ()),
-        "scan_warnings": list(scan_warnings or ()),
+        "warning": "扫描已取消",
+        "scan_errors": list(bundle.scan_result.errors),
+        "scan_warnings": list(bundle.scan_result.warnings),
         "scan_size_skips": [],
         "scan_skipped_files": 0,
         "scan_compress_files": 0,
@@ -310,28 +301,17 @@ def _format_scan_warnings(
 def scan_result(
     bundle: Any,
     *,
-    progress_callback: Callable[[dict], None] | None = None,
     cancel_event: Any | None = None,
-    cancelled_result_factory: Callable[..., dict] | None = None,
     size_resolver: Callable[[Any], int] | None = None,
     logger: Callable[..., Any] | None = write_app_log,
     caption_store_factory: Callable[..., Any] = CaptionStore,
 ) -> dict:
     """Translate a V2 scan bundle into the existing preview page payload."""
 
-    del progress_callback
     kind = bundle.kind
     scan = bundle.scan_result
     if scan.cancelled or (cancel_event is not None and cancel_event.is_set()):
-        kwargs = {
-            "core_available": True,
-            "warning": "扫描已取消",
-            "scan_errors": scan.errors,
-            "scan_warnings": scan.warnings,
-        }
-        if cancelled_result_factory is not None:
-            return cancelled_result_factory(kind, **kwargs)
-        return _default_cancelled_result(bundle, kind, **kwargs)
+        return _cancelled_result(bundle)
 
     size_of = size_resolver or item_size
     models = tuple(scan.items)
@@ -396,7 +376,6 @@ def scan_result(
         "completed_paths": completed_paths,
         "source_dir": str(bundle.source_root),
         "state_path": str(getattr(bundle.state, "path", "") or ""),
-        "core_available": True,
         "warning": warning,
         "scan_errors": scan_errors,
         "scan_warnings": scan_warnings,
