@@ -1,1 +1,0 @@
-`remux_h264_aac.mp4` is the repository's synthetic H.264/AAC fixture restored from commit `ef34394`. The queue integration tests use it to exercise real video probing and preparation without contacting Telegram.
