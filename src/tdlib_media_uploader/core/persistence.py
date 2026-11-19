@@ -47,7 +47,9 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _atomic_write(path: Path, write: Callable[[TextIO], None]) -> None:
+def _atomic_write(
+    path: Path, write: Callable[[TextIO], None], *, before_replace: Callable[[], None] | None = None
+) -> None:
     path = Path(path)
     ensure_private_directory(path.parent)
     descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -61,6 +63,8 @@ def _atomic_write(path: Path, write: Callable[[TextIO], None]) -> None:
             write(stream)
             stream.flush()
             os.fsync(stream.fileno())
+        if before_replace is not None:
+            before_replace()
         os.replace(temporary, path)
         fsync_directory(path.parent)
     finally:
@@ -73,10 +77,15 @@ def atomic_write_text(path: Path, text: str) -> None:
     _atomic_write(path, lambda stream: stream.write(text))
 
 
-def atomic_write_json(path: Path, data: Any) -> None:
+def atomic_write_json(
+    path: Path, data: Any, *, before_replace: Callable[[], None] | None = None
+) -> None:
     """Atomically persist JSON with the shared checkpoint durability rules."""
 
-    _atomic_write(path, lambda stream: json.dump(data, stream, ensure_ascii=False, indent=2))
+    _atomic_write(
+        path, lambda stream: json.dump(data, stream, ensure_ascii=False, indent=2),
+        before_replace=before_replace,
+    )
 
 
 def durable_unlink(path: Path) -> None:

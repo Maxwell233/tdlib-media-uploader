@@ -23,7 +23,7 @@ if __name__ == "__main__" and not getattr(sys, "frozen", False):
 
 from ..core.album import album_key
 from ..core.logging import write_app_log
-from PySide6.QtCore import Slot, Qt
+from PySide6.QtCore import QTimer, Slot, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -123,6 +123,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(860, 560)
         self.resize(1240, 800)
         self._cache_clear_worker = None
+        self._close_after_recovery = False
         self.scanners: dict[str, ScanWorker] = {}
         self._build_ui(preferences)
         store = queue_store if queue_store is not None else UploadQueue(DATA_DIR / "upload_queue.json")
@@ -141,6 +142,9 @@ class MainWindow(QMainWindow):
             lambda: self.sidebar.setCurrentRow(self.sidebar_rows["inflight"])
         )
         self.queue.skipped.connect(self._record_skipped_task)
+        self.queue.recovery_progress.connect(self.task_page.show_recovery_progress)
+        self.queue.recovery_finished.connect(self._queue_recovery_finished)
+        self.task_page.queue_cancel_requested.connect(self.queue.cancel_recovery)
         self.settings_page.storage_panel.cancel_cleanup_requested.connect(self._cancel_cache_clear)
         self._refresh_pages()
         self._refresh_queue()
@@ -317,6 +321,9 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _reset_upload_state(self, kind: str):
         kind = _require_kind(kind)
+        if self.queue.recovery_busy:
+            self.statusBar().showMessage("请等待当前队列检查结束后再重置断点")
+            return
         if self._cache_clear_worker is not None:
             self.statusBar().showMessage("请等待缓存清理结束后再重置断点")
             return
@@ -339,7 +346,7 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        if answer != QMessageBox.StandardButton.Yes or self.queue.recovery_busy:
             return
         _removed, errors = clear_cache((f"{kind}_state",), targets=current_cache_targets())
         self._upload_page(kind).clear_scan_result()
@@ -431,21 +438,43 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("目录配置已保存")
 
     def _refresh_queue(self):
-        self.task_page.show_queue(self.queue.store, self.queue.write_blocked)
+        recovering = self.queue.recovery_busy
+        self.task_page.show_queue(self.queue.store, self.queue.write_blocked, recovering=recovering)
+        self.inflight_page.set_review_blocked(recovering)
 
     def _queue_recovery_allowed(self):
+        if self.queue.recovery_busy:
+            self.statusBar().showMessage("请等待当前队列检查结束")
+            return False
         if self._cache_clear_worker is not None:
             self._queue_error("请等待缓存清理结束后再处理队列任务。")
             return False
         return True
 
     def _restore_queued_task(self, task_id):
-        if self._queue_recovery_allowed() and self.queue.restore(task_id):
-            self.statusBar().showMessage("任务已恢复到原位置。请选择继续队列。")
+        if self._queue_recovery_allowed():
+            self.queue.restore(task_id)
 
     def _recheck_queued_task(self, task_id):
-        if self._queue_recovery_allowed() and self.queue.recheck(task_id):
-            self.statusBar().showMessage("记录已核对。请选择恢复或跳过此任务。")
+        if self._queue_recovery_allowed():
+            self.queue.recheck(task_id)
+
+    def _queue_recovery_finished(self, result):
+        if result.cancelled:
+            self.task_page.queue_notice.setText("已取消队列检查。")
+            self.statusBar().showMessage("已取消队列检查。")
+        elif result.error is None:
+            message = {
+                "restore": "任务已恢复到原位置。请选择继续队列。",
+                "recheck": "记录已核对。请选择恢复或跳过此任务。",
+                "skip": "已跳过未完成的上传任务。请选择继续队列。",
+                "refresh_reviews": "未确认上传记录已更新。请在任务中心查看恢复状态。",
+            }[result.action]
+            self.task_page.queue_notice.setText(message)
+            self.statusBar().showMessage(message)
+        if self._close_after_recovery:
+            self._close_after_recovery = False
+            QTimer.singleShot(0, self.close)
 
     def _skip_queued_task(self, task_id):
         if not self._queue_recovery_allowed():
@@ -464,7 +493,6 @@ class MainWindow(QMainWindow):
     def _record_skipped_task(self, task):
         message = "已跳过未完成的上传任务。"
         self._record_task_history(task, message)
-        self.statusBar().showMessage(message + " 请选择继续队列。")
 
     def _record_task_history(self, task, message):
         records = _load_history()
@@ -483,6 +511,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
 
     def _start_upload(self, kind: str):
+        if self.queue.recovery_busy:
+            self.statusBar().showMessage("请等待当前队列检查结束后再入队")
+            return
         page = self._upload_page(kind)
         result = page.result
         if not result or not result.get("pending_files"):
@@ -505,7 +536,8 @@ class MainWindow(QMainWindow):
             + "入队后会按队列顺序自动执行。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        if answer == QMessageBox.StandardButton.Yes and self.queue.enqueue(task):
+        if (answer == QMessageBox.StandardButton.Yes and not self.queue.recovery_busy
+                and self.queue.enqueue(task)):
             self.statusBar().showMessage("上传任务已加入队列，可继续扫描")
 
     def _can_start_queue(self):
@@ -643,8 +675,7 @@ class MainWindow(QMainWindow):
     def _reconcile_inflight(self, record: object, sent: bool):
         """Apply a confirmed manual decision without querying Telegram."""
 
-        if self._cache_clear_worker is not None:
-            self.statusBar().showMessage("请等待缓存清理结束")
+        if not self._queue_recovery_allowed():
             return
         if not isinstance(record, dict):
             return
@@ -674,7 +705,7 @@ class MainWindow(QMainWindow):
             except SourceRootRequired:
                 source_root = QFileDialog.getExistingDirectory(
                     self, "旧记录缺少来源目录：请选择当时扫描的根目录")
-                if not source_root:
+                if not source_root or not self._queue_recovery_allowed():
                     return
                 client.reconcile_inflight(
                     album_key, sent=bool(sent), kind=kind, target=target or None, source_root=source_root,
@@ -687,10 +718,12 @@ class MainWindow(QMainWindow):
             )
             return
         self.inflight_page.reload_records()
-        if self.queue.refresh_reviews(record):
-            self.statusBar().showMessage("未确认上传记录已更新。请在任务中心查看恢复状态。")
+        self.queue.refresh_reviews(record)
 
     def _cache_operation_allowed(self) -> bool:
+        if self.queue.recovery_busy:
+            self.statusBar().showMessage("请等待当前队列检查结束后再清理缓存")
+            return False
         from ..telegram.tdlib_common import TDJsonClient
         if TDJsonClient.unclosed_instance() is not None:
             self.statusBar().showMessage("请等待 Telegram 任务和数据库关闭后再清理缓存")
@@ -708,6 +741,9 @@ class MainWindow(QMainWindow):
         return True
 
     def _finish_cache_clear(self, keys: tuple[str, ...], *, reset_scan: bool):
+        if self.queue.recovery_busy:
+            self.statusBar().showMessage("请等待当前队列检查结束后再清理缓存")
+            return
         from .workers import CacheClearWorker
         worker = CacheClearWorker(keys, current_cache_targets(), self)
         self._cache_clear_worker = worker
@@ -851,6 +887,13 @@ class MainWindow(QMainWindow):
                 worker.request_stop()
 
     def closeEvent(self, event):
+        if self.queue.recovery_busy:
+            self._close_after_recovery = True
+            self.queue.closing = True
+            self.queue.cancel_recovery()
+            self.statusBar().showMessage("正在等待队列检查安全结束后关闭窗口")
+            event.ignore()
+            return
         cleanup = self._cache_clear_worker
         if cleanup is not None and cleanup.isRunning():
             cleanup.request_stop()

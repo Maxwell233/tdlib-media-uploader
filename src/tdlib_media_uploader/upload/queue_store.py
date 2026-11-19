@@ -2,21 +2,48 @@
 
 import json
 from dataclasses import replace
+from functools import wraps
 from pathlib import Path
+from threading import Lock
 
 from ..config import paths
+from ..core.concurrency import CancellationRequested, raise_if_cancelled
 from ..core.persistence import atomic_write_json, atomic_write_text
 from .queue import ACTION_REQUIRED, ACTIVE, RECOVERABLE, TaskStatus, UploadTask, finish_task, now
-from .queue_recovery import protection_for, recover_task, review_matches_task, verify_task
+from .queue_recovery import recover_task, review_matches_task, verify_delivery, verify_task
+
+
+class QueueRecoveryConflict(ValueError):
+    """The verified task or queue no longer matches its current state."""
+
+
+def _queue_write(action):
+    @wraps(action)
+    def guarded(self, *args, **kwargs):
+        if not self._writer.acquire(blocking=False):
+            raise RuntimeError("正在处理队列事务，请等待当前操作结束")
+        try:
+            if self.error:
+                raise RuntimeError(self.error)
+            return action(self, *args, **kwargs)
+        finally:
+            self._writer.release()
+
+    return guarded
 
 
 class UploadQueue:
+    """Serialize mutations across threads. Readers see the last durable task tuple."""
+
     def __init__(self, path: Path, recover=None, *, runtime_paths=paths):
         self.path = path
         self.runtime_paths = runtime_paths
         self.tasks: tuple[UploadTask, ...] = ()
         self.paused = False
         self.error = None
+        self._writer = Lock()
+        self._revision = 0
+        self._recovering = False
         try:
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
@@ -37,15 +64,26 @@ class UploadQueue:
             self.paused = True
             self.error = f"无法恢复上传队列（{path}）：{exc}"
 
-    def _commit(self, tasks, paused):
-        if self.error:
-            raise RuntimeError(self.error)
-        atomic_write_json(self.path, {
+    @property
+    def revision(self):
+        return self._revision
+
+    @staticmethod
+    def _record(tasks, paused):
+        return {
             "schema_version": 1, "paused": paused,
             "tasks": [task.to_record() for task in tasks],
-        })
-        self.tasks, self.paused = tasks, paused
+        }
 
+    def _publish(self, tasks, paused):
+        self.tasks, self.paused = tasks, paused
+        self._revision += 1
+
+    def _commit(self, tasks, paused):
+        atomic_write_json(self.path, self._record(tasks, paused))
+        self._publish(tasks, paused)
+
+    @_queue_write
     def enqueue(self, task):
         if any(entry.status in ACTIVE | {TaskStatus.PENDING} and entry.overlaps(task) for entry in self.tasks):
             raise ValueError("队列已有同类型、同目录、同目标且文件范围重叠的任务")
@@ -70,6 +108,7 @@ class UploadQueue:
         waiting = RECOVERABLE | {TaskStatus.PENDING}
         return next((task for task in self.tasks if task.status in waiting), None)
 
+    @_queue_write
     def set_paused(self, paused):
         reason = self.blocked_reason if not paused else None
         if reason:
@@ -77,7 +116,8 @@ class UploadQueue:
         self._commit(self.tasks, paused)
 
     def next_pending(self):
-        if self.paused or self.error or self.blocked_reason or any(task.status in ACTIVE for task in self.tasks):
+        if (self._recovering or self.paused or self.error or self.blocked_reason
+                or any(task.status in ACTIVE for task in self.tasks)):
             return None
         return self._head()
 
@@ -89,73 +129,151 @@ class UploadQueue:
             raise ValueError("该任务状态不支持此操作")
         return task
 
-    def _commit_recovery(self, tasks):
-        # The previous queue normally stays in place on a write failure.
-        # Restore it if directory fsync failed after the atomic replace.
-        previous = self.path.read_bytes()
-        saved = json.loads(previous)
-        if (saved["schema_version"] != 1 or saved["paused"] != self.paused
-                or tuple(UploadTask.from_record(task) for task in saved["tasks"]) != self.tasks):
-            raise ValueError("磁盘上的队列文件已变化，请重启后再次核对")
+    def _check_revision(self, revision):
+        if self.revision != revision:
+            raise QueueRecoveryConflict("队列状态已变化，请重新验证任务")
+
+    def _disk_conflict(self, detail):
+        # Prevent later mutations from overwriting this file with the stale in-memory queue.
+        self.error = f"无法确认磁盘上的队列文件，请重启后再次核对：{detail}"
+        return QueueRecoveryConflict(self.error)
+
+    def _read_recovery_queue(self):
         try:
-            self._commit(tasks, paused=True)
-        except OSError:
-            try:
-                if self.path.read_bytes() != previous:
-                    atomic_write_text(self.path, previous.decode("utf-8"))
-            except OSError as rollback_error:
-                self.error = f"无法确认队列文件已恢复：{rollback_error}"
-                self.paused = True
+            return self.path.read_bytes()
+        except OSError as exc:
+            raise self._disk_conflict(exc) from exc
+
+    def _commit_recovery(self, tasks, verified, revision, cancel_event, progress):
+        progress("正在准备保存队列状态…", True)
+        previous = self._read_recovery_queue()
+        try:
+            saved = json.loads(previous)
+            matches = (
+                saved["schema_version"] == 1 and saved["paused"] is self.paused
+                and tuple(UploadTask.from_record(task) for task in saved["tasks"]) == self.tasks
+            )
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise self._disk_conflict(exc) from exc
+        if not matches:
+            raise self._disk_conflict("磁盘上的队列文件已变化")
+        replacement = self._record(tasks, paused=True)
+        replace_attempted = False
+
+        def check_delivery():
+            self._check_revision(revision)
+            for task, expected in verified:
+                if verify_delivery(task, self.runtime_paths) != expected:
+                    raise QueueRecoveryConflict("上传断点已变化，请重新验证任务")
+
+        def before_replace():
+            nonlocal replace_attempted
+            check_delivery()
+            if self._read_recovery_queue() != previous:
+                raise self._disk_conflict("磁盘上的队列文件已变化")
+            # After this point only roll back a copy of our own replacement.
+            replace_attempted = True
+
+        raise_if_cancelled(cancel_event=cancel_event)
+        progress("正在保存队列状态…", False)
+        try:
+            atomic_write_json(self.path, replacement, before_replace=before_replace)
+            # A concurrent external journal change during directory fsync
+            # must not publish a result based on the earlier validation.
+            check_delivery()
+            if json.loads(self._read_recovery_queue()) != replacement:
+                raise self._disk_conflict("保存时磁盘上的队列文件已变化")
+        except (OSError, ValueError, TypeError, RuntimeError):
+            if replace_attempted:
+                self._rollback_recovery(previous, replacement)
             raise
+        self._publish(tasks, paused=True)
 
-    def _save_recovery(self, updated):
-        self._commit_recovery(tuple(updated if task.task_id == updated.task_id else task for task in self.tasks))
-        return updated
+    def _rollback_recovery(self, previous, replacement):
+        try:
+            current = self.path.read_bytes()
+            if current != previous:
+                if json.loads(current) != replacement:
+                    raise QueueRecoveryConflict("磁盘上的队列已被修改")
+                atomic_write_text(self.path, previous.decode("utf-8"))
+        except (OSError, ValueError) as exc:
+            self.error = f"无法确认队列文件已恢复：{exc}"
+            self.paused = True
 
-    def restore(self, task_id):
-        task = self._action_task(task_id, ACTION_REQUIRED)
-        if any(entry.status is TaskStatus.PENDING and entry.overlaps(task) for entry in self.tasks):
+    @_queue_write
+    def recover(self, action, subject, *, expected_revision=None, cancel_event=None, progress=None):
+        """Validate and commit one recovery under the same exclusive writer lock."""
+        revision = self.revision
+        if expected_revision is not None:
+            self._check_revision(expected_revision)
+        self._recovering = True
+        try:
+            if progress is None:
+                progress = lambda _message, _cancelable: None
+            progress("正在验证任务…", True)
+            raise_if_cancelled(cancel_event=cancel_event)
+            if action == "refresh_reviews":
+                updates = self._review_updates(subject, cancel_event, progress)
+                result = None
+            else:
+                result = self._recover_task(action, subject, cancel_event, progress)
+                updates = {result.task_id: result}
+
+            if updates:
+                tasks = tuple(updates.get(task.task_id, task) for task in self.tasks)
+                verified = [(task, updates[task.task_id].confirmed_paths)
+                            for task in self.tasks if task.task_id in updates]
+                self._commit_recovery(tasks, verified, revision, cancel_event, progress)
+            return result
+        finally:
+            self._recovering = False
+
+    def _recover_task(self, action, task_id, cancel_event, progress):
+        task = self._action_task(task_id, {
+            "restore": ACTION_REQUIRED, "skip": RECOVERABLE, "recheck": {TaskStatus.NEEDS_REVIEW},
+        }[action])
+        if action == "restore" and any(
+            entry.status is TaskStatus.PENDING and entry.overlaps(task) for entry in self.tasks
+        ):
             raise ValueError("队列中有重叠的等待任务，请先移除重复项")
-        confirmed = verify_task(task, self.runtime_paths)
-        return self._save_recovery(replace(
-            task, status=TaskStatus.PENDING, confirmed_paths=confirmed,
-            started_at=None, finished_at=None, outcome=None, error=None,
-        ))
-
-    def recheck(self, task_id):
-        task = self._action_task(task_id, {TaskStatus.NEEDS_REVIEW})
-        return self._save_recovery(self._reviewed(task))
-
-    def _reviewed(self, task):
-        confirmed = verify_task(task, self.runtime_paths, verify_source=False)
+        confirmed = verify_task(
+            task, self.runtime_paths, verify_source=action == "restore",
+            cancel_event=cancel_event, progress=progress,
+        )
+        if action == "restore":
+            return replace(task, status=TaskStatus.PENDING, confirmed_paths=confirmed,
+                           started_at=None, finished_at=None, outcome=None, error=None)
+        if action == "skip":
+            return replace(task, status=TaskStatus.SKIPPED, confirmed_paths=confirmed,
+                           finished_at=now(), outcome="SKIPPED", error="用户选择跳过未完成的任务。")
         return replace(task, status=TaskStatus.INTERRUPTED, confirmed_paths=confirmed,
                        error="发送记录和断点已核对。请选择恢复或跳过此任务。")
 
-    def refresh_reviews(self, record):
-        if not any(task.status is TaskStatus.NEEDS_REVIEW for task in self.tasks):
-            return
-        if any(task.status in ACTIVE for task in self.tasks):
-            raise ValueError("请等待当前上传结束后再核对队列")
-        tasks = []
+    def _review_updates(self, record, cancel_event, progress):
+        updates = {}
         for task in self.tasks:
+            raise_if_cancelled(cancel_event=cancel_event)
             if task.status is TaskStatus.NEEDS_REVIEW and review_matches_task(record, task):
                 try:
-                    task = self._reviewed(task)
+                    updates[task.task_id] = self._recover_task("recheck", task.task_id, cancel_event, progress)
+                except CancellationRequested:
+                    raise
                 except (OSError, ValueError, TypeError, RuntimeError):
                     # A single manual decision may leave other Albums protected.
                     pass
-            tasks.append(task)
-        if tuple(tasks) != self.tasks:
-            self._commit_recovery(tuple(tasks))
+        return updates
+
+    def restore(self, task_id):
+        return self.recover("restore", task_id)
+
+    def recheck(self, task_id):
+        return self.recover("recheck", task_id)
+
+    def refresh_reviews(self, record):
+        return self.recover("refresh_reviews", record)
 
     def skip(self, task_id):
-        task = self._action_task(task_id, RECOVERABLE)
-        if protection_for(task, self.runtime_paths) is not None:
-            raise ValueError("任务仍有未确认发送记录，请先核对后再跳过")
-        return self._save_recovery(replace(
-            task, status=TaskStatus.SKIPPED, finished_at=now(), outcome="SKIPPED",
-            error="用户选择跳过未完成的任务。",
-        ))
+        return self.recover("skip", task_id)
 
     def _pending_index(self, task_id):
         for index, task in enumerate(self.tasks):
@@ -163,10 +281,12 @@ class UploadQueue:
                 return index
         raise ValueError("只能操作等待中的任务")
 
+    @_queue_write
     def remove(self, task_id):
         index = self._pending_index(task_id)
         self._commit(self.tasks[:index] + self.tasks[index + 1:], self.paused)
 
+    @_queue_write
     def move(self, task_id, direction):
         indices = [i for i, task in enumerate(self.tasks) if task.status is TaskStatus.PENDING]
         index = self._pending_index(task_id)
@@ -181,16 +301,19 @@ class UploadQueue:
         self._commit(tuple(task if value.task_id == task.task_id else value for value in self.tasks), paused)
         return task
 
+    @_queue_write
     def prepare(self, task):
         if self.next_pending() != task:
             raise ValueError("任务当前不能启动")
         return self._replace(replace(task, status=TaskStatus.PREPARING, started_at=now()), paused=self.paused)
 
+    @_queue_write
     def start(self, task):
         if task.status is not TaskStatus.PREPARING or task not in self.tasks or self._review_task() is not None:
             raise ValueError("任务尚未进入准备状态")
         return self._replace(replace(task, status=TaskStatus.RUNNING), paused=self.paused)
 
+    @_queue_write
     def finish(self, task, result):
         if task.status not in ACTIVE or task not in self.tasks:
             raise ValueError("任务已结束或不存在")

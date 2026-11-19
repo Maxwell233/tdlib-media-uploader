@@ -168,7 +168,11 @@ def test_controller_runs_fifo_only_after_worker_cleanup(tmp_path, pump, runtime_
         assert control.worker is None
         if state is TaskStatus.NEEDS_REVIEW:
             assert control.recheck(tasks[0].task_id)
+            pump(lambda: not control.recovery_busy)
+            assert store.tasks[0].status is TaskStatus.INTERRUPTED
         assert control.skip(tasks[0].task_id)
+        pump(lambda: not control.recovery_busy)
+        assert store.tasks[0].status is TaskStatus.SKIPPED
         control.set_paused(False)
         pump(lambda: len(outcomes) == 3)
     assert starts == [task.task_id for task in tasks]

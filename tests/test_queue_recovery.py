@@ -194,9 +194,9 @@ def test_atomic_restore_failure_keeps_previous_task_and_disk_state(tmp_path, sto
     previous = store.path.read_bytes()
     real_write = queue_store.atomic_write_json
 
-    def fail(path, value):
+    def fail(path, value, **options):
         if after_replace:
-            real_write(path, value)
+            real_write(path, value, **options)
         raise OSError("write failed")
 
     monkeypatch.setattr(queue_store, "atomic_write_json", fail)
@@ -287,3 +287,81 @@ def test_original_queue_schema_without_recovery_fields_remains_readable(tmp_path
     assert restored.status is TaskStatus.PENDING
     assert restored.plans == task.plans and restored.task_id == task.task_id
     assert json.loads(store.path.read_bytes())["tasks"][0]["manifest_digest"]
+
+
+@pytest.mark.parametrize("outcome", ["FAILED", "CANCELLED", "PARTIAL"])
+def test_skip_preserves_confirmed_checkpoint_even_without_source(tmp_path, runtime_paths, store, outcome):
+    original = task_for(tmp_path / "a")
+    item = original.items[0]
+    state = checkpoint(original, runtime_paths)
+    state.mark_album_completed([payload(item)], [17])
+    before = state.path.read_bytes()
+    batch = UploadBatchResult(original.plans[0].key, BatchStatus.CONFIRMED, (17,), (item,))
+    task = end_first(store, original, outcome, (batch,))
+    later = task_for(tmp_path / "b")
+    store.enqueue(later)
+    original.source_root.rename(tmp_path / "missing")
+    skipped = store.skip(task.task_id)
+    assert skipped.status is TaskStatus.SKIPPED and skipped.task_id == original.task_id
+    assert skipped.plans == original.plans
+    assert skipped.config == original.config and skipped.target == original.target
+    assert state.path.read_bytes() == before and store.tasks == (skipped, later)
+    assert store.next_pending() is None
+    store.set_paused(False)
+    assert store.next_pending() == later
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "snapshot", "target", "journal", "manifest"])
+def test_skip_refuses_to_discard_confirmation_protection(tmp_path, runtime_paths, store, damage):
+    original = task_for(tmp_path / "a")
+    item = original.items[0]
+    key, target = original.plans[0].key, dict(original.target)
+    state = checkpoint(original, runtime_paths)
+    journal = InflightJournal(runtime_paths.UPLOAD_INFLIGHT_DIR)
+    journal.prepare(original.kind, key, [payload(item)], target=target)
+    journal.mark_confirmed(original.kind, key, [17], target=target)
+    state.mark_album_completed([payload(item)], [17])
+    journal.finalize(original.kind, key, target=target)
+    assert not journal.list_unresolved()
+    batch = UploadBatchResult(key, BatchStatus.CONFIRMED, (17,), (item,))
+    task = end_first(store, original, "PARTIAL", (batch,))
+
+    if damage == "missing":
+        state.path.unlink()
+    elif damage == "corrupt":
+        state.path.write_text("{invalid", encoding="utf-8")
+    elif damage in {"snapshot", "target"}:
+        data = state.data
+        if damage == "snapshot":
+            data["completed"][state.signature(payload(item))]["mtime_ns"] += 1
+        else:
+            data["target"]["chat_id"] -= 1
+        state.path.write_text(json.dumps(data), encoding="utf-8")
+    elif damage == "journal":
+        journal.prepare(original.kind, key, [payload(item)], target=target)
+    else:
+        raw = json.loads(store.path.read_bytes())
+        raw["tasks"][0]["plans"][0]["caption"] = "tampered"
+        store.path.write_text(json.dumps(raw), encoding="utf-8")
+
+    queue_data = store.path.read_bytes()
+    checkpoint_data = state.path.read_bytes() if state.path.exists() else None
+    protections = journal.list_unresolved(refresh=True)
+    with pytest.raises((ValueError, RuntimeError)):
+        store.skip(task.task_id)
+    assert store.tasks == (task,) and store.path.read_bytes() == queue_data
+    assert (state.path.read_bytes() if state.path.exists() else None) == checkpoint_data
+    assert journal.list_unresolved(refresh=True) == protections
+
+
+def test_skip_persistence_failure_does_not_publish_success(tmp_path, store, monkeypatch):
+    task = end_first(store, task_for(tmp_path / "a"), "FAILED")
+    previous = store.path.read_bytes()
+
+    def fail(*args, **kwargs):
+        raise OSError("queue write failed")
+
+    monkeypatch.setattr(queue_store, "atomic_write_json", fail)
+    with pytest.raises(OSError, match="queue write failed"):
+        store.skip(task.task_id)
+    assert store.tasks == (task,) and store.path.read_bytes() == previous

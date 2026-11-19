@@ -8,6 +8,7 @@ and cancellation while preview formatting remains reversible.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 import importlib
 from pathlib import Path
 import threading
@@ -15,11 +16,13 @@ import time
 from typing import Any
 from uuid import uuid4
 
+from ..core.concurrency import CancellationRequested
 from ..core.logging import write_exception
 from ..core.models import UploadRunResult
 from ..core.compat import call_supported
 from PySide6.QtCore import QThread, Signal
 
+from ..upload.queue import UploadTask
 from .events import AuthBridge, GuiConsoleUI
 from .tools import require_kind as _require_kind
 
@@ -28,6 +31,45 @@ def _load_upload_runner() -> Callable[..., Any]:
     from .integration import run_v2_upload
 
     return run_v2_upload
+
+
+@dataclass(frozen=True, slots=True)
+class QueueRecoveryResult:
+    action: str
+    task: UploadTask | None = None
+    error: str | None = None
+    cancelled: bool = False
+
+
+class QueueRecoveryWorker(QThread):
+    """Run verification and durable queue writes outside the GUI event loop."""
+
+    progress = Signal(str, bool)
+
+    def __init__(self, store, action, subject, revision):
+        super().__init__()
+        self.store = store
+        self.action = action
+        self.subject = subject
+        self.revision = revision
+        self.cancel_event = threading.Event()
+        self.result: QueueRecoveryResult | None = None
+
+    def request_stop(self):
+        self.cancel_event.set()
+
+    def run(self):
+        try:
+            task = self.store.recover(
+                self.action, self.subject, expected_revision=self.revision,
+                cancel_event=self.cancel_event, progress=self.progress.emit,
+            )
+        except CancellationRequested:
+            self.result = QueueRecoveryResult(self.action, cancelled=True)
+        except Exception as exc:
+            self.result = QueueRecoveryResult(self.action, error=str(exc) or type(exc).__name__)
+        else:
+            self.result = QueueRecoveryResult(self.action, task=task)
 
 
 class ScanWorker(QThread):
@@ -233,7 +275,6 @@ class UploadWorker(QThread):
             if not isinstance(self.result, UploadRunResult):
                 raise TypeError("上传引擎未返回结构化结果")
         except Exception as exc:
-            from ..core.concurrency import CancellationRequested
             from ..telegram.tdlib_common import TDLibCancelled
             from ..upload.engine import UploadCancelled
 

@@ -37,6 +37,7 @@ class TaskPage(QWidget):
     queue_skip_requested = Signal(str)
     queue_recheck_requested = Signal(str)
     queue_inflight_requested = Signal()
+    queue_cancel_requested = Signal()
 
     def __init__(
         self,
@@ -211,13 +212,17 @@ class TaskPage(QWidget):
         self.queue_skip = QPushButton("跳过此任务")
         self.queue_recheck = QPushButton("重新核对状态")
         self.queue_inflight = QPushButton("前往未确认上传")
-        for button in (self.queue_restore, self.queue_skip, self.queue_recheck, self.queue_inflight):
+        self.queue_cancel = QPushButton("取消检查")
+        for button in (self.queue_restore, self.queue_skip, self.queue_recheck,
+                       self.queue_inflight, self.queue_cancel):
             button.setObjectName("secondaryButton")
             actions.addWidget(button)
         self.queue_restore.clicked.connect(lambda: self.queue_restore_requested.emit(self._selected_task()))
         self.queue_skip.clicked.connect(lambda: self.queue_skip_requested.emit(self._selected_task()))
         self.queue_recheck.clicked.connect(lambda: self.queue_recheck_requested.emit(self._selected_task()))
         self.queue_inflight.clicked.connect(self.queue_inflight_requested)
+        self.queue_cancel.clicked.connect(self.queue_cancel_requested)
+        self.queue_cancel.hide()
         queue_layout.addLayout(actions)
         layout.addWidget(card)
         self._queue_paused = False
@@ -248,13 +253,18 @@ class TaskPage(QWidget):
         self.queue_recheck.setEnabled(review and self._queue_actions_allowed)
         self.queue_inflight.setVisible(review)
 
-    def show_queue(self, store, blocked=False):
+    @Slot(str, bool)
+    def show_recovery_progress(self, message, cancelable):
+        self.queue_notice.setText(message)
+        self.queue_cancel.setEnabled(cancelable)
+
+    def show_queue(self, store, blocked=False, *, recovering=False):
         selected = self._selected_task()
         self._queue_paused = store.paused
         self._queue_pending = []
         self._queue_states = {task.task_id: task.status for task in store.tasks}
         self._queue_actions_allowed = not (
-            blocked or store.error or any(status in ACTIVE for status in self._queue_states.values())
+            recovering or blocked or store.error or any(status in ACTIVE for status in self._queue_states.values())
         )
         self.queue_list.clear()
         labels = {
@@ -276,13 +286,14 @@ class TaskPage(QWidget):
             row.setToolTip(3, str(task.source_root))
             row.setToolTip(4, target)
             self.queue_list.addTopLevelItem(row)
-            if task.status is TaskStatus.PENDING and not (blocked or store.error):
+            if task.status is TaskStatus.PENDING and not (recovering or blocked or store.error):
                 self._queue_pending.append(task.task_id)
             if task.task_id == selected:
                 self.queue_list.setCurrentItem(row)
         self.queue_toggle.setText("继续队列" if store.paused else "暂停队列")
-        self.queue_toggle.setEnabled(not (blocked or store.error))
-        if not blocked:
+        self.queue_toggle.setEnabled(not (recovering or blocked or store.error))
+        self.queue_cancel.setVisible(recovering)
+        if not recovering and not blocked:
             self.queue_notice.setText(store.error or store.blocked_reason or (
                 "队列已暂停。继续后按顺序执行等待任务。" if store.paused else
                 f"{len(self._queue_pending)} 个任务等待上传"

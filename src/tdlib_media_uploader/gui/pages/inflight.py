@@ -179,13 +179,19 @@ class InflightPage(QWidget):
         value = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         return value if isinstance(value, dict) else None
 
+    def set_review_blocked(self, blocked):
+        self._review_blocked = blocked
+        self._update_actions()
+
     def _update_actions(self):
-        record = self._selected_record()
+        record = None if getattr(self, "_review_blocked", False) else self._selected_record()
         status = str(record.get("status", "")).upper() if record else ""
         self.sent_button.setEnabled(record is not None and status != "CORRUPT")
         self.not_sent_button.setEnabled(status in {"PREPARED", "SUBMITTED", "UNKNOWN"})
 
     def _emit_choice(self, sent: bool):
+        if getattr(self, "_review_blocked", False):
+            return
         record = self._selected_record()
         if record is None:
             QMessageBox.information(self, "请选择记录", "请先选择一条未确认上传记录。")

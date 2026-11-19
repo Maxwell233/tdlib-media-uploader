@@ -5,6 +5,7 @@ import threading
 
 import pytest
 from PIL import Image
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QDialog, QMessageBox
 
 from conftest import TARGET, task_for
@@ -20,7 +21,7 @@ from tdlib_media_uploader.gui.pages import upload
 from tdlib_media_uploader.gui.preferences import UiPreferences
 from tdlib_media_uploader.gui.theme import DARK_PALETTE, LIGHT_PALETTE, initialize_theme
 from tdlib_media_uploader.gui.workers import UploadWorker
-from tdlib_media_uploader.upload import reconciliation
+from tdlib_media_uploader.upload import queue_recovery, queue_store, reconciliation
 from tdlib_media_uploader.upload.queue import TaskStatus
 from tdlib_media_uploader.upload.queue_store import UploadQueue
 
@@ -297,7 +298,7 @@ def test_theme_switch_leaves_unsaved_retry_settings_and_skips_config_refresh(win
     assert values[("upload_retry", "retry_delay_seconds")] == 0.5
 
 
-def test_review_controls_follow_manual_reconciliation_and_skip_history(window, monkeypatch, tmp_path, runtime_paths):
+def test_review_controls_follow_manual_reconciliation_and_skip_history(window, monkeypatch, tmp_path, runtime_paths, pump):
     win, _, _ = window
     store = win.queue.store
     task = task_for(tmp_path / "a")
@@ -322,6 +323,7 @@ def test_review_controls_follow_manual_reconciliation_and_skip_history(window, m
     assert win.sidebar.currentRow() == win.sidebar_rows["inflight"]
 
     win.inflight_page.reconciliation_requested.emit(record, False)
+    pump(lambda: not win.queue.recovery_busy)
     assert store.tasks[0].status is TaskStatus.INTERRUPTED
     assert store.paused and win.worker is None
     assert not page.queue_skip.isHidden() and not page.queue_restore.isHidden()
@@ -330,6 +332,7 @@ def test_review_controls_follow_manual_reconciliation_and_skip_history(window, m
         page.queue_skip.click()
         assert store.tasks[0].status is TaskStatus.INTERRUPTED
     page.queue_skip.click()
+    pump(lambda: not win.queue.recovery_busy)
     assert store.paused and store.tasks[0].status is TaskStatus.SKIPPED
     assert history[-1]["task_id"] == reviewed.task_id
     assert history[-1]["status"] == "SKIPPED" and history[-1]["success"] is False
@@ -345,3 +348,57 @@ def test_cache_clear_cannot_discard_protection_for_existing_queue_tasks(window, 
     monkeypatch.setattr(win, "_finish_cache_clear", lambda *args, **kwargs: pytest.fail("cleared protection"))
     win._clear_all_cache()
     assert "未完成" in win.statusBar().currentMessage()
+
+
+
+@pytest.mark.parametrize("stage", ["validation", "commit"])
+def test_window_closes_only_after_recovery_can_end_safely(window, tmp_path, pump, monkeypatch, stage):
+    win, _, _ = window
+    store = win.queue.store
+    task = task_for(tmp_path / "failed")
+    store.enqueue(task)
+    failed = store.finish(store.start(store.prepare(task)), UploadRunResult("FAILED"))
+    win._refresh_queue()
+    old_queue = store.path.read_bytes()
+    entered, release = threading.Event(), threading.Event()
+
+    if stage == "validation":
+        module, method = queue_recovery, "validate_snapshots"
+    else:
+        module, method = queue_store, "atomic_write_json"
+    original = getattr(module, method)
+
+    def pause(*args, **kwargs):
+        entered.set()
+        if not release.wait(10):
+            raise RuntimeError("test did not release the recovery thread")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, method, pause)
+    try:
+        win._restore_queued_task(failed.task_id)
+        pump(entered.is_set)
+        assert not win.close()
+        assert win.isVisible() and win.queue.recovery_busy and win.queue.closing
+        assert store.tasks == (failed,) and store.path.read_bytes() == old_queue
+        switched = []
+
+        def open_task_centre():
+            win.sidebar.setCurrentRow(win.sidebar_rows["task"])
+            switched.append(win.task_page.isVisible())
+
+        QTimer.singleShot(0, open_task_centre)
+        pump(lambda: bool(switched))
+        assert switched == [True]
+        assert not win.task_page.queue_cancel.isEnabled()
+    finally:
+        release.set()
+        pump(lambda: not win.queue.recovery_busy)
+    pump(lambda: not win.isVisible())
+    reopened = UploadQueue(store.path, runtime_paths=store.runtime_paths)
+    assert reopened.tasks == store.tasks and reopened.paused and win.queue.worker is None
+    if stage == "validation":
+        assert store.tasks == (failed,) and store.path.read_bytes() == old_queue
+    else:
+        assert store.tasks[0].status is TaskStatus.PENDING
+        assert store.tasks[0].task_id == failed.task_id

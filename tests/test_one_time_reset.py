@@ -38,7 +38,7 @@ class OneTimeResetTest(unittest.TestCase):
         self.window = SimpleNamespace(
             _cache_clear_worker=None,
             worker=None,
-            queue=SimpleNamespace(store=SimpleNamespace(tasks=(), error=None)),
+            queue=SimpleNamespace(store=SimpleNamespace(tasks=(), error=None), recovery_busy=False),
             scanners={},
             _upload_page=lambda kind: self.pages[kind],
             home=Mock(),
