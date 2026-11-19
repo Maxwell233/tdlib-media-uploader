@@ -420,6 +420,7 @@ class MainWindow(QMainWindow):
         else:
             self._upload_page(kind).clear_scan_result()
             self._upload_page(kind).refresh_config()
+            self.settings_page.refresh()
             self.statusBar().showMessage("目录配置已保存")
 
     def _refresh_queue(self):
@@ -767,6 +768,7 @@ class MainWindow(QMainWindow):
             saved_kind = dialog.kind
             self._upload_page(saved_kind).clear_scan_result()
             self._upload_page(saved_kind).refresh_config()
+            self.settings_page.refresh()
             self.statusBar().showMessage(
                 f"{_kind_label(saved_kind)}上传目标已保存"
             )

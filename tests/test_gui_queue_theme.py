@@ -170,6 +170,7 @@ def test_scan_edit_enqueue_while_active_upload_keeps_media_and_theme_isolated(
         monkeypatch.setattr(main_window, "_write_config_values", save_draft)
         b_page.path_selected.emit(scan_kind, str(third))
         assert b_page.result is None
+        assert getattr(win.settings_page.general_panel, f"{scan_kind}_dir").text() == str(third)
         assert win._scan(scan_kind)
         pump(lambda: not win.scanners)
         latest = b_page.result
@@ -271,3 +272,23 @@ def test_theme_write_error_is_visible(window, monkeypatch, qt_app):
     assert LIGHT_PALETTE.bg_base in qt_app.styleSheet()
     assert "保存失败" in win.statusBar().currentMessage()
     assert not prefs.path.exists()
+
+
+def test_theme_switch_leaves_unsaved_retry_settings_and_skips_config_refresh(window, monkeypatch):
+    win, _, prefs = window
+    panel = win.settings_page.advanced_panel
+    assert not panel.album_retry_enabled.isChecked()
+    panel.album_retry_enabled.setChecked(True)
+    panel.album_retry_count.setValue(4)
+    panel.album_retry_delay.setValue(0.5)
+
+    def must_not_refresh():
+        pytest.fail("theme switch reloaded upload settings")
+
+    monkeypatch.setattr(win.settings_page, "refresh", must_not_refresh)
+    win.nav_sidebar.theme_btn.click()
+    assert prefs.theme_mode == "light" and panel.is_dirty()
+    values = panel.collect_values()
+    assert values[("upload_retry", "enabled")] is True
+    assert values[("upload_retry", "max_retries")] == 4
+    assert values[("upload_retry", "retry_delay_seconds")] == 0.5
