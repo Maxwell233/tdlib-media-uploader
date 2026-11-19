@@ -31,16 +31,16 @@ from ..core.upload_journal import (
     UNKNOWN,
     normalize_target,
 )
-from .send_result import _error_text as _send_failure_text
-
 from .send_result import SendRequestRejected
+from .send_result import _error_text as _send_failure_text
 
 
 REQUIRED_TDJSON_VERSION = "1.8.69"
 
 
 class TDLibError(RuntimeError):
-    def __init__(self, code: int, message: str):
+    def __init__(self, code: int, message: str, *, response_received=False):
+        self.response_received = response_received
         self.code = int(code)
         self.message = str(message)
         wait = re.search(r"(?:FLOOD_WAIT_|retry after\s+)(\d+(?:\.\d+)?)", self.message, re.IGNORECASE)
@@ -703,9 +703,9 @@ class TDJsonClient:
                 raise
             raise TimeoutError(f"TDLib 请求超时：{query.get('@type')}") from exc
         if response.get("@type") == "error":
-            error = TDLibError(response.get("code", 0), response.get("message", "unknown error"))
-            error.response_received = True
-            raise error
+            raise TDLibError(
+                response.get("code", 0), response.get("message", "unknown error"), response_received=True
+            )
         return response
 
     def add_update_callback(self, callback):
@@ -1503,7 +1503,7 @@ class TDJsonClient:
                     return self.request(query)
                 return self.request(query, retry_rate_limit=False)
             except TDLibError as error:
-                if not getattr(error, "response_received", False):
+                if not error.response_received:
                     raise
                 # Classify the direct send response only. An error during
                 # message reconciliation cannot establish non-submission.

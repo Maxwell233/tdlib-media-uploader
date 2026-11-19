@@ -281,4 +281,3 @@ class ImprovementsTest(unittest.TestCase):
             self.assertLess(elapsed, 0.5)
         finally:
             timer.cancel()
-

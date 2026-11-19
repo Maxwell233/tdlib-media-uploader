@@ -274,3 +274,16 @@ def test_legacy_partial_without_file_mapping_retains_protection(tmp_path, runtim
     with pytest.raises(ValueError, match="无法对应"):
         ReconciliationService(journal).reconcile_inflight(key, sent=False, kind=a.kind, target=target)
     assert journal.unresolved(a.kind, key, target) is not None
+
+
+def test_original_queue_schema_without_recovery_fields_remains_readable(tmp_path, runtime_paths, store):
+    task = end_first(store, task_for(tmp_path / "a"), "FAILED")
+    serialized = json.loads(store.path.read_bytes())
+    serialized["tasks"][0].pop("manifest_digest")
+    serialized["tasks"][0].pop("confirmed_paths")
+    store.path.write_text(json.dumps(serialized), encoding="utf-8")
+    reopened = queue_store.UploadQueue(store.path, runtime_paths=runtime_paths)
+    restored = reopened.restore(task.task_id)
+    assert restored.status is TaskStatus.PENDING
+    assert restored.plans == task.plans and restored.task_id == task.task_id
+    assert json.loads(store.path.read_bytes())["tasks"][0]["manifest_digest"]
