@@ -1,5 +1,5 @@
 {
-  "release_tag": "autobuild-2026-11-05-12-48",
-  "archive": "ffmpeg-n9.0.2-47-gb204e94e90-win64-lgpl-9.0.zip",
-  "sha256": "9d557b1a39b9db87ff9b5cf7a4c2c3fd42e5f3d21c68714b2dd6e104bd48f715"
+  "release_tag": "autobuild-2026-10-31-12-59",
+  "archive": "ffmpeg-n9.0.2-39-g7adfbe40dc-win64-lgpl-9.0.zip",
+  "sha256": "9d37c564e0d01c18cde184a079fa6ef04d7d2783ada41da81d04165cc8f1a650"
 }
