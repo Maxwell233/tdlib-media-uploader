@@ -126,6 +126,18 @@ class LogEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class AlbumAttemptEvent:
+    """Current whole-Album attempt and time until the next send."""
+
+    album_number: int
+    album_key: str
+    attempt: int
+    max_attempts: int
+    last_error: str | None = None
+    retry_in_seconds: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AuthEvent:
     """A TDLib authentication state update for the GUI adapter."""
 
@@ -154,12 +166,14 @@ class UploadRunResult:
     failed_items: tuple[MediaItem, ...] = ()
     scanned_items: tuple[MediaItem, ...] = ()
     cancelled: bool = False
+    confirmed_before_run: tuple[MediaItem, ...] = ()
 
 
-Event = ProgressEvent | LogEvent | AuthEvent
+Event = ProgressEvent | LogEvent | AuthEvent | AlbumAttemptEvent
 
 
 __all__ = [
+    "AlbumAttemptEvent",
     "AlbumPlan",
     "AuthEvent",
     "BatchStatus",

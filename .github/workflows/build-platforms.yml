@@ -43,6 +43,12 @@ jobs:
           python -m pip install --no-binary imageio-ffmpeg -r requirements-build-lock.txt
           python -m pip check
 
+      - name: Cache Windows FFmpeg archive
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tdlib-media-uploader-ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/ffmpeg-windows.json') }}
+
       - name: Build one-folder EXE
         shell: pwsh
         run: |
@@ -55,7 +61,7 @@ jobs:
           $ffmpegTag = $ffmpegManifest.release_tag
           $ffmpegArchiveName = $ffmpegManifest.archive
           $ffmpegSha256 = $ffmpegManifest.sha256
-          $ffmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$ffmpegTag/$ffmpegArchiveName"
+          $ffmpegUrl = "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/$ffmpegTag/$ffmpegArchiveName"
           $ffmpegStage = Join-Path $projectDir "tools\ffmpeg"
           $ffmpegPath = Join-Path $ffmpegStage "ffmpeg.exe"
           $ffprobePath = Join-Path $ffmpegStage "ffprobe.exe"

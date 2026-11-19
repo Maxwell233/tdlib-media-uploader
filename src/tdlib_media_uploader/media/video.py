@@ -12,13 +12,12 @@ owns that lifecycle.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import contextmanager
 from datetime import datetime
 import importlib
 from pathlib import Path
-import threading
 from typing import Any
 
+from .runtime import media_scope, pipeline_value
 from ..core.compat import call_supported as _call_supported
 from ..contracts import CancelToken, EventSink, UploadContext
 from ..core.filesystem import snapshot_file, stable_path
@@ -44,7 +43,6 @@ from .strategy_support import (
 )
 
 
-_MISSING = object()
 
 
 def _load_legacy_module() -> Any:
@@ -149,12 +147,6 @@ class VideoStrategy:
     kind = "video"
     validate_source_snapshots = True
 
-    # The legacy module reads ``cfg.VIDEO_DIR`` for several helpers even
-    # though the V2 contract passes source_root explicitly.  The GUI runs one
-    # upload task at a time, and this lock makes the temporary compatibility
-    # override safe for any accidental same-process concurrent caller.
-    _legacy_config_lock = threading.RLock()
-
     def __init__(
         self,
         legacy: Any | None = None,
@@ -174,7 +166,7 @@ class VideoStrategy:
 
     @property
     def _config(self) -> Any:
-        return getattr(self.legacy, "cfg", None) or self.config or self.legacy
+        return self.config or getattr(self.legacy, "cfg", None) or self.legacy
 
     _target_dict = staticmethod(_shared_target_dict)
 
@@ -186,43 +178,8 @@ class VideoStrategy:
         configured = getattr(self._config, "VIDEO_DIR", None)
         return Path(configured) if configured is not None else Path(".")
 
-    @contextmanager
-    def _legacy_root(
-        self,
-        source_root: Path,
-        items: Sequence[MediaItem] = (),
-    ):
-        """Temporarily align legacy global configuration with V2 source_root."""
-
-        holder = getattr(self.legacy, "cfg", None) or self.config
-        attribute_owner = holder if hasattr(holder, "VIDEO_DIR") else None
-        if attribute_owner is None and hasattr(self.legacy, "VIDEO_DIR"):
-            attribute_owner = self.legacy
-
-        with self._legacy_config_lock:
-            original = (
-                getattr(attribute_owner, "VIDEO_DIR")
-                if attribute_owner is not None
-                else _MISSING
-            )
-            previous_snapshots = getattr(self.legacy, "LAST_SCAN_SNAPSHOTS", _MISSING)
-            try:
-                if attribute_owner is not None and original != Path(source_root):
-                    setattr(attribute_owner, "VIDEO_DIR", Path(source_root))
-                if previous_snapshots is not _MISSING:
-                    working = dict(previous_snapshots or {})
-                    for item in items:
-                        working[self._normalize_path(item.path)] = (
-                            int(item.snapshot.size),
-                            int(item.snapshot.mtime_ns),
-                        )
-                    self.legacy.LAST_SCAN_SNAPSHOTS = working
-                yield
-            finally:
-                if attribute_owner is not None and original is not _MISSING and original != Path(source_root):
-                    setattr(attribute_owner, "VIDEO_DIR", original)
-                if previous_snapshots is not _MISSING:
-                    self.legacy.LAST_SCAN_SNAPSHOTS = previous_snapshots
+    def _legacy_root(self, source_root: Path, items=()):
+        return media_scope(self._config, kind=self.kind, root=Path(source_root), items=items)
 
     def _cancel_event(self, token: CancelToken | None):
         return _CancelEventBridge(token) if token is not None else None
@@ -275,7 +232,7 @@ class VideoStrategy:
         if size is not None and mtime_ns is not None:
             return FileSnapshot(str(path), _as_int(size), _as_int(mtime_ns))
 
-        snapshots = getattr(self.legacy, "LAST_SCAN_SNAPSHOTS", {})
+        snapshots = pipeline_value(self.legacy, "LAST_SCAN_SNAPSHOTS", {})
         try:
             value = snapshots.get(self._normalize_path(path))
         except AttributeError:
@@ -508,10 +465,10 @@ class VideoStrategy:
             else:
                 raw_items, missing = paths, ()
 
-            warnings = [str(value) for value in getattr(self.legacy, "LAST_SCAN_WARNINGS", ())]
-            errors = [str(value) for value in getattr(self.legacy, "LAST_SCAN_ERRORS", ())]
+            warnings = [str(value) for value in pipeline_value(self.legacy, "LAST_SCAN_WARNINGS", ())]
+            errors = [str(value) for value in pipeline_value(self.legacy, "LAST_SCAN_ERRORS", ())]
             errors.extend(metadata_errors)
-            size_records = getattr(self.legacy, "LAST_SCAN_SIZE_SKIPS", ()) or ()
+            size_records = pipeline_value(self.legacy, "LAST_SCAN_SIZE_SKIPS", ()) or ()
             for record in size_records:
                 if isinstance(record, Mapping) and record.get("reason"):
                     warnings.append(str(record["reason"]))
@@ -653,16 +610,15 @@ class VideoStrategy:
         legacy_items: Sequence[Mapping[str, Any]],
         context: UploadContext | None,
     ) -> str:
+        if context is not None and context.metadata.get("frozen_caption"):
+            return plan.caption
         caption = str(plan.caption or "")
         config = self._config
         enabled = bool(getattr(config, "VIDEO_CAPTION_INCLUDE_FILENAMES", False))
         helper = getattr(self.legacy, "with_filename_description", None)
         if not enabled or not callable(helper):
             return caption
-        numberer = getattr(self.legacy, "include_filename_numbers", None)
-        numbered = bool(numberer()) if callable(numberer) else bool(
-            getattr(config, "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS", True)
-        )
+        numbered = bool(getattr(config, "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS", True))
         metadata = context.metadata if context is not None else {}
         limit = metadata.get("caption_limit", metadata.get("caption_length_limit", 1024))
         return str(

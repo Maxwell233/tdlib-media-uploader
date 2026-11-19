@@ -339,11 +339,11 @@ def scan_result(
     scan_warnings = [str(value) for value in scan.warnings if str(value)]
     scan_size_skips = [
         dict(value)
-        for value in (getattr(bundle.legacy, "LAST_SCAN_SIZE_SKIPS", ()) or ())
+        for value in (getattr(bundle, "size_skips", ()) or ())
         if isinstance(value, dict)
     ]
     ignored_root_media = list(
-        getattr(bundle.legacy, "LAST_SCAN_IGNORED_ROOT_MEDIA", ()) or ()
+        getattr(bundle, "ignored_root_media", ()) or ()
     )
     warning, rejected, compressing = _format_scan_warnings(
         kind,

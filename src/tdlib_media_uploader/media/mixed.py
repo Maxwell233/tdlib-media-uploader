@@ -10,12 +10,11 @@ journaling, transport calls and checkpoints.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
 import importlib
 from pathlib import Path
-import threading
 from typing import Any
 
+from .runtime import media_scope, pipeline_value
 from ..core.compat import call_supported as _call_compatible
 from ..contracts import CancelToken, EventSink, UploadContext
 from ..core.models import (
@@ -36,8 +35,6 @@ from .strategy_support import (
 )
 
 
-_LEGACY_SCOPE_LOCK = threading.RLock()
-_MISSING = object()
 
 
 def _load_legacy_module() -> Any:
@@ -172,7 +169,7 @@ class MixedMediaStrategy:
     @property
     def _config(self) -> Any:
         return (
-            getattr(self._legacy, "cfg", None) or self._config_override or self._legacy
+            self._config_override or getattr(self._legacy, "cfg", None) or self._legacy
         )
 
     def _root(self, source_root: Path | None = None) -> Path:
@@ -183,20 +180,8 @@ class MixedMediaStrategy:
         configured = getattr(self._config, "MIXED_DIR", None)
         return Path(configured) if configured is not None else Path(".")
 
-    @contextmanager
-    def _legacy_scope(self, source_root: Path):
-        """Temporarily align the legacy root with the V2 run context."""
-
-        config = getattr(self._legacy, "cfg", None) or self._config_override
-        with _LEGACY_SCOPE_LOCK:
-            previous = getattr(config, "MIXED_DIR", _MISSING)
-            try:
-                if previous is not _MISSING and previous != Path(source_root):
-                    config.MIXED_DIR = Path(source_root)
-                yield
-            finally:
-                if previous is not _MISSING and previous != Path(source_root):
-                    config.MIXED_DIR = previous
+    def _legacy_scope(self, source_root: Path, items=()):
+        return media_scope(self._config, kind=self.kind, root=Path(source_root), items=items)
 
     @staticmethod
     def _legacy_item(item: MediaItem) -> dict[str, Any]:
@@ -338,18 +323,18 @@ class MixedMediaStrategy:
     def _scan_diagnostics(legacy: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
         errors = tuple(
             str(value)
-            for value in getattr(legacy, "LAST_SCAN_ERRORS", ())
+            for value in pipeline_value(legacy, "LAST_SCAN_ERRORS", ())
             if str(value)
         )
         warnings = [
             str(value)
-            for value in getattr(legacy, "LAST_SCAN_WARNINGS", ())
+            for value in pipeline_value(legacy, "LAST_SCAN_WARNINGS", ())
             if str(value)
         ]
         rejected_count = 0
         preflight_count = 0
         compressing_count = 0
-        for record in getattr(legacy, "LAST_SCAN_SIZE_SKIPS", ()):
+        for record in pipeline_value(legacy, "LAST_SCAN_SIZE_SKIPS", ()):
             action = record.get("action")
             if action == "skip":
                 rejected_count += 1
@@ -373,7 +358,7 @@ class MixedMediaStrategy:
                 f"已扫描到 {preflight_count} 个源文件超过视频大小上限；"
                 "上传前将检查能否无损转封装，并按输出大小复核。"
             )
-        ignored = list(getattr(legacy, "LAST_SCAN_IGNORED_ROOT_MEDIA", ()))
+        ignored = list(pipeline_value(legacy, "LAST_SCAN_IGNORED_ROOT_MEDIA", ()))
         if ignored:
             warnings.append(
                 f"混合根目录中有 {len(ignored)} 个媒体已忽略；"
@@ -519,7 +504,7 @@ class MixedMediaStrategy:
     def _caption_settings(
         self, context: UploadContext | None
     ) -> tuple[bool, bool, int]:
-        config = getattr(self._legacy, "cfg", None) or self._config_override
+        config = self._config
         include = bool(getattr(config, "MIXED_CAPTION_INCLUDE_FILENAMES", False))
         numbered = bool(getattr(config, "MIXED_CAPTION_INCLUDE_FILENAME_NUMBERS", True))
         limit_value = 1024
@@ -536,6 +521,8 @@ class MixedMediaStrategy:
         *,
         context: UploadContext | None,
     ) -> str:
+        if context is not None and context.metadata.get("frozen_caption"):
+            return plan.caption
         include, numbered, limit = self._caption_settings(context)
         formatter = getattr(self._legacy, "with_filename_description")
         return str(

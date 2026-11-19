@@ -5,20 +5,23 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Signal, Slot
+from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QListWidget,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from ..theme import THEME
+from ...upload.queue import ACTIVE, RECOVERABLE, TaskStatus
 from ..tools import format_eta, format_size, kind_label
 
 
@@ -27,6 +30,14 @@ class TaskPage(QWidget):
 
     safe_stop_requested = Signal()
     immediate_stop_requested = Signal()
+    queue_pause_requested = Signal(bool)
+    queue_move_requested = Signal(str, int)
+    queue_remove_requested = Signal(str)
+    queue_restore_requested = Signal(str)
+    queue_skip_requested = Signal(str)
+    queue_recheck_requested = Signal(str)
+    queue_inflight_requested = Signal()
+    queue_cancel_requested = Signal()
 
     def __init__(
         self,
@@ -54,6 +65,7 @@ class TaskPage(QWidget):
         title_row.addStretch(1)
         title_row.addWidget(self.task_status)
         layout.addLayout(title_row)
+        self._build_queue(layout)
 
         # 1. Dual Progress & Real-time Metrics Card (No QGroupBox)
         progress_card = QFrame()
@@ -66,6 +78,11 @@ class TaskPage(QWidget):
         self.album_label = QLabel("当前 Album：尚未开始")
         self.album_label.setObjectName("sectionTitle")
         progress_layout.addWidget(self.album_label)
+        self.attempt_label = QLabel()
+        self.attempt_label.setObjectName("mutedLabel")
+        self.attempt_label.setWordWrap(True)
+        self.attempt_label.hide()
+        progress_layout.addWidget(self.attempt_label)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
@@ -147,12 +164,159 @@ class TaskPage(QWidget):
         bottom.addWidget(self.immediate_stop_button)
         layout.addLayout(bottom)
 
+    def _build_queue(self, layout):
+        card = QFrame()
+        card.setObjectName("surfaceCard")
+        queue_layout = QVBoxLayout(card)
+        controls = QHBoxLayout()
+        title = QLabel("上传队列")
+        title.setObjectName("sectionTitle")
+        controls.addWidget(title)
+        controls.addStretch(1)
+        self.queue_toggle = QPushButton("暂停队列")
+        self.queue_up = QPushButton("上移")
+        self.queue_down = QPushButton("下移")
+        self.queue_remove = QPushButton("移除")
+        for button in (self.queue_toggle, self.queue_up, self.queue_down, self.queue_remove):
+            button.setObjectName("secondaryButton")
+            controls.addWidget(button)
+        self.queue_toggle.clicked.connect(lambda: self.queue_pause_requested.emit(not self._queue_paused))
+        self.queue_up.clicked.connect(lambda: self.queue_move_requested.emit(self._selected_task(), -1))
+        self.queue_down.clicked.connect(lambda: self.queue_move_requested.emit(self._selected_task(), 1))
+        self.queue_remove.clicked.connect(lambda: self.queue_remove_requested.emit(self._selected_task()))
+        queue_layout.addLayout(controls)
+
+        self.queue_notice = QLabel()
+        self.queue_notice.setObjectName("mutedLabel")
+        self.queue_notice.setWordWrap(True)
+        queue_layout.addWidget(self.queue_notice)
+
+        self.queue_list = QTreeWidget()
+        self.queue_list.setRootIsDecorated(False)
+        self.queue_list.setAlternatingRowColors(True)
+        self.queue_list.setHeaderLabels(["顺序", "状态", "类型", "来源目录", "上传目标", "文件", "大小"])
+        self.queue_list.setMinimumHeight(84)
+        self.queue_list.setMaximumHeight(165)
+        header = self.queue_list.header()
+        for index in (0, 2, 5, 6):
+            header.setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setStretchLastSection(False)
+        self.queue_list.setColumnWidth(1, 96)
+        self.queue_list.setColumnWidth(4, 142)
+        self.queue_list.itemSelectionChanged.connect(self._update_queue_controls)
+        queue_layout.addWidget(self.queue_list)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        self.queue_restore = QPushButton("重新验证并恢复")
+        self.queue_skip = QPushButton("跳过此任务")
+        self.queue_recheck = QPushButton("重新核对状态")
+        self.queue_inflight = QPushButton("前往未确认上传")
+        self.queue_cancel = QPushButton("取消检查")
+        for button in (self.queue_restore, self.queue_skip, self.queue_recheck,
+                       self.queue_inflight, self.queue_cancel):
+            button.setObjectName("secondaryButton")
+            actions.addWidget(button)
+        self.queue_restore.clicked.connect(lambda: self.queue_restore_requested.emit(self._selected_task()))
+        self.queue_skip.clicked.connect(lambda: self.queue_skip_requested.emit(self._selected_task()))
+        self.queue_recheck.clicked.connect(lambda: self.queue_recheck_requested.emit(self._selected_task()))
+        self.queue_inflight.clicked.connect(self.queue_inflight_requested)
+        self.queue_cancel.clicked.connect(self.queue_cancel_requested)
+        self.queue_cancel.hide()
+        queue_layout.addLayout(actions)
+        layout.addWidget(card)
+        self._queue_paused = False
+        self._queue_pending = []
+        self._queue_actions_allowed = False
+        self._queue_states = {}
+        self._update_queue_controls()
+
+    def _selected_task(self):
+        row = self.queue_list.currentItem()
+        return row.data(0, Qt.ItemDataRole.UserRole) if row is not None else ""
+
+    def _update_queue_controls(self):
+        selected = self._selected_task()
+        pending = self._queue_pending
+        index = pending.index(selected) if selected in pending else -1
+        self.queue_up.setEnabled(index > 0)
+        self.queue_down.setEnabled(0 <= index < len(pending) - 1)
+        self.queue_remove.setEnabled(index >= 0)
+        status = self._queue_states.get(selected)
+        recoverable = status in RECOVERABLE
+        review = status is TaskStatus.NEEDS_REVIEW
+        self.queue_restore.setVisible(recoverable)
+        self.queue_restore.setEnabled(recoverable and self._queue_actions_allowed)
+        self.queue_skip.setVisible(recoverable)
+        self.queue_skip.setEnabled(recoverable and self._queue_actions_allowed)
+        self.queue_recheck.setVisible(review)
+        self.queue_recheck.setEnabled(review and self._queue_actions_allowed)
+        self.queue_inflight.setVisible(review)
+
+    @Slot(str, bool)
+    def show_recovery_progress(self, message, cancelable):
+        self.queue_notice.setText(message)
+        self.queue_cancel.setEnabled(cancelable)
+
+    def show_queue(self, store, blocked=False, *, recovering=False):
+        selected = self._selected_task()
+        self._queue_paused = store.paused
+        self._queue_pending = []
+        self._queue_states = {task.task_id: task.status for task in store.tasks}
+        self._queue_actions_allowed = not (
+            recovering or blocked or store.error or any(status in ACTIVE for status in self._queue_states.values())
+        )
+        self.queue_list.clear()
+        labels = {
+            TaskStatus.PENDING: "等待中", TaskStatus.PREPARING: "准备中", TaskStatus.RUNNING: "上传中",
+            TaskStatus.COMPLETED: "已完成", TaskStatus.FAILED: "失败", TaskStatus.INTERRUPTED: "已中断",
+            TaskStatus.NEEDS_REVIEW: "待核对", TaskStatus.SKIPPED: "已跳过",
+        }
+        for index, task in enumerate(store.tasks, 1):
+            state = "部分完成" if task.status is TaskStatus.FAILED and task.outcome == "PARTIAL" else labels[task.status]
+            target = str(task.target["chat_id"])
+            if task.target["forum_topic_id"]:
+                target += f" / {task.target['forum_topic_id']}"
+            row = QTreeWidgetItem([
+                str(index), state, kind_label(task.kind), str(task.source_root),
+                target, str(len(task.items)), self._size_formatter(task.total_bytes),
+            ])
+            row.setData(0, Qt.ItemDataRole.UserRole, task.task_id)
+            row.setToolTip(1, task.error or state)
+            row.setToolTip(3, str(task.source_root))
+            row.setToolTip(4, target)
+            self.queue_list.addTopLevelItem(row)
+            if task.status is TaskStatus.PENDING and not (recovering or blocked or store.error):
+                self._queue_pending.append(task.task_id)
+            if task.task_id == selected:
+                self.queue_list.setCurrentItem(row)
+        self.queue_toggle.setText("继续队列" if store.paused else "暂停队列")
+        self.queue_toggle.setEnabled(not (recovering or blocked or store.error))
+        self.queue_cancel.setVisible(recovering)
+        if not recovering and not blocked:
+            self.queue_notice.setText(store.error or store.blocked_reason or (
+                "队列已暂停。继续后按顺序执行等待任务。" if store.paused else
+                f"{len(self._queue_pending)} 个任务等待上传"
+            ))
+        self._update_queue_controls()
+
+    def show_album_attempt(self, event):
+        text = f"Album {event.album_number} · 第 {event.attempt}/{event.max_attempts} 次尝试"
+        if event.last_error:
+            text += f" · 上次失败 {event.last_error.splitlines()[0][:160]}"
+        if event.retry_in_seconds is not None:
+            text += f" · {event.retry_in_seconds} 秒后重试"
+        self.attempt_label.setText(text)
+        self.attempt_label.show()
+
     def start_session(self, kind: str, result: dict):
         self.title.setText(f"任务中心 · {kind_label(kind)}")
         self.task_status.setText("正在启动…")
         self.stop_button.setEnabled(True)
         self.immediate_stop_button.setEnabled(True)
         self.progress.setValue(0)
+        self.album_label.setText("当前 Album：尚未开始")
+        self.attempt_label.hide()
         self.metrics.setText(
             f"待上传 {result['pending_files']} 个 · "
             f"{self._size_formatter(result['pending_bytes'])} · "
@@ -196,6 +360,7 @@ class TaskPage(QWidget):
     def finish_session(self, success: bool, message: str):
         self.stop_button.setEnabled(False)
         self.immediate_stop_button.setEnabled(False)
+        self.attempt_label.hide()
         self.task_status.setText("已完成" if success else message)
         self.log.appendPlainText(("✓ " if success else "! ") + message)
 

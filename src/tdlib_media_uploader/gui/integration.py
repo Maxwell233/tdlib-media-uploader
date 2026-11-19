@@ -10,9 +10,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
 from dataclasses import dataclass, replace
-import sys
 import importlib
 import threading
 import time
@@ -26,6 +24,7 @@ from ..contracts import UploadContext
 from ..config.snapshot import snapshot_config
 from ..core.models import FileSnapshot
 from ..core.models import (
+    AlbumAttemptEvent,
     AlbumPlan,
     AuthEvent,
     BatchStatus,
@@ -36,7 +35,10 @@ from ..core.models import (
     UploadRunResult,
 )
 from ..media import ImageStrategy, MixedStrategy, VideoStrategy
+from ..media.runtime import media_scope, pipeline_value
+from ..core.source_snapshot import validate_snapshots
 from ..telegram.send_result import SendResult
+from ..upload.retry import AlbumRetryPolicy
 from ..upload.engine import (
     UploadCancelled,
     UploadEngine,
@@ -68,7 +70,6 @@ _DEVICE_MODELS = {
     "mixed": "TDLib Mixed Album Uploader",
     "video": "TDLib Video Album Uploader",
 }
-_MISSING = object()
 
 
 def _normalize_kind(kind: str) -> str:
@@ -89,29 +90,11 @@ def _state_directory(kind: str, runtime_paths: Any | None) -> Path | None:
     return Path(value) if value is not None else None
 
 
-def _new_state(legacy: Any, target: Mapping[str, Any], state_dir: Path | None) -> Any:
+def _new_state(legacy, target, state_dir, *, create=True):
     state_type = getattr(legacy, "UploadState", None)
     if not callable(state_type):
         raise TypeError("legacy uploader 缺少 UploadState()")
-    return _call_supported(state_type, target=dict(target or {}), state_dir=state_dir)
-
-
-@contextmanager
-def _legacy_root_scope(legacy: Any, config: Any, kind: str, root: Path):
-    """Align the legacy state constructor with the explicit V2 source root."""
-
-    owner = getattr(legacy, "cfg", None) or config
-    attribute = _ROOT_NAMES[_normalize_kind(kind)]
-    if not hasattr(owner, attribute) and hasattr(legacy, attribute):
-        owner = legacy
-    previous = getattr(owner, attribute, _MISSING)
-    try:
-        if previous is not _MISSING and previous != Path(root):
-            setattr(owner, attribute, Path(root))
-        yield
-    finally:
-        if previous is not _MISSING and previous != Path(root):
-            setattr(owner, attribute, previous)
+    return _call_supported(state_type, target=dict(target or {}), state_dir=state_dir, create=create)
 
 
 class GuiCancelToken:
@@ -167,6 +150,11 @@ class GuiEventSink:
             method(message)
 
     def emit(self, event: Any) -> None:
+        if isinstance(event, AlbumAttemptEvent):
+            callback = getattr(self.ui, "album_attempt", None)
+            if callable(callback):
+                callback(event)
+            return
         if isinstance(event, LogEvent):
             self._ui_message(event.level, str(event.message))
             return
@@ -220,6 +208,8 @@ class V2ScanBundle:
     scan_result: ScanResult
     plans: tuple[AlbumPlan, ...]
     missing: tuple[Path, ...] = ()
+    size_skips: tuple[Mapping, ...] = ()
+    ignored_root_media: tuple[Path, ...] = ()
 
 
 def _strategy(kind: str, legacy: Any, config: Any, source_root: Path) -> Any:
@@ -246,60 +236,41 @@ def scan_v2(
     normalized = _normalize_kind(kind)
     if config is None:
         config = importlib.import_module("tdlib_media_uploader.config.loader")
-    activate = getattr(config, "activate_target", None)
-    if callable(activate):
-        activate(normalized)
+    root = Path(source_root).absolute()
+    config = snapshot_config(
+        config, normalized, target, immutable=True, overrides={_ROOT_NAMES[normalized]: root}
+    )
+    with media_scope(config):
+        return _scan_v2(normalized, root, target, config, runtime_paths, cancel_event, progress_callback)
 
+
+def _scan_v2(normalized, root, target, config, runtime_paths, cancel_event, progress_callback):
     legacy = _load_pipeline(normalized)
     state_dir = _state_directory(normalized, runtime_paths)
-    root = Path(source_root)
     strategy = _strategy(normalized, legacy, config, root)
     token = GuiCancelToken(cancel_event)
     sink = GuiEventSink(progress_callback=progress_callback, kind=normalized)
-    with _legacy_root_scope(legacy, config, normalized, root):
-        state = _new_state(legacy, target, state_dir)
+    state = _new_state(legacy, target, state_dir, create=False)
     try:
-        scan_result = strategy.scan(
-            root,
-            cancel_token=token,
-            event_sink=sink,
-        )
-    except BaseException as error:
-        if token.is_cancelled() or bool(getattr(error, "cancelled", False)):
+        scan_result = strategy.scan(root, cancel_token=token, event_sink=sink)
+    except Exception:
+        if token.is_cancelled():
             scan_result = ScanResult(cancelled=True)
         else:
             raise
 
-    if scan_result.cancelled or token.is_cancelled():
-        return V2ScanBundle(
-            normalized,
-            root,
-            dict(target or {}),
-            strategy,
-            legacy,
-            state,
-            replace(scan_result, items=(), cancelled=True),
-            (),
-        )
-
-    plans = tuple(
-        strategy.build_plans(
-            scan_result,
-            target=dict(target or {}),
-            state=state,
-        )
-    )
-    missing = tuple(Path(value) for value in getattr(strategy, "last_missing", ()) or ())
+    cancelled = scan_result.cancelled or token.is_cancelled()
+    plans = () if cancelled else tuple(strategy.build_plans(scan_result, target=dict(target), state=state))
+    if token.is_cancelled():
+        cancelled = True
+        plans = ()
+    if cancelled:
+        scan_result = replace(scan_result, items=(), cancelled=True)
     return V2ScanBundle(
-        normalized,
-        root,
-        dict(target or {}),
-        strategy,
-        legacy,
-        state,
-        scan_result,
-        plans,
-        missing,
+        normalized, root, dict(target), strategy, legacy, state, scan_result, plans,
+        tuple(getattr(strategy, "last_missing", ())),
+        tuple(pipeline_value(legacy, "LAST_SCAN_SIZE_SKIPS", ())),
+        tuple(pipeline_value(legacy, "LAST_SCAN_IGNORED_ROOT_MEDIA", ())),
     )
 
 
@@ -331,7 +302,7 @@ class _ConfirmedStateAdapter:
         self.path = getattr(state, "path", "")
 
     def is_completed(self, item: Any) -> bool:
-        return bool(self.state.is_completed(item))
+        return bool(self.state.is_completed(_legacy_item(item) if isinstance(item, MediaItem) else item))
 
     def mark_album_completed(self, items: Sequence[Any], message_ids=None) -> None:
         self.state.mark_album_completed(items, message_ids)
@@ -625,6 +596,8 @@ class TDLibSender:
                     pending_ids=value.get("pending", []),
                     item_results=value.get("item_results"), target=dict(target or {}),
                 )
+        policy = context.metadata.get("album_retry") if context is not None else None
+        request_options = {"retry_rate_limit": False} if policy and policy.enabled else {}
         try:
             value = _call_supported(
                 self.client.send_contents,
@@ -635,6 +608,7 @@ class TDLibSender:
                 on_submitted=on_submitted,
                 on_delivery=on_delivery,
                 prepared_media=prepared_media,
+                **request_options,
             )
             if isinstance(value, SendResult):
                 result = value
@@ -657,19 +631,8 @@ class TDLibSender:
                     BatchStatus.CONFIRMED,
                     succeeded_ids=tuple(int(value) for value in (value or ())),
                 )
-            if result.status is BatchStatus.CONFIRMED:
-                self.progress.finish_album(items)
             return result
-        except BaseException as error:
-            # TDLib request errors are observed before Telegram accepts the
-            # request; tell UploadEngine so it can persist FAILED instead of
-            # conservatively escalating a definite request rejection to
-            # UNKNOWN.  Cancellation/timeouts remain ambiguous by design.
-            if type(error).__name__ == "TDLibError":
-                try:
-                    error.submitted = False
-                except Exception:
-                    pass
+        except BaseException:
             finish = getattr(self.ui, "finish", None)
             if callable(finish):
                 try:
@@ -677,6 +640,10 @@ class TDLibSender:
                 except Exception:
                     pass
             raise
+
+
+    def confirmed(self, items):
+        self.progress.finish_album(items)
 
 
 def _premium_checker(strategy: Any, client: Any):
@@ -727,23 +694,8 @@ def run_v2_upload(kind: str, **kwargs) -> UploadRunResult:
         config = importlib.import_module("tdlib_media_uploader.config.loader")
     frozen = snapshot_config(config, kind, kwargs.get("target"), immutable=True,
         overrides={_ROOT_NAMES[name]: Path(kwargs["source_root"]) for name in _ROOT_NAMES})
-    legacy = _load_pipeline(kind)
-    modules = [legacy]
-    for name in _MEDIA_PIPELINES.values():
-        module = sys.modules.get(name)
-        if module is not None and all(module is not value for value in modules):
-            modules.append(module)
-    previous = [(module, getattr(module, "cfg", _MISSING)) for module in modules]
-    try:
-        for module, _ in previous:
-            module.cfg = frozen
+    with media_scope(frozen):
         return _run_v2_upload(kind, **{**kwargs, "config": frozen})
-    finally:
-        for module, value in previous:
-            if value is _MISSING:
-                del module.cfg
-            else:
-                module.cfg = value
 
 
 def _confirmed_preview(preview, strategy, root, target, state):
@@ -793,6 +745,7 @@ def _run_v2_upload(
     runtime_paths: Any | None = None,
     client_factory: Callable[..., Any] | None = None,
     engine_factory: Callable[..., Any] | None = None,
+    on_ready: Callable[[], UploadRunResult | None] | None = None,
 ) -> UploadRunResult:
     """Run one GUI upload through ``UploadEngine`` and a legacy TDLib client."""
 
@@ -801,9 +754,6 @@ def _run_v2_upload(
     target = validate_send_target(dict(target))
     if config is None:
         config = importlib.import_module("tdlib_media_uploader.config.loader")
-    activate = getattr(config, "activate_target", None)
-    if callable(activate):
-        activate(normalized)
     legacy = _load_pipeline(normalized)
     state_dir = _state_directory(normalized, runtime_paths)
     root = Path(source_root)
@@ -811,8 +761,30 @@ def _run_v2_upload(
     token = GuiCancelToken(cancel_event, stop_after_current)
     sink = GuiEventSink(ui, kind=normalized)
 
+    state = _new_state(legacy, target, state_dir, create=False)
+    state_adapter = _ConfirmedStateAdapter(state, _cleanup_for(legacy, normalized))
+    captured_scan, captured_plans = _confirmed_preview(preview_result, strategy, root, target, state_adapter)
+    if (preview_result or {}).get("queued"):
+        from ..core.source_snapshot import SourceChanged
+
+        try:
+            validate_snapshots(
+                (item.path, item.snapshot.size, item.snapshot.mtime_ns)
+                for plan in captured_plans for item in plan.items
+            )
+            known = (preview_result or {}).get("known_confirmed")
+            if known is None:
+                known = {stable_path(item.path) for plan in captured_plans
+                         for item in plan.items if item not in plan.pending_items}
+            completed_paths = tuple(stable_path(item.path) for item in captured_scan.items
+                                    if state_adapter.is_completed(item))
+            if not set(known).issubset(completed_paths):
+                raise SourceChanged("已确认文件缺少上传断点，请先核对发送记录")
+        except SourceChanged as error:
+            return UploadRunResult("FAILED", error=str(error))
+    else:
+        completed_paths = tuple((preview_result or {}).get("completed_paths", ()) or ())
     raw_items = tuple((preview_result or {}).get("items", ()) or ())
-    completed_paths = tuple((preview_result or {}).get("completed_paths", ()) or ())
     progress = GuiUploadProgress(normalized, raw_items, completed_paths, ui)
 
     if client_factory is None:
@@ -844,12 +816,6 @@ def _run_v2_upload(
             add_callback(progress.handle_update)
             callback_added = True
 
-        with _legacy_root_scope(legacy, config, normalized, root):
-            state = _new_state(legacy, target, state_dir)
-        state_adapter = _ConfirmedStateAdapter(
-            state,
-            _cleanup_for(legacy, normalized),
-        )
         from ..core.upload_journal import InflightJournal  # noqa: PLC0415
 
         journal_root = getattr(runtime_paths, "UPLOAD_INFLIGHT_DIR", None) if runtime_paths is not None else None
@@ -861,7 +827,6 @@ def _run_v2_upload(
             ui,
             total_albums=int((preview_result or {}).get("album_count", 0) or 0),
         )
-        captured_scan, captured_plans = _confirmed_preview(preview_result, strategy, root, target, state_adapter)
         context = UploadContext(
             scan_result=captured_scan,
             plans=captured_plans,
@@ -876,6 +841,8 @@ def _run_v2_upload(
             preflight=_premium_checker(strategy, client),
             metadata={
                 "is_premium": getattr(client, "is_premium", None),
+                "album_retry": AlbumRetryPolicy.from_config(config),
+                "frozen_caption": bool((preview_result or {}).get("queued")),
                 "caption_limit": int(caption_limit),
                 "caption_length_limit": int(caption_limit),
                 "prefetch_next": bool(
@@ -898,7 +865,11 @@ def _run_v2_upload(
             preflight=context.preflight,
             prefetch_next=context.metadata.get("prefetch_next"),
         )
-        return engine.run(
+        if on_ready is not None:
+            halted = on_ready()
+            if halted is not None:
+                return halted
+        result = engine.run(
             strategy,
             source_root=root,
             target=dict(target or {}),
@@ -906,6 +877,12 @@ def _run_v2_upload(
             event_sink=sink,
             context=context,
         )
+        if (preview_result or {}).get("queued"):
+            completed_at_start = set(completed_paths)
+            result = replace(result, confirmed_before_run=tuple(
+                item for item in captured_scan.items if stable_path(item.path) in completed_at_start
+            ))
+        return result
     finally:
         def cleanup_call(label, callback):
             try:

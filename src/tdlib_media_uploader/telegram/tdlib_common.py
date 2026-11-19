@@ -31,13 +31,16 @@ from ..core.upload_journal import (
     UNKNOWN,
     normalize_target,
 )
+from .send_result import SendRequestRejected
 from .send_result import _error_text as _send_failure_text
+
 
 REQUIRED_TDJSON_VERSION = "1.8.69"
 
 
 class TDLibError(RuntimeError):
-    def __init__(self, code: int, message: str):
+    def __init__(self, code: int, message: str, *, response_received=False):
+        self.response_received = response_received
         self.code = int(code)
         self.message = str(message)
         wait = re.search(r"(?:FLOOD_WAIT_|retry after\s+)(\d+(?:\.\d+)?)", self.message, re.IGNORECASE)
@@ -60,9 +63,9 @@ class UploadUnknownError(RuntimeError):
 
 
 class SendResultFailed(RuntimeError):
-    """Every message was definitively rejected; a retry is safe."""
+    """All submitted messages have a final failed delivery result."""
 
-    submitted = False
+    submitted = True
 
     def __init__(self, message, result):
         super().__init__(message)
@@ -76,7 +79,7 @@ class SendResultUnknown(TimeoutError):
 
     def __init__(self, message: str, result: dict):
         super().__init__(message)
-        self.result = result
+        self.result = {**result, "status": UNKNOWN}
 
 
 def _send_failure_summary(result) -> str:
@@ -622,14 +625,18 @@ class TDJsonClient:
         if self.cancel_event.is_set():
             raise TDLibCancelled("上传任务已立即停止")
 
-    def request(self, query: dict, timeout: int | float | None = None):
+    def request(self, query: dict, timeout: int | float | None = None, *, retry_rate_limit=True):
         try:
             return self._request_once(query, timeout)
         except TDLibError as error:
-            if error.retry_after is None:
+            if not retry_rate_limit or error.retry_after is None or not math.isfinite(error.retry_after):
                 raise
-            self._wait_for_retry(error.retry_after)
+            if self._wait_for_retry(error.retry_after) is False:
+                raise
             return self._request_once(query, timeout)
+
+    def _safe_stop_before_retry(self):
+        return getattr(self.ui, "safe_stop_requested", False) is True
 
     def _wait_for_retry(self, seconds):
         """Honor Telegram's delay without blocking immediate cancellation."""
@@ -638,13 +645,19 @@ class TDJsonClient:
         show = getattr(self.ui, "rate_limit", None)
         deadline = time.monotonic() + seconds
         try:
-            while (remaining := math.ceil(deadline - time.monotonic())) > 0:
-                if callable(show):
-                    show(remaining)
-                if self.cancel_event.wait(min(1, remaining)):
+            displayed = None
+            while (remaining := deadline - time.monotonic()) > 0:
+                if self._safe_stop_before_retry() and not self.cancel_event.is_set():
+                    return False
+                seconds_left = math.ceil(remaining)
+                if callable(show) and seconds_left != displayed:
+                    show(seconds_left)
+                    displayed = seconds_left
+                if self.cancel_event.wait(min(0.05, remaining)):
                     error = TDLibCancelled("已取消限流等待")
                     error.submitted = False
                     raise error
+            return not self._safe_stop_before_retry()
         finally:
             if callable(show):
                 show(0)
@@ -690,7 +703,9 @@ class TDJsonClient:
                 raise
             raise TimeoutError(f"TDLib 请求超时：{query.get('@type')}") from exc
         if response.get("@type") == "error":
-            raise TDLibError(response.get("code", 0), response.get("message", "unknown error"))
+            raise TDLibError(
+                response.get("code", 0), response.get("message", "unknown error"), response_received=True
+            )
         return response
 
     def add_update_callback(self, callback):
@@ -1019,6 +1034,7 @@ class TDJsonClient:
         updates = {}
         last_payload = None
         retried = set()
+        resend_rejections = {}
         while True:
             with self.send_condition:
                 ids = [message.get("id") for message in messages]
@@ -1028,6 +1044,12 @@ class TDJsonClient:
                         updates[old_id] = update
             result = map_send_result(messages, updates.values())
             payload = result.as_dict()
+            for row in payload.get("item_results", []):
+                rejection = resend_rejections.get(row["index"])
+                if rejection is not None:
+                    row["error_code"] = rejection.code
+                    row["error"] = str(rejection)
+                    row["retry_after"] = max(row["retry_after"], rejection.retry_after or 0)
             failures = []
             for value in (*messages, *updates.values()):
                 error = _send_failure_text(value)
@@ -1042,11 +1064,13 @@ class TDJsonClient:
             retryable = [row for row in result.item_results
                          if row["status"] == "failed" and row["can_retry"]
                          and not row["requires_action"] and row["index"] not in retried]
-            if retryable and chat_id is not None:
+            can_resend = False
+            if retryable and chat_id is not None and not self._safe_stop_before_retry():
                 try:
-                    self._wait_for_retry(max(row["retry_after"] for row in retryable))
+                    can_resend = self._wait_for_retry(max(row["retry_after"] for row in retryable)) is not False
                 except TDLibCancelled as error:
                     raise SendResultUnknown(str(error), payload) from error
+            if can_resend and not self._safe_stop_before_retry():
                 order = sorted(retryable, key=lambda row: row["message_id"] or row["old_message_id"])
                 originals = {}
                 for row in order:
@@ -1074,6 +1098,9 @@ class TDJsonClient:
                             if update is not None:
                                 updates[message["id"]] = update
                         if isinstance(error, TDLibError):
+                            # Keep the original failed message IDs and preserve
+                            # the latest rejection for whole-Album eligibility.
+                            resend_rejections.update(dict.fromkeys(originals, error))
                             self.ui.warning(f"重发失败：{error}")
                             continue
                         retry_payload = map_send_result(messages, updates.values()).as_dict()
@@ -1224,6 +1251,7 @@ class TDJsonClient:
         on_submitted=None,
         on_delivery=None,
         prepared_media=None,
+        retry_rate_limit=True,
     ):
         attempted = False
 
@@ -1237,11 +1265,11 @@ class TDJsonClient:
                 kind=kind, journal_items=journal_items, target=target,
                 on_submitted=on_submitted, on_delivery=on_delivery,
                 prepared_media=prepared_media, _request_started=request_started,
+                retry_rate_limit=retry_rate_limit,
             )
         except Exception as error:
             if not hasattr(error, "submitted"):
-                rejected = isinstance(error, TDLibError) or isinstance(error.__cause__, TDLibError)
-                error.submitted = attempted and not rejected
+                error.submitted = attempted
             raise
 
     @staticmethod
@@ -1422,6 +1450,7 @@ class TDJsonClient:
         on_delivery=None,
         prepared_media=None,
         _request_started=None,
+        retry_rate_limit=True,
     ):
         """Send media and persist PREPARED/SUBMITTED/UNKNOWN transitions."""
         journal = getattr(self, "inflight_journal", None)
@@ -1468,6 +1497,18 @@ class TDJsonClient:
                 items if journal_items is None else journal_items,
                 target=journal_target,
             )
+        def submit(query):
+            try:
+                if retry_rate_limit:
+                    return self.request(query)
+                return self.request(query, retry_rate_limit=False)
+            except TDLibError as error:
+                if not error.response_received:
+                    raise
+                # Classify the direct send response only. An error during
+                # message reconciliation cannot establish non-submission.
+                raise SendRequestRejected(error.code, str(error), error.retry_after) from error
+
         try:
             if prepared_media is not None:
                 prepared_media.validate()
@@ -1475,7 +1516,7 @@ class TDJsonClient:
                 _request_started()
             submitted = True
             if len(contents) == 1:
-                message = self.request({
+                message = submit({
                     "@type": "sendMessage",
                     "chat_id": int(send_target["chat_id"]),
                     "topic_id": send_topic,
@@ -1486,7 +1527,7 @@ class TDJsonClient:
                 })
                 messages = [message]
             else:
-                response = self.request({
+                response = submit({
                     "@type": "sendMessageAlbum",
                     "chat_id": int(send_target["chat_id"]),
                     "topic_id": send_topic,
@@ -1541,8 +1582,12 @@ class TDJsonClient:
             pending = list(result.get("pending", []))
             if failed or pending or len(succeeded) != len(messages):
                 failure_detail = _send_failure_summary(result)
+                all_failed = (
+                    result.get("status") == FAILED and not succeeded and not pending
+                    and len(set(failed)) == len(messages) == len(failed)
+                )
                 if journal_active:
-                    status = FAILED if not succeeded and not pending and failed else UNKNOWN
+                    status = FAILED if all_failed else UNKNOWN
                     journal_error = (
                         "Album 内消息全部失败"
                         if status == FAILED
@@ -1563,7 +1608,7 @@ class TDJsonClient:
                         target=journal_target,
                     )
                     journal_terminal = True
-                if not succeeded and not pending:
+                if all_failed:
                     message = "Album 内消息全部发送失败"
                     if failure_detail:
                         message += f"：{failure_detail}"
@@ -1600,11 +1645,12 @@ class TDJsonClient:
                 )
             self._safe_diagnose_upload_failure(contents, items, exc)
             raise
-        except TDLibError as exc:
+        except SendRequestRejected as exc:
             if journal_active:
-                journal.failed(selected_kind, album_key, str(exc), target=journal_target)
-            self._safe_diagnose_upload_failure(contents, items, exc)
-            error_text = exc.message.lower()
+                journal.update(selected_kind, album_key, FAILED, error=str(exc),
+                               request_rejection=exc.as_dict(), target=journal_target)
+            self._safe_diagnose_upload_failure(contents, items, exc.__cause__)
+            error_text = str(exc).lower()
             forbidden = any(
                 marker in error_text
                 for marker in (
@@ -1616,7 +1662,9 @@ class TDJsonClient:
                 )
             )
             if getattr(self.config, "TARGET_MODE", "forum_topic") == "channel" and forbidden:
-                raise RuntimeError("当前账号没有在该频道发布内容的权限。") from exc
+                raise SendRequestRejected(
+                    exc.error_code, "当前账号没有在该频道发布内容的权限。", None
+                ) from exc
             raise
         except (TimeoutError, TDLibCancelled) as exc:
             if journal_active:

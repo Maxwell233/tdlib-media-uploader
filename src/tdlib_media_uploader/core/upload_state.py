@@ -50,6 +50,7 @@ class UploadState:
         target=None,
         state_dir,
         reset: bool = False,
+        create: bool = True,
         filename_prefix: str | None = None,
         snapshot_provider=None,
     ):
@@ -80,7 +81,7 @@ class UploadState:
         prefix = filename_prefix or f"{self.kind}_upload_state"
         self.path = self.state_dir / f"{prefix}_{digest}.json"
         self.lock = threading.RLock()
-        self.data = self._load(reset=reset)
+        self.data = self._load(reset=reset, create=create)
 
     def _new(self):
         return {
@@ -91,13 +92,16 @@ class UploadState:
             "completed": {},
         }
 
-    def _load(self, *, reset=False):
-        if reset or not self.path.exists():
-            data = self._new()
-            self._save(data)
-            return data
+    def _load(self, *, reset=False, create=True):
         try:
+            if reset:
+                raise FileNotFoundError
             data = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            data = self._new()
+            if create or reset:
+                self._save(data)
+            return data
         except (OSError, ValueError, TypeError) as exc:
             raise RuntimeError(f"断点文件读取失败：{self.path}\n{exc}") from exc
         if not isinstance(data, dict) or data.get("version") != self.VERSION:

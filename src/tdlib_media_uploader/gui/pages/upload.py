@@ -300,7 +300,7 @@ class UploadPage(QWidget):
         self.reset_state_button.setObjectName("secondaryButton")
         self.reset_state_button.clicked.connect(lambda: self.reset_state_requested.emit(self.kind))
 
-        self.start_button = QPushButton("开始上传")
+        self.start_button = QPushButton("加入上传队列")
         self.start_button.setObjectName("primaryButton")
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(lambda: self.start_requested.emit(self.kind))
@@ -354,7 +354,6 @@ class UploadPage(QWidget):
     def set_scanning(self, active: bool):
         self._scanning = active
         self.scan_button.setText("停止扫描" if active else "扫描目录")
-        self.scan_button.setEnabled(not self._running)
         self.reset_state_button.setEnabled(not active and not self._running)
         if active:
             self.clear_scan_result()
@@ -394,12 +393,11 @@ class UploadPage(QWidget):
         elif result["pending_files"] == 0:
             self.status_label.setText("全部项目已在断点记录中")
         else:
-            self.status_label.setText("扫描完成，可开始上传")
+            self.status_label.setText("扫描完成，可加入上传队列")
         self.start_button.setEnabled(
             bool(
                 result["pending_files"]
                 and not result.get("cancelled")
-                and not self._running
             )
         )
 
@@ -527,7 +525,7 @@ class UploadPage(QWidget):
 
     def _show_tree_context_menu(self, pos):
         item = self.tree.itemAt(pos)
-        if item is None or self._running or self._scanning:
+        if item is None or self._scanning:
             return
         plan = item.data(0, Qt.ItemDataRole.UserRole)
         if not isinstance(plan, dict) and item.parent() is not None:
@@ -542,7 +540,7 @@ class UploadPage(QWidget):
             self._edit_album(item)
 
     def _edit_album(self, item, _column=0):
-        if item is None or self._running or self._scanning:
+        if item is None or self._scanning:
             return
         plan = item.data(0, Qt.ItemDataRole.UserRole)
         if not isinstance(plan, dict) and item.parent() is not None:
@@ -625,7 +623,6 @@ class UploadPage(QWidget):
             bool(
                 item is not None
                 and isinstance(item.data(0, Qt.ItemDataRole.UserRole), dict)
-                and not self._running
                 and not self._scanning
             )
         )
@@ -684,19 +681,7 @@ class UploadPage(QWidget):
 
     def set_running(self, active: bool):
         self._running = active
-        self._update_edit_button()
-        self.scan_button.setEnabled(not active)
         self.reset_state_button.setEnabled(not active and not self._scanning)
-        self.start_button.setEnabled(
-            not active
-            and bool(
-                self.result
-                and self.result.get("pending_files")
-                and not self.result.get("cancelled")
-            )
-        )
-        if active:
-            self.status_label.setText("任务运行中，请在任务中心查看进度")
 
     def refresh_theme(self):
         """Re-apply dynamic status styles when theme is toggled."""

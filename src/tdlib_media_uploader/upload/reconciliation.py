@@ -189,6 +189,10 @@ class ReconciliationService:
         rows = _item_delivery(record) if not confirmed and record.get("item_results") else ()
         if not sent:
             successful = [row for row in rows if row["status"] == "succeeded"]
+            if not set(record.get("succeeded_ids") or ()).issubset(
+                row["message_id"] for row in successful
+            ):
+                raise ValueError("上传记录中的成功消息无法对应到源文件，已保留保护记录")
             if successful:
                 snapshots = self._snapshot_items(record)
                 state = self._state_for_journal(

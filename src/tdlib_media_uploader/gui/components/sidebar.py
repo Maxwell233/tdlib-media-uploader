@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from ...config.paths import read_version
 from ..icons import get_svg_icon
+from ..preferences import UiPreferences
 from ..theme import THEME, build_stylesheet, get_current_theme_mode, toggle_theme
 
 
@@ -39,6 +40,7 @@ class NavigationSidebar(QFrame):
     """Sidebar navigation panel containing branding, grouped routes, and status."""
 
     item_selected = Signal(int)
+    theme_save_failed = Signal(str)
 
     NAV_ITEMS = (
         ("概览", "dashboard", "dashboard"),
@@ -49,11 +51,12 @@ class NavigationSidebar(QFrame):
         ("设置与诊断", "settings", "settings"),
     )
 
-    def __init__(self, version: str | None = None, parent=None):
+    def __init__(self, version: str | None = None, parent=None, *, preferences=None):
         super().__init__(parent)
         self.setObjectName("sidebarFrame")
         self.setFixedWidth(230)
         self.version = str(version or read_version()).strip()
+        self.preferences = preferences if preferences is not None else UiPreferences()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -79,15 +82,12 @@ class NavigationSidebar(QFrame):
         title_row.addStretch(1)
 
         # Theme toggle button (Vector Sun / Moon icon)
-        curr_mode = get_current_theme_mode()
         self.theme_btn = QPushButton()
         self.theme_btn.setObjectName("themeToggleBtn")
         self.theme_btn.setFixedSize(30, 30)
         self.theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.theme_btn.setProperty("themeMode", curr_mode)
-        self.theme_btn.setIcon(get_svg_icon("sun" if curr_mode == "dark" else "moon", 16, 16))
         self.theme_btn.setIconSize(QSize(16, 16))
-        self.theme_btn.setToolTip("切换明暗主题 (Light / Dark)")
+        self._refresh_theme_button()
         self.theme_btn.clicked.connect(self._toggle_theme)
         title_row.addWidget(self.theme_btn)
 
@@ -154,22 +154,31 @@ class NavigationSidebar(QFrame):
                 item.setIcon(get_svg_icon(icon_name, color=color, size=18, selected_color="#ffffff"))
 
     def _toggle_theme(self):
-        new_mode = toggle_theme()
-        self.theme_btn.setIcon(get_svg_icon("sun" if new_mode == "dark" else "moon", 16, 16))
-        self.theme_btn.setProperty("themeMode", new_mode)
-        self.theme_btn.setToolTip(f"当前{'浅色' if new_mode == 'light' else '深色'}模式，点击切换主题")
+        mode = toggle_theme()
+        error = None
+        try:
+            self.preferences.save_theme(mode)
+        except (OSError, ValueError) as exc:
+            error = f"主题已切换，保存失败：{exc}"
+        self._refresh_theme_button()
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(build_stylesheet(THEME))
             for widget in app.topLevelWidgets():
                 if hasattr(widget, "refresh_theme"):
                     widget.refresh_theme()
+        if error:
+            self.theme_save_failed.emit(error)
+
+    def _refresh_theme_button(self):
+        mode = get_current_theme_mode()
+        self.theme_btn.setIcon(get_svg_icon("sun" if mode == "dark" else "moon", 16, 16))
+        self.theme_btn.setProperty("themeMode", mode)
+        self.theme_btn.setToolTip(f"当前{'浅色' if mode == 'light' else '深色'}模式，点击切换主题")
 
     def refresh_theme(self):
         """Refresh styling and re-polish dynamic elements."""
-        curr_mode = get_current_theme_mode()
-        self.theme_btn.setIcon(get_svg_icon("sun" if curr_mode == "dark" else "moon", 16, 16))
-        self.theme_btn.setProperty("themeMode", curr_mode)
+        self._refresh_theme_button()
         self._update_icons()
         self.status_dot.style().unpolish(self.status_dot)
         self.status_dot.style().polish(self.status_dot)

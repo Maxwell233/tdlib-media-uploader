@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict, defaultdict
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError as FutureTimeoutError, wait
+from concurrent.futures import FIRST_COMPLETED, TimeoutError as FutureTimeoutError, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -38,6 +38,8 @@ from .common import (
     readiness_record as _readiness_record,
 )
 from ..config import loader as cfg
+from ..core.concurrency import ContextExecutor
+from .runtime import pipeline_config, pipeline_locals
 from ..telegram.tdlib_common import HeadlessUI, formatted_text
 from ..config.paths import APP_DATA_DIR, RESOURCE_DIR, VIDEO_STATE_DIR, THUMBNAIL_CACHE_DIR
 from ..upload.staging import should_stage, stage_file
@@ -150,17 +152,18 @@ UI = HeadlessUI()
 
 def video_limit_text(limit: int) -> str:
     """Use product-facing GB labels for Telegram's protocol limits."""
+    config = pipeline_config(cfg)
 
     value = int(limit)
-    if value == int(getattr(cfg, "VIDEO_PREMIUM_MAX_BYTES", 8000 * 524_288)):
+    if value == int(getattr(config, "VIDEO_PREMIUM_MAX_BYTES", 8000 * 524_288)):
         return "约 4 GB"
-    if value == int(getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)):
+    if value == int(getattr(config, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)):
         return "约 2 GB"
     return format_size(value)
 
 
 def relative_name(path: Path) -> str:
-    return stable_relative_name(path, cfg.VIDEO_DIR)
+    return stable_relative_name(path, pipeline_config(cfg).VIDEO_DIR)
 
 
 def normalize_path(path) -> str:
@@ -170,14 +173,14 @@ def normalize_path(path) -> str:
 def _snapshot_for_path(path: Path):
     # Prefer the immutable snapshot captured by the scanner.  A late stat is
     # only a fallback for direct API callers that did not scan first.
-    return LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or file_snapshot(path)
+    return pipeline_locals(globals())["LAST_SCAN_SNAPSHOTS"].get(normalize_path(path)) or file_snapshot(path)
 
 
 def file_signature(path: Path, snapshot=None) -> str:
     snapshot = snapshot or _snapshot_for_path(path)
     if snapshot is None:
         raise OSError(f"文件暂时不可读取：{path}")
-    return media_file_signature(path, root=cfg.VIDEO_DIR, snapshot=snapshot)
+    return media_file_signature(path, root=pipeline_config(cfg).VIDEO_DIR, snapshot=snapshot)
 
 
 FORCED_GROUP_KEY = "__all_videos__"
@@ -187,27 +190,27 @@ FORCED_GROUP_LABEL = "全部视频（按顺序分组）"
 def video_dates_enabled() -> bool:
     """Return whether date metadata should be read during a video scan."""
 
-    return bool(getattr(cfg, "VIDEO_READ_DATES", True))
+    return bool(getattr(pipeline_config(cfg), "VIDEO_READ_DATES", True))
 
 
 def cleanup_staging_cache(*, startup: bool = False) -> None:
-    _prune_staging_cache(cfg, startup=startup)
+    _prune_staging_cache(pipeline_config(cfg), startup=startup)
 
 
 def cleanup_confirmed_staging(paths) -> None:
-    _cleanup_confirmed_staging(paths, config=cfg, staged_maps=(STAGED_UPLOAD_PATHS,))
+    _cleanup_confirmed_staging(paths, config=pipeline_config(cfg), staged_maps=(pipeline_locals(globals())["STAGED_UPLOAD_PATHS"],))
 
 
 def force_ten_per_album() -> bool:
-    return not video_dates_enabled() or cfg.VIDEO_GROUP_MODE == "fixed"
+    return not video_dates_enabled() or pipeline_config(cfg).VIDEO_GROUP_MODE == "fixed"
 
 
 def include_group_title() -> bool:
-    return bool(getattr(cfg, "VIDEO_CAPTION_INCLUDE_GROUP_TITLE", True))
+    return bool(getattr(pipeline_config(cfg), "VIDEO_CAPTION_INCLUDE_GROUP_TITLE", True))
 
 
 def include_filename_numbers() -> bool:
-    return bool(getattr(cfg, "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS", True))
+    return bool(getattr(pipeline_config(cfg), "VIDEO_CAPTION_INCLUDE_FILENAME_NUMBERS", True))
 
 
 def group_display_name(group_key: str) -> str:
@@ -219,33 +222,34 @@ def month_caption(month_key: str) -> str:
         return "Album"
     year_text, month_text = month_key.split("-")
     year, month = int(year_text), int(month_text)
-    return f"{year % 100:02d}-{month}" if cfg.VIDEO_CAPTION_YEAR_DIGITS == 2 else f"{year}-{month}"
+    return f"{year % 100:02d}-{month}" if pipeline_config(cfg).VIDEO_CAPTION_YEAR_DIGITS == 2 else f"{year}-{month}"
 
 
 def scan_videos(cancel_event=None) -> list[Path]:
-    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_PREMIUM_REQUIRED, LAST_SCAN_SNAPSHOTS
+    config = pipeline_config(cfg)
+    runtime = pipeline_locals(globals())
     try:
         root = validate_scan_root(
-            cfg.VIDEO_DIR,
-            attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
-            initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
-            max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+            config.VIDEO_DIR,
+            attempts=getattr(config, "SCAN_DISCOVERY_ATTEMPTS", 3),
+            initial_delay=getattr(config, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+            max_delay=getattr(config, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
             cancel_event=cancel_event,
         )
     except TimeoutError:
-        LAST_SCAN_ERRORS = []
-        LAST_SCAN_WARNINGS = ["目录扫描已取消"]
-        LAST_SCAN_SIZE_SKIPS = []
-        LAST_SCAN_PREMIUM_REQUIRED = []
-        LAST_SCAN_SNAPSHOTS = {}
+        runtime["LAST_SCAN_ERRORS"] = []
+        runtime["LAST_SCAN_WARNINGS"] = ["目录扫描已取消"]
+        runtime["LAST_SCAN_SIZE_SKIPS"] = []
+        runtime["LAST_SCAN_PREMIUM_REQUIRED"] = []
+        runtime["LAST_SCAN_SNAPSHOTS"] = {}
         return []
     scan_result = iter_files(
         root,
         None,
         cancel_event=cancel_event,
-        discovery_attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
-        discovery_initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
-        discovery_max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+        discovery_attempts=getattr(config, "SCAN_DISCOVERY_ATTEMPTS", 3),
+        discovery_initial_delay=getattr(config, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+        discovery_max_delay=getattr(config, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
     )
     # Configured video suffixes retain their established diagnostics; other
     # names enter only when their header resembles a supported container.
@@ -254,16 +258,16 @@ def scan_videos(cancel_event=None) -> list[Path]:
     for path in scan_result.paths:
         if scan_result.cancelled or _cancel_requested(cancel_event):
             break
-        if path.suffix.lower() in cfg.VIDEO_EXTENSIONS or has_video_container_signature(path):
+        if path.suffix.lower() in config.VIDEO_EXTENSIONS or has_video_container_signature(path):
             videos.append(path)
-    LAST_SCAN_ERRORS = list(scan_result.errors)
-    LAST_SCAN_WARNINGS = list(scan_result.warnings)
+    runtime["LAST_SCAN_ERRORS"] = list(scan_result.errors)
+    runtime["LAST_SCAN_WARNINGS"] = list(scan_result.warnings)
     cancelled = scan_result.cancelled or _cancel_requested(cancel_event)
     if cancelled:
-        LAST_SCAN_WARNINGS.append("目录扫描已取消")
-    LAST_SCAN_SIZE_SKIPS = []
-    LAST_SCAN_PREMIUM_REQUIRED = []
-    LAST_SCAN_SNAPSHOTS = {
+        runtime["LAST_SCAN_WARNINGS"].append("目录扫描已取消")
+    runtime["LAST_SCAN_SIZE_SKIPS"] = []
+    runtime["LAST_SCAN_PREMIUM_REQUIRED"] = []
+    runtime["LAST_SCAN_SNAPSHOTS"] = {
         key: snapshot.as_tuple()
         for key, snapshot in getattr(scan_result, "snapshots", {}).items()
     }
@@ -272,43 +276,43 @@ def scan_videos(cancel_event=None) -> list[Path]:
     accepted = []
     for path in videos:
         if _cancel_requested(cancel_event):
-            LAST_SCAN_WARNINGS.append("目录扫描已取消")
+            runtime["LAST_SCAN_WARNINGS"].append("目录扫描已取消")
             return []
-        snapshot = LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or file_snapshot(path)
+        snapshot = runtime["LAST_SCAN_SNAPSHOTS"].get(normalize_path(path)) or file_snapshot(path)
         if snapshot is None:
-            LAST_SCAN_ERRORS.append(f"{path}: 文件暂时不可读取或为空")
+            runtime["LAST_SCAN_ERRORS"].append(f"{path}: 文件暂时不可读取或为空")
             continue
         size, mtime_ns = snapshot
-        if size > cfg.VIDEO_MAX_BYTES:
-            LAST_SCAN_SIZE_SKIPS.append({
+        if size > config.VIDEO_MAX_BYTES:
+            runtime["LAST_SCAN_SIZE_SKIPS"].append({
                 "path": path,
                 "size": size,
-                "limit": cfg.VIDEO_MAX_BYTES,
+                "limit": config.VIDEO_MAX_BYTES,
                 "category": "size",
                 "action": "preflight",
                 "reason": (
                     f"源文件大小 {format_size(size)} 超过 Telegram 视频上限 "
-                    f"{video_limit_text(cfg.VIDEO_MAX_BYTES)}；转封装后将按输出大小复核"
+                    f"{video_limit_text(config.VIDEO_MAX_BYTES)}；转封装后将按输出大小复核"
                 ),
             })
-        if size > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288):
-            LAST_SCAN_PREMIUM_REQUIRED.append({
+        if size > getattr(config, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288):
+            runtime["LAST_SCAN_PREMIUM_REQUIRED"].append({
                 "path": path,
                 "size": size,
                 "category": "premium",
                 "reason": "视频超过约 2 GB，需要 Telegram Premium 才能上传",
             })
-        LAST_SCAN_SNAPSHOTS[normalize_path(path)] = (int(size), int(mtime_ns))
+        runtime["LAST_SCAN_SNAPSHOTS"][normalize_path(path)] = (int(size), int(mtime_ns))
         accepted.append(path)
     videos = accepted
     sort_mode = "name"
-    if video_dates_enabled() and getattr(cfg, "VIDEO_SORT_MODE", "mtime") == "mtime":
+    if video_dates_enabled() and getattr(config, "VIDEO_SORT_MODE", "mtime") == "mtime":
         sort_mode = "mtime"
     return media_path_sort(
         videos,
         root,
         mode=sort_mode,
-        mtime_key=lambda path: LAST_SCAN_SNAPSHOTS.get(normalize_path(path), (0, 0))[1],
+        mtime_key=lambda path: runtime["LAST_SCAN_SNAPSHOTS"].get(normalize_path(path), (0, 0))[1],
     )
 
 
@@ -364,10 +368,11 @@ def _cancel_requested(cancel_event=None) -> bool:
 
 
 def _readiness_options(path=None) -> dict:
+    config = pipeline_config(cfg)
     return _shared_readiness_options(
-        cfg,
-        network=is_network_path(path or cfg.VIDEO_DIR),
-        default_attempts=READINESS_ATTEMPTS,
+        config,
+        network=is_network_path(path or config.VIDEO_DIR),
+        default_attempts=int(getattr(config, "SCAN_READINESS_ATTEMPTS", READINESS_ATTEMPTS)),
     )
 
 
@@ -375,14 +380,15 @@ def _process_timeout(config_name: str, fallback: float) -> float:
     """Read a live timeout value so GUI config reloads take effect."""
 
     try:
-        return max(1.0, float(getattr(cfg, config_name, fallback)))
+        return max(1.0, float(getattr(pipeline_config(cfg), config_name, fallback)))
     except (TypeError, ValueError):
         return float(fallback)
 
 
 def _exiftool_command() -> list[str]:
+    config = pipeline_config(cfg)
     command = [
-        str(cfg.EXIFTOOL_PATH),
+        str(config.EXIFTOOL_PATH),
         "-charset", "FileName=UTF8",
         "-j", "-a", "-G1", "-s",
         "-api", "LargeFileSupport=1",
@@ -392,7 +398,7 @@ def _exiftool_command() -> list[str]:
     # ExifTool must never discover a second, potentially inconsistent view of
     # a network directory.  Python supplies the explicit file list through
     # stdin.
-    for ext in sorted(cfg.VIDEO_EXTENSIONS):
+    for ext in sorted(config.VIDEO_EXTENSIONS):
         command += ["-ext", ext.lstrip(".")]
     # Keep all paths in an UTF-8 argument stream. This avoids Windows codepage
     # conversion and also lets callers pass the exact files accepted by the
@@ -515,7 +521,8 @@ def read_exif_metadata(
     performs the same Python discovery as the GUI and always supplies explicit
     file paths to ExifTool.  ExifTool itself never recursively scans a root.
     """
-    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS
+    config = pipeline_config(cfg)
+    runtime = pipeline_locals(globals())
     if not video_dates_enabled():
         return {}
     if paths is None:
@@ -530,9 +537,9 @@ def read_exif_metadata(
     # no-op even when ExifTool is not installed.
     if requested == []:
         return {}
-    if not cfg.EXIFTOOL_PATH.exists():
+    if not config.EXIFTOOL_PATH.exists():
         raise RuntimeError(
-            f"找不到 ExifTool：{cfg.EXIFTOOL_PATH}\n"
+            f"找不到 ExifTool：{config.EXIFTOOL_PATH}\n"
             "请把对应平台的 ExifTool 可执行文件放入 tools 目录，或在设置中指定路径。"
         )
     requested_keys = {normalize_path(path) for path in requested}
@@ -551,9 +558,10 @@ def read_exif_metadata(
 
     emit_progress()
 
+    batch_size = int(getattr(config, "EXIFTOOL_BATCH_SIZE", EXIFTOOL_BATCH_SIZE))
     batches = [
-        requested[offset:offset + EXIFTOOL_BATCH_SIZE]
-        for offset in range(0, len(requested), EXIFTOOL_BATCH_SIZE)
+        requested[offset:offset + batch_size]
+        for offset in range(0, len(requested), batch_size)
     ]
     index = {}
     diagnostics = []
@@ -581,8 +589,8 @@ def read_exif_metadata(
         # trigger another ExifTool invocation.  Only unresolved SourceFile
         # entries are retried or bisected.
         if diagnostic:
-            label = str(batch[0]) if batch else str(cfg.VIDEO_DIR)
-            LAST_SCAN_WARNINGS.append(f"ExifTool：{label}: {diagnostic}")
+            label = str(batch[0]) if batch else str(config.VIDEO_DIR)
+            runtime["LAST_SCAN_WARNINGS"].append(f"ExifTool：{label}: {diagnostic}")
 
         missing = [
             path for path in batch
@@ -590,18 +598,18 @@ def read_exif_metadata(
         ]
         if not missing:
             if diagnostic and not complete:
-                label = str(batch[0]) if batch else str(cfg.VIDEO_DIR)
+                label = str(batch[0]) if batch else str(config.VIDEO_DIR)
                 diagnostics.append(f"{label}: {diagnostic}")
             return
 
         if diagnostic and not rows:
-            label = str(batch[0]) if batch else str(cfg.VIDEO_DIR)
+            label = str(batch[0]) if batch else str(config.VIDEO_DIR)
             diagnostics.append(f"{label}: {diagnostic}")
         if _cancel_requested(cancel_event):
             return
         if len(missing) == 1:
             if len(batch) <= 1:
-                label = str(batch[0]) if batch else str(cfg.VIDEO_DIR)
+                label = str(batch[0]) if batch else str(config.VIDEO_DIR)
                 diagnostics.append(
                     f"{label}: {diagnostic or 'ExifTool 未返回该文件的结果'}"
                 )
@@ -629,7 +637,7 @@ def read_exif_metadata(
             break
         collect(batch)
     if diagnostics:
-        LAST_SCAN_ERRORS.extend(f"ExifTool：{message}" for message in diagnostics)
+        runtime["LAST_SCAN_ERRORS"].extend(f"ExifTool：{message}" for message in diagnostics)
     if not _cancel_requested(cancel_event):
         emit_progress()
     return index
@@ -752,7 +760,10 @@ def _media_creation_metadata(path_text: str, size: int, mtime_ns: int, cancel_ev
     if _cancel_requested(cancel_event):
         return None
 
-    cache_key = (path_text, size, mtime_ns)
+    cache_key = (
+        path_text, size, mtime_ns,
+        getattr(pipeline_config(cfg), "VIDEO_QUICKTIME_UTC_TARGET_ZONE", None),
+    )
     with _media_metadata_cache_lock:
         if cache_key in _media_metadata_cache:
             return _media_metadata_cache[cache_key]
@@ -807,7 +818,7 @@ def read_media_creation_time(path: Path, cancel_event=None):
 
 
 def _normalize_media_timezone(dt, utc_style):
-    zone = cfg.VIDEO_QUICKTIME_UTC_TARGET_ZONE
+    zone = pipeline_config(cfg).VIDEO_QUICKTIME_UTC_TARGET_ZONE
     if utc_style:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -816,6 +827,7 @@ def _normalize_media_timezone(dt, utc_style):
 
 
 def _choose_embedded_capture_time(row: dict | None):
+    config = pipeline_config(cfg)
     row = row or {}
     exif_candidates = []
     media_candidates = []
@@ -840,7 +852,7 @@ def _choose_embedded_capture_time(row: dict | None):
         elif tag == "createdate" and exif_group:
             exif_candidates.append((1, key, dt, False))
 
-        if getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True):
+        if getattr(config, "VIDEO_READ_MEDIA_CREATION_DATE", True):
             is_media = (
                 normalized in {
                     "keys:creationdate",
@@ -868,10 +880,10 @@ def _choose_embedded_capture_time(row: dict | None):
 
     if media_candidates:
         _, key, dt, utc_style = min(media_candidates, key=lambda item: item[0])
-        if utc_style and cfg.VIDEO_QUICKTIME_UTC_TARGET_ZONE:
+        if utc_style and config.VIDEO_QUICKTIME_UTC_TARGET_ZONE:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            dt = dt.astimezone(ZoneInfo(cfg.VIDEO_QUICKTIME_UTC_TARGET_ZONE))
+            dt = dt.astimezone(ZoneInfo(config.VIDEO_QUICKTIME_UTC_TARGET_ZONE))
         return {"datetime": dt, "tag": key, "fallback": False}
 
     return None
@@ -891,7 +903,7 @@ def _media_selection(media):
 def _fallback_capture_time(path: Path):
     if not video_dates_enabled():
         return None
-    if cfg.VIDEO_MISSING_DATE_POLICY == "mtime":
+    if pipeline_config(cfg).VIDEO_MISSING_DATE_POLICY == "mtime":
         snapshot = file_snapshot(path)
         if snapshot is None:
             return None
@@ -916,7 +928,7 @@ def choose_capture_time(
     selected = _choose_embedded_capture_time(row)
     if selected is not None:
         return selected
-    if probe_media and getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True):
+    if probe_media and getattr(pipeline_config(cfg), "VIDEO_READ_MEDIA_CREATION_DATE", True):
         selected = _media_selection(read_media_creation_time(path, cancel_event))
         if selected is not None:
             return selected
@@ -934,10 +946,11 @@ def _emit_scan_progress(progress_callback, payload: dict):
 
 
 def _probe_media_dates(paths, progress_callback=None, cancel_event=None):
+    config = pipeline_config(cfg)
     if (
         not paths
         or not video_dates_enabled()
-        or not getattr(cfg, "VIDEO_READ_MEDIA_CREATION_DATE", True)
+        or not getattr(config, "VIDEO_READ_MEDIA_CREATION_DATE", True)
     ):
         return {}
 
@@ -952,16 +965,16 @@ def _probe_media_dates(paths, progress_callback=None, cancel_event=None):
     )
 
     worker_count = io_worker_count(
-        cfg.VIDEO_DIR,
-        local=getattr(cfg, "IO_WORKERS_LOCAL", MEDIA_DATE_MAX_WORKERS),
-        network=getattr(cfg, "IO_WORKERS_NETWORK", 2),
+        config.VIDEO_DIR,
+        local=getattr(config, "IO_WORKERS_LOCAL", MEDIA_DATE_MAX_WORKERS),
+        network=getattr(config, "IO_WORKERS_NETWORK", 2),
     )
     probe = (
         (lambda path: read_media_creation_time(path, cancel_event))
         if cancel_event is not None
         else read_media_creation_time
     )
-    with ThreadPoolExecutor(
+    with ContextExecutor(
         max_workers=worker_count,
         thread_name_prefix="tdlib-media-date",
     ) as executor:
@@ -980,7 +993,7 @@ def _probe_media_dates(paths, progress_callback=None, cancel_event=None):
                 try:
                     results[normalize_path(path)] = future.result()
                 except Exception as exc:
-                    LAST_SCAN_ERRORS.append(f"{path}: {exc}")
+                    pipeline_locals(globals())["LAST_SCAN_ERRORS"].append(f"{path}: {exc}")
                     results[normalize_path(path)] = None
                 completed += 1
                 _emit_scan_progress(
@@ -999,6 +1012,8 @@ def _probe_media_dates(paths, progress_callback=None, cancel_event=None):
 
 
 def build_items(videos, metadata_index, progress_callback=None, cancel_event=None):
+    config = pipeline_config(cfg)
+    runtime = pipeline_locals(globals())
     items, missing = [], []
     metadata_index = metadata_index or {}
 
@@ -1018,11 +1033,11 @@ def build_items(videos, metadata_index, progress_callback=None, cancel_event=Non
                 "date_tag": "未读取日期",
                 "fallback": False,
                 "requires_premium": (
-                    int((LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or (0, 0))[0])
-                    > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)
+                    int((runtime["LAST_SCAN_SNAPSHOTS"].get(normalize_path(path)) or (0, 0))[0])
+                    > getattr(config, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)
                 ),
             }
-            snapshot = LAST_SCAN_SNAPSHOTS.get(normalize_path(path)) or file_snapshot(path)
+            snapshot = runtime["LAST_SCAN_SNAPSHOTS"].get(normalize_path(path)) or file_snapshot(path)
             if snapshot is not None:
                 item["scan_size"], item["scan_mtime_ns"] = snapshot
             filename_items.append(item)
@@ -1045,7 +1060,7 @@ def build_items(videos, metadata_index, progress_callback=None, cancel_event=Non
             # A network share can disappear between os.walk() and metadata
             # handling. Treat that file as temporarily unavailable instead
             # of allowing a transient SMB error to abort the whole scan.
-            LAST_SCAN_ERRORS.append(f"{path}: {exc}")
+            runtime["LAST_SCAN_ERRORS"].append(f"{path}: {exc}")
             unavailable.add(normalize_path(path))
             missing.append(path)
             continue
@@ -1079,7 +1094,7 @@ def build_items(videos, metadata_index, progress_callback=None, cancel_event=Non
             try:
                 selected = _fallback_capture_time(path)
             except (OSError, ValueError, OverflowError) as exc:
-                LAST_SCAN_ERRORS.append(f"{path}: {exc}")
+                runtime["LAST_SCAN_ERRORS"].append(f"{path}: {exc}")
                 missing.append(path)
                 continue
         if selected is None:
@@ -1093,11 +1108,11 @@ def build_items(videos, metadata_index, progress_callback=None, cancel_event=Non
             "date_tag": selected["tag"],
             "fallback": selected["fallback"],
             "requires_premium": (
-                int((LAST_SCAN_SNAPSHOTS.get(key) or (0, 0))[0])
-                > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)
+                int((runtime["LAST_SCAN_SNAPSHOTS"].get(key) or (0, 0))[0])
+                > getattr(config, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)
             ),
         }
-        snapshot = LAST_SCAN_SNAPSHOTS.get(key) or file_snapshot(path)
+        snapshot = runtime["LAST_SCAN_SNAPSHOTS"].get(key) or file_snapshot(path)
         if snapshot is not None:
             item["scan_size"], item["scan_mtime_ns"] = snapshot
         items.append(item)
@@ -1115,7 +1130,7 @@ _VIDEO_INFO_CACHE_LOCK = threading.Lock()
 def _next_frame_metadata(reader, *, timeout: float, cancel_event=None):
     """Read imageio's header with a timeout and close its child process."""
 
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tdlib-video-header")
+    executor = ContextExecutor(max_workers=1, thread_name_prefix="tdlib-video-header")
     future = executor.submit(next, reader)
     try:
         limit = max(1.0, float(timeout))
@@ -1187,7 +1202,7 @@ def _thumbnail_timestamp_seconds(value=None) -> float:
     """Normalize a thumbnail seek position to the application's 10 ms unit."""
 
     raw = (
-        getattr(cfg, "VIDEO_THUMBNAIL_TIMESTAMP_SECONDS", 1.0)
+        getattr(pipeline_config(cfg), "VIDEO_THUMBNAIL_TIMESTAMP_SECONDS", 1.0)
         if value is None
         else value
     )
@@ -1221,6 +1236,7 @@ def build_thumbnail(
     logical_path: Path | None = None,
 ):
     """Create or reuse a cached thumbnail at the requested video timestamp."""
+    config = pipeline_config(cfg)
 
     timestamp = _thumbnail_timestamp_seconds(timestamp_seconds)
     if duration is not None:
@@ -1327,10 +1343,10 @@ def build_thumbnail(
     try:
         with Image.open(temp_path) as image:
             image = image.convert("RGB")
-            image.thumbnail((cfg.VIDEO_THUMB_MAX_EDGE, cfg.VIDEO_THUMB_MAX_EDGE), Image.Resampling.LANCZOS)
+            image.thumbnail((config.VIDEO_THUMB_MAX_EDGE, config.VIDEO_THUMB_MAX_EDGE), Image.Resampling.LANCZOS)
             for quality in (85, 75, 65, 55, 45, 35, 25):
                 image.save(final_path, "JPEG", quality=quality, optimize=True)
-                if final_path.stat().st_size <= cfg.VIDEO_THUMB_TARGET_BYTES:
+                if final_path.stat().st_size <= config.VIDEO_THUMB_TARGET_BYTES:
                     break
             width, height = image.width, image.height
     finally:
@@ -1343,14 +1359,15 @@ def build_thumbnail(
 
 def prepare_video(path: Path, cancel_event=None):
     """Read all local video data required before a Telegram request."""
+    config = pipeline_config(cfg)
 
     info = (
         video_info(path)
         if cancel_event is None
         else video_info(path, cancel_event=cancel_event)
     )
-    if cfg.VIDEO_GENERATE_THUMBNAIL and (
-        Path(path).stat().st_size <= cfg.VIDEO_MAX_BYTES
+    if config.VIDEO_GENERATE_THUMBNAIL and (
+        Path(path).stat().st_size <= config.VIDEO_MAX_BYTES
         or can_remux_video(path, info=info)
     ):
         from .video_prepare import _optional_thumbnail
@@ -1361,7 +1378,7 @@ def prepare_video(path: Path, cancel_event=None):
 
 def can_remux_video(path: Path, *, info=None, cancel_event=None) -> bool:
     """Defer source-size checks only for verified stream-copy candidates."""
-    policy = str(getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", "remux")).strip().lower()
+    policy = str(getattr(pipeline_config(cfg), "VIDEO_COMPATIBILITY_POLICY", "remux")).strip().lower()
     if policy == "original":
         return False
     if info is None:
@@ -1376,6 +1393,7 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
     uploaded.  A later run can retry it after the user repairs or replaces the
     file.
     """
+    config = pipeline_config(cfg)
 
     target = ui or UI
     skipped = []
@@ -1402,13 +1420,13 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
                 if cancel_event is None
                 else prepare_video(path, cancel_event)
             )
-            if size > cfg.VIDEO_MAX_BYTES and not can_remux_video(path, info=info):
+            if size > config.VIDEO_MAX_BYTES and not can_remux_video(path, info=info):
                 raise RuntimeError(
                     f"文件大小 {format_size(size)} 超过 Telegram 视频上限 "
-                    f"{video_limit_text(cfg.VIDEO_MAX_BYTES)}"
+                    f"{video_limit_text(config.VIDEO_MAX_BYTES)}"
                 )
             if getattr(info, "compatibility", "native") not in {"native", "legacy"}:
-                policy = getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", "remux")
+                policy = getattr(config, "VIDEO_COMPATIBILITY_POLICY", "remux")
                 if getattr(info, "compatibility", "") == "remux":
                     if policy == "original":
                         raise RuntimeError(
@@ -1458,18 +1476,18 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
             return record
 
     worker_count = io_worker_count(
-        cfg.VIDEO_DIR,
-        local=getattr(cfg, "IO_WORKERS_LOCAL", MEDIA_DATE_MAX_WORKERS),
-        network=getattr(cfg, "IO_WORKERS_NETWORK", 2),
+        config.VIDEO_DIR,
+        local=getattr(config, "IO_WORKERS_LOCAL", MEDIA_DATE_MAX_WORKERS),
+        network=getattr(config, "IO_WORKERS_NETWORK", 2),
     )
-    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tdlib-preflight") as executor:
+    with ContextExecutor(max_workers=worker_count, thread_name_prefix="tdlib-preflight") as executor:
         for index, result in enumerate(
             ordered_bounded_map(executor, items, worker, worker_count),
             1,
         ):
             if _cancel_requested(cancel_event):
                 raise TimeoutError("视频预检已取消")
-            if getattr(cfg, "VIDEO_VERIFY_ALL_METADATA", False):
+            if getattr(config, "VIDEO_VERIFY_ALL_METADATA", False):
                 target.info(f"预检视频 {index}/{total} · {items[index-1]['path'].name}")
             if result:
                 skipped.append(result)
@@ -1545,6 +1563,7 @@ def input_video(
     Mixed uploads use the same payload builder as standalone video uploads;
     only the thumbnail preference differs by mode.
     """
+    config = pipeline_config(cfg)
 
     path = item["path"]
     readiness = wait_for_file_ready(
@@ -1556,18 +1575,18 @@ def input_video(
     )
     raise_for_file_readiness(path, readiness)
     source_path = path
-    staging_mode = getattr(cfg, "STAGING_MODE", None)
-    if staging_mode is None or (staging_mode == "off" and getattr(cfg, "STAGING_ENABLED", False)):
-        staging_mode = "always" if getattr(cfg, "STAGING_ENABLED", False) else "off"
+    staging_mode = getattr(config, "STAGING_MODE", None)
+    if staging_mode is None or (staging_mode == "off" and getattr(config, "STAGING_ENABLED", False)):
+        staging_mode = "always" if getattr(config, "STAGING_ENABLED", False) else "off"
     if should_stage(path, staging_mode):
         source_path = stage_file(
             path,
             readiness.snapshot,
-            staging_dir=cfg.STAGING_DIR,
-            staging_base_dir=getattr(cfg, "STAGING_BASE_DIR", cfg.STAGING_DIR),
+            staging_dir=config.STAGING_DIR,
+            staging_base_dir=getattr(config, "STAGING_BASE_DIR", config.STAGING_DIR),
             cancel_event=cancel_event,
         )
-        STAGED_UPLOAD_PATHS[stable_path(path)] = source_path
+        pipeline_locals(globals())["STAGED_UPLOAD_PATHS"][stable_path(path)] = source_path
 
     info = (
         video_info(source_path)
@@ -1575,7 +1594,7 @@ def input_video(
         else video_info(source_path, cancel_event=cancel_event)
     )
     thumbnail_enabled = (
-        cfg.VIDEO_GENERATE_THUMBNAIL
+        config.VIDEO_GENERATE_THUMBNAIL
         if generate_thumbnail is None
         else bool(generate_thumbnail)
     )
@@ -1591,7 +1610,7 @@ def input_video(
         max_bytes=max_bytes,
         is_premium=is_premium,
         info=info,
-        config=cfg,
+        config=config,
     )
     info = prep.info
     supports_streaming = (
@@ -1631,11 +1650,12 @@ def input_video(
 class UploadState(SharedUploadState):
     """Video-specific facade over the shared V1.9 checkpoint format."""
 
-    def __init__(self, target=None, *, state_dir: Path | None = None):
+    def __init__(self, target=None, *, state_dir: Path | None = None, create=True):
         super().__init__(
             kind="video",
-            source_root=cfg.VIDEO_DIR,
-            target=target or getattr(cfg, "target_for", lambda _kind: {}) ("video"),
+            create=create,
+            source_root=pipeline_config(cfg).VIDEO_DIR,
+            target=target or getattr(pipeline_config(cfg), "target_for", lambda _kind: {}) ("video"),
             state_dir=STATE_DIR if state_dir is None else state_dir,
             filename_prefix="video_upload_state",
             snapshot_provider=_snapshot_for_path,
@@ -1658,6 +1678,8 @@ def build_album_plans(items, state=None) -> list[dict]:
     puts the complete scan into consecutive groups of the configured size,
     regardless of each video's capture month.
     """
+    config = pipeline_config(cfg)
+    runtime = pipeline_locals(globals())
     store = CaptionStore("video")
     # ``scan_videos`` normally supplies immutable snapshots for every item.
     # Materialize a missing snapshot once for direct API callers so the shared
@@ -1665,13 +1687,13 @@ def build_album_plans(items, state=None) -> list[dict]:
     for raw_item in items:
         path = Path(raw_item.get("path") if isinstance(raw_item, dict) else raw_item)
         key = normalize_path(path)
-        if key not in LAST_SCAN_SNAPSHOTS:
+        if key not in runtime["LAST_SCAN_SNAPSHOTS"]:
             snapshot = file_snapshot(path)
             if snapshot is not None:
-                LAST_SCAN_SNAPSHOTS[key] = (int(snapshot[0]), int(snapshot[1]))
+                runtime["LAST_SCAN_SNAPSHOTS"][key] = (int(snapshot[0]), int(snapshot[1]))
     plans = []
     groups = make_groups(items)
-    album_size = cfg.VIDEO_ALBUM_SIZE
+    album_size = config.VIDEO_ALBUM_SIZE
     for month_key in sorted(groups):
         month_items = groups[month_key]
         for start in range(0, len(month_items), album_size):
@@ -1693,8 +1715,8 @@ def build_album_plans(items, state=None) -> list[dict]:
                 "video",
                 key_group,
                 album_items,
-                root=cfg.VIDEO_DIR,
-                snapshot_provider=lambda path: LAST_SCAN_SNAPSHOTS.get(normalize_path(path)),
+                root=config.VIDEO_DIR,
+                snapshot_provider=lambda path: runtime["LAST_SCAN_SNAPSHOTS"].get(normalize_path(path)),
             )
             record = store.get(key, default_label)
             base_label = record["base_label"] if include_group_title() else ""
@@ -1712,7 +1734,7 @@ def build_album_plans(items, state=None) -> list[dict]:
                     "text": compose_caption(
                         base_label,
                         record["custom_text"],
-                        getattr(cfg, "VIDEO_ALBUM_CAPTION_SEPARATOR", " · "),
+                        getattr(config, "VIDEO_ALBUM_CAPTION_SEPARATOR", " · "),
                     ),
                 },
             })

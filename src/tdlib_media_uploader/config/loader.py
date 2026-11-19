@@ -232,6 +232,16 @@ def _bounded_float(section, key: str, default: float, minimum: float, maximum: f
     return value
 
 
+upload_retry = _optional_section("upload_retry")
+UPLOAD_RETRY_ENABLED = upload_retry.get("enabled", False)
+if type(UPLOAD_RETRY_ENABLED) is not bool:
+    raise RuntimeError("config.toml 中的 upload_retry.enabled 必须是布尔值。")
+if type(upload_retry.get("max_retries", 2)) is not int:
+    raise RuntimeError("config.toml 中的 upload_retry.max_retries 必须是整数。")
+UPLOAD_RETRY_MAX_RETRIES = _bounded_int(upload_retry, "max_retries", 2, 1, 10)
+UPLOAD_RETRY_DELAY_SECONDS = _bounded_float(upload_retry, "retry_delay_seconds", 1.0, 0, 3600)
+
+
 def _thumbnail_timestamp_seconds(section, key: str, default: float = 1.0) -> float:
     """Read a finite, non-negative thumbnail timestamp at centisecond precision."""
 

@@ -9,10 +9,11 @@ from .models import scan_result as preview_result
 from .tools import require_kind
 
 
-def scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
+def scan_result(kind: str, progress_callback=None, cancel_event=None, *, config=None, source_root=None, target=None) -> dict:
     """Scan the configured source and render its Album plans."""
     kind = require_kind(kind)
-    config = get_config()
+    if config is None:
+        config = get_config()
     if config is None:
         raise RuntimeError(config_service._CONFIG_ERROR or "配置不可用。")
 
@@ -20,8 +21,8 @@ def scan_result(kind: str, progress_callback=None, cancel_event=None) -> dict:
 
     bundle = scan_v2(
         kind,
-        source_root=source_root_for(kind),
-        target=target_for(kind),
+        source_root=source_root_for(kind) if source_root is None else source_root,
+        target=target_for(kind) if target is None else target,
         cancel_event=cancel_event,
         progress_callback=progress_callback,
         config=config,

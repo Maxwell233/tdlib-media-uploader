@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
@@ -13,6 +15,34 @@ SUBMITTED = BatchStatus.SUBMITTED.value
 CONFIRMED = BatchStatus.CONFIRMED.value
 FAILED = BatchStatus.FAILED.value
 UNKNOWN = BatchStatus.UNKNOWN.value
+
+
+class SendRequestRejected(RuntimeError):
+    """A correlated TDLib error returned before any message was accepted."""
+
+    submitted = False
+
+    def __init__(self, error_code: int, description: str, retry_after: float | None):
+        super().__init__(description)
+        self.error_code = error_code
+        self.retry_after = retry_after
+
+    @property
+    def rate_limited(self) -> bool:
+        return (
+            self.error_code in {420, 429}
+            and self.retry_after is not None
+            and math.isfinite(self.retry_after)
+            and self.retry_after >= 0
+        )
+
+    def as_dict(self) -> dict:
+        return {
+            "submitted": self.submitted, "error_code": self.error_code,
+            "rate_limited": self.rate_limited,
+            "retry_after": self.retry_after if self.rate_limited else None,
+            "error": str(self),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,14 +104,24 @@ class _MessageRecord:
     can_retry: bool = False
     retry_after: float = 0.0
     requires_action: bool = False
+    error_code: int | None = None
 
 
 def _failure_options(value):
     message = value.get("message", value)
     state = message.get("sending_state") or {}
+    error = value.get("error") or state.get("error") or {}
+    code = _as_id(error.get("code")) if isinstance(error, Mapping) else None
+    delay = max(0.0, float(state.get("retry_after", 0) or 0))
+    if code in {420, 429}:
+        wait = re.search(r"(?:FLOOD_WAIT_|retry after\s+)(\d+(?:\.\d+)?)",
+                         str(error.get("message", "")), re.IGNORECASE)
+        if wait:
+            delay = max(delay, float(wait[1]))
     return {
+        "error_code": code,
         "can_retry": bool(state.get("can_retry", False)),
-        "retry_after": max(0.0, float(state.get("retry_after", 0) or 0)),
+        "retry_after": delay,
         "requires_action": any(state.get(key) for key in (
             "need_another_sender", "need_another_reply_quote", "need_drop_reply",
             "required_paid_message_star_count",
@@ -191,6 +231,7 @@ def _apply_updates(records: list[_MessageRecord], updates: Iterable[Any]) -> Non
             record.can_retry = options["can_retry"]
             record.retry_after = options["retry_after"]
             record.requires_action = options["requires_action"]
+            record.error_code = options["error_code"]
 
 
 def _ids(records: Iterable[_MessageRecord], state: str) -> tuple[int, ...]:
@@ -253,7 +294,8 @@ def map_send_result(
     # Keep the observed IDs for manual recovery, but never checkpoint them
     # as a complete Album merely because a response/update repeated an ID.
     duplicate_confirmations = len(set(succeeded)) != len(succeeded)
-    forced_unknown = timed_out or cancelled or incomplete or duplicate_confirmations
+    invalid_failed_ids = len(set(failed)) != len(failed) or 0 in failed
+    forced_unknown = timed_out or cancelled or incomplete or duplicate_confirmations or invalid_failed_ids
     status = status_for_delivery(
         len(succeeded),
         len(failed),
@@ -276,7 +318,8 @@ def map_send_result(
         tuple({"index": index, "old_message_id": record.old_id,
                "message_id": record.resolved_id, "status": record.state,
                "error": record.error, "can_retry": record.can_retry,
-               "retry_after": record.retry_after, "requires_action": record.requires_action}
+               "retry_after": record.retry_after, "requires_action": record.requires_action,
+               "error_code": record.error_code}
               for index, record in enumerate(records)),
     )
 

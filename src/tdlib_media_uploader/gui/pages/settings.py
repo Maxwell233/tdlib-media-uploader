@@ -240,7 +240,6 @@ class SettingsPage(QWidget):
             item = self.nav_list.item(idx)
             if item is not None:
                 item.setIcon(get_svg_icon(icon_name, 16, 16))
-        self.refresh()
 
     def refresh(self, update_cache: bool = False):
         if config_service._CONFIG_ERROR:
