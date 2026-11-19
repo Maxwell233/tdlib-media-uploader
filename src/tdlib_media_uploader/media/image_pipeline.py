@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ..core.album import CaptionStore, album_key, compose_caption
@@ -24,6 +23,8 @@ from .common import (
     readiness_record as _readiness_record,
 )
 from ..config import loader as cfg
+from ..core.concurrency import ContextExecutor
+from .runtime import pipeline_config, pipeline_locals
 from ..telegram.tdlib_common import HeadlessUI, formatted_text
 from ..config.paths import IMAGE_STATE_DIR, IMAGE_COMPRESSION_CACHE_DIR
 from ..upload.staging import should_stage, stage_file
@@ -49,102 +50,104 @@ UI = HeadlessUI()
 
 
 def _readiness_options(path=None) -> dict:
+    config = pipeline_config(cfg)
     return _shared_readiness_options(
-        cfg,
-        network=is_network_path(path or cfg.IMAGE_DIR),
-        default_attempts=READINESS_ATTEMPTS,
+        config,
+        network=is_network_path(path or config.IMAGE_DIR),
+        default_attempts=int(getattr(config, "SCAN_READINESS_ATTEMPTS", READINESS_ATTEMPTS)),
     )
 
 
 def relative_name(path: Path) -> str:
-    return stable_relative_name(path, cfg.IMAGE_DIR)
+    return stable_relative_name(path, pipeline_config(cfg).IMAGE_DIR)
 
 
 def cleanup_staging_cache(*, startup: bool = False) -> None:
-    _prune_staging_cache(cfg, startup=startup)
+    _prune_staging_cache(pipeline_config(cfg), startup=startup)
 
 
 def cleanup_confirmed_staging(paths) -> None:
-    _cleanup_confirmed_staging(paths, config=cfg, staged_maps=(STAGED_UPLOAD_PATHS,))
+    _cleanup_confirmed_staging(paths, config=pipeline_config(cfg), staged_maps=(pipeline_locals(globals())["STAGED_UPLOAD_PATHS"],))
 
 
 def _snapshot_for_path(path: Path):
     # Prefer the immutable snapshot captured by the scanner.  A late stat is
     # only a fallback for direct API callers that did not scan first.
-    return IMAGE_SCAN_SNAPSHOTS.get(stable_path(path)) or file_snapshot(path)
+    return pipeline_locals(globals())["IMAGE_SCAN_SNAPSHOTS"].get(stable_path(path)) or file_snapshot(path)
 
 
 def file_signature(path: Path, snapshot=None) -> str:
     snapshot = snapshot or _snapshot_for_path(path)
     if snapshot is None:
         raise OSError(f"文件暂时不可读取：{path}")
-    return media_file_signature(path, root=cfg.IMAGE_DIR, snapshot=snapshot)
+    return media_file_signature(path, root=pipeline_config(cfg).IMAGE_DIR, snapshot=snapshot)
 
 
 def scan_images(cancel_event=None) -> list[Path]:
-    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, IMAGE_SCAN_SNAPSHOTS
+    config = pipeline_config(cfg)
+    runtime = pipeline_locals(globals())
     try:
         root = validate_scan_root(
-            cfg.IMAGE_DIR,
-            attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
-            initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
-            max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+            config.IMAGE_DIR,
+            attempts=getattr(config, "SCAN_DISCOVERY_ATTEMPTS", 3),
+            initial_delay=getattr(config, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+            max_delay=getattr(config, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
             cancel_event=cancel_event,
         )
     except TimeoutError:
-        LAST_SCAN_ERRORS = []
-        LAST_SCAN_WARNINGS = ["目录扫描已取消"]
-        LAST_SCAN_SIZE_SKIPS = []
-        IMAGE_SCAN_SNAPSHOTS = {}
+        runtime["LAST_SCAN_ERRORS"] = []
+        runtime["LAST_SCAN_WARNINGS"] = ["目录扫描已取消"]
+        runtime["LAST_SCAN_SIZE_SKIPS"] = []
+        runtime["IMAGE_SCAN_SNAPSHOTS"] = {}
         return []
     scan_result = iter_files(
         root,
-        cfg.IMAGE_EXTENSIONS,
+        config.IMAGE_EXTENSIONS,
         cancel_event=cancel_event,
-        discovery_attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
-        discovery_initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
-        discovery_max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+        discovery_attempts=getattr(config, "SCAN_DISCOVERY_ATTEMPTS", 3),
+        discovery_initial_delay=getattr(config, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+        discovery_max_delay=getattr(config, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
     )
     images = scan_result.paths
-    LAST_SCAN_ERRORS = list(scan_result.errors)
-    LAST_SCAN_WARNINGS = list(scan_result.warnings)
+    runtime["LAST_SCAN_ERRORS"] = list(scan_result.errors)
+    runtime["LAST_SCAN_WARNINGS"] = list(scan_result.warnings)
     if scan_result.cancelled:
-        LAST_SCAN_WARNINGS.append("目录扫描已取消")
-    LAST_SCAN_SIZE_SKIPS = []
-    IMAGE_SCAN_SNAPSHOTS = {
+        runtime["LAST_SCAN_WARNINGS"].append("目录扫描已取消")
+    runtime["LAST_SCAN_SIZE_SKIPS"] = []
+    runtime["IMAGE_SCAN_SNAPSHOTS"] = {
         key: snapshot.as_tuple()
         for key, snapshot in getattr(scan_result, "snapshots", {}).items()
     }
     accepted = []
     for path in images:
-        snapshot = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path)) or file_snapshot(path)
+        snapshot = runtime["IMAGE_SCAN_SNAPSHOTS"].get(stable_path(path)) or file_snapshot(path)
         if snapshot is None:
-            LAST_SCAN_ERRORS.append(f"{path}: 文件暂时不可读取或为空")
+            runtime["LAST_SCAN_ERRORS"].append(f"{path}: 文件暂时不可读取或为空")
             continue
         size, _mtime_ns = snapshot
-        if size > cfg.IMAGE_MAX_BYTES:
+        if size > config.IMAGE_MAX_BYTES:
             record = {
                 "path": path,
                 "size": size,
-                "limit": cfg.IMAGE_MAX_BYTES,
+                "limit": config.IMAGE_MAX_BYTES,
                 "category": "size",
                 "action": "normalize",
                 "reason": (
                     f"文件大小 {format_size(size)} 超过 Telegram Photo 上限 "
-                    f"{format_size(cfg.IMAGE_MAX_BYTES)}，将在上传前规范化"
+                    f"{format_size(config.IMAGE_MAX_BYTES)}，将在上传前规范化"
                 ),
             }
-            LAST_SCAN_SIZE_SKIPS.append(record)
+            runtime["LAST_SCAN_SIZE_SKIPS"].append(record)
         accepted.append(path)
-        IMAGE_SCAN_SNAPSHOTS[stable_path(path)] = snapshot
+        runtime["IMAGE_SCAN_SNAPSHOTS"][stable_path(path)] = snapshot
     images = accepted
 
-    mode = "mtime" if cfg.IMAGE_SORT_MODE == "mtime" else "name"
+    mode = "mtime" if config.IMAGE_SORT_MODE == "mtime" else "name"
     return media_path_sort(
         images,
         root,
         mode=mode,
-        mtime_key=lambda path: IMAGE_SCAN_SNAPSHOTS.get(stable_path(path), (0, 0))[1],
+        mtime_key=lambda path: runtime["IMAGE_SCAN_SNAPSHOTS"].get(stable_path(path), (0, 0))[1],
     )
 
 
@@ -155,8 +158,9 @@ _IMAGE_INFO_CACHE_LOCK = threading.Lock()
 
 def compress_image(path: Path, cancel_event=None, *, source_info=None) -> Path:
     """Create a temporary JPEG under the Telegram photo limit."""
-    extreme_aspect_policy = getattr(cfg, "IMAGE_EXTREME_ASPECT_POLICY", "pad")
-    transparency_background = getattr(cfg, "IMAGE_TRANSPARENCY_BACKGROUND", "#FFFFFF")
+    config = pipeline_config(cfg)
+    extreme_aspect_policy = getattr(config, "IMAGE_EXTREME_ASPECT_POLICY", "pad")
+    transparency_background = getattr(config, "IMAGE_TRANSPARENCY_BACKGROUND", "#FFFFFF")
     prepared = prepare_image_for_telegram(
         path,
         cancel_event=cancel_event,
@@ -209,6 +213,7 @@ def image_info(path: Path) -> tuple[int, int]:
 
 def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
     """Find unreadable images without aborting the complete upload task."""
+    config = pipeline_config(cfg)
 
     target = ui or UI
     skipped = []
@@ -216,7 +221,7 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
 
     def worker(path):
         try:
-            expected = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
+            expected = pipeline_locals(globals())["IMAGE_SCAN_SNAPSHOTS"].get(stable_path(path))
             readiness = wait_for_file_ready(
                 path,
                 expected_size=expected[0] if expected else None,
@@ -230,7 +235,7 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
             info = cached_image_probe(path)
             if info.animated:
                 raise RuntimeError(f"检测到动画图片，不会自动转换为静态 Photo：{path.name}")
-            extreme_aspect_policy = getattr(cfg, "IMAGE_EXTREME_ASPECT_POLICY", "pad")
+            extreme_aspect_policy = getattr(config, "IMAGE_EXTREME_ASPECT_POLICY", "pad")
             if info.needs_aspect_fix and extreme_aspect_policy == "skip":
                 ratio = (
                     max(info.width / info.height, info.height / info.width)
@@ -240,7 +245,7 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
                 raise RuntimeError(
                     f"图片长宽比（{ratio:.2f}）超过限制 {TELEGRAM_PHOTO_MAX_ASPECT_RATIO}，且配置为跳过：{path.name}"
                 )
-            if info.needs_normalization or size > cfg.IMAGE_MAX_BYTES:
+            if info.needs_normalization or size > config.IMAGE_MAX_BYTES:
                 return {"path": path, "oversize": True}
             return None
         except TimeoutError as exc:
@@ -277,11 +282,11 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
             return record
 
     worker_count = io_worker_count(
-        cfg.IMAGE_DIR,
-        local=getattr(cfg, "IO_WORKERS_LOCAL", 4),
-        network=getattr(cfg, "IO_WORKERS_NETWORK", 2),
+        config.IMAGE_DIR,
+        local=getattr(config, "IO_WORKERS_LOCAL", 4),
+        network=getattr(config, "IO_WORKERS_NETWORK", 2),
     )
-    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tdlib-preflight") as executor:
+    with ContextExecutor(max_workers=worker_count, thread_name_prefix="tdlib-preflight") as executor:
         for index, result in enumerate(
             ordered_bounded_map(executor, paths, worker, worker_count, cancel_event=cancel_event),
             1,
@@ -297,7 +302,7 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
                 target.warning(f"跳过图片：{relative_name(result['path'])}")
                 target.log(f"跳过图片详情：{result['path']}\n原因：{result['reason']}")
 
-            if getattr(cfg, "IMAGE_VERIFY_ALL_IMAGES", False):
+            if getattr(config, "IMAGE_VERIFY_ALL_IMAGES", False):
                 target.info(f"预检图片 {index}/{total} · {paths[index-1].name}")
 
     return skipped
@@ -311,8 +316,10 @@ def input_photo(
     expected_mtime_ns=None,
     cancel_event=None,
 ) -> dict:
+    config = pipeline_config(cfg)
+    runtime = pipeline_locals(globals())
     if expected_size is None and expected_mtime_ns is None:
-        expected = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
+        expected = runtime["IMAGE_SCAN_SNAPSHOTS"].get(stable_path(path))
         if expected is not None:
             expected_size, expected_mtime_ns = expected
     readiness = wait_for_file_ready(
@@ -325,20 +332,20 @@ def input_photo(
     raise_for_file_readiness(path, readiness)
     snapshot = readiness.snapshot.as_tuple()
     source_path = path
-    staging_mode = getattr(cfg, "STAGING_MODE", None)
-    if staging_mode is None or (staging_mode == "off" and getattr(cfg, "STAGING_ENABLED", False)):
-        staging_mode = "always" if getattr(cfg, "STAGING_ENABLED", False) else "off"
+    staging_mode = getattr(config, "STAGING_MODE", None)
+    if staging_mode is None or (staging_mode == "off" and getattr(config, "STAGING_ENABLED", False)):
+        staging_mode = "always" if getattr(config, "STAGING_ENABLED", False) else "off"
     if should_stage(path, staging_mode):
         source_path = stage_file(
             path,
             readiness.snapshot,
-            staging_dir=cfg.STAGING_DIR,
-            staging_base_dir=getattr(cfg, "STAGING_BASE_DIR", cfg.STAGING_DIR),
+            staging_dir=config.STAGING_DIR,
+            staging_base_dir=getattr(config, "STAGING_BASE_DIR", config.STAGING_DIR),
             cancel_event=cancel_event,
         )
-        STAGED_UPLOAD_PATHS[stable_path(path)] = source_path
+        runtime["STAGED_UPLOAD_PATHS"][stable_path(path)] = source_path
     info = cached_image_probe(source_path)
-    if info.needs_normalization or snapshot[0] > cfg.IMAGE_MAX_BYTES:
+    if info.needs_normalization or snapshot[0] > config.IMAGE_MAX_BYTES:
         source_path = compress_image(
             source_path,
             cancel_event,
@@ -380,7 +387,7 @@ def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
     skipped = []
     for path in paths:
         try:
-            expected = IMAGE_SCAN_SNAPSHOTS.get(stable_path(path))
+            expected = pipeline_locals(globals())["IMAGE_SCAN_SNAPSHOTS"].get(stable_path(path))
             item_caption = caption if not valid_paths else ""
             if expected is None:
                 # Keep the historical two-argument call shape for embedding
@@ -407,7 +414,7 @@ def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
             record = {
                 "path": path,
                 "reason": f"{type(exc).__name__}: {exc}",
-                "category": "size" if current_size > cfg.IMAGE_MAX_BYTES else "unreadable",
+                "category": "size" if current_size > pipeline_config(cfg).IMAGE_MAX_BYTES else "unreadable",
             }
             readiness_record = _readiness_record(exc)
             if readiness_record:
@@ -424,11 +431,12 @@ def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
 class UploadState(SharedUploadState):
     """Image-specific facade over the shared V1.9 checkpoint format."""
 
-    def __init__(self, target=None, *, state_dir: Path | None = None):
+    def __init__(self, target=None, *, state_dir: Path | None = None, create=True):
         super().__init__(
             kind="image",
-            source_root=cfg.IMAGE_DIR,
-            target=target or getattr(cfg, "target_for", lambda _kind: {}) ("image"),
+            create=create,
+            source_root=pipeline_config(cfg).IMAGE_DIR,
+            target=target or getattr(pipeline_config(cfg), "target_for", lambda _kind: {}) ("image"),
             state_dir=STATE_DIR if state_dir is None else state_dir,
             filename_prefix="image_upload_state",
             snapshot_provider=_snapshot_for_path,
@@ -437,6 +445,8 @@ class UploadState(SharedUploadState):
 
 def build_album_plans(images: list[Path], state=None) -> list[dict]:
     """Build stable image Albums from the complete scan, not pending-only files."""
+    config = pipeline_config(cfg)
+    runtime = pipeline_locals(globals())
     store = CaptionStore("image")
     # Normal scans populate ``IMAGE_SCAN_SNAPSHOTS`` before planning.  Keep
     # direct callers (including integrations that provide a list of Paths)
@@ -445,20 +455,20 @@ def build_album_plans(images: list[Path], state=None) -> list[dict]:
     # it only consumes this immutable map.
     for path in images:
         key = stable_path(path)
-        if key not in IMAGE_SCAN_SNAPSHOTS:
+        if key not in runtime["IMAGE_SCAN_SNAPSHOTS"]:
             snapshot = file_snapshot(path)
             if snapshot is not None:
-                IMAGE_SCAN_SNAPSHOTS[key] = (int(snapshot[0]), int(snapshot[1]))
+                runtime["IMAGE_SCAN_SNAPSHOTS"][key] = (int(snapshot[0]), int(snapshot[1]))
     plans = []
-    for start in range(0, len(images), cfg.IMAGE_ALBUM_SIZE):
-        album_paths = list(images[start:start + cfg.IMAGE_ALBUM_SIZE])
-        number = start // cfg.IMAGE_ALBUM_SIZE + cfg.IMAGE_ALBUM_NUMBER_START
+    for start in range(0, len(images), config.IMAGE_ALBUM_SIZE):
+        album_paths = list(images[start:start + config.IMAGE_ALBUM_SIZE])
+        number = start // config.IMAGE_ALBUM_SIZE + config.IMAGE_ALBUM_NUMBER_START
         key = album_key(
             "image",
             f"Album {number}",
             album_paths,
-            root=cfg.IMAGE_DIR,
-            snapshot_provider=lambda path: IMAGE_SCAN_SNAPSHOTS.get(stable_path(path)),
+            root=config.IMAGE_DIR,
+            snapshot_provider=lambda path: runtime["IMAGE_SCAN_SNAPSHOTS"].get(stable_path(path)),
         )
         pending = [
             path for path in album_paths
@@ -470,9 +480,9 @@ def build_album_plans(images: list[Path], state=None) -> list[dict]:
             "base_label": base_label,
             "custom_text": record["custom_text"],
             "text": compose_caption(
-                base_label if getattr(cfg, "IMAGE_ALBUM_NUMBERING", True) else "",
+                base_label if getattr(config, "IMAGE_ALBUM_NUMBERING", True) else "",
                 record["custom_text"],
-                getattr(cfg, "IMAGE_ALBUM_CAPTION_SEPARATOR", " · "),
+                getattr(config, "IMAGE_ALBUM_CAPTION_SEPARATOR", " · "),
             ),
         }
         plans.append({

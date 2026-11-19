@@ -925,6 +925,12 @@ QPushButton#themeToggleBtn:hover {{
 """
 
 
+def initialize_theme(application, preferences):
+    """Restore theme tokens before creating widgets or generating icons."""
+    set_theme_mode(preferences.theme_mode)
+    application.setStyleSheet(build_stylesheet(THEME))
+
+
 APP_STYLE = build_stylesheet()
 
 __all__ = [
@@ -938,5 +944,6 @@ __all__ = [
     "toggle_theme",
     "APP_STYLE",
     "build_stylesheet",
+    "initialize_theme",
     "FONT_FAMILY",
 ]

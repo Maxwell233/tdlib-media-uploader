@@ -7,7 +7,7 @@ truth for scanning, Album creation, TDLib requests and resumable state.
 
 from __future__ import annotations
 
-import datetime as _dt
+from functools import partial
 import os
 import sys
 import tomllib
@@ -56,6 +56,10 @@ from .pages import (
     VideoPage,
 )
 from .workers import ScanWorker, UploadWorker
+from .queue_controller import QueueController, recover_task
+from ..config.snapshot import snapshot_config
+from ..upload.queue import ACTIVE, TaskStatus, UploadTask
+from ..upload.queue_store import UploadQueue
 
 
 PROJECT_DIR = RESOURCE_DIR
@@ -103,11 +107,12 @@ from .pages import (
     SettingsPage,
 )
 from .components import NavigationSidebar
-from .theme import APP_STYLE
+from .theme import initialize_theme
+from .preferences import UiPreferences
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, *, queue_store=None, preferences=None):
         super().__init__()
         global cfg
         cfg = config_service.get_config()
@@ -118,16 +123,27 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(860, 560)
         self.resize(1240, 800)
         self._cache_clear_worker = None
-        self.worker: UploadWorker | None = None
         self.scanners: dict[str, ScanWorker] = {}
-        self.active_kind = ""
-        self.active_result = None
-        self.started_at = ""
-        self.auth_bridge = AuthBridge()
-        self.auth_bridge.requested.connect(self._show_auth_dialog)
-        self._build_ui()
+        self._build_ui(preferences)
+        store = queue_store if queue_store is not None else UploadQueue(DATA_DIR / "upload_queue.json", recover_task)
+        self.queue = QueueController(store, self._make_upload_worker, self._can_start_queue, self)
+        self.queue.changed.connect(self._refresh_queue)
+        self.queue.error.connect(self._queue_error)
+        self.queue.launched.connect(self._upload_launched)
+        self.queue.ended.connect(self._upload_finished)
+        self.task_page.queue_pause_requested.connect(self.queue.set_paused)
+        self.task_page.queue_move_requested.connect(self.queue.move)
+        self.task_page.queue_remove_requested.connect(self.queue.remove)
         self.settings_page.storage_panel.cancel_cleanup_requested.connect(self._cancel_cache_clear)
         self._refresh_pages()
+        self._refresh_queue()
+        if store.error:
+            write_app_log("ERROR", store.error, source="upload/queue")
+            self.statusBar().showMessage(store.error)
+
+    @property
+    def worker(self):
+        return self.queue.worker
 
     def _upload_page(self, kind: str):
         """Return a media page after validating the explicit route kind."""
@@ -137,14 +153,15 @@ class MainWindow(QMainWindow):
     def _sidebar_row(self, kind: str) -> int:
         return self.sidebar_rows[_require_kind(kind)]
 
-    def _build_ui(self):
+    def _build_ui(self, preferences=None):
         central = QWidget()
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         self.setCentralWidget(central)
 
-        self.nav_sidebar = NavigationSidebar(version=APP_VERSION)
+        self.nav_sidebar = NavigationSidebar(version=APP_VERSION, preferences=preferences)
+        self.nav_sidebar.theme_save_failed.connect(self._theme_warning)
         self.sidebar = self.nav_sidebar.list
         root.addWidget(self.nav_sidebar)
 
@@ -213,6 +230,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("就绪")
         self._telegram_connected = False
 
+    def _theme_warning(self, message):
+        write_app_log("WARNING", message, source="ui/preferences")
+        self.statusBar().showMessage(message)
+
     def refresh_theme(self):
         """Re-apply styling across composite widgets on theme switch."""
         for target in (
@@ -251,22 +272,40 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("请等待缓存清理结束，或先取消清理")
             return False
         kind = _require_kind(kind)
-        if self.worker is not None and self.worker.isRunning():
-            QMessageBox.warning(self, "任务运行中", "当前已有上传任务，请先安全停止后再扫描。")
-            return
-        if any(scanner.isRunning() for scanner in self.scanners.values()):
-            QMessageBox.warning(self, "扫描运行中", "当前已有目录扫描，请等待扫描完成后再扫描另一个类型。")
-            return
-        worker = ScanWorker(kind, scan_runner=_scan_result)
+        if self.scanners:
+            self.statusBar().showMessage("已有目录扫描在运行，请等待完成或取消")
+            return False
+        config = config_service.get_config()
+        if config is None:
+            self.statusBar().showMessage("配置不可用，请检查设置")
+            return False
+        target = _target_for(kind)
+        root = _source_root_for(kind)
+        frozen = snapshot_config(config, kind, target, immutable=True)
+        runner = partial(_scan_result, config=frozen, target=target, source_root=root)
+        worker = ScanWorker(kind, scan_runner=runner)
         self.scanners[kind] = worker
-        page = self._upload_page(kind)
-        page.set_scanning(True)
-        worker.completed.connect(lambda result, k=kind: self._scan_done(k, result))
-        worker.cancelled.connect(lambda result, k=kind: self._scan_done(k, result))
-        worker.failed.connect(lambda message, k=kind: self._scan_failed(k, message))
-        worker.progress_changed.connect(self._scan_progress)
-        worker.finished.connect(worker.deleteLater)
+        self._upload_page(kind).set_scanning(True)
+        worker.progress_changed.connect(
+            lambda k, event, w=worker: self._scan_progress(k, event)
+            if self.scanners.get(k) is w else None, Qt.ConnectionType.QueuedConnection,
+        )
+        worker.finished.connect(
+            lambda w=worker: self._scan_finished(w), Qt.ConnectionType.QueuedConnection
+        )
         worker.start()
+        return True
+
+    def _scan_finished(self, worker):
+        kind = worker.kind
+        if self.scanners.get(kind) is not worker:
+            return
+        if worker.result is not None:
+            self._scan_done(kind, {**worker.result, "scan_id": worker.scan_id})
+        else:
+            self._scan_failed(kind, worker.error or "扫描线程没有返回结果")
+        worker.deleteLater()
+
 
     @Slot(str)
     def _reset_upload_state(self, kind: str):
@@ -278,6 +317,10 @@ class MainWindow(QMainWindow):
             scanner.isRunning() for scanner in self.scanners.values()
         ):
             QMessageBox.warning(self, "任务运行中", "请等待扫描完成或安全停止上传后再重置断点。")
+            return
+        if self.queue.store.error or any(task.kind == kind and task.status in ACTIVE | {TaskStatus.PENDING}
+               for task in self.queue.store.tasks):
+            self.statusBar().showMessage("此媒体类型仍有队列任务，请先处理任务再重置断点")
             return
         label = _kind_label(kind)
         answer = QMessageBox.warning(
@@ -375,78 +418,98 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "保存失败", error)
             self._upload_page(kind).refresh_config()
         else:
-            self._invalidate_previews()
-            self._refresh_pages()
+            self._upload_page(kind).clear_scan_result()
+            self._upload_page(kind).refresh_config()
             self.statusBar().showMessage("目录配置已保存")
 
+    def _refresh_queue(self):
+        self.task_page.show_queue(self.queue.store, self.queue.write_blocked)
+
+    def _queue_error(self, message):
+        write_app_log("ERROR", message, source="upload/queue")
+        self.task_page.queue_notice.setText(message)
+        self.statusBar().showMessage(message)
+
     def _start_upload(self, kind: str):
-        if self._cache_clear_worker is not None:
-            self.statusBar().showMessage("请等待缓存清理结束，或先取消清理")
-            return False
-        kind = _require_kind(kind)
-        if any(scanner.isRunning() for scanner in self.scanners.values()):
-            QMessageBox.information(self, "正在扫描", "请等待目录扫描完成后再上传。")
-            return
-        if self.worker is not None and self.worker.isRunning():
-            QMessageBox.warning(self, "任务运行中", "图片和视频任务不能同时运行。")
-            return
         page = self._upload_page(kind)
         result = page.result
         if not result or not result.get("pending_files"):
-            QMessageBox.information(self, "无需上传", "当前没有待上传项目。")
+            self.statusBar().showMessage("请先扫描包含待上传媒体的目录")
             return
-        api_hash = str(_cfg("API_HASH", "")).strip()
-        if (
-            _cfg("API_ID", 12345678) == 12345678
-            or not api_hash
-            or api_hash == "YOUR_API_HASH"
-        ):
-            QMessageBox.warning(self, "尚未配置", "请先在设置中填写 Telegram API ID 和 API Hash。")
-            self.sidebar.setCurrentRow(self.sidebar_rows["settings"])
+        try:
+            task = UploadTask.from_preview(kind, result, config_service.get_config())
+        except (ValueError, TypeError, KeyError) as exc:
+            QMessageBox.warning(self, "无法加入队列", str(exc))
             return
 
+        target = task.target
         answer = QMessageBox.question(
             self,
-            "确认开始上传",
-            f"待上传 {result['pending_files']} 个文件，约 {_fmt_size(result['pending_bytes'])}，共 {result['album_count']} 组。\n"
-            f"来源：{result.get('source_dir', '')}\n"
-            f"目标 Chat ID：{_target_for(kind).get('chat_id', 0)}\n"
-            + (f"话题 ID：{_target_for(kind).get('forum_topic_id', 0)}\n" if _target_for(kind).get('target_mode') != 'channel' else "目标类型：频道\n")
-            + "\n确认开始？",
+            "确认加入上传队列",
+            f"待上传 {result['pending_files']} 个文件，约 {_fmt_size(result['pending_bytes'])}，"
+            f"共 {result['album_count']} 组。\n"
+            f"来源：{task.source_root}\n目标 Chat ID：{target['chat_id']}\n"
+            + (f"话题 ID：{target['forum_topic_id']}\n" if target["forum_topic_id"] else "目标类型：频道\n")
+            + "入队后会按队列顺序自动执行。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
+        if answer == QMessageBox.StandardButton.Yes and self.queue.enqueue(task):
+            self.statusBar().showMessage("上传任务已加入队列，可继续扫描")
 
-        self.active_kind = kind
-        self.active_result = result
-        self.started_at = _dt.datetime.now().isoformat(timespec="seconds")
-        self.task_page.start_session(kind, result)
-        self.sidebar.setCurrentRow(self.sidebar_rows["task"])
+    def _can_start_queue(self):
+        if self._cache_clear_worker is not None:
+            return False
+        from ..telegram.tdlib_common import TDJsonClient
+
+        api_hash = str(_cfg("API_HASH", "")).strip()
+        if _cfg("API_ID", 12345678) in {0, 12345678} or api_hash in {"", "YOUR_API_HASH"}:
+            self.queue.set_paused(True)
+            self._queue_error("队列已暂停，请先配置 Telegram API ID 和 API Hash，再继续队列。")
+            return False
+        if TDJsonClient.unclosed_instance() is not None:
+            self.queue.set_paused(True)
+            self._queue_error("队列已暂停，请等待 Telegram 数据库关闭后再继续。")
+            return False
+        return True
+
+    def _make_upload_worker(self, task):
+        auth_bridge = AuthBridge()
         worker = UploadWorker(
-            kind,
-            self.auth_bridge,
-            result,
-            target_provider=_target_for,
-            source_root_provider=_source_root_for,
-            config=cfg,
+            task.kind, auth_bridge, task.preview(),
+            target_provider=lambda _kind: task.target,
+            config=task.execution_config(config_service.get_config()),
         )
-        self.worker = worker
-        worker.ui.message_added.connect(self.task_page.add_message)
-        worker.ui.progress_changed.connect(self._on_worker_progress)
-        worker.ui.rate_limit_changed.connect(self.task_page.show_rate_limit)
-        worker.ui.album_changed.connect(self.task_page.show_album)
-        worker.ui.target_changed.connect(self._target_from_worker)
-        worker.completed.connect(self._upload_finished)
-        worker.finished.connect(lambda w=worker: self._worker_thread_finished(w))
-        for upload_page in self.upload_pages.values():
-            upload_page.set_running(True)
-        summary = f"待上传 {result['pending_files']} 个文件 · {result.get('album_count', 0)} 个 Album"
-        self.home.set_task_running(kind, summary)
+        worker.wait_for_scheduler = True
+        auth_bridge.requested.connect(
+            lambda prompt, password, w=worker: self._show_auth_dialog(w, prompt, password),
+            Qt.ConnectionType.QueuedConnection,
+        )
+        return worker
+
+    def _upload_launched(self, task, worker):
+        pending = [item for plan in task.plans for item in plan.pending_items]
+        self.task_page.start_session(task.kind, {
+            "pending_files": len(pending),
+            "pending_bytes": sum(item.snapshot.size for item in pending),
+            "album_count": sum(bool(plan.pending_items) for plan in task.plans),
+        })
+        for signal, callback in (
+            (worker.ui.message_added, self.task_page.add_message),
+            (worker.ui.progress_changed, self._on_worker_progress),
+            (worker.ui.rate_limit_changed, self.task_page.show_rate_limit),
+            (worker.ui.album_changed, self.task_page.show_album),
+            (worker.ui.album_attempt_changed, self.task_page.show_album_attempt),
+            (worker.ui.target_changed, self._target_from_worker),
+        ):
+            signal.connect(
+                lambda *args, w=worker, handler=callback: handler(*args) if self.worker is w else None,
+                Qt.ConnectionType.QueuedConnection,
+            )
+        for page in self.upload_pages.values():
+            page.set_running(True)
+        self.home.set_task_running(task.kind, f"{len(pending)} 个待上传文件 · {len(task.plans)} 个 Album")
         self.home.set_connection("上传中", True)
         self.nav_sidebar.set_connection_status(True, "上传中")
-        self.statusBar().showMessage("上传任务已启动")
-        worker.start()
 
     def _on_worker_progress(self, payload: dict):
         self.task_page.show_progress(payload)
@@ -462,25 +525,15 @@ class MainWindow(QMainWindow):
         self._telegram_connected = True
         self.home.set_connection("已连接", True)
         self.nav_sidebar.set_connection_status(True, "已连接")
-        kind = _require_kind(payload.get("kind") or self.active_kind)
-        page = self._upload_page(kind)
-        is_channel = str(payload.get("target_mode") or _target_for(kind).get("target_mode")) == "channel"
-        page.chat_label.setText(
-            f"{'频道' if is_channel else '超级群组'} · "
-            f"{payload.get('chat_title')} ({payload.get('chat_id')})"
-        )
-        page.topic_label.setText(
-            "不适用（频道不使用 Topic）"
-            if is_channel
-            else f"{payload.get('topic_name')} ({payload.get('topic_id')})"
-        )
+        is_channel = payload.get("target_mode") == "channel"
         self.statusBar().showMessage(
             f"目标已确认：{payload.get('chat_title')}"
             + ("（频道）" if is_channel else f" / {payload.get('topic_name')}")
         )
 
     def _safe_stop_upload(self):
-        if self.worker is not None and self.worker.isRunning():
+        worker = self.worker
+        if worker is not None and worker.isRunning():
             answer = QMessageBox.question(
                 self,
                 "安全停止上传",
@@ -488,13 +541,14 @@ class MainWindow(QMainWindow):
                 "是否安全停止？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
-            if answer == QMessageBox.StandardButton.Yes:
-                self.worker.request_safe_stop()
+            if answer == QMessageBox.StandardButton.Yes and self.worker is worker:
+                worker.request_safe_stop()
                 self.task_page.task_status.setText("当前 Album 完成后安全停止…")
                 self.statusBar().showMessage("已请求安全停止，当前 Album 将继续完成…")
 
     def _immediate_stop_upload(self):
-        if self.worker is not None and self.worker.isRunning():
+        worker = self.worker
+        if worker is not None and worker.isRunning():
             answer = QMessageBox.warning(
                 self,
                 "立即中断上传",
@@ -503,48 +557,42 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
-            if answer == QMessageBox.StandardButton.Yes:
-                self.worker.request_immediate_stop()
+            if answer == QMessageBox.StandardButton.Yes and self.worker is worker:
+                worker.request_immediate_stop()
                 self.task_page.task_status.setText("正在立即中断…")
                 self.statusBar().showMessage("正在立即中断上传任务；当前 Album 可能进入 UNKNOWN…")
 
-    def _upload_finished(self, success: bool, message: str):
-        write_app_log(
-            "INFO" if success else "ERROR",
-            f"{self.active_kind} 任务结束：{message}",
-            source=f"upload/{self.active_kind or 'app'}",
-        )
-        if self.active_result is not None:
+    def _upload_finished(self, task):
+        success = task.status is TaskStatus.COMPLETED
+        if self.queue.write_blocked:
+            message = "任务结果未写入队列，已停止调度。请检查数据目录后重启。"
+        else:
+            message = {
+                TaskStatus.COMPLETED: "上传任务完成。",
+                TaskStatus.NEEDS_REVIEW: "请在“未确认上传”核对发送记录。",
+                TaskStatus.INTERRUPTED: "任务已停止。重新扫描可检查剩余文件。",
+                TaskStatus.FAILED: "任务部分完成。" if task.outcome == "PARTIAL" else "任务未完成。",
+            }[task.status]
+            if task.error:
+                message += f" {task.error}"
             records = _load_history()
             records.append({
-                "started_at": self.started_at,
-                "finished_at": _dt.datetime.now().isoformat(timespec="seconds"),
-                "kind": self.active_kind,
-                "source_dir": self.active_result.get("source_dir", ""),
-                "total_files": self.active_result.get("total_files", 0),
-                "total_bytes": self.active_result.get("total_bytes", 0),
-                "success": success,
-                "message": message,
+                "task_id": task.task_id, "started_at": task.started_at, "finished_at": task.finished_at,
+                "kind": task.kind, "source_dir": str(task.source_root), "total_files": len(task.items),
+                "total_bytes": task.total_bytes, "success": success, "message": message,
             })
             _save_history(records)
 
-        self.task_page.finish_session(success, message)
-        if self.active_kind:
-            page = self._upload_page(self.active_kind)
-            page.clear_scan_result()
+        write_app_log("INFO" if success else "ERROR", message, source=f"upload/{task.kind}")
+        self.task_page.finish_session(success, message.splitlines()[0][:180])
         for upload_page in self.upload_pages.values():
             upload_page.set_running(False)
         self.home.set_task_idle()
         self.home.set_connection("已连接" if self._telegram_connected else "未连接", self._telegram_connected)
         self.nav_sidebar.set_connection_status(self._telegram_connected, "已连接" if self._telegram_connected else "未连接")
-        self.statusBar().showMessage(message)
+        self.statusBar().showMessage(message.splitlines()[0][:180])
         self.history_page.reload_records()
         self.inflight_page.reload_records()
-
-    def _worker_thread_finished(self, worker: UploadWorker):
-        if self.worker is worker:
-            self.worker = None
-        worker.deleteLater()
 
     @Slot(object, bool)
     def _reconcile_inflight(self, record: object, sent: bool):
@@ -643,6 +691,7 @@ class MainWindow(QMainWindow):
         worker.deleteLater()
         self.settings_page.storage_panel.set_cleaning(False)
         self.settings_page.refresh()
+        self.queue.schedule()
         if reset_scan:
             for upload_page in self.upload_pages.values():
                 upload_page.clear_scan_result()
@@ -666,6 +715,11 @@ class MainWindow(QMainWindow):
 
     def _clear_all_cache(self):
         if not self._cache_operation_allowed():
+            return
+        if self.queue.store.error or any(
+            task.status in ACTIVE | {TaskStatus.PENDING} for task in self.queue.store.tasks
+        ):
+            self.statusBar().showMessage("请先处理等待中的上传任务，再清理断点和未确认记录")
             return
         answer = QMessageBox.warning(
             self,
@@ -710,9 +764,9 @@ class MainWindow(QMainWindow):
             return
         dialog = TargetDialog(kind, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._invalidate_previews()
-            self._refresh_pages()
             saved_kind = dialog.kind
+            self._upload_page(saved_kind).clear_scan_result()
+            self._upload_page(saved_kind).refresh_config()
             self.statusBar().showMessage(
                 f"{_kind_label(saved_kind)}上传目标已保存"
             )
@@ -728,8 +782,8 @@ class MainWindow(QMainWindow):
         if self._cache_clear_worker is not None:
             self.statusBar().showMessage("请等待缓存清理结束，或先取消清理")
             return False
-        if (self.worker is not None and self.worker.isRunning()) or any(scanner.isRunning() for scanner in self.scanners.values()):
-            QMessageBox.information(self, "任务进行中", "请等待扫描完成或停止上传后再修改配置。")
+        if self.scanners:
+            QMessageBox.information(self, "正在扫描", "请等待扫描完成或先取消扫描，再修改配置。")
             return False
         return True
 
@@ -738,18 +792,19 @@ class MainWindow(QMainWindow):
             upload_page.clear_scan_result()
         self.home.clear_scan()
 
-    @Slot(str, bool)
-    def _show_auth_dialog(self, prompt: str, password: bool):
+    def _show_auth_dialog(self, worker, prompt: str, password: bool):
+        if self.worker is not worker or worker.ui.safe_stop_requested:
+            return
         echo = QLineEdit.EchoMode.Password if password else QLineEdit.EchoMode.Normal
         value, accepted = QInputDialog.getText(self, "Telegram 登录", prompt, echo)
         if not password:
             value = value.strip()
         if accepted and value:
-            self.auth_bridge.answer(value)
+            worker.ui.auth_bridge.answer(value)
         else:
-            self.auth_bridge.answer("")
-            if self.worker is not None:
-                self.worker.request_stop()
+            worker.ui.auth_bridge.answer("")
+            if self.worker is worker:
+                worker.request_stop()
 
     def closeEvent(self, event):
         cleanup = self._cache_clear_worker
@@ -759,7 +814,9 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("正在停止缓存清理，请稍后再关闭窗口")
                 event.ignore()
                 return
-        if self.worker is not None and self.worker.isRunning():
+        worker = self.worker
+        self.queue.closing = True
+        if worker is not None and worker.isRunning():
             answer = QMessageBox.question(
                 self,
                 "任务运行中",
@@ -767,18 +824,23 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
+                self.queue.closing = False
+                self.queue.schedule()
                 event.ignore()
                 return
-            self.worker.request_stop()
-            if not self.worker.wait(10000):
+            if self.worker is worker:
+                worker.request_stop()
+            if self.worker is worker and not worker.wait(10000):
                 QMessageBox.warning(self, "仍在运行", "TDLib 尚未结束，请稍后再关闭窗口。")
                 event.ignore()
                 return
+        self.queue.finish_after_wait()
         from ..telegram.tdlib_common import TDJsonClient
         closing_client = TDJsonClient.unclosed_instance()
         if closing_client is not None:
             closing_client._send_close_now()
             QMessageBox.warning(self, "正在关闭", "Telegram 数据库尚未关闭，请稍后再退出。")
+            self.queue.closing = False
             event.ignore()
             return
         for scanner in list(self.scanners.values()):
@@ -786,6 +848,7 @@ class MainWindow(QMainWindow):
                 scanner.request_stop()
                 if not scanner.wait(5000):
                     QMessageBox.warning(self, "仍在扫描", "扫描任务尚未结束，请稍候再关闭窗口。")
+                    self.queue.closing = False
                     event.ignore()
                     return
         cache_worker = self.settings_page.storage_panel._cache_worker
@@ -793,6 +856,7 @@ class MainWindow(QMainWindow):
             cache_worker.request_stop()
             if not cache_worker.wait(1000):
                 self.statusBar().showMessage("正在停止缓存统计，请稍后再关闭窗口")
+                self.queue.closing = False
                 event.ignore()
                 return
         event.accept()
@@ -838,8 +902,11 @@ def main() -> int:
         app.setApplicationVersion(APP_VERSION)
         app.setWindowIcon(_application_icon())
         app.setStyle("Fusion")
-        app.setStyleSheet(APP_STYLE)
-        window = MainWindow()
+        preferences = UiPreferences()
+        initialize_theme(app, preferences)
+        window = MainWindow(preferences=preferences)
+        if preferences.error:
+            window._theme_warning(preferences.error)
         window.setWindowIcon(app.windowIcon())
         window.show()
         return app.exec()

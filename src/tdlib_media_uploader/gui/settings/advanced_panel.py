@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -103,6 +104,22 @@ class AdvancedPanel(SettingsPanel):
         io_layout.addLayout(io_form)
         layout.addWidget(io_card)
 
+        album_card, album_layout = self.create_card("Album 发送失败自动重试")
+        album_form = QFormLayout()
+        self.album_retry_enabled = QCheckBox("启用整组重试")
+        self.album_retry_count = self._int_spin(1, 10, " 次")
+        self.album_retry_delay = self._dec_spin(0.0, 3600.0, 2, " 秒")
+        album_form.addRow(self.album_retry_enabled)
+        album_form.addRow("额外重试次数", self.album_retry_count)
+        album_form.addRow("重试间隔", self.album_retry_delay)
+        album_layout.addLayout(album_form)
+        retry_hint = QLabel("额外次数指重新发送完整 Album。TDLib 的单条消息重发另行处理。"
+                            "仅明确全部失败时才重试，并遵守 Telegram 的限流等待。")
+        retry_hint.setWordWrap(True)
+        retry_hint.setObjectName("mutedLabel")
+        album_layout.addWidget(retry_hint)
+        layout.addWidget(album_card)
+
         # Helper for collapsible section
         def build_collapsible(title: str):
             c_card = QFrame()
@@ -187,6 +204,11 @@ class AdvancedPanel(SettingsPanel):
 
         # Wire dirty tracking
         self.exiftool_path.textChanged.connect(self._check_dirty)
+        self.album_retry_enabled.toggled.connect(self._check_dirty)
+        self.album_retry_enabled.toggled.connect(self.album_retry_count.setEnabled)
+        self.album_retry_enabled.toggled.connect(self.album_retry_delay.setEnabled)
+        self.album_retry_count.valueChanged.connect(self._check_dirty)
+        self.album_retry_delay.valueChanged.connect(self._check_dirty)
         for spin in (
             self.scan_workers_local, self.scan_workers_network,
             self.scan_stability_checks, self.scan_stability_checks_local, self.scan_stability_checks_network,
@@ -255,12 +277,21 @@ class AdvancedPanel(SettingsPanel):
         self.exiftool_batch_size.setValue(int(_cfg("EXIFTOOL_BATCH_SIZE", 64)))
         self.exiftool_retries.setValue(int(_cfg("EXIFTOOL_RETRIES", 2)))
 
+        self.album_retry_enabled.setChecked(bool(_cfg("UPLOAD_RETRY_ENABLED", False)))
+        self.album_retry_count.setValue(int(_cfg("UPLOAD_RETRY_MAX_RETRIES", 2)))
+        self.album_retry_delay.setValue(float(_cfg("UPLOAD_RETRY_DELAY_SECONDS", 1.0)))
+        self.album_retry_count.setEnabled(self.album_retry_enabled.isChecked())
+        self.album_retry_delay.setEnabled(self.album_retry_enabled.isChecked())
+
         self.blockSignals(False)
         self._initial_values = self._current_values_dict()
         self.mark_clean()
 
     def _current_values_dict(self) -> dict:
         return {
+            "retry_enabled": self.album_retry_enabled.isChecked(),
+            "retry_count": self.album_retry_count.value(),
+            "retry_delay": self.album_retry_delay.value(),
             "exiftool_path": self.exiftool_path.text().strip(),
             "scan_workers_local": self.scan_workers_local.value(),
             "scan_workers_network": self.scan_workers_network.value(),
@@ -295,6 +326,9 @@ class AdvancedPanel(SettingsPanel):
     def collect_values(self) -> dict:
         c = self._current_values_dict()
         return {
+            ("upload_retry", "enabled"): c["retry_enabled"],
+            ("upload_retry", "max_retries"): c["retry_count"],
+            ("upload_retry", "retry_delay_seconds"): c["retry_delay"],
             ("paths", "exiftool_path"): c["exiftool_path"],
             ("scan", "io_workers_local"): c["scan_workers_local"],
             ("scan", "io_workers_network"): c["scan_workers_network"],

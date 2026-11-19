@@ -255,10 +255,12 @@ class InflightJournal:
         return self.get_entry(kind, album_key, target)[1]
 
     def unresolved(self, kind: str, album_key: str, target=None) -> dict | None:
-        record = self.get(kind, album_key, target)
-        if record and str(record.get("status", "")).upper() in UNRESOLVED:
-            return record
-        return None
+        with self._lock:
+            record = self.get(kind, album_key, target)
+            if record and record.get("status") in UNRESOLVED:
+                return record
+            return next((entry for _, entry in self._entries(kind, album_key, target)
+                         if entry.get("status") in UNRESOLVED), None)
 
     def unresolved_for_items(self, kind: str, items, *, target=None):
         """Find protected source snapshots even after their Album is regrouped."""
@@ -342,7 +344,8 @@ class InflightJournal:
         # a journal with a text editor.
         record.update(normalized)
 
-    def prepare(self, kind: str, album_key: str, items=None, *, target=None) -> dict:
+    def prepare(self, kind: str, album_key: str, items=None, *, target=None,
+                attempt_id=None, attempt_number=1) -> dict:
         """Persist PREPARED immediately before issuing a TDLib request."""
 
         now = _now()
@@ -356,6 +359,8 @@ class InflightJournal:
             "created_at": now,
             "updated_at": now,
         }
+        if attempt_id is not None:
+            record.update(attempt_id=attempt_id, attempt_number=attempt_number)
         self._with_target(record, target)
         with self._lock:
             path = self.path_for(kind, album_key, target)
@@ -370,6 +375,16 @@ class InflightJournal:
                     )
                 if existing_path is not None:
                     path = existing_path
+            if existing is not None and self.unresolved(kind, album_key, target):
+                raise RuntimeError(f"已有未确认上传记录：{kind} / {album_key}")
+            if attempt_number > 1:
+                if (not existing or existing.get("status") != FAILED
+                        or existing.get("attempt_number") != attempt_number - 1):
+                    raise RuntimeError("找不到已结案的上一次 Album 发送记录")
+                summary = {key: existing.get(key) for key in (
+                    "attempt_id", "attempt_number", "updated_at", "error", "failed_ids"
+                )}
+                record["previous_attempts"] = [*existing.get("previous_attempts", []), summary]
             overlap = self.unresolved_for_items(kind, record["items"], target=target)
             if overlap is not None:
                 raise RuntimeError(f"源文件已有未确认上传记录：{overlap['album_key']}")

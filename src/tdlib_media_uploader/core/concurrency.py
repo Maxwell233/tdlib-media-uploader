@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
-from concurrent.futures import FIRST_COMPLETED, Future, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextvars import copy_context
 import os
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from typing import TypeVar
+
+
+class ContextExecutor(ThreadPoolExecutor):
+    """Keep task-local settings when a media helper submits nested work."""
+
+    def submit(self, fn, /, *args, **kwargs):
+        return super().submit(copy_context().run, fn, *args, **kwargs)
 
 
 class CancellationRequested(TimeoutError):

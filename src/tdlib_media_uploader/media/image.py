@@ -9,12 +9,11 @@ contracts and leaves state, journal and transport lifecycle to UploadEngine.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
 import importlib
 from pathlib import Path
-import threading
 from typing import Any
 
+from .runtime import media_scope, pipeline_value
 from ..core.compat import call_supported as _call_supported
 from ..contracts import CancelToken, EventSink, UploadContext
 from ..core.filesystem import snapshot_file, stable_path
@@ -41,8 +40,6 @@ from .strategy_support import (
 )
 
 
-_MISSING = object()
-_LEGACY_SCOPE_LOCK = threading.RLock()
 
 
 def _load_legacy_module() -> Any:
@@ -108,7 +105,7 @@ class ImageStrategy:
 
     @property
     def _config(self) -> Any:
-        return getattr(self.legacy, "cfg", None) or self.config or self.legacy
+        return self.config or getattr(self.legacy, "cfg", None) or self.legacy
 
     def _root(self, source_root: Path | None = None) -> Path:
         if source_root is not None:
@@ -127,41 +124,8 @@ class ImageStrategy:
                 pass
         return stable_path(path)
 
-    @contextmanager
-    def _legacy_scope(
-        self,
-        source_root: Path,
-        items: Sequence[MediaItem] = (),
-    ):
-        """Temporarily align legacy globals with one V2 run.
-
-        The old image helpers read ``cfg.IMAGE_DIR`` and
-        ``IMAGE_SCAN_SNAPSHOTS``.  The values are scoped and restored so two
-        independent strategy calls cannot leak a source root or stale
-        identity into one another.
-        """
-
-        config = getattr(self.legacy, "cfg", None) or self.config
-        with _LEGACY_SCOPE_LOCK:
-            previous_root = getattr(config, "IMAGE_DIR", _MISSING)
-            previous_snapshots = getattr(self.legacy, "IMAGE_SCAN_SNAPSHOTS", _MISSING)
-            try:
-                if previous_root is not _MISSING and previous_root != Path(source_root):
-                    config.IMAGE_DIR = Path(source_root)
-                if previous_snapshots is not _MISSING:
-                    working = dict(previous_snapshots or {})
-                    for item in items:
-                        working[self._normalize_path(item.path)] = (
-                            int(item.snapshot.size),
-                            int(item.snapshot.mtime_ns),
-                        )
-                    self.legacy.IMAGE_SCAN_SNAPSHOTS = working
-                yield
-            finally:
-                if previous_root is not _MISSING and previous_root != Path(source_root):
-                    config.IMAGE_DIR = previous_root
-                if previous_snapshots is not _MISSING:
-                    self.legacy.IMAGE_SCAN_SNAPSHOTS = previous_snapshots
+    def _legacy_scope(self, source_root: Path, items=()):
+        return media_scope(self._config, kind=self.kind, root=Path(source_root), items=items)
 
     def _scan_snapshot(self, path: Path, raw: Any = None) -> FileSnapshot | None:
         if isinstance(raw, Mapping):
@@ -169,7 +133,7 @@ class ImageStrategy:
                 return _raw_snapshot(raw, path)
             except (TypeError, ValueError, KeyError):
                 pass
-        snapshots = getattr(self.legacy, "IMAGE_SCAN_SNAPSHOTS", {})
+        snapshots = pipeline_value(self.legacy, "IMAGE_SCAN_SNAPSHOTS", {})
         try:
             value = snapshots.get(self._normalize_path(path))
         except AttributeError:
@@ -255,15 +219,15 @@ class ImageStrategy:
     def _scan_diagnostics(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
         errors = tuple(
             str(value)
-            for value in getattr(self.legacy, "LAST_SCAN_ERRORS", ())
+            for value in pipeline_value(self.legacy, "LAST_SCAN_ERRORS", ())
             if str(value)
         )
         warnings = [
             str(value)
-            for value in getattr(self.legacy, "LAST_SCAN_WARNINGS", ())
+            for value in pipeline_value(self.legacy, "LAST_SCAN_WARNINGS", ())
             if str(value)
         ]
-        size_skips = list(getattr(self.legacy, "LAST_SCAN_SIZE_SKIPS", ()) or ())
+        size_skips = list(pipeline_value(self.legacy, "LAST_SCAN_SIZE_SKIPS", ()) or ())
         rejected = [record for record in size_skips if record.get("action") == "skip"]
         compressing = [record for record in size_skips if record.get("action") == "compress"]
         if rejected:
@@ -397,6 +361,8 @@ class ImageStrategy:
         items: Sequence[MediaItem],
         context: UploadContext | None,
     ) -> str:
+        if context is not None and context.metadata.get("frozen_caption"):
+            return plan.caption
         caption = str(plan.caption or "")
         config = self._config
         enabled = bool(getattr(config, "IMAGE_CAPTION_INCLUDE_FILENAMES", False))

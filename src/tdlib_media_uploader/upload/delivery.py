@@ -1,4 +1,5 @@
 """Normalize transport outcomes without changing checkpoint policy."""
+import math
 from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -29,6 +30,32 @@ class _ObservedSend:
     pending_ids: tuple[int, ...] = ()
     error: str | None = None
     item_results: tuple[Mapping[str, Any], ...] = ()
+    preserve_journal: bool = False
+
+
+    def album_retry_delay(self, expected_count: int) -> float | None:
+        """Require a distinct, terminal and transient failure for every item."""
+        if (self.status is not BatchStatus.FAILED or self.succeeded_ids or self.pending_ids
+                or len(self.failed_ids) != expected_count or len(self.item_results) != expected_count
+                or not all(self.failed_ids) or len(set(self.failed_ids)) != expected_count):
+            return None
+        ids = []
+        delays = []
+        for index, row in enumerate(self.item_results):
+            if (not isinstance(row, Mapping) or row.get("index") != index
+                    or row.get("status") != "failed" or row.get("requires_action") is not False):
+                return None
+            code = row.get("error_code")
+            if type(code) is not int or not (
+                code in {420, 429} or 500 <= code <= 599 or (code == 0 and row.get("can_retry") is True)
+            ):
+                return None
+            delay = row.get("retry_after")
+            if type(delay) not in {int, float} or not math.isfinite(delay) or delay < 0:
+                return None
+            ids.append(row.get("message_id") or row.get("old_message_id"))
+            delays.append(delay)
+        return max(delays) if tuple(ids) == self.failed_ids else None
 
 
 def _normalize_status(value: Any) -> BatchStatus | None:
@@ -108,7 +135,9 @@ def _normalize_send_result(value: Any, expected_count: int) -> _ObservedSend:
     if status is BatchStatus.CONFIRMED and len(set(succeeded or message_ids)) != expected_count:
         status = BatchStatus.UNKNOWN
         error = error or "发送器确认结果包含重复消息 ID"
-    if status is BatchStatus.FAILED and (succeeded or pending):
+    if status is BatchStatus.FAILED and (succeeded or pending or (
+        failed and (len(failed) != expected_count or len(set(failed)) != expected_count or not all(failed))
+    )):
         status = BatchStatus.UNKNOWN
         error = error or "发送结果同时包含成功或待确认消息"
     if status is BatchStatus.CONFIRMED and not succeeded:

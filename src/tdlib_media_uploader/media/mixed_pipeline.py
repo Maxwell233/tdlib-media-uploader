@@ -11,7 +11,6 @@ checkpoint finalization. Mixed Albums retain per-item error isolation.
 from __future__ import annotations
 
 import stat
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ..core.album import CaptionStore, album_key, compose_caption
@@ -30,6 +29,8 @@ from .common import (
     readiness_record as _readiness_record,
 )
 from ..config import loader as cfg
+from ..core.concurrency import ContextExecutor
+from .runtime import pipeline_config, pipeline_locals, pipeline_value
 from ..telegram.tdlib_common import HeadlessUI
 from ..telegram.tdlib_common import formatted_text as formatted_text
 from ..config.paths import MIXED_STATE_DIR
@@ -49,16 +50,18 @@ READINESS_ATTEMPTS = 3
 
 
 def _readiness_options(path=None) -> dict:
+    config = pipeline_config(cfg)
     return _shared_readiness_options(
-        cfg,
-        network=is_network_path(path or cfg.MIXED_DIR),
-        default_attempts=READINESS_ATTEMPTS,
+        config,
+        network=is_network_path(path or config.MIXED_DIR),
+        default_attempts=int(getattr(config, "SCAN_READINESS_ATTEMPTS", READINESS_ATTEMPTS)),
     )
 
 
 def _validate_extensions() -> None:
-    overlap = set(getattr(cfg, "MIXED_IMAGE_EXTENSIONS", set())) & set(
-        getattr(cfg, "MIXED_VIDEO_EXTENSIONS", set())
+    config = pipeline_config(cfg)
+    overlap = set(getattr(config, "MIXED_IMAGE_EXTENSIONS", set())) & set(
+        getattr(config, "MIXED_VIDEO_EXTENSIONS", set())
     )
     if overlap:
         values = ", ".join(sorted(overlap))
@@ -72,21 +75,21 @@ def format_size(value: float | int) -> str:
 
 
 def relative_name(path: Path, root=None) -> str:
-    return stable_relative_name(path, root or cfg.MIXED_DIR)
+    return stable_relative_name(path, root or pipeline_config(cfg).MIXED_DIR)
 
 
 def cleanup_staging_cache(*, startup: bool = False) -> None:
-    _prune_staging_cache(cfg, startup=startup)
+    _prune_staging_cache(pipeline_config(cfg), startup=startup)
 
 
 def cleanup_confirmed_staging(items) -> None:
     paths = (item.get("path") if isinstance(item, dict) else item for item in items or ())
     _cleanup_confirmed_staging(
         (path for path in paths if path is not None),
-        config=cfg,
+        config=pipeline_config(cfg),
         staged_maps=(
-            getattr(image_core, "STAGED_UPLOAD_PATHS", {}),
-            getattr(video_core, "STAGED_UPLOAD_PATHS", {}),
+            pipeline_value(image_core, "STAGED_UPLOAD_PATHS", {}),
+            pipeline_value(video_core, "STAGED_UPLOAD_PATHS", {}),
         ),
     )
 
@@ -96,37 +99,40 @@ def file_signature(path: Path, snapshot=None) -> str:
         snapshot = file_snapshot(path)
     if snapshot is None:
         raise OSError(f"文件暂时不可读取：{path}")
-    return media_file_signature(path, root=cfg.MIXED_DIR, snapshot=snapshot)
+    return media_file_signature(path, root=pipeline_config(cfg).MIXED_DIR, snapshot=snapshot)
 
 
 def _kind_for(path: Path) -> str | None:
+    config = pipeline_config(cfg)
     _validate_extensions()
     suffix = path.suffix.lower()
     from .video_probe import has_video_container_signature
-    if has_video_container_signature(path) or suffix in cfg.MIXED_VIDEO_EXTENSIONS:
+    if has_video_container_signature(path) or suffix in config.MIXED_VIDEO_EXTENSIONS:
         return "video"
-    if suffix in cfg.MIXED_IMAGE_EXTENSIONS:
+    if suffix in config.MIXED_IMAGE_EXTENSIONS:
         return "image"
     return None
 
 
 def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
+    config = pipeline_config(cfg)
+    runtime = pipeline_locals(globals())
     media_kind = _kind_for(path)
     if media_kind is None:
         return None
     snapshot = snapshot or file_snapshot(path)
     if snapshot is None:
-        LAST_SCAN_ERRORS.append(f"{path}: 文件暂时不可读取或为空")
+        runtime["LAST_SCAN_ERRORS"].append(f"{path}: 文件暂时不可读取或为空")
         return None
     size, mtime_ns = snapshot
-    limit = cfg.VIDEO_MAX_BYTES if media_kind == "video" else cfg.IMAGE_MAX_BYTES
+    limit = config.VIDEO_MAX_BYTES if media_kind == "video" else config.IMAGE_MAX_BYTES
     if size > limit:
         limit_label = (
             video_core.video_limit_text(limit)
             if media_kind == "video"
             else format_size(limit)
         )
-        LAST_SCAN_SIZE_SKIPS.append({
+        runtime["LAST_SCAN_SIZE_SKIPS"].append({
             "path": path,
             "size": size,
             "limit": limit,
@@ -150,24 +156,26 @@ def _item_for_path(path: Path, group_name: str, snapshot=None) -> dict | None:
         "scan_mtime_ns": mtime_ns,
         "requires_premium": (
             media_kind == "video"
-            and size > getattr(cfg, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)
+            and size > getattr(config, "VIDEO_STANDARD_MAX_BYTES", 4000 * 524_288)
         ),
     }
 
 
 def _group_items(group_path: Path, group_name: str, cancel_event=None) -> list[dict]:
+    config = pipeline_config(cfg)
+    runtime = pipeline_locals(globals())
     scan_result = iter_files(
         group_path,
         None,
         cancel_event=cancel_event,
-        discovery_attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
-        discovery_initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
-        discovery_max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+        discovery_attempts=getattr(config, "SCAN_DISCOVERY_ATTEMPTS", 3),
+        discovery_initial_delay=getattr(config, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+        discovery_max_delay=getattr(config, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
     )
-    LAST_SCAN_ERRORS.extend(scan_result.errors)
-    LAST_SCAN_WARNINGS.extend(scan_result.warnings)
+    runtime["LAST_SCAN_ERRORS"].extend(scan_result.errors)
+    runtime["LAST_SCAN_WARNINGS"].extend(scan_result.warnings)
     if scan_result.cancelled:
-        LAST_SCAN_WARNINGS.append("目录扫描已取消")
+        runtime["LAST_SCAN_WARNINGS"].append("目录扫描已取消")
         return []
     candidates = scan_result.paths
     snapshots = getattr(scan_result, "snapshots", {})
@@ -180,9 +188,9 @@ def _group_items(group_path: Path, group_name: str, cancel_event=None) -> list[d
         if item is not None:
             items.append(item)
     if cancel_event is not None and cancel_event.is_set():
-        LAST_SCAN_WARNINGS.append("目录扫描已取消")
+        runtime["LAST_SCAN_WARNINGS"].append("目录扫描已取消")
         return []
-    sort_mode = str(getattr(cfg, "MIXED_SORT_MODE", "name")).strip().lower()
+    sort_mode = str(getattr(config, "MIXED_SORT_MODE", "name")).strip().lower()
     def item_mtime(item):
         snapshot_mtime = item.get("scan_mtime_ns")
         return snapshot_mtime if snapshot_mtime is not None else file_mtime(item["path"])
@@ -197,23 +205,24 @@ def _group_items(group_path: Path, group_name: str, cancel_event=None) -> list[d
 
 def scan_mixed_groups(cancel_event=None) -> list[dict]:
     """Scan each first-level directory as a separate mixed-media group."""
-    global LAST_SCAN_ERRORS, LAST_SCAN_WARNINGS, LAST_SCAN_SIZE_SKIPS, LAST_SCAN_IGNORED_ROOT_MEDIA
-    root = Path(cfg.MIXED_DIR)
+    config = pipeline_config(cfg)
+    runtime = pipeline_locals(globals())
+    root = Path(config.MIXED_DIR)
     _validate_extensions()
-    LAST_SCAN_ERRORS = []
-    LAST_SCAN_WARNINGS = []
-    LAST_SCAN_SIZE_SKIPS = []
-    LAST_SCAN_IGNORED_ROOT_MEDIA = []
+    runtime["LAST_SCAN_ERRORS"] = []
+    runtime["LAST_SCAN_WARNINGS"] = []
+    runtime["LAST_SCAN_SIZE_SKIPS"] = []
+    runtime["LAST_SCAN_IGNORED_ROOT_MEDIA"] = []
     try:
         root = validate_scan_root(
             root,
-            attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
-            initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
-            max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+            attempts=getattr(config, "SCAN_DISCOVERY_ATTEMPTS", 3),
+            initial_delay=getattr(config, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+            max_delay=getattr(config, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
             cancel_event=cancel_event,
         )
     except TimeoutError:
-        LAST_SCAN_WARNINGS.append("目录扫描已取消")
+        runtime["LAST_SCAN_WARNINGS"].append("目录扫描已取消")
         return []
     groups = []
     directories = []
@@ -223,38 +232,38 @@ def scan_mixed_groups(cancel_event=None) -> list[dict]:
         # cancellation and recover when an SMB iterator drops mid-enumeration.
         for entry in iter_directory_entries_with_retry(
             root,
-            attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
-            initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
-            max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+            attempts=getattr(config, "SCAN_DISCOVERY_ATTEMPTS", 3),
+            initial_delay=getattr(config, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+            max_delay=getattr(config, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
             cancel_event=cancel_event,
         ):
             if cancel_event is not None and cancel_event.is_set():
-                LAST_SCAN_WARNINGS.append("目录扫描已取消")
+                runtime["LAST_SCAN_WARNINGS"].append("目录扫描已取消")
                 break
             try:
                 info = retry_fs_operation(
                     lambda entry=entry: entry.stat(follow_symlinks=False),
-                    attempts=getattr(cfg, "SCAN_DISCOVERY_ATTEMPTS", 3),
-                    initial_delay=getattr(cfg, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
-                    max_delay=getattr(cfg, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
+                    attempts=getattr(config, "SCAN_DISCOVERY_ATTEMPTS", 3),
+                    initial_delay=getattr(config, "SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15),
+                    max_delay=getattr(config, "SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0),
                     cancel_event=cancel_event,
                 )
                 if stat.S_ISDIR(info.st_mode):
                     if is_link_or_junction(entry):
-                        LAST_SCAN_WARNINGS.append(f"跳过符号链接或 junction：{entry.path}")
+                        runtime["LAST_SCAN_WARNINGS"].append(f"跳过符号链接或 junction：{entry.path}")
                         continue
                     directories.append(Path(entry.path))
                 elif stat.S_ISREG(info.st_mode) and _kind_for(Path(entry.path)):
                     root_files.append(Path(entry.path))
             except OSError as exc:
-                LAST_SCAN_ERRORS.append(f"{entry.path}: {exc}")
+                runtime["LAST_SCAN_ERRORS"].append(f"{entry.path}: {exc}")
     except TimeoutError:
-        LAST_SCAN_WARNINGS.append("目录扫描已取消")
+        runtime["LAST_SCAN_WARNINGS"].append("目录扫描已取消")
     except OSError as exc:
         # Keep groups discovered before an iterator failure.  A reconnecting
         # network share must not discard the portion we already enumerated or
         # abort the entire mixed scan.
-        LAST_SCAN_ERRORS.append(f"{root}: {exc}")
+        runtime["LAST_SCAN_ERRORS"].append(f"{root}: {exc}")
     directories = media_path_sort(directories, root, mode="name")
     for group_path in directories:
         if cancel_event is not None and cancel_event.is_set():
@@ -270,37 +279,39 @@ def scan_mixed_groups(cancel_event=None) -> list[dict]:
     # in it are intentionally ignored so they cannot silently change Album
     # membership or be mixed with a first-level folder.
     if root_files:
-        LAST_SCAN_IGNORED_ROOT_MEDIA = list(root_files)
+        runtime["LAST_SCAN_IGNORED_ROOT_MEDIA"] = list(root_files)
     return groups
 
 
 class UploadState(SharedUploadState):
     """Mixed-specific facade over the shared V1.9 checkpoint format."""
 
-    def __init__(self, target=None, *, state_dir: Path | None = None):
+    def __init__(self, target=None, *, state_dir: Path | None = None, create=True):
         super().__init__(
             kind="mixed",
-            source_root=cfg.MIXED_DIR,
-            target=target or getattr(cfg, "target_for", lambda _kind: {}) ("mixed"),
+            create=create,
+            source_root=pipeline_config(cfg).MIXED_DIR,
+            target=target or getattr(pipeline_config(cfg), "target_for", lambda _kind: {}) ("mixed"),
             state_dir=STATE_DIR if state_dir is None else state_dir,
             filename_prefix="mixed_upload_state",
         )
 
 
 def build_album_plans(groups, state=None) -> list[dict]:
+    config = pipeline_config(cfg)
     plans = []
     store = CaptionStore("mixed")
     for group in groups:
         group_name = str(group["group_name"])
         items = list(group.get("items", []))
-        for offset in range(0, len(items), cfg.MIXED_ALBUM_SIZE):
-            album_items = items[offset:offset + cfg.MIXED_ALBUM_SIZE]
-            number = offset // cfg.MIXED_ALBUM_SIZE + 1
-            key = album_key("mixed", f"{group_name}:{number}", album_items, root=cfg.MIXED_DIR)
+        for offset in range(0, len(items), config.MIXED_ALBUM_SIZE):
+            album_items = items[offset:offset + config.MIXED_ALBUM_SIZE]
+            number = offset // config.MIXED_ALBUM_SIZE + 1
+            key = album_key("mixed", f"{group_name}:{number}", album_items, root=config.MIXED_DIR)
             pending = [item for item in album_items if state is None or not state.is_completed(item)]
             record = store.get(key, group_name)
-            base_label = record["base_label"] if cfg.MIXED_CAPTION_INCLUDE_GROUP_TITLE else ""
-            if cfg.MIXED_CAPTION_INCLUDE_GROUP_TITLE and not base_label:
+            base_label = record["base_label"] if config.MIXED_CAPTION_INCLUDE_GROUP_TITLE else ""
+            if config.MIXED_CAPTION_INCLUDE_GROUP_TITLE and not base_label:
                 base_label = group_name
             plans.append({
                 "key": key,
@@ -312,7 +323,7 @@ def build_album_plans(groups, state=None) -> list[dict]:
                 "caption": {
                     "base_label": base_label,
                     "custom_text": record["custom_text"],
-                    "text": compose_caption(base_label, record["custom_text"], cfg.MIXED_ALBUM_CAPTION_SEPARATOR),
+                    "text": compose_caption(base_label, record["custom_text"], config.MIXED_ALBUM_CAPTION_SEPARATOR),
                 },
             })
     return plans
@@ -325,6 +336,7 @@ def _deferred(exc: Exception) -> bool:
 
 
 def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
+    config = pipeline_config(cfg)
     target = ui or UI
     skipped = []
 
@@ -346,13 +358,13 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
                     if cancel_event is None
                     else video_core.video_info(path, cancel_event=cancel_event)
                 )
-                if snapshot[0] > cfg.VIDEO_MAX_BYTES and not video_core.can_remux_video(path, info=v_info):
+                if snapshot[0] > config.VIDEO_MAX_BYTES and not video_core.can_remux_video(path, info=v_info):
                     raise RuntimeError(
                         f"文件大小 {format_size(snapshot[0])} 超过 Telegram 视频上限 "
-                        f"{video_core.video_limit_text(cfg.VIDEO_MAX_BYTES)}"
+                        f"{video_core.video_limit_text(config.VIDEO_MAX_BYTES)}"
                     )
                 if getattr(v_info, "compatibility", "native") not in {"native", "legacy"}:
-                    policy = getattr(cfg, "VIDEO_COMPATIBILITY_POLICY", "remux")
+                    policy = getattr(config, "VIDEO_COMPATIBILITY_POLICY", "remux")
                     if getattr(v_info, "compatibility", "") == "remux":
                         if policy == "original":
                             raise RuntimeError(
@@ -369,7 +381,7 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
                 img_info = image_core.cached_image_probe(path)
                 if img_info.animated:
                     raise RuntimeError(f"检测到动画图片，不会自动转换为静态 Photo：{path.name}")
-                extreme_aspect_policy = getattr(cfg, "IMAGE_EXTREME_ASPECT_POLICY", "pad")
+                extreme_aspect_policy = getattr(config, "IMAGE_EXTREME_ASPECT_POLICY", "pad")
                 if img_info.needs_aspect_fix and extreme_aspect_policy == "skip":
                     from .image_probe import TELEGRAM_PHOTO_MAX_ASPECT_RATIO
                     ratio = (
@@ -419,11 +431,11 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
             return record
 
     worker_count = io_worker_count(
-        cfg.MIXED_DIR,
-        local=getattr(cfg, "IO_WORKERS_LOCAL", MEDIA_DATE_MAX_WORKERS),
-        network=getattr(cfg, "IO_WORKERS_NETWORK", 2),
+        config.MIXED_DIR,
+        local=getattr(config, "IO_WORKERS_LOCAL", MEDIA_DATE_MAX_WORKERS),
+        network=getattr(config, "IO_WORKERS_NETWORK", 2),
     )
-    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tdlib-mixed-preflight") as executor:
+    with ContextExecutor(max_workers=worker_count, thread_name_prefix="tdlib-mixed-preflight") as executor:
         for index, result in enumerate(
             ordered_bounded_map(executor, items, worker, worker_count),
             1,
@@ -434,7 +446,7 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
                 skipped.append(result)
                 target.warning(f"跳过无法读取的混合媒体：{relative_name(result['path'])}")
                 target.log(f"跳过混合媒体详情：{result['path']}\n原因：{result['reason']}")
-            if getattr(cfg, "MIXED_VERIFY_MEDIA", False):
+            if getattr(config, "MIXED_VERIFY_MEDIA", False):
                 target.info(f"预检混合媒体 {index}/{len(items)} · {Path(items[index - 1]['path']).name}")
     return skipped
 
@@ -450,12 +462,13 @@ def _mixed_input_video(
     # Keep one authoritative TDLib video payload implementation.  Mixed
     # orchestration still owns grouping/captions/state, while the shared
     # builder owns readiness, staging, metadata and thumbnail shape.
+    config = pipeline_config(cfg)
     kwargs = {
-        "generate_thumbnail": getattr(cfg, "MIXED_GENERATE_THUMBNAIL", True),
+        "generate_thumbnail": getattr(config, "MIXED_GENERATE_THUMBNAIL", True),
         "thumbnail_timestamp_seconds": getattr(
-            cfg,
+            config,
             "MIXED_THUMBNAIL_TIMESTAMP_SECONDS",
-            getattr(cfg, "VIDEO_THUMBNAIL_TIMESTAMP_SECONDS", 1.0),
+            getattr(config, "VIDEO_THUMBNAIL_TIMESTAMP_SECONDS", 1.0),
         ),
     }
     if group_key is not None:
@@ -509,7 +522,7 @@ def build_mixed_contents(
                         # check without inventing a second value.
                         expected_size = expected_mtime_ns = None
                     else:
-                        image_core.IMAGE_SCAN_SNAPSHOTS[stable_path(item["path"])] = (
+                        pipeline_value(image_core, "IMAGE_SCAN_SNAPSHOTS")[stable_path(item["path"])] = (
                             int(expected_size),
                             int(expected_mtime_ns),
                         )
@@ -517,7 +530,7 @@ def build_mixed_contents(
                     # Do not let a snapshot left by a previous mixed scan
                     # impose a stale JIT identity on a legacy caller that
                     # supplies only a path.
-                    image_core.IMAGE_SCAN_SNAPSHOTS.pop(
+                    pipeline_value(image_core, "IMAGE_SCAN_SNAPSHOTS").pop(
                         stable_path(item["path"]),
                         None,
                     )

@@ -275,3 +275,10 @@ database_encryption_key = ""
 use_file_database = true
 use_chat_info_database = true
 use_message_database = false
+
+
+[upload_retry]
+# Extra whole-Album attempts after every message is confirmed failed.
+enabled = false
+max_retries = 2
+retry_delay_seconds = 1.0

@@ -20,9 +20,11 @@ class AuthBridge(QObject):
         self._event: threading.Event | None = None
         self._value = ""
 
-    def ask(self, prompt: str, password: bool = False) -> str:
+    def ask(self, prompt: str, password: bool = False, *, stopped=None) -> str:
         event = threading.Event()
         with self._lock:
+            if stopped is not None and stopped.is_set():
+                return ""
             self._event = event
             self._value = ""
         self.requested.emit(prompt, password)
@@ -46,6 +48,7 @@ class GuiConsoleUI(QObject):
     message_added = Signal(str, str)
     progress_changed = Signal(object)
     album_changed = Signal(object)
+    album_attempt_changed = Signal(object)
     target_changed = Signal(object)
     rate_limit_changed = Signal(int)
 
@@ -111,7 +114,7 @@ class GuiConsoleUI(QObject):
             client.cancel()
 
     def prompt(self, text: str, *, password: bool = False) -> str:
-        value = self.auth_bridge.ask(text, password)
+        value = self.auth_bridge.ask(text, password, stopped=self._stop_after_current)
         if not value and not self.safe_stop_requested and not self.stop_requested:
             self.request_immediate_stop()
         return value
@@ -169,6 +172,9 @@ class GuiConsoleUI(QObject):
             "subtitle": subtitle,
             "rows": list(rows or []),
         })
+
+    def album_attempt(self, event):
+        self.album_attempt_changed.emit(event)
 
     def progress(self, **kwargs):
         self.progress_changed.emit(dict(kwargs))
