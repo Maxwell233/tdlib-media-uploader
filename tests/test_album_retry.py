@@ -291,3 +291,13 @@ def test_existing_request_flood_retry_shares_whole_album_budget(enabled):
         assert client.request(query) == {"@type": "messages"}
         assert requests == [query, query]
     assert waits == [1.0]
+
+
+def test_permission_rejection_during_message_resend_blocks_new_album(harness):
+    run, _, journal = harness
+    result, client, _, _ = run(["message_retry", TDLibError(403, "CHAT_WRITE_FORBIDDEN"), "ok"])
+    assert result.status == "PARTIAL"
+    assert client.requests == ["sendMessageAlbum", "resendMessages", "sendMessageAlbum"]
+    last = journal.get("image", "album-1", target=TARGET)
+    assert last["status"] == "FAILED"
+    assert [item["error_code"] for item in last["item_results"]] == [403, 403]

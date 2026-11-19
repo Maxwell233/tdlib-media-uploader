@@ -1030,6 +1030,7 @@ class TDJsonClient:
         updates = {}
         last_payload = None
         retried = set()
+        resend_rejections = {}
         while True:
             with self.send_condition:
                 ids = [message.get("id") for message in messages]
@@ -1039,6 +1040,12 @@ class TDJsonClient:
                         updates[old_id] = update
             result = map_send_result(messages, updates.values())
             payload = result.as_dict()
+            for row in payload.get("item_results", []):
+                rejection = resend_rejections.get(row["index"])
+                if rejection is not None:
+                    row["error_code"] = rejection.code
+                    row["error"] = str(rejection)
+                    row["retry_after"] = max(row["retry_after"], rejection.retry_after or 0)
             failures = []
             for value in (*messages, *updates.values()):
                 error = _send_failure_text(value)
@@ -1087,6 +1094,9 @@ class TDJsonClient:
                             if update is not None:
                                 updates[message["id"]] = update
                         if isinstance(error, TDLibError):
+                            # Keep the original failed message IDs and preserve
+                            # the latest rejection for whole-Album eligibility.
+                            resend_rejections.update(dict.fromkeys(originals, error))
                             self.ui.warning(f"重发失败：{error}")
                             continue
                         retry_payload = map_send_result(messages, updates.values()).as_dict()
@@ -1564,11 +1574,12 @@ class TDJsonClient:
             pending = list(result.get("pending", []))
             if failed or pending or len(succeeded) != len(messages):
                 failure_detail = _send_failure_summary(result)
+                all_failed = (
+                    result.get("status") == FAILED and not succeeded and not pending
+                    and len(set(failed)) == len(messages) == len(failed)
+                )
                 if journal_active:
-                    status = FAILED if (
-                        result.get("status") == FAILED and not succeeded and not pending
-                        and len(set(failed)) == len(messages) == len(failed)
-                    ) else UNKNOWN
+                    status = FAILED if all_failed else UNKNOWN
                     journal_error = (
                         "Album 内消息全部失败"
                         if status == FAILED
@@ -1589,8 +1600,7 @@ class TDJsonClient:
                         target=journal_target,
                     )
                     journal_terminal = True
-                if (result.get("status") == FAILED and not succeeded and not pending
-                        and len(set(failed)) == len(messages) == len(failed)):
+                if all_failed:
                     message = "Album 内消息全部发送失败"
                     if failure_detail:
                         message += f"：{failure_detail}"
