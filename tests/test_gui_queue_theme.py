@@ -11,6 +11,8 @@ from conftest import TARGET, task_for
 from tdlib_media_uploader.config import loader
 from tdlib_media_uploader.config.snapshot import snapshot_config
 from tdlib_media_uploader.core import album
+from tdlib_media_uploader.core.models import UploadRunResult
+from tdlib_media_uploader.core.upload_journal import InflightJournal
 from tdlib_media_uploader.gui import main_window, preferences, scanner
 from tdlib_media_uploader.gui.integration import run_v2_upload
 from tdlib_media_uploader.gui.icons import get_svg_icon
@@ -18,6 +20,7 @@ from tdlib_media_uploader.gui.pages import upload
 from tdlib_media_uploader.gui.preferences import UiPreferences
 from tdlib_media_uploader.gui.theme import DARK_PALETTE, LIGHT_PALETTE, initialize_theme
 from tdlib_media_uploader.gui.workers import UploadWorker
+from tdlib_media_uploader.upload import reconciliation
 from tdlib_media_uploader.upload.queue import TaskStatus
 from tdlib_media_uploader.upload.queue_store import UploadQueue
 
@@ -58,7 +61,7 @@ def window(tmp_path, qt_app, monkeypatch, runtime_paths):
     monkeypatch.setattr(main_window.config_service, "cfg", config)
     ui_prefs = UiPreferences(tmp_path / "ui_preferences.json")
     initialize_theme(qt_app, ui_prefs)
-    store = UploadQueue(tmp_path / "upload_queue.json", lambda task: task)
+    store = UploadQueue(tmp_path / "upload_queue.json", runtime_paths=runtime_paths)
     window = main_window.MainWindow(queue_store=store, preferences=ui_prefs)
     window.queue.can_start = lambda: True
     window.show()
@@ -292,3 +295,53 @@ def test_theme_switch_leaves_unsaved_retry_settings_and_skips_config_refresh(win
     assert values[("upload_retry", "enabled")] is True
     assert values[("upload_retry", "max_retries")] == 4
     assert values[("upload_retry", "retry_delay_seconds")] == 0.5
+
+
+def test_review_controls_follow_manual_reconciliation_and_skip_history(window, monkeypatch, tmp_path, runtime_paths):
+    win, _, _ = window
+    store = win.queue.store
+    task = task_for(tmp_path / "a")
+    store.enqueue(task)
+    reviewed = store.finish(store.start(store.prepare(task)), UploadRunResult("UNKNOWN"))
+    store.enqueue(task_for(tmp_path / "b"))
+    target, plan = dict(task.target), task.plans[0]
+    journal = InflightJournal(runtime_paths.UPLOAD_INFLIGHT_DIR)
+    record = journal.prepare(task.kind, plan.key, target=target)
+    service = reconciliation.ReconciliationService(journal)
+    monkeypatch.setattr(reconciliation, "ReconciliationService", lambda: service)
+    history = []
+    monkeypatch.setattr(main_window, "_load_history", lambda: history)
+    monkeypatch.setattr(main_window, "_save_history", lambda _records: None)
+    win._refresh_queue()
+    page = win.task_page
+    page.queue_list.setCurrentItem(page.queue_list.topLevelItem(0))
+    assert page.queue_skip.isHidden() and page.queue_restore.isHidden()
+    page.queue_toggle.click()
+    assert store.paused and "待核对" in page.queue_notice.text()
+    page.queue_inflight.click()
+    assert win.sidebar.currentRow() == win.sidebar_rows["inflight"]
+
+    win.inflight_page.reconciliation_requested.emit(record, False)
+    assert store.tasks[0].status is TaskStatus.INTERRUPTED
+    assert store.paused and win.worker is None
+    assert not page.queue_skip.isHidden() and not page.queue_restore.isHidden()
+    with monkeypatch.context() as context:
+        context.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.No)
+        page.queue_skip.click()
+        assert store.tasks[0].status is TaskStatus.INTERRUPTED
+    page.queue_skip.click()
+    assert store.paused and store.tasks[0].status is TaskStatus.SKIPPED
+    assert history[-1]["task_id"] == reviewed.task_id
+    assert history[-1]["status"] == "SKIPPED" and history[-1]["success"] is False
+
+
+def test_cache_clear_cannot_discard_protection_for_existing_queue_tasks(window, tmp_path, monkeypatch):
+    win, _, _ = window
+    store = win.queue.store
+    task = task_for(tmp_path / "a")
+    store.enqueue(task)
+    store.finish(store.start(store.prepare(task)), UploadRunResult("UNKNOWN"))
+    monkeypatch.setattr(win, "_cache_operation_allowed", lambda: True)
+    monkeypatch.setattr(win, "_finish_cache_clear", lambda *args, **kwargs: pytest.fail("cleared protection"))
+    win._clear_all_cache()
+    assert "未完成" in win.statusBar().currentMessage()

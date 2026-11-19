@@ -172,6 +172,8 @@ class InflightJournal:
             status = str(value.get("status", "")).strip().upper()
             if status not in UNRESOLVED | {FAILED}:
                 raise ValueError("invalid journal status")
+            if status == FAILED and (value.get("succeeded_ids") or value.get("pending_ids")):
+                raise ValueError("failed journal contains successful or pending messages")
             value["status"] = status
             if "items" in value and not isinstance(value["items"], list):
                 raise ValueError("invalid item snapshot list")
@@ -382,7 +384,7 @@ class InflightJournal:
                         or existing.get("attempt_number") != attempt_number - 1):
                     raise RuntimeError("找不到已结案的上一次 Album 发送记录")
                 summary = {key: existing.get(key) for key in (
-                    "attempt_id", "attempt_number", "updated_at", "error", "failed_ids"
+                    "attempt_id", "attempt_number", "updated_at", "error", "failed_ids", "request_rejection"
                 )}
                 record["previous_attempts"] = [*existing.get("previous_attempts", []), summary]
             overlap = self.unresolved_for_items(kind, record["items"], target=target)
@@ -405,6 +407,7 @@ class InflightJournal:
         item_results=None,
         items=None,
         reconciled: bool | None = None,
+        request_rejection=None,
         target=None,
     ) -> dict:
         normalized = str(status).strip().upper()
@@ -438,6 +441,8 @@ class InflightJournal:
                 record["pending_ids"] = list(pending_ids)
             if item_results is not None:
                 record["item_results"] = list(item_results)
+            if request_rejection is not None:
+                record["request_rejection"] = dict(request_rejection)
             if items is not None:
                 record["items"] = self._normalize_items(items)
             if reconciled is not None:

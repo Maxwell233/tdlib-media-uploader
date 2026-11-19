@@ -302,7 +302,7 @@ class _ConfirmedStateAdapter:
         self.path = getattr(state, "path", "")
 
     def is_completed(self, item: Any) -> bool:
-        return bool(self.state.is_completed(item))
+        return bool(self.state.is_completed(_legacy_item(item) if isinstance(item, MediaItem) else item))
 
     def mark_album_completed(self, items: Sequence[Any], message_ids=None) -> None:
         self.state.mark_album_completed(items, message_ids)
@@ -772,15 +772,16 @@ def _run_v2_upload(
                 (item.path, item.snapshot.size, item.snapshot.mtime_ns)
                 for plan in captured_plans for item in plan.items
             )
-            for plan in captured_plans:
-                captured_pending = {item.path for item in plan.pending_items}
-                if any(item.path not in captured_pending and not state_adapter.is_completed(item)
-                       for item in plan.items):
-                    raise SourceChanged("入队时已完成文件的断点已变化，请重新扫描并核对发送记录")
+            known = (preview_result or {}).get("known_confirmed")
+            if known is None:
+                known = {stable_path(item.path) for plan in captured_plans
+                         for item in plan.items if item not in plan.pending_items}
+            completed_paths = tuple(stable_path(item.path) for item in captured_scan.items
+                                    if state_adapter.is_completed(item))
+            if not set(known).issubset(completed_paths):
+                raise SourceChanged("已确认文件缺少上传断点，请先核对发送记录")
         except SourceChanged as error:
             return UploadRunResult("FAILED", error=str(error))
-        completed_paths = tuple(stable_path(item.path) for item in captured_scan.items
-                                if state_adapter.is_completed(item))
     else:
         completed_paths = tuple((preview_result or {}).get("completed_paths", ()) or ())
     raw_items = tuple((preview_result or {}).get("items", ()) or ())
@@ -868,7 +869,7 @@ def _run_v2_upload(
             halted = on_ready()
             if halted is not None:
                 return halted
-        return engine.run(
+        result = engine.run(
             strategy,
             source_root=root,
             target=dict(target or {}),
@@ -876,6 +877,12 @@ def _run_v2_upload(
             event_sink=sink,
             context=context,
         )
+        if (preview_result or {}).get("queued"):
+            completed_at_start = set(completed_paths)
+            result = replace(result, confirmed_before_run=tuple(
+                item for item in captured_scan.items if stable_path(item.path) in completed_at_start
+            ))
+        return result
     finally:
         def cleanup_call(label, callback):
             try:

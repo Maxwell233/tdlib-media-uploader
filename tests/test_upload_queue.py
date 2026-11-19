@@ -12,7 +12,8 @@ from tdlib_media_uploader.core.upload_journal import InflightJournal
 from tdlib_media_uploader.core.upload_state import UploadState
 from tdlib_media_uploader.gui.events import AuthBridge
 from tdlib_media_uploader.gui.integration import run_v2_upload
-from tdlib_media_uploader.gui.queue_controller import QueueController, recover_task
+from tdlib_media_uploader.gui.queue_controller import QueueController
+from tdlib_media_uploader.upload.queue_recovery import recover_task
 from tdlib_media_uploader.gui.workers import UploadWorker
 from tdlib_media_uploader.upload import queue_store
 from tdlib_media_uploader.upload.queue import TaskStatus, UploadTask
@@ -69,7 +70,7 @@ def test_order_and_duplicate_check_with_different_targets(tmp_path):
 def test_restart_never_requeues_running_task(tmp_path, runtime_paths, phase, protected):
     path = tmp_path / "queue.json"
     recover = partial(recover_task, runtime_paths=runtime_paths)
-    store = queue_store.UploadQueue(path, recover)
+    store = queue_store.UploadQueue(path, recover, runtime_paths=runtime_paths)
     a = task_for(tmp_path / "a")
     b = task_for(tmp_path / "b")
     for task in (a, b):
@@ -80,12 +81,20 @@ def test_restart_never_requeues_running_task(tmp_path, runtime_paths, phase, pro
     if protected:
         journal = InflightJournal(runtime_paths.UPLOAD_INFLIGHT_DIR)
         journal.prepare(a.kind, a.plans[0].key, target=dict(a.target))
-    reopened = queue_store.UploadQueue(path, recover)
+    reopened = queue_store.UploadQueue(path, recover, runtime_paths=runtime_paths)
     assert reopened.paused
     assert reopened.tasks[0].status == (TaskStatus.NEEDS_REVIEW if protected else TaskStatus.INTERRUPTED)
     assert json.loads(path.read_text(encoding="utf-8"))["paused"] is True
-    reopened.set_paused(False)
-    assert reopened.next_pending() == b
+    with pytest.raises(ValueError, match="队列无法继续"):
+        reopened.set_paused(False)
+    assert reopened.next_pending() is None
+    if protected:
+        with pytest.raises(ValueError):
+            reopened.skip(a.task_id)
+    else:
+        reopened.skip(a.task_id)
+        reopened.set_paused(False)
+        assert reopened.next_pending() == b
 
 
 def test_queue_corruption_and_atomic_failure(tmp_path, monkeypatch):
@@ -119,11 +128,11 @@ def test_queue_corruption_and_atomic_failure(tmp_path, monkeypatch):
     ("UNKNOWN", True, TaskStatus.NEEDS_REVIEW),
     ("CANCELLED", True, TaskStatus.INTERRUPTED),
 ])
-def test_controller_runs_fifo_only_after_worker_cleanup(tmp_path, pump, outcome, paused, state):
+def test_controller_runs_fifo_only_after_worker_cleanup(tmp_path, pump, runtime_paths, outcome, paused, state):
     tasks = tuple(task_for(tmp_path / name, caption=name) for name in ("a", "b", "c"))
     starts, outcomes = [], []
     a_started, release_a = threading.Event(), threading.Event()
-    store = queue_store.UploadQueue(tmp_path / "queue.json", recover_task)
+    store = queue_store.UploadQueue(tmp_path / "queue.json", runtime_paths=runtime_paths)
 
     def worker_for(task):
         def run(_kind, *, on_ready, **kwargs):
@@ -154,6 +163,12 @@ def test_controller_runs_fifo_only_after_worker_cleanup(tmp_path, pump, outcome,
     assert store.paused is paused
     if paused:
         assert starts == [tasks[0].task_id]
+        control.set_paused(False)
+        control.schedule()
+        assert control.worker is None
+        if state is TaskStatus.NEEDS_REVIEW:
+            assert control.recheck(tasks[0].task_id)
+        assert control.skip(tasks[0].task_id)
         control.set_paused(False)
         pump(lambda: len(outcomes) == 3)
     assert starts == [task.task_id for task in tasks]

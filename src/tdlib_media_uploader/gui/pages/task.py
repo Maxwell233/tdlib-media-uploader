@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...upload.queue import TaskStatus
+from ...upload.queue import ACTIVE, RECOVERABLE, TaskStatus
 from ..tools import format_eta, format_size, kind_label
 
 
@@ -33,6 +33,10 @@ class TaskPage(QWidget):
     queue_pause_requested = Signal(bool)
     queue_move_requested = Signal(str, int)
     queue_remove_requested = Signal(str)
+    queue_restore_requested = Signal(str)
+    queue_skip_requested = Signal(str)
+    queue_recheck_requested = Signal(str)
+    queue_inflight_requested = Signal()
 
     def __init__(
         self,
@@ -201,9 +205,25 @@ class TaskPage(QWidget):
         self.queue_list.setColumnWidth(4, 142)
         self.queue_list.itemSelectionChanged.connect(self._update_queue_controls)
         queue_layout.addWidget(self.queue_list)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        self.queue_restore = QPushButton("重新验证并恢复")
+        self.queue_skip = QPushButton("跳过此任务")
+        self.queue_recheck = QPushButton("重新核对状态")
+        self.queue_inflight = QPushButton("前往未确认上传")
+        for button in (self.queue_restore, self.queue_skip, self.queue_recheck, self.queue_inflight):
+            button.setObjectName("secondaryButton")
+            actions.addWidget(button)
+        self.queue_restore.clicked.connect(lambda: self.queue_restore_requested.emit(self._selected_task()))
+        self.queue_skip.clicked.connect(lambda: self.queue_skip_requested.emit(self._selected_task()))
+        self.queue_recheck.clicked.connect(lambda: self.queue_recheck_requested.emit(self._selected_task()))
+        self.queue_inflight.clicked.connect(self.queue_inflight_requested)
+        queue_layout.addLayout(actions)
         layout.addWidget(card)
         self._queue_paused = False
         self._queue_pending = []
+        self._queue_actions_allowed = False
+        self._queue_states = {}
         self._update_queue_controls()
 
     def _selected_task(self):
@@ -217,16 +237,30 @@ class TaskPage(QWidget):
         self.queue_up.setEnabled(index > 0)
         self.queue_down.setEnabled(0 <= index < len(pending) - 1)
         self.queue_remove.setEnabled(index >= 0)
+        status = self._queue_states.get(selected)
+        recoverable = status in RECOVERABLE
+        review = status is TaskStatus.NEEDS_REVIEW
+        self.queue_restore.setVisible(recoverable)
+        self.queue_restore.setEnabled(recoverable and self._queue_actions_allowed)
+        self.queue_skip.setVisible(recoverable)
+        self.queue_skip.setEnabled(recoverable and self._queue_actions_allowed)
+        self.queue_recheck.setVisible(review)
+        self.queue_recheck.setEnabled(review and self._queue_actions_allowed)
+        self.queue_inflight.setVisible(review)
 
     def show_queue(self, store, blocked=False):
         selected = self._selected_task()
         self._queue_paused = store.paused
         self._queue_pending = []
+        self._queue_states = {task.task_id: task.status for task in store.tasks}
+        self._queue_actions_allowed = not (
+            blocked or store.error or any(status in ACTIVE for status in self._queue_states.values())
+        )
         self.queue_list.clear()
         labels = {
             TaskStatus.PENDING: "等待中", TaskStatus.PREPARING: "准备中", TaskStatus.RUNNING: "上传中",
             TaskStatus.COMPLETED: "已完成", TaskStatus.FAILED: "失败", TaskStatus.INTERRUPTED: "已中断",
-            TaskStatus.NEEDS_REVIEW: "待核对",
+            TaskStatus.NEEDS_REVIEW: "待核对", TaskStatus.SKIPPED: "已跳过",
         }
         for index, task in enumerate(store.tasks, 1):
             state = "部分完成" if task.status is TaskStatus.FAILED and task.outcome == "PARTIAL" else labels[task.status]
@@ -249,7 +283,7 @@ class TaskPage(QWidget):
         self.queue_toggle.setText("继续队列" if store.paused else "暂停队列")
         self.queue_toggle.setEnabled(not (blocked or store.error))
         if not blocked:
-            self.queue_notice.setText(store.error or (
+            self.queue_notice.setText(store.error or store.blocked_reason or (
                 "队列已暂停。继续后按顺序执行等待任务。" if store.paused else
                 f"{len(self._queue_pending)} 个任务等待上传"
             ))

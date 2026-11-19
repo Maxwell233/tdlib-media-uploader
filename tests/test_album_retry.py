@@ -1,6 +1,7 @@
 import threading
 import time
 from collections import deque
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -18,14 +19,17 @@ from tdlib_media_uploader.upload.retry import AlbumRetryPolicy
 
 class SimulatedTDLib(TDJsonClient):
     def __init__(self, responses, journal):
-        self._config = SimpleNamespace(TDLIB_MESSAGE_SEND_TIMEOUT=0.02)
-        self.ui = SimpleNamespace(warning=lambda message: None)
+        self._config = SimpleNamespace(TDLIB_MESSAGE_SEND_TIMEOUT=0.02, TDLIB_REQUEST_TIMEOUT=0.02)
+        self.ui = SimpleNamespace(warning=lambda message: None, info=lambda message: None)
         self.send_condition = threading.Condition()
         self.cancel_event = threading.Event()
         self.send_events = {}
         self.responses = deque(responses)
         self.requests = []
         self.rate_limit_retry = []
+        self.request_waits = []
+        self.pending_lock = threading.Lock()
+        self.pending = {}
         self.snapshots = []
         self.captions = []
         self.journal = journal
@@ -35,13 +39,18 @@ class SimulatedTDLib(TDJsonClient):
         pass
 
     def _wait_for_retry(self, seconds):
-        pass
+        self.request_waits.append(seconds)
+        return super()._wait_for_retry(seconds)
 
     def request(self, payload, timeout=None, *, retry_rate_limit=True):
+        if payload["@type"] != "resendMessages":
+            self.rate_limit_retry.append(retry_rate_limit)
+        return super().request(payload, timeout, retry_rate_limit=retry_rate_limit)
+
+    def send_raw(self, payload):
         request = payload["@type"]
         self.requests.append(request)
         if request != "resendMessages":
-            self.rate_limit_retry.append(retry_rate_limit)
             contents = payload.get("input_message_contents") or [payload["input_message_content"]]
             self.captions.append(contents[0]["caption"]["text"])
             record = next(value for value in self.journal.list_unresolved() if value["status"] == "PREPARED")
@@ -50,6 +59,13 @@ class SimulatedTDLib(TDJsonClient):
             contents = payload["message_ids"]
 
         response = self.responses.popleft()
+        if isinstance(response, TDLibError):
+            self.pending.pop(payload["@extra"]).put({
+                "@type": "error", "code": response.code, "message": response.message,
+            })
+            return
+        if isinstance(response, TimeoutError):
+            return  # No response reaches request(); preserve uncertainty.
         if isinstance(response, BaseException):
             raise response
         messages = []
@@ -67,7 +83,8 @@ class SimulatedTDLib(TDJsonClient):
                     "error": {"@type": "error", "code": code, "message": state},
                 }
             messages.append(message)
-        return messages[0] if request == "sendMessage" else {"messages": messages}
+        reply = messages[0] if request == "sendMessage" else {"messages": messages}
+        self.pending.pop(payload["@extra"]).put(reply)
 
 
 @pytest.fixture
@@ -83,7 +100,10 @@ def harness(tmp_path):
         for number, items in ((1, media_items[:2]), (2, media_items[2:]))
     )
 
-    def run(responses, *, enabled=True, count=2, delay=0, on_event=None, modify_state=None, modify_journal=None):
+    def run(
+        responses, *, enabled=True, count=2, delay=0, on_event=None,
+        modify_state=None, modify_journal=None, single=False,
+    ):
         client = SimulatedTDLib(responses, journal)
         cancel = client.cancel_event
         safe_stop = threading.Event()
@@ -120,7 +140,9 @@ def harness(tmp_path):
         context = UploadContext(
             tmp_path, TARGET, token, SimpleNamespace(emit=emit), "image", state, journal, sender,
             metadata={"album_retry": AlbumRetryPolicy(enabled, count, delay), "prefetch_next": True},
-            scan_result=ScanResult(media_items), plans=plans,
+            scan_result=ScanResult(media_items),
+            plans=plans if not single else (replace(plans[0], items=media_items[:1], pending_items=media_items[:1]),
+                                            plans[1]),
         )
         result = UploadEngine().run(Strategy(), context=context)
         return result, client, events, builds
@@ -270,27 +292,93 @@ def test_retry_rechecks_protection_without_overwriting_it(harness):
 
 
 @pytest.mark.parametrize("enabled", [True, False])
-def test_existing_request_flood_retry_shares_whole_album_budget(enabled):
-    client = object.__new__(TDJsonClient)
-    requests, waits = [], []
+@pytest.mark.parametrize(("code", "message"), [(420, "FLOOD_WAIT_0.04"), (429, "retry after 0.04")])
+def test_request_rate_limit_waits_in_one_layer_and_succeeds(harness, enabled, code, message):
+    run, _, _ = harness
+    delays = []
+    before = time.monotonic()
 
-    def request_once(query, timeout):
-        requests.append(query)
-        if len(requests) == 1:
-            raise TDLibError(429, "retry after 1")
-        return {"@type": "messages"}
+    def capture(event, *_args):
+        if isinstance(event, AlbumAttemptEvent) and event.retry_in_seconds:
+            delays.append(event)
 
-    client._request_once = request_once
-    client._wait_for_retry = waits.append
-    query = {"@type": "sendMessageAlbum"}
+    result, client, _, _ = run([TDLibError(code, message), "ok", "ok"], enabled=enabled,
+                               delay=0.01, on_event=capture)
+    assert result.status == "COMPLETED"
+    assert time.monotonic() - before >= 0.035
+    assert client.captions == ["caption-1", "caption-1", "caption-2"]
+    first, second = client.snapshots[:2]
     if enabled:
-        with pytest.raises(TDLibError):
-            client.request(query, retry_rate_limit=False)
-        assert requests == [query]
+        assert len(delays) == 1 and client.request_waits == []
+        assert second["attempt_number"] == 2
+        assert second["previous_attempts"][0]["request_rejection"] == {
+            "submitted": False, "error_code": code, "rate_limited": True,
+            "retry_after": 0.04, "error": f"TDLib error {code}: {message}",
+        }
+        assert first["attempt_id"] != second["attempt_id"]
     else:
-        assert client.request(query) == {"@type": "messages"}
-        assert requests == [query, query]
-    assert waits == [1.0]
+        assert delays == [] and client.request_waits == [0.04]
+        assert first["attempt_id"] == second["attempt_id"]
+
+
+def test_mixed_rejection_and_message_failures_share_request_budget(harness):
+    run, _, journal = harness
+    result, client, events, _ = run([
+        TDLibError(429, "retry after 0"), "failed", TDLibError(420, "FLOOD_WAIT_5"), "ok",
+    ])
+    assert result.status == "PARTIAL"
+    assert client.captions == ["caption-1"] * 3 + ["caption-2"]
+    assert client.request_waits == []
+    assert not any(isinstance(event, AlbumAttemptEvent) and event.retry_in_seconds for event in events)
+    record = journal.get("image", "album-1", target=TARGET)
+    assert record["attempt_number"] == 3
+    assert record["previous_attempts"][0]["request_rejection"]["submitted"] is False
+    assert record["previous_attempts"][1]["failed_ids"]
+    assert record["request_rejection"]["retry_after"] == 5
+
+
+@pytest.mark.parametrize("immediate", [True, False])
+def test_request_flood_wait_stops_without_a_second_request(harness, immediate):
+    run, _, journal = harness
+
+    def stop(event, cancel, safe_stop, _paths):
+        if isinstance(event, AlbumAttemptEvent) and event.retry_in_seconds:
+            (cancel if immediate else safe_stop).set()
+
+    result, client, _, _ = run([TDLibError(429, "retry after 60")], on_event=stop)
+    assert result.status == "CANCELLED"
+    assert client.requests == ["sendMessageAlbum"] and client.request_waits == []
+    assert not journal.list_unresolved()
+
+
+@pytest.mark.parametrize(("code", "error"), [
+    (400, "INVALID_ARGUMENT"), (403, "CHAT_WRITE_FORBIDDEN"), (429, "UNSPECIFIED_RATE_LIMIT")
+])
+def test_missing_proof_or_permanent_request_rejections_have_no_retry(harness, code, error):
+    run, _, journal = harness
+    result, client, _, _ = run([TDLibError(code, error), "ok"])
+    assert result.status == "PARTIAL"
+    assert client.captions == ["caption-1", "caption-2"] and client.request_waits == []
+    assert journal.get("image", "album-1", target=TARGET)["request_rejection"]["rate_limited"] is False
+
+
+def test_request_flood_rejection_must_be_persisted_before_retry(harness, monkeypatch):
+    run, _, journal = harness
+
+    def fail(journal):
+        original = journal._write
+
+        def write(path, record):
+            if record.get("request_rejection"):
+                raise OSError("unable to save the rejection")
+            original(path, record)
+
+        monkeypatch.setattr(journal, "_write", write)
+
+    result, client, _, _ = run([TDLibError(429, "retry after 0"), "ok"], modify_journal=fail)
+    assert result.status == "UNKNOWN"
+    assert client.captions == ["caption-1", "caption-2"]
+    assert journal.unresolved("image", "album-1", target=TARGET)["status"] == "PREPARED"
 
 
 def test_permission_rejection_during_message_resend_blocks_new_album(harness):
@@ -301,3 +389,10 @@ def test_permission_rejection_during_message_resend_blocks_new_album(harness):
     last = journal.get("image", "album-1", target=TARGET)
     assert last["status"] == "FAILED"
     assert [item["error_code"] for item in last["item_results"]] == [403, 403]
+
+
+def test_single_message_requests_share_the_same_budget(harness):
+    run, _, _ = harness
+    result, client, _, _ = run([TDLibError(429, "retry after 0"), "ok", "ok"], single=True)
+    assert result.status == "COMPLETED"
+    assert client.requests == ["sendMessage", "sendMessage", "sendMessageAlbum"]

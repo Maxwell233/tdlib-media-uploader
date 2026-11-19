@@ -56,9 +56,9 @@ from .pages import (
     VideoPage,
 )
 from .workers import ScanWorker, UploadWorker
-from .queue_controller import QueueController, recover_task
+from .queue_controller import QueueController
 from ..config.snapshot import snapshot_config
-from ..upload.queue import ACTIVE, TaskStatus, UploadTask
+from ..upload.queue import ACTION_REQUIRED, ACTIVE, TaskStatus, UploadTask
 from ..upload.queue_store import UploadQueue
 
 
@@ -125,7 +125,7 @@ class MainWindow(QMainWindow):
         self._cache_clear_worker = None
         self.scanners: dict[str, ScanWorker] = {}
         self._build_ui(preferences)
-        store = queue_store if queue_store is not None else UploadQueue(DATA_DIR / "upload_queue.json", recover_task)
+        store = queue_store if queue_store is not None else UploadQueue(DATA_DIR / "upload_queue.json")
         self.queue = QueueController(store, self._make_upload_worker, self._can_start_queue, self)
         self.queue.changed.connect(self._refresh_queue)
         self.queue.error.connect(self._queue_error)
@@ -134,6 +134,13 @@ class MainWindow(QMainWindow):
         self.task_page.queue_pause_requested.connect(self.queue.set_paused)
         self.task_page.queue_move_requested.connect(self.queue.move)
         self.task_page.queue_remove_requested.connect(self.queue.remove)
+        self.task_page.queue_restore_requested.connect(self._restore_queued_task)
+        self.task_page.queue_recheck_requested.connect(self._recheck_queued_task)
+        self.task_page.queue_skip_requested.connect(self._skip_queued_task)
+        self.task_page.queue_inflight_requested.connect(
+            lambda: self.sidebar.setCurrentRow(self.sidebar_rows["inflight"])
+        )
+        self.queue.skipped.connect(self._record_skipped_task)
         self.settings_page.storage_panel.cancel_cleanup_requested.connect(self._cancel_cache_clear)
         self._refresh_pages()
         self._refresh_queue()
@@ -318,7 +325,7 @@ class MainWindow(QMainWindow):
         ):
             QMessageBox.warning(self, "任务运行中", "请等待扫描完成或安全停止上传后再重置断点。")
             return
-        if self.queue.store.error or any(task.kind == kind and task.status in ACTIVE | {TaskStatus.PENDING}
+        if self.queue.store.error or any(task.kind == kind and task.status in ACTIVE | ACTION_REQUIRED | {TaskStatus.PENDING}
                for task in self.queue.store.tasks):
             self.statusBar().showMessage("此媒体类型仍有队列任务，请先处理任务再重置断点")
             return
@@ -425,6 +432,50 @@ class MainWindow(QMainWindow):
 
     def _refresh_queue(self):
         self.task_page.show_queue(self.queue.store, self.queue.write_blocked)
+
+    def _queue_recovery_allowed(self):
+        if self._cache_clear_worker is not None:
+            self._queue_error("请等待缓存清理结束后再处理队列任务。")
+            return False
+        return True
+
+    def _restore_queued_task(self, task_id):
+        if self._queue_recovery_allowed() and self.queue.restore(task_id):
+            self.statusBar().showMessage("任务已恢复到原位置。请选择继续队列。")
+
+    def _recheck_queued_task(self, task_id):
+        if self._queue_recovery_allowed() and self.queue.recheck(task_id):
+            self.statusBar().showMessage("记录已核对。请选择恢复或跳过此任务。")
+
+    def _skip_queued_task(self, task_id):
+        if not self._queue_recovery_allowed():
+            return
+        task = next((task for task in self.queue.store.tasks if task.task_id == task_id), None)
+        if task is None:
+            return
+        answer = QMessageBox.question(
+            self, "跳过未完成任务", f"跳过 {task.source_root} 的任务？其余未上传文件将留在原目录。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes and self._queue_recovery_allowed():
+            self.queue.skip(task_id)
+
+    def _record_skipped_task(self, task):
+        message = "已跳过未完成的上传任务。"
+        self._record_task_history(task, message)
+        self.statusBar().showMessage(message + " 请选择继续队列。")
+
+    def _record_task_history(self, task, message):
+        records = _load_history()
+        records.append({
+            "task_id": task.task_id, "started_at": task.started_at, "finished_at": task.finished_at,
+            "kind": task.kind, "source_dir": str(task.source_root), "total_files": len(task.items),
+            "total_bytes": task.total_bytes, "success": task.status is TaskStatus.COMPLETED,
+            "status": task.status.value, "message": message,
+        })
+        _save_history(records)
+        self.history_page.reload_records()
 
     def _queue_error(self, message):
         write_app_log("ERROR", message, source="upload/queue")
@@ -571,18 +622,12 @@ class MainWindow(QMainWindow):
             message = {
                 TaskStatus.COMPLETED: "上传任务完成。",
                 TaskStatus.NEEDS_REVIEW: "请在“未确认上传”核对发送记录。",
-                TaskStatus.INTERRUPTED: "任务已停止。重新扫描可检查剩余文件。",
+                TaskStatus.INTERRUPTED: "任务已停止。可在任务中心重新验证并恢复。",
                 TaskStatus.FAILED: "任务部分完成。" if task.outcome == "PARTIAL" else "任务未完成。",
             }[task.status]
             if task.error:
                 message += f" {task.error}"
-            records = _load_history()
-            records.append({
-                "task_id": task.task_id, "started_at": task.started_at, "finished_at": task.finished_at,
-                "kind": task.kind, "source_dir": str(task.source_root), "total_files": len(task.items),
-                "total_bytes": task.total_bytes, "success": success, "message": message,
-            })
-            _save_history(records)
+            self._record_task_history(task, message)
 
         write_app_log("INFO" if success else "ERROR", message, source=f"upload/{task.kind}")
         self.task_page.finish_session(success, message.splitlines()[0][:180])
@@ -592,7 +637,6 @@ class MainWindow(QMainWindow):
         self.home.set_connection("已连接" if self._telegram_connected else "未连接", self._telegram_connected)
         self.nav_sidebar.set_connection_status(self._telegram_connected, "已连接" if self._telegram_connected else "未连接")
         self.statusBar().showMessage(message.splitlines()[0][:180])
-        self.history_page.reload_records()
         self.inflight_page.reload_records()
 
     @Slot(object, bool)
@@ -604,10 +648,7 @@ class MainWindow(QMainWindow):
             return
         if not isinstance(record, dict):
             return
-        if (
-            self.worker is not None
-            and self.worker.isRunning()
-        ) or any(scanner.isRunning() for scanner in self.scanners.values()):
+        if self.worker is not None or any(scanner.isRunning() for scanner in self.scanners.values()):
             QMessageBox.warning(
                 self,
                 "任务运行中",
@@ -646,7 +687,8 @@ class MainWindow(QMainWindow):
             )
             return
         self.inflight_page.reload_records()
-        self.statusBar().showMessage("未确认上传记录已更新")
+        if self.queue.refresh_reviews(record):
+            self.statusBar().showMessage("未确认上传记录已更新。请在任务中心查看恢复状态。")
 
     def _cache_operation_allowed(self) -> bool:
         from ..telegram.tdlib_common import TDJsonClient
@@ -718,9 +760,9 @@ class MainWindow(QMainWindow):
         if not self._cache_operation_allowed():
             return
         if self.queue.store.error or any(
-            task.status in ACTIVE | {TaskStatus.PENDING} for task in self.queue.store.tasks
+            task.status in ACTIVE | ACTION_REQUIRED | {TaskStatus.PENDING} for task in self.queue.store.tasks
         ):
-            self.statusBar().showMessage("请先处理等待中的上传任务，再清理断点和未确认记录")
+            self.statusBar().showMessage("请先处理未完成的上传任务，再清理断点和未确认记录")
             return
         answer = QMessageBox.warning(
             self,

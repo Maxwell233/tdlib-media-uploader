@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
+from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
 from uuid import UUID, uuid4
@@ -28,9 +30,12 @@ class TaskStatus(StrEnum):
     FAILED = "FAILED"
     INTERRUPTED = "INTERRUPTED"
     NEEDS_REVIEW = "NEEDS_REVIEW"
+    SKIPPED = "SKIPPED"
 
 
 ACTIVE = {TaskStatus.PREPARING, TaskStatus.RUNNING}
+RECOVERABLE = {TaskStatus.FAILED, TaskStatus.INTERRUPTED}
+ACTION_REQUIRED = RECOVERABLE | {TaskStatus.NEEDS_REVIEW}
 
 
 def now() -> str:
@@ -146,6 +151,8 @@ class UploadTask:
     outcome: str | None = None
     error: str | None = None
     scan_errors: tuple[str, ...] = ()
+    confirmed_paths: tuple[str, ...] = ()
+    manifest_digest: str | None = None
 
     @classmethod
     def from_preview(cls, kind, preview, config):
@@ -184,6 +191,14 @@ class UploadTask:
         return tuple(item for plan in self.plans for item in plan.items)
 
     @property
+    def known_confirmed(self) -> set[str]:
+        known = set(self.confirmed_paths)
+        for plan in self.plans:
+            pending = {stable_path(item.path) for item in plan.pending_items}
+            known.update(stable_path(item.path) for item in plan.items if stable_path(item.path) not in pending)
+        return known
+
+    @property
     def total_bytes(self):
         return sum(item.snapshot.size for item in self.items)
 
@@ -211,16 +226,29 @@ class UploadTask:
             "source_dir": str(self.source_root), "target": self.target, "items": self.items,
             "plans": self.plans, "scan_result": ScanResult(self.items, errors=self.scan_errors),
             "album_count": len(self.plans), "queued": True,
+            "known_confirmed": self.known_confirmed,
         }
 
-    def to_record(self) -> dict:
+    def _manifest(self) -> dict:
         return {
             "task_id": self.task_id, "kind": self.kind, "source_root": str(self.source_root),
             "target": dict(self.target), "config": _encode(self.config),
             "plans": [_plan_record(plan) for plan in self.plans],
-            "created_at": self.created_at, "started_at": self.started_at, "finished_at": self.finished_at,
+            "created_at": self.created_at, "scan_errors": list(self.scan_errors),
+        }
+
+    @staticmethod
+    def _digest(manifest) -> str:
+        data = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return sha256(data.encode("utf-8")).hexdigest()
+
+    def to_record(self) -> dict:
+        manifest = self._manifest()
+        return {
+            **manifest, "manifest_digest": self.manifest_digest or self._digest(manifest),
+            "started_at": self.started_at, "finished_at": self.finished_at,
             "status": self.status.value, "outcome": self.outcome, "error": self.error,
-            "scan_errors": list(self.scan_errors),
+            "confirmed_paths": list(self.confirmed_paths),
         }
 
     @classmethod
@@ -243,9 +271,18 @@ class UploadTask:
         for key in ("created_at", "started_at", "finished_at"):
             if raw[key] is not None:
                 datetime.fromisoformat(raw[key])
-        return cls(task_id, kind, root, target, config, plans,
+        confirmed = raw.get("confirmed_paths", [])
+        if (not isinstance(confirmed, list) or not all(isinstance(path, str) for path in confirmed)
+                or len(set(confirmed)) != len(confirmed) or not set(confirmed).issubset(paths)):
+            raise ValueError("任务中已确认的文件不属于原始清单")
+        task = cls(task_id, kind, root, target, config, plans,
                    raw["created_at"], TaskStatus(raw["status"]), raw["started_at"],
-                   raw["finished_at"], raw["outcome"], raw["error"], tuple(raw["scan_errors"]))
+                   raw["finished_at"], raw["outcome"], raw["error"], tuple(raw["scan_errors"]),
+                   tuple(confirmed))
+        digest = cls._digest(task._manifest())
+        if "manifest_digest" in raw and raw["manifest_digest"] != digest:
+            raise ValueError("原始任务清单已变化，Album 成员、顺序、目标与配置必须保持一致")
+        return replace(task, manifest_digest=digest)
 
 
 def finish_task(task: UploadTask, result) -> UploadTask:
@@ -259,4 +296,11 @@ def finish_task(task: UploadTask, result) -> UploadTask:
         status = TaskStatus.COMPLETED
     else:
         status = TaskStatus.FAILED
-    return replace(task, status=status, finished_at=now(), outcome=result.status, error=result.error)
+    confirmed = set(task.confirmed_paths)
+    confirmed.update(stable_path(item.path) for item in result.confirmed_before_run)
+    confirmed.update(
+        stable_path(item.path) for batch in result.batches
+        if batch.status is BatchStatus.CONFIRMED for item in batch.confirmed_items
+    )
+    return replace(task, status=status, finished_at=now(), outcome=result.status, error=result.error,
+                   confirmed_paths=tuple(sorted(confirmed)))

@@ -33,6 +33,9 @@ from ..core.upload_journal import (
 )
 from .send_result import _error_text as _send_failure_text
 
+from .send_result import SendRequestRejected
+
+
 REQUIRED_TDJSON_VERSION = "1.8.69"
 
 
@@ -626,10 +629,9 @@ class TDJsonClient:
         try:
             return self._request_once(query, timeout)
         except TDLibError as error:
-            if error.retry_after is None:
+            if not retry_rate_limit or error.retry_after is None or not math.isfinite(error.retry_after):
                 raise
-            can_retry = self._wait_for_retry(error.retry_after)
-            if can_retry is False or not retry_rate_limit:
+            if self._wait_for_retry(error.retry_after) is False:
                 raise
             return self._request_once(query, timeout)
 
@@ -701,7 +703,9 @@ class TDJsonClient:
                 raise
             raise TimeoutError(f"TDLib 请求超时：{query.get('@type')}") from exc
         if response.get("@type") == "error":
-            raise TDLibError(response.get("code", 0), response.get("message", "unknown error"))
+            error = TDLibError(response.get("code", 0), response.get("message", "unknown error"))
+            error.response_received = True
+            raise error
         return response
 
     def add_update_callback(self, callback):
@@ -1265,8 +1269,7 @@ class TDJsonClient:
             )
         except Exception as error:
             if not hasattr(error, "submitted"):
-                rejected = isinstance(error, TDLibError) or isinstance(error.__cause__, TDLibError)
-                error.submitted = attempted and not rejected
+                error.submitted = attempted
             raise
 
     @staticmethod
@@ -1495,11 +1498,16 @@ class TDJsonClient:
                 target=journal_target,
             )
         def submit(query):
-            if retry_rate_limit:
-                return self.request(query)
-            # Whole-Album retry mode exclusively owns the Album attempt
-            # budget. A request-level flood rejection still honors its delay.
-            return self.request(query, retry_rate_limit=False)
+            try:
+                if retry_rate_limit:
+                    return self.request(query)
+                return self.request(query, retry_rate_limit=False)
+            except TDLibError as error:
+                if not getattr(error, "response_received", False):
+                    raise
+                # Classify the direct send response only. An error during
+                # message reconciliation cannot establish non-submission.
+                raise SendRequestRejected(error.code, str(error), error.retry_after) from error
 
         try:
             if prepared_media is not None:
@@ -1637,11 +1645,12 @@ class TDJsonClient:
                 )
             self._safe_diagnose_upload_failure(contents, items, exc)
             raise
-        except TDLibError as exc:
+        except SendRequestRejected as exc:
             if journal_active:
-                journal.failed(selected_kind, album_key, str(exc), target=journal_target)
-            self._safe_diagnose_upload_failure(contents, items, exc)
-            error_text = exc.message.lower()
+                journal.update(selected_kind, album_key, FAILED, error=str(exc),
+                               request_rejection=exc.as_dict(), target=journal_target)
+            self._safe_diagnose_upload_failure(contents, items, exc.__cause__)
+            error_text = str(exc).lower()
             forbidden = any(
                 marker in error_text
                 for marker in (
@@ -1653,7 +1662,9 @@ class TDJsonClient:
                 )
             )
             if getattr(self.config, "TARGET_MODE", "forum_topic") == "channel" and forbidden:
-                raise RuntimeError("当前账号没有在该频道发布内容的权限。") from exc
+                raise SendRequestRejected(
+                    exc.error_code, "当前账号没有在该频道发布内容的权限。", None
+                ) from exc
             raise
         except (TimeoutError, TDLibCancelled) as exc:
             if journal_active:

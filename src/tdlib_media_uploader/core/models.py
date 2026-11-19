@@ -166,6 +166,7 @@ class UploadRunResult:
     failed_items: tuple[MediaItem, ...] = ()
     scanned_items: tuple[MediaItem, ...] = ()
     cancelled: bool = False
+    confirmed_before_run: tuple[MediaItem, ...] = ()
 
 
 Event = ProgressEvent | LogEvent | AuthEvent | AlbumAttemptEvent

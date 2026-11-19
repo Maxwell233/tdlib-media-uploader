@@ -92,7 +92,7 @@ class HistoryPage(QWidget):
         self.status_filter = QComboBox()
         self.status_filter.addItem("全部结果", "all")
         self.status_filter.addItem("仅成功", "success")
-        self.status_filter.addItem("停止 / 失败", "failed")
+        self.status_filter.addItem("未完成", "failed")
         self.status_filter.currentIndexChanged.connect(self._apply_filter)
         filter_bar.addWidget(self.status_filter)
 
@@ -150,13 +150,16 @@ class HistoryPage(QWidget):
         self.table.setRowCount(len(filtered))
         for row, record in enumerate(filtered):
             is_success = bool(record.get("success"))
+            status = "成功" if is_success else "停止/失败"
+            if record.get("status") == "SKIPPED":
+                status = "已跳过"
             values = [
                 record.get("finished_at", record.get("started_at", "")),
                 _kind_label(record.get("kind", "image")),
                 record.get("source_dir", ""),
                 str(record.get("total_files", 0)),
                 _fmt_size(record.get("total_bytes", 0)),
-                "成功" if is_success else "停止/失败",
+                status,
                 record.get("message", ""),
             ]
             for column, value in enumerate(values):

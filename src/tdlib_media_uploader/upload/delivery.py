@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
 from typing import Any
 from ..core.models import BatchStatus, UploadBatchResult
+from ..telegram.send_result import SendRequestRejected
 
 def _as_ids(values: Any) -> tuple[int, ...]:
     if values is None:
@@ -31,11 +32,18 @@ class _ObservedSend:
     error: str | None = None
     item_results: tuple[Mapping[str, Any], ...] = ()
     preserve_journal: bool = False
+    request_rejection: SendRequestRejected | None = None
 
-
-    def album_retry_delay(self, expected_count: int) -> float | None:
+    def album_retry_delay(self, expected_count: int, *, complete_album=True) -> float | None:
         """Require a distinct, terminal and transient failure for every item."""
-        if (self.status is not BatchStatus.FAILED or self.succeeded_ids or self.pending_ids
+        if self.status is not BatchStatus.FAILED or self.succeeded_ids or self.pending_ids:
+            return None
+        rejection = self.request_rejection
+        if rejection is not None:
+            if rejection.rate_limited and not (self.message_ids or self.failed_ids or self.item_results):
+                return rejection.retry_after
+            return None
+        if (not complete_album or not expected_count
                 or len(self.failed_ids) != expected_count or len(self.item_results) != expected_count
                 or not all(self.failed_ids) or len(set(self.failed_ids)) != expected_count):
             return None

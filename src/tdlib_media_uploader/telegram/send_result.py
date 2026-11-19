@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
@@ -14,6 +15,34 @@ SUBMITTED = BatchStatus.SUBMITTED.value
 CONFIRMED = BatchStatus.CONFIRMED.value
 FAILED = BatchStatus.FAILED.value
 UNKNOWN = BatchStatus.UNKNOWN.value
+
+
+class SendRequestRejected(RuntimeError):
+    """A correlated TDLib error returned before any message was accepted."""
+
+    submitted = False
+
+    def __init__(self, error_code: int, description: str, retry_after: float | None):
+        super().__init__(description)
+        self.error_code = error_code
+        self.retry_after = retry_after
+
+    @property
+    def rate_limited(self) -> bool:
+        return (
+            self.error_code in {420, 429}
+            and self.retry_after is not None
+            and math.isfinite(self.retry_after)
+            and self.retry_after >= 0
+        )
+
+    def as_dict(self) -> dict:
+        return {
+            "submitted": self.submitted, "error_code": self.error_code,
+            "rate_limited": self.rate_limited,
+            "retry_after": self.retry_after if self.rate_limited else None,
+            "error": str(self),
+        }
 
 
 @dataclass(frozen=True, slots=True)

@@ -222,7 +222,7 @@ class InflightPage(QWidget):
         if not sent:
             message += "\n\n下次上传将跳过日志中已确认成功的文件。请确认其余文件可以重新上传。"
             if record.get("succeeded_ids") and not record.get("item_results"):
-                message += "\n旧日志无法区分已发送的文件，整组重新上传可能产生重复消息。"
+                message += "\n旧日志无法区分已发送的文件时会保留原始保护记录。"
         if sent and target.startswith("⚠"):
             message += (
                 "\n\n这是一条旧版未记录 Telegram 目标的上传记录。"

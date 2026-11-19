@@ -24,6 +24,7 @@ from typing import Any, Protocol
 
 from ..core.concurrency import ContextExecutor, cancelable_sleep
 from ..core.compat import call_supported as _call_supported
+from ..telegram.send_result import SendRequestRejected
 from .delivery import _as_ids, _ObservedSend, _normalize_send_result, _normalize_status
 from ..config.paths import VIDEO_PROCESSED_CACHE_DIR
 from ..contracts import CancelToken, EventSink, MediaStrategy, UploadContext
@@ -1046,6 +1047,8 @@ class UploadEngine:
             except SourceChanged:
                 self._discard_unsent(journal, plan, target)
                 raise
+            except SendRequestRejected as exc:
+                observed = _ObservedSend(BatchStatus.FAILED, error=str(exc), request_rejection=exc)
             except Exception as exc:
                 delivery = getattr(exc, "result", None)
                 if isinstance(delivery, Mapping):
@@ -1060,19 +1063,23 @@ class UploadEngine:
                 return observed, cancelled
 
             last_error = observed.error or "Album 内消息发送失败"
+            rejection = observed.request_rejection
             try:
                 self._journal_call(
                     journal, "update", plan.kind, plan.key, BatchStatus.FAILED.value,
                     error=last_error, message_ids=observed.message_ids,
                     succeeded_ids=observed.succeeded_ids, failed_ids=observed.failed_ids,
                     pending_ids=observed.pending_ids, item_results=observed.item_results,
+                    request_rejection=rejection.as_dict() if rejection is not None else None,
                     target=target,
                 )
             except Exception as exc:
                 return replace(observed, status=BatchStatus.UNKNOWN,
                                error=f"Album {ordinal} 无法保存 FAILED 日志：{exc}", preserve_journal=True), cancelled
 
-            eligible_delay = observed.album_retry_delay(len(items)) if len(items) == len(plan.items) else None
+            eligible_delay = observed.album_retry_delay(
+                len(items), complete_album=len(items) == len(plan.items)
+            )
             if cancelled or _stop_after_current_requested(token) or eligible_delay is None:
                 return observed, stopped()
             if attempt == policy.max_attempts:
@@ -1081,7 +1088,9 @@ class UploadEngine:
                 return observed, False
 
             delay = max(policy.delay_seconds, eligible_delay)
-            self._log(sink, "WARNING", f"Album {ordinal} 第 {attempt} 次发送失败：{last_error}，{delay:g} 秒后重试")
+            reason = "发送请求被限流拒绝" if rejection is not None else "全部消息明确失败"
+            self._log(sink, "WARNING",
+                      f"Album {ordinal} 第 {attempt} 次尝试{reason}：{last_error}，{delay:g} 秒后重试")
             deadline = time.monotonic() + delay
             remaining = delay
             while remaining > 0:
@@ -1404,9 +1413,9 @@ class UploadEngine:
                             plan.key,
                             BatchStatus.UNKNOWN.value,
                             error=observed.error or "Album 发送结果无法确认",
-                            succeeded_ids=observed.succeeded_ids,
-                            failed_ids=observed.failed_ids,
-                            pending_ids=observed.pending_ids,
+                            succeeded_ids=observed.succeeded_ids or None,
+                            failed_ids=observed.failed_ids or None,
+                            pending_ids=observed.pending_ids or None,
                             item_results=observed.item_results or None,
                             target=run_context.target,
                         )
