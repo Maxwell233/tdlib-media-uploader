@@ -220,7 +220,7 @@ def test_scan_cancel_navigation_and_theme_during_scan(window, monkeypatch, pump,
 def test_theme_startup_qss_icons_and_independent_files(window, qt_app, tmp_path):
     win, _config, prefs = window
     config_path = tmp_path / "config.toml"
-    config_path.write_text("[other]\nexample = true\n")
+    config_path.write_text("[other]\nexample = true\n", encoding="utf-8")
     queue = win.queue.store
     queue.set_paused(True)
     queue.enqueue(task_for(tmp_path / "other"))
@@ -229,7 +229,7 @@ def test_theme_startup_qss_icons_and_independent_files(window, qt_app, tmp_path)
     assert DARK_PALETTE.bg_base in qt_app.styleSheet()
     assert button.icon().pixmap(16, 16).toImage() == get_svg_icon("sun", 16, 16).pixmap(16, 16).toImage()
     button.click()
-    assert json.loads(prefs.path.read_text()) == {"schema_version": 1, "theme_mode": "light"}
+    assert json.loads(prefs.path.read_text(encoding="utf-8")) == {"schema_version": 1, "theme_mode": "light"}
     reloaded = UiPreferences(prefs.path)
     initialize_theme(qt_app, reloaded)
     restarted = main_window.MainWindow(queue_store=queue, preferences=reloaded)
@@ -250,7 +250,7 @@ def test_theme_startup_qss_icons_and_independent_files(window, qt_app, tmp_path)
 def test_old_unknown_and_corrupt_preferences(value, qt_app, tmp_path):
     path = tmp_path / "ui_preferences.json"
     if value is not None:
-        path.write_text(value)
+        path.write_text(value, encoding="utf-8")
     prefs = UiPreferences(path)
     initialize_theme(qt_app, prefs)
     assert DARK_PALETTE.bg_base in qt_app.styleSheet()
@@ -258,7 +258,7 @@ def test_old_unknown_and_corrupt_preferences(value, qt_app, tmp_path):
     if prefs.error:
         with pytest.raises(ValueError):
             prefs.save_theme("light")
-        assert path.read_text() == value
+        assert path.read_text(encoding="utf-8") == value
 
 
 def test_theme_write_error_is_visible(window, monkeypatch, qt_app):

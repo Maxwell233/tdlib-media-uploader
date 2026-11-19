@@ -83,7 +83,7 @@ def test_restart_never_requeues_running_task(tmp_path, runtime_paths, phase, pro
     reopened = queue_store.UploadQueue(path, recover)
     assert reopened.paused
     assert reopened.tasks[0].status == (TaskStatus.NEEDS_REVIEW if protected else TaskStatus.INTERRUPTED)
-    assert json.loads(path.read_text())["paused"] is True
+    assert json.loads(path.read_text(encoding="utf-8"))["paused"] is True
     reopened.set_paused(False)
     assert reopened.next_pending() == b
 
@@ -104,12 +104,12 @@ def test_queue_corruption_and_atomic_failure(tmp_path, monkeypatch):
             store.remove(task.task_id)
         assert store.tasks == (task,)
         assert path.read_bytes() == original
-    path.write_text("{bad")
+    path.write_text("{bad", encoding="utf-8")
     broken = queue_store.UploadQueue(path, recover_task)
     assert broken.error
     with pytest.raises(RuntimeError):
         broken.enqueue(task)
-    assert path.read_text() == "{bad"
+    assert path.read_text(encoding="utf-8") == "{bad"
 
 
 @pytest.mark.parametrize("outcome, paused, state", [
