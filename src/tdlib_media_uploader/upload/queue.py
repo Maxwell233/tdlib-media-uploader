@@ -467,54 +467,64 @@ def retry_failed_album(task, album_key, confirmed_paths):
                    started_at=None, finished_at=None, outcome=None, error=None, paused_by_policy=False)
 
 
+def album_outcome_from_result(plan, batch, confirmed, failed_paths, deferred_paths, *, retry_prior=None, error=None):
+    """Project one engine result onto the original Album's queue status."""
+    paths = {stable_path(item.path) for item in plan.pending_items}
+    failed = paths & failed_paths
+    deferred = paths & deferred_paths
+    if batch is None and not (failed or deferred):
+        return None
+
+    stage = None
+    if batch is not None:
+        deferred.update(stable_path(item.path) for item in batch.deferred_items)
+        if batch.status is BatchStatus.FAILED and not (failed or deferred):
+            failed = (set(retry_prior.failed_paths) if retry_prior is not None else paths) - confirmed
+        if batch.failure_stage is not None:
+            stage = batch.failure_stage
+        elif batch.status is BatchStatus.CONFIRMED and batch.error:
+            stage = "persistence"
+        elif batch.status in {BatchStatus.PREPARED, BatchStatus.SUBMITTED, BatchStatus.UNKNOWN}:
+            stage = "unknown"
+        elif retry_prior is not None:
+            stage = retry_prior.failure_stage
+    if retry_prior is not None:
+        deferred.update(set(retry_prior.deferred_paths) - failed - confirmed)
+
+    if batch is not None and (
+        batch.status in {BatchStatus.PREPARED, BatchStatus.SUBMITTED, BatchStatus.UNKNOWN}
+        or batch.status is BatchStatus.CONFIRMED and batch.error
+    ):
+        status = AlbumStatus.UNKNOWN
+    elif paths <= confirmed:
+        status = AlbumStatus.COMPLETED
+        stage = None
+    elif paths & confirmed:
+        status = AlbumStatus.PARTIAL
+    elif failed:
+        status = AlbumStatus.FAILED
+    else:
+        status = AlbumStatus.DEFERRED
+    return AlbumOutcome(
+        plan.key, status, batch.error if batch is not None else error,
+        tuple(sorted(failed - deferred - confirmed)), tuple(sorted(deferred - confirmed)),
+        failure_stage=stage,
+    )
+
+
 def _run_album_outcomes(task, result, confirmed):
     outcomes = {outcome.album_key: outcome for outcome in task.album_outcomes}
     batches = {batch.album_key.split(":retry:", 1)[0]: batch for batch in result.batches}
     failed_paths = {stable_path(item.path) for item in result.failed_items}
     deferred_paths = {stable_path(item.path) for item in result.deferred_items}
     for plan in task.plans:
-        paths = {stable_path(item.path) for item in plan.pending_items}
-        batch = batches.get(plan.key)
-        failed = paths & failed_paths
-        deferred = paths & deferred_paths
-        if batch is None and not (failed or deferred):
-            continue
-        prior = outcomes.get(plan.key)
-        selected_retry = task.retry_album_key == plan.key and prior is not None
-        stage = None
-        if batch is not None:
-            deferred.update(stable_path(item.path) for item in batch.deferred_items)
-            if batch.status is BatchStatus.FAILED and not (failed or deferred):
-                failed = (set(prior.failed_paths) if selected_retry else paths) - confirmed
-            if batch.failure_stage is not None:
-                stage = batch.failure_stage
-            elif batch.status is BatchStatus.CONFIRMED and batch.error:
-                stage = "persistence"
-            elif batch.status in {BatchStatus.PREPARED, BatchStatus.SUBMITTED, BatchStatus.UNKNOWN}:
-                stage = "unknown"
-            elif selected_retry:
-                stage = prior.failure_stage
-        if selected_retry:
-            deferred.update(set(prior.deferred_paths) - failed - confirmed)
-        if batch is not None and (
-            batch.status in {BatchStatus.PREPARED, BatchStatus.SUBMITTED, BatchStatus.UNKNOWN}
-            or batch.status is BatchStatus.CONFIRMED and batch.error
-        ):
-            status = AlbumStatus.UNKNOWN
-        elif paths <= confirmed:
-            status = AlbumStatus.COMPLETED
-            stage = None
-        elif paths & confirmed:
-            status = AlbumStatus.PARTIAL
-        elif failed:
-            status = AlbumStatus.FAILED
-        else:
-            status = AlbumStatus.DEFERRED
-        outcomes[plan.key] = AlbumOutcome(
-            plan.key, status, batch.error if batch is not None else result.error,
-            tuple(sorted(failed - deferred - confirmed)), tuple(sorted(deferred - confirmed)),
-            failure_stage=stage,
+        outcome = album_outcome_from_result(
+            plan, batches.get(plan.key), confirmed, failed_paths, deferred_paths,
+            retry_prior=outcomes.get(plan.key) if task.retry_album_key == plan.key else None,
+            error=result.error,
         )
+        if outcome is not None:
+            outcomes[plan.key] = outcome
     return tuple(outcomes.values())
 
 

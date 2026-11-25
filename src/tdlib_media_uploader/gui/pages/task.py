@@ -32,9 +32,17 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.filesystem import stable_path
-from ...upload.queue import ACTIVE, RECOVERABLE, AlbumStatus, TaskStatus
+from ...core.models import AlbumSettledEvent, BatchStatus
+from ...upload.queue import ACTIVE, RECOVERABLE, AlbumStatus, TaskStatus, album_outcome_from_result
 from ..theme import status_color
 from ..tools import format_eta, format_size, kind_label
+
+
+_ALBUM_STATUS_LABELS = {
+    AlbumStatus.PENDING: "待上传", AlbumStatus.COMPLETED: "已完成",
+    AlbumStatus.PARTIAL: "部分完成", AlbumStatus.DEFERRED: "暂缓",
+    AlbumStatus.FAILED: "失败", AlbumStatus.UNKNOWN: "待核对", AlbumStatus.SKIPPED: "已跳过",
+}
 
 
 class TaskPage(QWidget):
@@ -69,6 +77,9 @@ class TaskPage(QWidget):
         self._target_label_provider: Callable[[Mapping[str, Any]], Mapping[str, str]] | None = None
         self._live_album_key: str | None = None
         self._live_album_rows: list[str] = []
+        self._active_album_plans = {}
+        self._active_confirmed: set[str] = set()
+        self._settled_albums = {}
         self._log_entries: list[tuple[str, str]] = []
 
         self._connection_notice = ""
@@ -553,6 +564,7 @@ class TaskPage(QWidget):
                     and (not album_key or not self._live_album_key or album_key == self._live_album_key)
                 )
             )
+            and album_key not in self._settled_albums
         )
         self._update_album_reason()
         self.album_files.clear()
@@ -565,9 +577,8 @@ class TaskPage(QWidget):
         plan = next((entry for entry in task.plans if entry.key == album_key), None)
         if plan is None:
             return
-        outcomes = task.album_statuses()
-        outcome = outcomes.get(plan.key)
-        confirmed = set(task.confirmed_paths) | task.known_confirmed
+        outcome = self._album_rows[plan.key].data(1, Qt.ItemDataRole.UserRole)
+        confirmed = self._active_confirmed if task.task_id == self._active_task_id else task.known_confirmed
         failed = set(outcome.failed_paths) if outcome is not None else set()
         deferred = set(outcome.deferred_paths) if outcome is not None else set()
         for item in plan.items:
@@ -609,29 +620,22 @@ class TaskPage(QWidget):
         self._album_rows.clear()
         if task is not None:
             states = task.album_statuses()
-            labels = {
-                AlbumStatus.PENDING: "待上传", AlbumStatus.COMPLETED: "已完成",
-                AlbumStatus.PARTIAL: "部分完成", AlbumStatus.DEFERRED: "暂缓",
-                AlbumStatus.FAILED: "失败", AlbumStatus.UNKNOWN: "待核对", AlbumStatus.SKIPPED: "已跳过",
-            }
-            confirmed = set(task.confirmed_paths) | task.known_confirmed
+            active = task.task_id == self._active_task_id
+            if active:
+                states.update(self._settled_albums)
+            confirmed = self._active_confirmed if active else task.known_confirmed
             for plan in task.plans:
                 outcome = states[plan.key]
                 names = [item.path.name for item in plan.items]
                 summary = "、".join(names[:3])
                 if len(names) > 3:
                     summary += f" 等 {len(names)} 个"
-                done = sum(stable_path(item.path) in confirmed for item in plan.items)
-                status_text = labels[outcome.status]
                 row = QTreeWidgetItem([
-                    f"{plan.group_label} · {plan.number}", status_text,
-                    summary, f"{done}/{len(names)}", "›",
+                    f"{plan.group_label} · {plan.number}", "", summary, "", "›",
                 ])
                 row.setData(0, Qt.ItemDataRole.UserRole, plan.key)
-                row.setData(1, Qt.ItemDataRole.UserRole, outcome)
-                row.setForeground(1, QColor(status_color(status_text)))
                 row.setToolTip(2, "\n".join(names))
-                row.setToolTip(4, outcome.error or "")
+                self._apply_album_outcome(row, plan, outcome, confirmed)
                 row.setTextAlignment(4, Qt.AlignmentFlag.AlignCenter)
                 self.albums.addTopLevelItem(row)
                 self._album_rows[plan.key] = row
@@ -641,6 +645,16 @@ class TaskPage(QWidget):
         self._update_album_controls()
         self._render_album_files()
 
+    @staticmethod
+    def _apply_album_outcome(row, plan, outcome, confirmed):
+        status = _ALBUM_STATUS_LABELS[outcome.status]
+        done = sum(stable_path(item.path) in confirmed for item in plan.items)
+        row.setData(1, Qt.ItemDataRole.UserRole, outcome)
+        row.setText(1, status)
+        row.setForeground(1, QColor(status_color(status)))
+        row.setText(3, f"{done}/{len(plan.items)}")
+        row.setToolTip(4, outcome.error or "")
+
     @Slot(str, bool)
     def show_recovery_progress(self, message, cancelable):
         self.queue_notice.setText(message)
@@ -649,7 +663,13 @@ class TaskPage(QWidget):
     def show_queue(self, store, blocked=False, *, recovering=False):
         selected = self._selected_task()
         self._queue_tasks = {task.task_id: task for task in store.tasks}
-        self._active_task_id = next((task.task_id for task in store.tasks if task.status in ACTIVE), None)
+        active = next((task for task in store.tasks if task.status in ACTIVE), None)
+        active_id = active.task_id if active is not None else None
+        if active_id != self._active_task_id:
+            self._settled_albums.clear()
+            self._active_album_plans = {plan.key: plan for plan in active.plans} if active is not None else {}
+            self._active_confirmed = active.known_confirmed if active is not None else set()
+        self._active_task_id = active_id
         if selected not in self._queue_tasks and store.tasks:
             selected = self._active_task_id or store.tasks[0].task_id
         self._queue_paused = store.paused
@@ -732,7 +752,8 @@ class TaskPage(QWidget):
         self.attempt_label.show()
         self._show_queue_cooldown(self._cooldown_seconds or event.retry_in_seconds)
         if self._selected_task() == self._active_task_id:
-            row = self._album_rows.get(event.album_key)
+            key = event.album_key.split(":retry:", 1)[0]
+            row = self._album_rows.get(key) if key not in self._settled_albums else None
             if row is not None:
                 status = "冷却中" if event.retry_in_seconds is not None else "上传中"
                 row.setText(1, status)
@@ -740,6 +761,32 @@ class TaskPage(QWidget):
                 row.setToolTip(4, event.last_error or "")
                 if row is self.albums.currentItem():
                     self._update_album_reason()
+
+    @Slot(object)
+    def show_album_settled(self, event: AlbumSettledEvent):
+        batch = event.batch
+        key = batch.album_key.split(":retry:", 1)[0]
+        plan = self._active_album_plans.get(key)
+        if plan is None:
+            return
+        if batch.status is BatchStatus.CONFIRMED and not batch.error:
+            self._active_confirmed.update(stable_path(item.path) for item in batch.confirmed_items)
+        task = self._queue_tasks[self._active_task_id]
+        prior = None
+        if task.retry_album_key == key:
+            prior = next((outcome for outcome in task.album_outcomes if outcome.album_key == key), None)
+        outcome = album_outcome_from_result(
+            plan, batch, self._active_confirmed,
+            {stable_path(item.path) for item in event.failed_items},
+            {stable_path(item.path) for item in event.deferred_items}, retry_prior=prior,
+        )
+        self._settled_albums[key] = outcome
+        if self._selected_task() == self._active_task_id:
+            row = self._album_rows[key]
+            self._apply_album_outcome(row, plan, outcome, self._active_confirmed)
+            if row is self.albums.currentItem():
+                self._update_album_controls()
+                self._render_album_files()
 
     def start_session(self, kind: str, result: dict):
         self._has_transfer = True
@@ -816,7 +863,7 @@ class TaskPage(QWidget):
         self.album_label.setVisible(bool(title))
         if self.task_status.text() == "正在启动…":
             self.task_status.setText("上传中")
-        self._live_album_key = str(payload.get("album_key") or "") or None
+        self._live_album_key = str(payload.get("album_key") or "").split(":retry:", 1)[0] or None
         self._live_album_rows = [str(row) for row in payload.get("rows", [])]
         self._render_album_files()
 
@@ -836,7 +883,8 @@ class TaskPage(QWidget):
         if active_row is not None:
             active_row.setText(2, f"{ratio:.0%}")
         if self._selected_task() == self._active_task_id:
-            row = self._album_rows.get(payload.get("album_key"))
+            key = str(payload.get("album_key") or "").split(":retry:", 1)[0]
+            row = self._album_rows.get(key) if key not in self._settled_albums else None
             if row is not None and "album_ratio" in payload:
                 row.setText(3, f"{float(payload['album_ratio']):.0%}")
 

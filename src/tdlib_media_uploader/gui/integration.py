@@ -27,6 +27,7 @@ from ..core.models import FileSnapshot
 from ..core.models import (
     AlbumAttemptEvent,
     AlbumPlan,
+    AlbumSettledEvent,
     AuthEvent,
     BatchStatus,
     LogEvent,
@@ -170,6 +171,11 @@ class GuiEventSink:
             return
         if isinstance(event, AlbumAttemptEvent):
             callback = getattr(self.ui, "album_attempt", None)
+            if callable(callback):
+                callback(event)
+            return
+        if isinstance(event, AlbumSettledEvent):
+            callback = getattr(self.ui, "album_settled", None)
             if callable(callback):
                 callback(event)
             return

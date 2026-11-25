@@ -156,6 +156,15 @@ class AlbumAttemptEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class AlbumSettledEvent:
+    """One Album result after the engine has processed its send and persistence outcome."""
+
+    batch: UploadBatchResult
+    failed_items: tuple[MediaItem, ...] = ()
+    deferred_items: tuple[MediaItem, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class AuthEvent:
     """A TDLib authentication state update for the GUI adapter."""
 
@@ -188,12 +197,13 @@ class UploadRunResult:
     paused: bool = False
 
 
-Event = ProgressEvent | PreliminaryProgressEvent | LogEvent | AuthEvent | AlbumAttemptEvent
+Event = ProgressEvent | PreliminaryProgressEvent | LogEvent | AuthEvent | AlbumAttemptEvent | AlbumSettledEvent
 
 
 __all__ = [
     "AlbumAttemptEvent",
     "AlbumPlan",
+    "AlbumSettledEvent",
     "AuthEvent",
     "BatchStatus",
     "ContentBuildResult",

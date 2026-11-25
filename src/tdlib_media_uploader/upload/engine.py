@@ -34,6 +34,7 @@ from ..core.identity import canonical_target
 from ..core.models import (
     AlbumAttemptEvent,
     AlbumPlan,
+    AlbumSettledEvent,
     BatchStatus,
     ContentBuildResult,
     LogEvent,
@@ -1316,6 +1317,14 @@ class UploadEngine:
         tail = []
         delayed_failures = {}
 
+        def record_batch(batch, prep=None, *, failed=()):
+            batches.append(batch)
+            deferred = ()
+            if prep is not None:
+                failed = (*prep.extra_failed_items, *prep.preflight_failed, *prep.build_failed, *failed)
+                deferred = (*prep.plan_deferred, *prep.build_deferred)
+            self._emit(sink, AlbumSettledEvent(batch, tuple(failed), deferred))
+
         def should_pause(*, unknown=False):
             return send_policy is not None and send_policy.pauses_for(unknown=unknown)
 
@@ -1516,10 +1525,12 @@ class UploadEngine:
                 except Exception as exc:
                     message = f"Album {plan.key} 预加载异常：{exc}"
                     errors.append(message)
-                    batches.append(
-                        UploadBatchResult(plan.key, BatchStatus.FAILED, error=message, failure_stage="pre_submit")
+                    failed = tuple(getattr(plan, "pending_items", ()))
+                    record_batch(
+                        UploadBatchResult(plan.key, BatchStatus.FAILED, error=message, failure_stage="pre_submit"),
+                        failed=failed,
                     )
-                    failed_items.extend(getattr(plan, "pending_items", ()))
+                    failed_items.extend(failed)
                     if (paused := should_pause()):
                         break
                     continue
@@ -1549,7 +1560,7 @@ class UploadEngine:
                     self._cleanup_unconfirmed_staging(
                         plan, run_context.stager, prep.effective_plan, run_context, errors,
                     )
-                    batches.append(prep.batch_result)
+                    record_batch(prep.batch_result, prep)
                     if prep.confirmed_recovery_failed and (paused := should_pause(unknown=True)):
                         break
                     if prep.batch_result.status is BatchStatus.FAILED and (paused := should_pause()):
@@ -1582,7 +1593,7 @@ class UploadEngine:
 
                 if prep.ambiguous and should_pause(unknown=True):
                     paused = True
-                    batches.append(UploadBatchResult(plan.key, BatchStatus.UNKNOWN, error="Album 有待核对的发送记录"))
+                    record_batch(UploadBatchResult(plan.key, BatchStatus.UNKNOWN, error="Album 有待核对的发送记录"), prep)
                     self._cleanup_unconfirmed_staging(
                         plan, run_context.stager, effective_plan, run_context, errors,
                     )
@@ -1602,8 +1613,9 @@ class UploadEngine:
                     message = "UploadEngine 未配置 sender，未发起 Telegram 请求"
                     errors.append(f"Album {plan.key} {message}")
                     failed_items.extend(ready_items)
-                    batches.append(
-                        UploadBatchResult(plan.key, BatchStatus.FAILED, error=message, failure_stage="pre_submit")
+                    record_batch(
+                        UploadBatchResult(plan.key, BatchStatus.FAILED, error=message, failure_stage="pre_submit"),
+                        prep, failed=ready_items,
                     )
                     self._cleanup_unconfirmed_staging(
                         plan, run_context.stager, effective_plan, run_context, errors,
@@ -1660,7 +1672,7 @@ class UploadEngine:
                     else:
                         failed_items.extend(ready_items)
                         errors.append(f"Album {plan.key} 发送失败：{message}")
-                        batches.append(batch)
+                        record_batch(batch, prep, failed=ready_items)
                     if run_context.stager is not None and effective_plan is not None:
                         try:
                             self._cleanup(run_context.stager, effective_plan, run_context, confirmed=False)
@@ -1709,14 +1721,15 @@ class UploadEngine:
                 except Exception as journal_error:
                     message = f"Album {plan.key} 发送日志状态不完整：{journal_error}"
                     errors.append(message)
-                    batches.append(
+                    record_batch(
                         UploadBatchResult(
                             plan.key,
                             BatchStatus.UNKNOWN,
                             message_ids=observed.message_ids,
                             error=message,
                             failure_stage="unknown",
-                        )
+                        ),
+                        prep,
                     )
                     ambiguous = True
                     if cancelled or (paused := should_pause(unknown=True)):
@@ -1726,14 +1739,15 @@ class UploadEngine:
                 if observed.status is not BatchStatus.CONFIRMED:
                     message = observed.error or "Album 发送结果无法确认"
                     errors.append(f"Album {plan.key} 发送结果未确认：{message}")
-                    batches.append(
+                    record_batch(
                         UploadBatchResult(
                             plan.key,
                             observed.status,
                             message_ids=observed.message_ids,
                             error=message,
                             failure_stage="unknown",
-                        )
+                        ),
+                        prep,
                     )
                     ambiguous = True
                     if (paused := should_pause(unknown=True)):
@@ -1752,14 +1766,15 @@ class UploadEngine:
                 except Exception as journal_error:
                     message = f"Album {plan.key} 无法写入 CONFIRMED 日志：{journal_error}"
                     errors.append(message)
-                    batches.append(
+                    record_batch(
                         UploadBatchResult(
                             plan.key,
                             BatchStatus.UNKNOWN,
                             message_ids=observed.message_ids,
                             error=message,
                             failure_stage="unknown",
-                        )
+                        ),
+                        prep,
                     )
                     ambiguous = True
                     if (paused := should_pause(unknown=True)):
@@ -1782,7 +1797,7 @@ class UploadEngine:
                     message = f"Album {plan.key} 状态保存失败：{state_error}"
                     errors.append(message)
                     confirmed_recovery_failed = True
-                    batches.append(
+                    record_batch(
                         UploadBatchResult(
                             plan.key,
                             BatchStatus.CONFIRMED,
@@ -1790,7 +1805,8 @@ class UploadEngine:
                             confirmed_items=ready_items,
                             error=message,
                             failure_stage="persistence",
-                        )
+                        ),
+                        prep,
                     )
                     if (paused := should_pause(unknown=True)):
                         break
@@ -1811,6 +1827,18 @@ class UploadEngine:
                         errors.append(finalize_error)
                         confirmed_recovery_failed = True
 
+                record_batch(
+                    UploadBatchResult(
+                        plan.key,
+                        BatchStatus.CONFIRMED,
+                        message_ids=ids,
+                        confirmed_items=ready_items,
+                        error=finalize_error,
+                        failure_stage="persistence" if finalize_error else None,
+                    ),
+                    prep,
+                )
+
                 if run_context.stager is not None:
                     try:
                         self._cleanup(
@@ -1828,16 +1856,6 @@ class UploadEngine:
                         cleanup_processed_group(plan.key, prep.managed_processed_paths)
                     except Exception as cleanup_error:
                         errors.append(f"Album {plan.key} 临时视频清理失败：{cleanup_error}")
-                batches.append(
-                    UploadBatchResult(
-                        plan.key,
-                        BatchStatus.CONFIRMED,
-                        message_ids=ids,
-                        confirmed_items=ready_items,
-                        error=finalize_error,
-                        failure_stage="persistence" if finalize_error else None,
-                    )
-                )
                 confirmed_count += 1
                 confirmed = getattr(run_context.sender, "confirmed", None)
                 if callable(confirmed):
@@ -1875,7 +1893,7 @@ class UploadEngine:
             io_executor.shutdown(wait=False, cancel_futures=True)
 
         for _, batch, items, _ in delayed_failures.values():
-            batches.append(batch)
+            record_batch(batch, failed=items)
             failed_items.extend(items)
             errors.append(f"Album {batch.album_key} 发送失败：{batch.error}")
 

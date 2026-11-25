@@ -15,7 +15,7 @@ from conftest import TARGET, task_for
 from tdlib_media_uploader.config import loader, paths
 from tdlib_media_uploader.config.snapshot import snapshot_config
 from tdlib_media_uploader.core import album, logging as app_logging, upload_journal
-from tdlib_media_uploader.core.models import UploadRunResult
+from tdlib_media_uploader.core.models import AlbumSettledEvent, BatchStatus, UploadBatchResult, UploadRunResult
 from tdlib_media_uploader.core.upload_journal import InflightJournal
 from tdlib_media_uploader.gui import main_window, preferences, scanner
 from tdlib_media_uploader.gui.integration import run_v2_upload
@@ -396,6 +396,84 @@ def test_task_center_fits_long_details_and_keeps_live_status_at_narrow_width(qt_
     assert page.progress.isVisible() and page.progress.value() == 0
     page.finish_session(True, "已完成")
     assert page.progress.isVisible() and page.progress.value() == page.progress.maximum()
+
+
+def test_task_center_finishes_first_album_while_second_is_sending(window, tmp_path, pump, monkeypatch, runtime_paths):
+    win, config, _ = window
+    source = seed(tmp_path / "photos", "image")
+    Image.new("RGB", (20, 20)).save(source / "next.jpg")
+    config.IMAGE_ALBUM_SIZE = 1
+    monkeypatch.setattr(main_window, "_source_root_for", lambda _kind: source)
+    second_started = threading.Event()
+    finish_second = threading.Event()
+
+    class Client:
+        def __init__(self, _ui, _device_model, *, config):
+            self.sends = 0
+
+        def send_contents(self, contents, *, on_submitted, **kwargs):
+            self.sends += 1
+            ids = [100 + self.sends]
+            assert len(contents) == 1
+            on_submitted(ids)
+            if self.sends == 2:
+                second_started.set()
+                assert finish_second.wait(10)
+            return ids
+
+        def close(self):
+            pass
+
+    def run(kind, **kwargs):
+        return run_v2_upload(kind, **{**kwargs, "runtime_paths": runtime_paths}, client_factory=Client)
+
+    def make_worker(task):
+        worker = UploadWorker(task.kind, main_window.AuthBridge(), task.preview(), target_provider=lambda _: task.target,
+                              config=task.execution_config(config), upload_runner=run)
+        worker.wait_for_scheduler = True
+        return worker
+
+    win.queue.make_worker = make_worker
+    try:
+        assert win._scan("image")
+        pump(lambda: not win.scanners)
+        win._start_upload("image")
+        pump(second_started.is_set)
+        page = win.task_page
+        assert win.worker is not None and win.queue.store.tasks[0].status is TaskStatus.RUNNING
+        first_row, second_row = (page.albums.topLevelItem(index) for index in range(2))
+        assert (first_row.text(1), first_row.text(3)) == ("已完成", "1/1")
+        assert second_row.text(1) == "上传中"
+        page.albums.setCurrentItem(first_row)
+        assert "已完成" in page.album_files.item(0).text()
+        win._refresh_queue()
+        assert page.albums.topLevelItem(0).text(1) == "已完成"
+    finally:
+        finish_second.set()
+        pump(lambda: win.worker is None)
+
+
+@pytest.mark.parametrize(("error", "label", "count"), [(None, "部分完成", "1/2"), ("断点写入失败", "待核对", "0/2")])
+def test_album_settlement_preserves_partial_and_unknown_status(qt_app, tmp_path, error, label, count):
+    files = [tmp_path / name for name in ("first.jpg", "second.jpg")]
+    for path in files:
+        path.write_bytes(b"image snapshot")
+    task = replace(task_for(tmp_path, paths=files), status=TaskStatus.RUNNING)
+    plan = task.plans[0]
+    page = TaskPage()
+    page.show_queue(SimpleNamespace(tasks=(task,), paused=False, error=None, blocked_reason=""))
+    row = page.albums.topLevelItem(0)
+    page.albums.setCurrentItem(row)
+    page.show_album({"album_key": plan.key, "rows": ["live file"]})
+    page.show_album_settled(AlbumSettledEvent(
+        UploadBatchResult(f"{plan.key}:retry:example", BatchStatus.CONFIRMED, confirmed_items=plan.items[:1], error=error),
+        deferred_items=plan.items[1:],
+    ))
+    page.show_progress({"album_key": plan.key, "album_ratio": 1.0})
+    assert (row.text(1), row.text(3)) == (label, count)
+    assert page.album_files.count() == 2
+    expected = ("待核对", "待核对") if error else ("已完成", "暂缓")
+    assert tuple(page.album_files.item(i).data(Qt.ItemDataRole.UserRole) for i in range(2)) == expected
 
 
 def test_review_controls_follow_manual_reconciliation_and_skip_history(window, monkeypatch, tmp_path, runtime_paths, pump):

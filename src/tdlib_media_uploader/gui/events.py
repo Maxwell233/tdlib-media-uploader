@@ -49,6 +49,7 @@ class GuiConsoleUI(QObject):
     progress_changed = Signal(object)
     album_changed = Signal(object)
     album_attempt_changed = Signal(object)
+    album_settled_changed = Signal(object)
     preliminary_progress_changed = Signal(object)
     target_changed = Signal(object)
     rate_limit_changed = Signal(int)
@@ -186,6 +187,9 @@ class GuiConsoleUI(QObject):
 
     def album_attempt(self, event):
         self.album_attempt_changed.emit(event)
+
+    def album_settled(self, event):
+        self.album_settled_changed.emit(event)
 
     def progress(self, **kwargs):
         self.progress_changed.emit(dict(kwargs))

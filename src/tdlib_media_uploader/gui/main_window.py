@@ -700,6 +700,7 @@ class MainWindow(QMainWindow):
             (worker.ui.rate_limit_changed, self.task_page.show_rate_limit),
             (worker.ui.album_changed, self.task_page.show_album),
             (worker.ui.album_attempt_changed, self.task_page.show_album_attempt),
+            (worker.ui.album_settled_changed, self.task_page.show_album_settled),
             (worker.ui.preliminary_progress_changed, self.task_page.show_preliminary_progress),
             (worker.ui.target_changed, self._target_from_worker),
         ):
