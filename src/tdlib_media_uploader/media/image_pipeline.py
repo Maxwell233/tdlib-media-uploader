@@ -11,20 +11,21 @@ from ..core.album import CaptionStore, album_key, compose_caption
 from ..core.album import with_filename_description as with_filename_description
 from ..core.identity import media_file_signature
 from ..core.upload_state import UploadState as SharedUploadState
-from ..core.filesystem import display_path, file_snapshot, is_network_path, io_worker_count, iter_files, stable_path, validate_scan_root
+from ..core.filesystem import display_path, file_snapshot, is_network_path, iter_files, stable_path, validate_scan_root
 from ..core.sorting import media_path_sort, relative_name as stable_relative_name
-from ..core.concurrency import ordered_bounded_map
+from ..core.compat import call_supported
 from ..core.readiness import raise_for_file_readiness, wait_for_file_ready
 from .common import (
     cleanup_confirmed_staging as _cleanup_confirmed_staging,
     format_size,
+    media_io_results,
     prune_staging_cache as _prune_staging_cache,
     readiness_options as _shared_readiness_options,
     readiness_record as _readiness_record,
+    revalidate_ready_source,
 )
 from ..config import loader as cfg
-from ..core.concurrency import ContextExecutor
-from .runtime import pipeline_config, pipeline_locals
+from .runtime import pipeline_config, pipeline_locals, pipeline_paths_lock
 from ..telegram.tdlib_common import HeadlessUI, formatted_text
 from ..config.paths import IMAGE_STATE_DIR, IMAGE_COMPRESSION_CACHE_DIR
 from ..upload.staging import should_stage, stage_file
@@ -172,8 +173,10 @@ def compress_image(path: Path, cancel_event=None, *, source_info=None) -> Path:
 
 
 def cleanup_compressed_images() -> None:
-    paths = set(IMAGE_UPLOAD_PATHS.values())
-    IMAGE_UPLOAD_PATHS.clear()
+    tracked_paths = pipeline_locals(globals())["IMAGE_UPLOAD_PATHS"]
+    with pipeline_paths_lock:
+        paths = set(tracked_paths.values())
+        tracked_paths.clear()
     for path in paths:
         try:
             path.unlink(missing_ok=True)
@@ -211,7 +214,7 @@ def image_info(path: Path) -> tuple[int, int]:
     return info.width, info.height
 
 
-def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
+def preflight_images(paths, ui=None, cancel_event=None, *, executor=None) -> list[dict]:
     """Find unreadable images without aborting the complete upload task."""
     config = pipeline_config(cfg)
 
@@ -231,7 +234,6 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
             )
             raise_for_file_readiness(path, readiness)
             size = readiness.snapshot.size
-            IMAGE_UPLOAD_PATHS.pop(stable_path(path), None)
             info = cached_image_probe(path)
             if info.animated:
                 raise RuntimeError(f"检测到动画图片，不会自动转换为静态 Photo：{path.name}")
@@ -281,29 +283,24 @@ def preflight_images(paths, ui=None, cancel_event=None) -> list[dict]:
                 record.update(readiness_record)
             return record
 
-    worker_count = io_worker_count(
-        config.IMAGE_DIR,
-        local=getattr(config, "IO_WORKERS_LOCAL", 4),
-        network=getattr(config, "IO_WORKERS_NETWORK", 2),
-    )
-    with ContextExecutor(max_workers=worker_count, thread_name_prefix="tdlib-preflight") as executor:
-        for index, result in enumerate(
-            ordered_bounded_map(executor, paths, worker, worker_count, cancel_event=cancel_event),
-            1,
-        ):
-            if cancel_event is not None and cancel_event.is_set():
-                raise TimeoutError("图片预检已取消")
-            if result and result.get("oversize"):
-                target.info(
-                    f"预检发现需规范化图片，将在上传时生成兼容副本：{relative_name(result['path'])}"
-                )
-            elif result:
-                skipped.append(result)
-                target.warning(f"跳过图片：{relative_name(result['path'])}")
-                target.log(f"跳过图片详情：{result['path']}\n原因：{result['reason']}")
+    for index, result in enumerate(
+        media_io_results(paths, worker, config=config, root=config.IMAGE_DIR,
+                         cancel_event=cancel_event, executor=executor),
+        1,
+    ):
+        if cancel_event is not None and cancel_event.is_set():
+            raise TimeoutError("图片预检已取消")
+        if result and result.get("oversize"):
+            target.info(
+                f"预检发现需规范化图片，将在上传时生成兼容副本：{relative_name(result['path'])}"
+            )
+        elif result:
+            skipped.append(result)
+            target.warning(f"跳过图片：{relative_name(result['path'])}")
+            target.log(f"跳过图片详情：{result['path']}\n原因：{result['reason']}")
 
-            if getattr(config, "IMAGE_VERIFY_ALL_IMAGES", False):
-                target.info(f"预检图片 {index}/{total} · {paths[index-1].name}")
+        if getattr(config, "IMAGE_VERIFY_ALL_IMAGES", False):
+            target.info(f"预检图片 {index}/{total} · {paths[index-1].name}")
 
     return skipped
 
@@ -315,47 +312,57 @@ def input_photo(
     expected_size=None,
     expected_mtime_ns=None,
     cancel_event=None,
+    ui=None,
+    staged_paths=None,
+    preflight_verified=False,
+    use_scan_snapshot=True,
 ) -> dict:
     config = pipeline_config(cfg)
     runtime = pipeline_locals(globals())
-    if expected_size is None and expected_mtime_ns is None:
-        expected = runtime["IMAGE_SCAN_SNAPSHOTS"].get(stable_path(path))
+    key = stable_path(path)
+    if use_scan_snapshot and expected_size is None and expected_mtime_ns is None:
+        expected = runtime["IMAGE_SCAN_SNAPSHOTS"].get(key)
         if expected is not None:
             expected_size, expected_mtime_ns = expected
-    readiness = wait_for_file_ready(
-        path,
-        expected_size=expected_size,
-        expected_mtime_ns=expected_mtime_ns,
-        **_readiness_options(path),
-        cancel_event=cancel_event,
-    )
-    raise_for_file_readiness(path, readiness)
-    snapshot = readiness.snapshot.as_tuple()
-    source_path = path
-    staging_mode = getattr(config, "STAGING_MODE", None)
-    if staging_mode is None or (staging_mode == "off" and getattr(config, "STAGING_ENABLED", False)):
-        staging_mode = "always" if getattr(config, "STAGING_ENABLED", False) else "off"
-    if should_stage(path, staging_mode):
-        source_path = stage_file(
-            path,
-            readiness.snapshot,
-            staging_dir=config.STAGING_DIR,
-            staging_base_dir=getattr(config, "STAGING_BASE_DIR", config.STAGING_DIR),
+    if preflight_verified and expected_size is not None and expected_mtime_ns is not None:
+        snapshot = revalidate_ready_source(
+            path, expected_size=expected_size, expected_mtime_ns=expected_mtime_ns,
             cancel_event=cancel_event,
         )
-        runtime["STAGED_UPLOAD_PATHS"][stable_path(path)] = source_path
+    else:
+        readiness = wait_for_file_ready(
+            path, expected_size=expected_size, expected_mtime_ns=expected_mtime_ns,
+            **_readiness_options(path), cancel_event=cancel_event,
+        )
+        raise_for_file_readiness(path, readiness)
+        snapshot = readiness.snapshot
+    source_path = path if staged_paths is None else staged_paths.get(key, path)
+    if staged_paths is None:
+        staging_mode = getattr(config, "STAGING_MODE", "off")
+        if not staging_mode or (staging_mode == "off" and getattr(config, "STAGING_ENABLED", False)):
+            staging_mode = "always" if getattr(config, "STAGING_ENABLED", False) else "off"
+        if should_stage(path, staging_mode):
+            source_path = stage_file(
+                path, snapshot, staging_dir=config.STAGING_DIR,
+                staging_base_dir=getattr(config, "STAGING_BASE_DIR", config.STAGING_DIR),
+                cancel_event=cancel_event,
+            )
+            with pipeline_paths_lock:
+                runtime["STAGED_UPLOAD_PATHS"][key] = source_path
     info = cached_image_probe(source_path)
-    if info.needs_normalization or snapshot[0] > config.IMAGE_MAX_BYTES:
+    if info.needs_normalization or snapshot.size > config.IMAGE_MAX_BYTES:
         source_path = compress_image(
             source_path,
             cancel_event,
             source_info=info,
         ) if cancel_event is not None else compress_image(source_path, source_info=info)
-        IMAGE_UPLOAD_PATHS[stable_path(path)] = source_path
-        if source_path.stat().st_size != snapshot[0]:
-            UI.info(
+        with pipeline_paths_lock:
+            runtime["IMAGE_UPLOAD_PATHS"][key] = source_path
+        upload_size = source_path.stat().st_size
+        if upload_size != snapshot.size:
+            (ui or UI).info(
                 f"图片规范化完成：{relative_name(path)} · "
-                f"{format_size(snapshot[0])} → {format_size(source_path.stat().st_size)}；原文件未修改"
+                f"{format_size(snapshot.size)} → {format_size(upload_size)}；原文件未修改"
             )
         width, height = image_info(source_path)
     else:
@@ -378,34 +385,31 @@ def input_photo(
     }
 
 
-def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
+def build_image_contents(
+    paths, caption: str, ui=None, cancel_event=None, *, staged_paths=None,
+    preflight_verified=False, executor=None,
+):
     """Build an Album while isolating images that became unreadable later."""
 
     target = ui or UI
-    contents = []
-    valid_paths = []
-    skipped = []
-    for path in paths:
+    config = pipeline_config(cfg)
+    paths = tuple(paths)
+
+    def build(path):
         try:
             expected = pipeline_locals(globals())["IMAGE_SCAN_SNAPSHOTS"].get(stable_path(path))
-            item_caption = caption if not valid_paths else ""
-            if expected is None:
-                # Keep the historical two-argument call shape for embedding
-                # integrations that provide their own input_photo wrapper.
-                contents.append(
-                    input_photo(path, item_caption, cancel_event=cancel_event)
-                    if cancel_event is not None
-                    else input_photo(path, item_caption)
-                )
-            else:
-                kwargs = {
-                    "expected_size": expected[0],
-                    "expected_mtime_ns": expected[1],
-                }
-                if cancel_event is not None:
-                    kwargs["cancel_event"] = cancel_event
-                contents.append(input_photo(path, item_caption, **kwargs))
-            valid_paths.append(path)
+            kwargs = {}
+            if expected is not None:
+                kwargs.update(expected_size=expected[0], expected_mtime_ns=expected[1])
+            if cancel_event is not None:
+                kwargs["cancel_event"] = cancel_event
+            if ui is not None:
+                kwargs["ui"] = ui
+            if staged_paths is not None:
+                kwargs["staged_paths"] = staged_paths
+            if preflight_verified:
+                kwargs["preflight_verified"] = True
+            return path, call_supported(input_photo, (path, ""), **kwargs), None
         except Exception as exc:
             try:
                 current_size = path.stat().st_size
@@ -414,7 +418,7 @@ def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
             record = {
                 "path": path,
                 "reason": f"{type(exc).__name__}: {exc}",
-                "category": "size" if current_size > pipeline_config(cfg).IMAGE_MAX_BYTES else "unreadable",
+                "category": "size" if current_size > config.IMAGE_MAX_BYTES else "unreadable",
             }
             readiness_record = _readiness_record(exc)
             if readiness_record:
@@ -422,9 +426,21 @@ def build_image_contents(paths, caption: str, ui=None, cancel_event=None):
                 record["category"] = readiness_record["category"]
             elif isinstance(exc, (OSError, TimeoutError)):
                 record["category"] = "deferred"
+            return path, None, record
+
+    contents, valid_paths, skipped = [], [], []
+    for path, content, record in media_io_results(
+        paths, build, config=config, root=config.IMAGE_DIR, cancel_event=cancel_event, executor=executor,
+    ):
+        if record:
             skipped.append(record)
             target.warning(f"跳过上传前变得无法读取的图片：{relative_name(path)}")
             target.log(f"跳过图片详情：{path}\n原因：{record['reason']}")
+        else:
+            if not contents:
+                content = {**content, "caption": formatted_text(caption)}
+            contents.append(content)
+            valid_paths.append(path)
     return contents, valid_paths, skipped
 
 

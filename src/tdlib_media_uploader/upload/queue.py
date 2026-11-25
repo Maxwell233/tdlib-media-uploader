@@ -20,6 +20,10 @@ from ..core.models import AlbumPlan, BatchStatus, FileSnapshot, MediaItem, ScanR
 from .retry import AlbumRetryPolicy
 
 KINDS = {"video", "image", "mixed"}
+_TDLIB_JOB_SETTINGS = {
+    "TDLIB_REQUEST_TIMEOUT", "TDLIB_MESSAGE_SEND_TIMEOUT", "TDLIB_ENABLE_PRELIMINARY_UPLOAD",
+    "TDLIB_MAX_CONCURRENT_FILE_UPLOADS", "TDLIB_PRELIMINARY_WAIT_SECONDS",
+}
 
 
 class TaskStatus(StrEnum):
@@ -33,6 +37,31 @@ class TaskStatus(StrEnum):
     SKIPPED = "SKIPPED"
 
 
+class AlbumStatus(StrEnum):
+    PENDING = "PENDING"
+    COMPLETED = "COMPLETED"
+    PARTIAL = "PARTIAL"
+    DEFERRED = "DEFERRED"
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"
+    SKIPPED = "SKIPPED"
+
+
+@dataclass(frozen=True, slots=True)
+class AlbumOutcome:
+    album_key: str
+    status: AlbumStatus
+    error: str | None = None
+    failed_paths: tuple[str, ...] = ()
+    deferred_paths: tuple[str, ...] = ()
+
+    def to_record(self):
+        return {
+            "album_key": self.album_key, "status": self.status.value, "error": self.error,
+            "failed_paths": list(self.failed_paths), "deferred_paths": list(self.deferred_paths),
+        }
+
+
 ACTIVE = {TaskStatus.PREPARING, TaskStatus.RUNNING}
 RECOVERABLE = {TaskStatus.FAILED, TaskStatus.INTERRUPTED}
 ACTION_REQUIRED = RECOVERABLE | {TaskStatus.NEEDS_REVIEW}
@@ -44,7 +73,7 @@ def now() -> str:
 
 def _runtime_setting(name: str) -> bool:
     # Credentials and account/database settings belong to the application.
-    return name == "CONFIG" or name.startswith(("API_", "TDLIB_", "PROXY_"))
+    return name == "CONFIG" or (name not in _TDLIB_JOB_SETTINGS and name.startswith(("API_", "TDLIB_", "PROXY_")))
 
 
 def _encode(value):
@@ -153,6 +182,10 @@ class UploadTask:
     scan_errors: tuple[str, ...] = ()
     confirmed_paths: tuple[str, ...] = ()
     manifest_digest: str | None = None
+    album_outcomes: tuple[AlbumOutcome, ...] = ()
+    skipped_albums: tuple[str, ...] = ()
+    retry_album_key: str | None = None
+    paused_by_policy: bool = False
 
     @classmethod
     def from_preview(cls, kind, preview, config):
@@ -169,7 +202,10 @@ class UploadTask:
             if name.isupper() and not _runtime_setting(name)
         }
         final_plans = []
+        skipped = set(preview.get("skipped_album_keys", ()))
         for plan in preview["plans"]:
+            if plan.key in skipped:
+                continue
             base = captions.get(plan.key, plan.caption)
             caption = with_filename_description(
                 base, [{"path": item.path} for item in plan.pending_items],
@@ -217,17 +253,52 @@ class UploadTask:
     def execution_config(self, application_config):
         runtime = {
             name: getattr(application_config, name) for name in dir(application_config)
-            if name.isupper() and name != "CONFIG" and _runtime_setting(name)
+            if name.isupper() and name != "CONFIG" and (_runtime_setting(name) or name in _TDLIB_JOB_SETTINGS)
         }
-        return FrozenConfig(**runtime, **self.config)
+        runtime.update(self.config)
+        return FrozenConfig(**runtime)
+
+    def execution_plans(self):
+        plans = tuple(plan for plan in self.plans if plan.key not in self.skipped_albums)
+        if self.retry_album_key is not None:
+            plan = next(plan for plan in plans if plan.key == self.retry_album_key)
+            failed = set(next(outcome.failed_paths for outcome in self.album_outcomes if outcome.album_key == plan.key))
+            plans = (replace(plan, pending_items=tuple(
+                item for item in plan.pending_items if stable_path(item.path) in failed
+            )),)
+        return plans
 
     def preview(self) -> dict:
+        plans = self.execution_plans()
+        items = self.items
+        progress_items = items
+        if self.retry_album_key is not None or self.skipped_albums:
+            progress_items = tuple(item for plan in plans for item in plan.pending_items)
         return {
-            "source_dir": str(self.source_root), "target": self.target, "items": self.items,
-            "plans": self.plans, "scan_result": ScanResult(self.items, errors=self.scan_errors),
-            "album_count": len(self.plans), "queued": True,
+            "source_dir": str(self.source_root), "target": self.target, "items": progress_items,
+            "plans": plans, "scan_result": ScanResult(items, errors=self.scan_errors),
+            "album_count": len(plans), "queued": True,
             "known_confirmed": self.known_confirmed,
         }
+
+    def album_statuses(self) -> dict[str, AlbumOutcome]:
+        confirmed = self.known_confirmed
+        return self._album_statuses(confirmed)
+
+    def _album_statuses(self, confirmed):
+        observed = {outcome.album_key: outcome for outcome in self.album_outcomes}
+        skipped = set(self.skipped_albums)
+        statuses = {}
+        for plan in self.plans:
+            if plan.key in skipped:
+                statuses[plan.key] = AlbumOutcome(plan.key, AlbumStatus.SKIPPED)
+            elif plan.key in observed and observed[plan.key].status is AlbumStatus.UNKNOWN:
+                statuses[plan.key] = observed[plan.key]
+            elif all(stable_path(item.path) in confirmed for item in plan.items):
+                statuses[plan.key] = AlbumOutcome(plan.key, AlbumStatus.COMPLETED)
+            else:
+                statuses[plan.key] = observed.get(plan.key, AlbumOutcome(plan.key, AlbumStatus.PENDING))
+        return statuses
 
     def _manifest(self) -> dict:
         return {
@@ -249,6 +320,9 @@ class UploadTask:
             "started_at": self.started_at, "finished_at": self.finished_at,
             "status": self.status.value, "outcome": self.outcome, "error": self.error,
             "confirmed_paths": list(self.confirmed_paths),
+            "album_outcomes": [outcome.to_record() for outcome in self.album_outcomes],
+            "skipped_albums": list(self.skipped_albums), "retry_album_key": self.retry_album_key,
+            "paused_by_policy": self.paused_by_policy,
         }
 
     @classmethod
@@ -275,14 +349,111 @@ class UploadTask:
         if (not isinstance(confirmed, list) or not all(isinstance(path, str) for path in confirmed)
                 or len(set(confirmed)) != len(confirmed) or not set(confirmed).issubset(paths)):
             raise ValueError("任务中已确认的文件不属于原始清单")
+        pending_by_album = {
+            plan.key: {stable_path(item.path) for item in plan.pending_items}
+            for plan in plans
+        }
+        outcomes = []
+        for entry in raw.get("album_outcomes", ()):
+            album_key = entry["album_key"]
+            failed = tuple(entry.get("failed_paths", ()))
+            deferred = tuple(entry.get("deferred_paths", ()))
+            if (album_key not in pending_by_album
+                    or any(outcome.album_key == album_key for outcome in outcomes)
+                    or not set((*failed, *deferred)).issubset(pending_by_album[album_key])
+                    or set(failed).intersection(deferred)):
+                raise ValueError("Album 状态不属于任务的原始待上传清单")
+            outcomes.append(AlbumOutcome(album_key, AlbumStatus(entry["status"]), entry.get("error"), failed, deferred))
+        skipped = tuple(raw.get("skipped_albums", ()))
+        retry = raw.get("retry_album_key")
+        paused_by_policy = raw.get("paused_by_policy", False)
+        if type(paused_by_policy) is not bool:
+            raise ValueError("无效的队列暂停状态")
+        if (len(set(skipped)) != len(skipped) or not set(skipped).issubset(pending_by_album)
+                or retry is not None and (
+                    retry in skipped or not any(
+                        outcome.album_key == retry and outcome.failed_paths
+                        and outcome.status in {AlbumStatus.FAILED, AlbumStatus.PARTIAL}
+                        for outcome in outcomes
+                    )
+                )):
+            raise ValueError("Album 跳过或重试选择不属于原始任务")
         task = cls(task_id, kind, root, target, config, plans,
                    raw["created_at"], TaskStatus(raw["status"]), raw["started_at"],
                    raw["finished_at"], raw["outcome"], raw["error"], tuple(raw["scan_errors"]),
-                   tuple(confirmed))
+                   tuple(confirmed), album_outcomes=tuple(outcomes), skipped_albums=skipped,
+                   retry_album_key=retry, paused_by_policy=paused_by_policy)
         digest = cls._digest(task._manifest())
         if "manifest_digest" in raw and raw["manifest_digest"] != digest:
             raise ValueError("原始任务清单已变化，Album 成员、顺序、目标与配置必须保持一致")
         return replace(task, manifest_digest=digest)
+
+
+def skip_album(task, album_key, confirmed_paths):
+    task = replace(task, confirmed_paths=confirmed_paths)
+    outcome = task.album_statuses().get(album_key)
+    if outcome is None or outcome.status in {AlbumStatus.COMPLETED, AlbumStatus.UNKNOWN, AlbumStatus.SKIPPED}:
+        raise ValueError("此 Album 不能跳过")
+    updated = replace(task, skipped_albums=(*task.skipped_albums, album_key), retry_album_key=None)
+    statuses = {entry.status for entry in updated.album_statuses().values()}
+    if statuses <= {AlbumStatus.COMPLETED, AlbumStatus.SKIPPED}:
+        status = TaskStatus.COMPLETED if AlbumStatus.COMPLETED in statuses else TaskStatus.SKIPPED
+        return replace(updated, status=status, finished_at=now(), outcome="SKIPPED",
+                       error=None, paused_by_policy=False)
+    if statuses.isdisjoint({AlbumStatus.FAILED, AlbumStatus.PARTIAL, AlbumStatus.UNKNOWN}):
+        return replace(updated, status=TaskStatus.PENDING, started_at=None, finished_at=None,
+                       outcome=None, error=None, paused_by_policy=False)
+    return updated
+
+
+def retry_failed_album(task, album_key, confirmed_paths):
+    task = replace(task, confirmed_paths=confirmed_paths)
+    outcome = task.album_statuses().get(album_key)
+    if (outcome is None or outcome.status not in {AlbumStatus.FAILED, AlbumStatus.PARTIAL}
+            or not set(outcome.failed_paths).difference(task.known_confirmed)):
+        raise ValueError("此 Album 没有已明确失败且仍可重试的文件")
+    return replace(task, status=TaskStatus.PENDING, retry_album_key=album_key,
+                   started_at=None, finished_at=None, outcome=None, error=None, paused_by_policy=False)
+
+
+def _run_album_outcomes(task, result, confirmed):
+    outcomes = {outcome.album_key: outcome for outcome in task.album_outcomes}
+    batches = {batch.album_key.split(":retry:", 1)[0]: batch for batch in result.batches}
+    failed_paths = {stable_path(item.path) for item in result.failed_items}
+    deferred_paths = {stable_path(item.path) for item in result.deferred_items}
+    for plan in task.plans:
+        paths = {stable_path(item.path) for item in plan.pending_items}
+        batch = batches.get(plan.key)
+        failed = paths & failed_paths
+        deferred = paths & deferred_paths
+        if batch is None and not (failed or deferred):
+            continue
+        prior = outcomes.get(plan.key)
+        selected_retry = task.retry_album_key == plan.key and prior is not None
+        if batch is not None:
+            deferred.update(stable_path(item.path) for item in batch.deferred_items)
+            if batch.status is BatchStatus.FAILED and not (failed or deferred):
+                failed = (set(prior.failed_paths) if selected_retry else paths) - confirmed
+        if selected_retry:
+            deferred.update(set(prior.deferred_paths) - failed - confirmed)
+        if batch is not None and (
+            batch.status in {BatchStatus.PREPARED, BatchStatus.SUBMITTED, BatchStatus.UNKNOWN}
+            or batch.status is BatchStatus.CONFIRMED and batch.error
+        ):
+            status = AlbumStatus.UNKNOWN
+        elif paths <= confirmed:
+            status = AlbumStatus.COMPLETED
+        elif paths & confirmed:
+            status = AlbumStatus.PARTIAL
+        elif failed:
+            status = AlbumStatus.FAILED
+        else:
+            status = AlbumStatus.DEFERRED
+        outcomes[plan.key] = AlbumOutcome(
+            plan.key, status, batch.error if batch is not None else result.error,
+            tuple(sorted(failed - deferred - confirmed)), tuple(sorted(deferred - confirmed)),
+        )
+    return tuple(outcomes.values())
 
 
 def finish_task(task: UploadTask, result) -> UploadTask:
@@ -302,5 +473,22 @@ def finish_task(task: UploadTask, result) -> UploadTask:
         stable_path(item.path) for batch in result.batches
         if batch.status is BatchStatus.CONFIRMED for item in batch.confirmed_items
     )
-    return replace(task, status=status, finished_at=now(), outcome=result.status, error=result.error,
-                   confirmed_paths=tuple(sorted(confirmed)))
+    updated = replace(
+        task, status=status, finished_at=now(), outcome=result.status, error=result.error,
+        confirmed_paths=tuple(sorted(confirmed)), album_outcomes=_run_album_outcomes(task, result, confirmed),
+        retry_album_key=None, paused_by_policy=result.paused,
+    )
+    if task.retry_album_key is not None and (
+        status is TaskStatus.INTERRUPTED or status is TaskStatus.FAILED and result.paused
+    ) and any(
+        album.album_key == task.retry_album_key and album.status in {AlbumStatus.FAILED, AlbumStatus.PARTIAL}
+        and set(album.failed_paths).difference(confirmed)
+        for album in updated.album_outcomes
+    ):
+        return replace(updated, retry_album_key=task.retry_album_key)
+    if task.retry_album_key is not None and status is TaskStatus.COMPLETED and any(
+        album.status not in {AlbumStatus.COMPLETED, AlbumStatus.SKIPPED}
+        for album in updated._album_statuses(confirmed).values()
+    ):
+        return replace(updated, status=TaskStatus.FAILED, outcome="PARTIAL", error="任务仍有未完成的 Album。")
+    return updated

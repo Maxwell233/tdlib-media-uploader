@@ -10,6 +10,7 @@ import tomllib
 from pathlib import Path
 
 from ..core.persistence import atomic_write_text
+from ..core.uploader_database import DEFAULT_MEDIA_METADATA_CACHE_MAX_ENTRIES
 
 from .paths import (
     APP_DATA_DIR,
@@ -240,6 +241,15 @@ if type(upload_retry.get("max_retries", 2)) is not int:
     raise RuntimeError("config.toml 中的 upload_retry.max_retries 必须是整数。")
 UPLOAD_RETRY_MAX_RETRIES = _bounded_int(upload_retry, "max_retries", 2, 1, 10)
 UPLOAD_RETRY_DELAY_SECONDS = _bounded_float(upload_retry, "retry_delay_seconds", 1.0, 0, 3600)
+UPLOAD_QUEUE_ERROR_POLICY = upload_retry.get("queue_error_policy", "pause_on_error")
+if UPLOAD_QUEUE_ERROR_POLICY not in ("pause_on_error", "skip_and_retry"):
+    raise RuntimeError("config.toml 中的 upload_retry.queue_error_policy 无效。")
+UPLOAD_PAUSE_ON_UNKNOWN = upload_retry.get("pause_on_unknown", True)
+if type(UPLOAD_PAUSE_ON_UNKNOWN) is not bool:
+    raise RuntimeError("config.toml 中的 upload_retry.pause_on_unknown 必须是布尔值。")
+UPLOAD_MIN_SEND_INTERVAL = _bounded_float(upload_retry, "min_send_interval_seconds", 0, 0, 3600)
+UPLOAD_FLOOD_JITTER = _bounded_float(upload_retry, "flood_jitter_seconds", 0.25, 0, 10)
+UPLOAD_FLOOD_MAX_RETRIES = _bounded_int(upload_retry, "flood_max_retries", 1, 0, 10)
 
 
 def _thumbnail_timestamp_seconds(section, key: str, default: float = 1.0) -> float:
@@ -270,6 +280,7 @@ proxy = _optional_section("proxy")
 staging = _optional_section("staging")
 scan = _optional_section("scan")
 process = _optional_section("process")
+upload = _optional_section("upload")
 
 
 # Telegram
@@ -523,13 +534,10 @@ VIDEO_VERIFY_ALL_METADATA = bool(
     )
 )
 
-VIDEO_PREFETCH_NEXT_ALBUM = bool(
-    video.get(
-        "prefetch_next_album",
-        True,
-    )
-)
-PREFETCH_NEXT_ALBUM = VIDEO_PREFETCH_NEXT_ALBUM
+PREFETCH_NEXT_ALBUM = bool(upload.get("prefetch_next_album", video.get("prefetch_next_album", True)))
+PREFETCH_SLOTS = _bounded_int(upload, "prefetch_slots", 3, 1, 16)
+PREFETCH_MAX_BYTES = _bounded_int(upload, "prefetch_max_bytes", 8 * 1024 ** 3, 1, 1024 ** 4)
+VIDEO_PREFETCH_NEXT_ALBUM = PREFETCH_NEXT_ALBUM
 
 VIDEO_COMPATIBILITY_POLICY = str(
     video.get("compatibility_policy", video.get("transcode_policy", "remux"))
@@ -767,6 +775,13 @@ STAGING_CLEANUP_ON_START = bool(staging.get("cleanup_on_start", True))
 STAGING_CLEANUP_DAYS = _bounded_int(staging, "cleanup_days", 7, 0, 3650)
 STAGING_CLEANUP_AFTER_SUCCESS = bool(staging.get("cleanup_after_success", True))
 
+cache = _optional_section("cache")
+THUMBNAIL_CACHE_MAX_BYTES = _bounded_int(cache, "thumbnail_max_mib", 512, 0, 1024 * 1024) * 1024**2
+IMAGE_COMPRESSION_CACHE_MAX_BYTES = _bounded_int(cache, "image_compression_max_mib", 2048, 0, 1024 * 1024) * 1024**2
+MEDIA_METADATA_CACHE_MAX_ENTRIES = _bounded_int(
+    cache, "media_metadata_max_entries", DEFAULT_MEDIA_METADATA_CACHE_MAX_ENTRIES, 0, 1_000_000,
+)
+
 
 def _path_contains(parent: Path, child: Path) -> bool:
     """Lexically compare paths without resolving network mounts or links."""
@@ -854,6 +869,12 @@ TDLIB_MESSAGE_SEND_TIMEOUT = int(
         86400
     )
 )
+
+TDLIB_ENABLE_PRELIMINARY_UPLOAD = tdlib.get("enable_preliminary_upload", False)
+if type(TDLIB_ENABLE_PRELIMINARY_UPLOAD) is not bool:
+    raise RuntimeError("config.toml 中的 tdlib.enable_preliminary_upload 必须是布尔值。")
+TDLIB_MAX_CONCURRENT_FILE_UPLOADS = _bounded_int(tdlib, "max_concurrent_file_uploads", 4, 1, 16)
+TDLIB_PRELIMINARY_WAIT_SECONDS = _bounded_int(tdlib, "preliminary_wait_seconds", 30, 1, 600)
 
 TDLIB_DATABASE_ENCRYPTION_KEY = str(
     tdlib.get(

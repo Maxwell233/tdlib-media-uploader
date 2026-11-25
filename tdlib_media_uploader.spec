@@ -71,9 +71,10 @@ ffmpeg_build_info = PROJECT_DIR / "tools" / "ffmpeg" / "BUILD_INFO.txt"
 if ffmpeg_build_info.is_file():
     datas.append((str(ffmpeg_build_info), "tools/ffmpeg"))
 
-# Include dynamic GUI/media imports without maintaining a second module list.
+# Include dynamically loaded application modules and transport adapters.
 # The hook runs before Analysis applies pathex.
 sys.path.insert(0, str(SRC_DIR))
+PACKAGE_HIDDENIMPORTS = collect_submodules(PACKAGE_NAME)
 hiddenimports = [
     "tdjson",
     "PIL",
@@ -81,7 +82,7 @@ hiddenimports = [
     "PySide6.QtSvg",
     # PyInstaller's Qt hook checks the full PySide6 metapackage for this helper.
     "PySide6.support.deprecated",
-    *collect_submodules(PACKAGE_NAME),
+    *PACKAGE_HIDDENIMPORTS,
 ]
 
 for package_name in ("tdjson", "imageio_ffmpeg"):

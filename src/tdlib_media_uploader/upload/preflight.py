@@ -9,6 +9,8 @@ from collections.abc import Mapping
 from typing import Any, Callable, Iterable
 
 from ..contracts import CancelToken, EventSink, UploadContext
+from ..core.concurrency import ContextExecutor, ordered_bounded_map
+from ..core.filesystem import io_worker_count
 from ..core.models import AlbumPlan, MediaItem, ProgressEvent
 from .planner import restrict_plan, validate_plan
 
@@ -181,54 +183,60 @@ def preflight_items(
                 return PreflightResult(original, cancelled=True)
             batch = tuple(PreflightDecision.failed(str(error)) for _ in original)
 
-    for completed, item in enumerate(original, start=1):
+    def decide(item):
         try:
             _raise_if_cancelled(cancel_token)
+            return _normalize_decision(_call_checker(checker, item, context))
         except BaseException as error:
             if _looks_cancelled(error) or _is_cancelled(cancel_token):
-                return PreflightResult(
-                    original,
-                    tuple(ready),
-                    tuple(deferred),
-                    tuple(failed),
-                    tuple(reasons),
-                    cancelled=True,
-                )
-            raise
+                raise
+            return PreflightDecision.failed(str(error))
 
-        try:
-            decision = _normalize_decision(batch[completed - 1] if batch is not None else _call_checker(checker, item, context))
-        except BaseException as error:
-            if _looks_cancelled(error) or _is_cancelled(cancel_token):
-                return PreflightResult(
-                    original,
-                    tuple(ready),
-                    tuple(deferred),
-                    tuple(failed),
-                    tuple(reasons),
-                    cancelled=True,
-                )
-            decision = PreflightDecision.failed(str(error))
-
-        if decision.status is PreflightStatus.READY:
-            ready.append(item)
-        elif decision.status is PreflightStatus.DEFERRED:
-            deferred.append(item)
+    def decisions():
+        if batch is not None:
+            for value in batch:
+                try:
+                    yield _normalize_decision(value)
+                except (ValueError, TypeError) as error:
+                    yield PreflightDecision.failed(str(error))
+            return
+        if not original:
+            return
+        metadata = context.metadata if context is not None else {}
+        executor = metadata.get("io_executor")
+        count = min(total, io_worker_count(
+            original[0].source_root, local=metadata.get("io_workers_local", 4),
+            network=metadata.get("io_workers_network", 2),
+        ))
+        if executor is not None:
+            yield from ordered_bounded_map(executor, original, decide, count, cancel_token=cancel_token)
+        elif total == 1:
+            yield decide(original[0])
         else:
-            failed.append(item)
-        if decision.reason:
-            reasons.append((str(item.path), decision.reason))
-        _emit(
-            event_sink,
-            ProgressEvent(
-                kind=str(kind),
-                phase="preflight",
-                completed=completed,
-                total=total,
-                path=str(item.path),
-                message=decision.reason,
-            ),
-        )
+            with ContextExecutor(max_workers=count, thread_name_prefix="tdlib-preflight") as pool:
+                yield from ordered_bounded_map(pool, original, decide, count, cancel_token=cancel_token)
+
+    cancelled = False
+    try:
+        for completed, (item, decision) in enumerate(zip(original, decisions(), strict=True), start=1):
+            _raise_if_cancelled(cancel_token)
+            if decision.status is PreflightStatus.READY:
+                ready.append(item)
+            elif decision.status is PreflightStatus.DEFERRED:
+                deferred.append(item)
+            else:
+                failed.append(item)
+            if decision.reason:
+                reasons.append((str(item.path), decision.reason))
+            _emit(
+                event_sink,
+                ProgressEvent(kind=str(kind), phase="preflight", completed=completed,
+                              total=total, path=str(item.path), message=decision.reason),
+            )
+    except BaseException as error:
+        if not (_looks_cancelled(error) or _is_cancelled(cancel_token)):
+            raise
+        cancelled = True
 
     return PreflightResult(
         original,
@@ -236,6 +244,7 @@ def preflight_items(
         tuple(deferred),
         tuple(failed),
         tuple(reasons),
+        cancelled=cancelled,
     )
 
 

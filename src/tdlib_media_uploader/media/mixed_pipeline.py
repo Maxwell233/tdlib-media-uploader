@@ -15,21 +15,21 @@ from pathlib import Path
 
 from ..core.album import CaptionStore, album_key, compose_caption
 from ..core.album import with_filename_description as with_filename_description
+from ..core.compat import call_supported
 from ..core.identity import media_file_signature
 from ..core.upload_state import UploadState as SharedUploadState
-from ..core.filesystem import file_snapshot, io_worker_count, iter_files, is_network_path, file_mtime, is_link_or_junction, retry_fs_operation, stable_path, iter_directory_entries_with_retry, validate_scan_root
+from ..core.filesystem import file_snapshot, iter_files, is_network_path, file_mtime, is_link_or_junction, retry_fs_operation, stable_path, iter_directory_entries_with_retry, validate_scan_root
 from ..core.readiness import CHANGED, DEFERRED, FileReadinessError, raise_for_file_readiness, wait_for_file_ready
 from ..core.sorting import media_path_sort, relative_name as stable_relative_name
-from ..core.concurrency import ordered_bounded_map
 from .common import (
     cleanup_confirmed_staging as _cleanup_confirmed_staging,
     format_size as _format_size,
+    media_io_results,
     prune_staging_cache as _prune_staging_cache,
     readiness_options as _shared_readiness_options,
     readiness_record as _readiness_record,
 )
 from ..config import loader as cfg
-from ..core.concurrency import ContextExecutor
 from .runtime import pipeline_config, pipeline_locals, pipeline_value
 from ..telegram.tdlib_common import HeadlessUI
 from ..telegram.tdlib_common import formatted_text as formatted_text
@@ -335,7 +335,7 @@ def _deferred(exc: Exception) -> bool:
     return isinstance(exc, (OSError, TimeoutError))
 
 
-def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
+def preflight_mixed(items, ui=None, cancel_event=None, *, executor=None) -> list[dict]:
     config = pipeline_config(cfg)
     target = ui or UI
     skipped = []
@@ -430,24 +430,19 @@ def preflight_mixed(items, ui=None, cancel_event=None) -> list[dict]:
                 record.update(readiness_record)
             return record
 
-    worker_count = io_worker_count(
-        config.MIXED_DIR,
-        local=getattr(config, "IO_WORKERS_LOCAL", MEDIA_DATE_MAX_WORKERS),
-        network=getattr(config, "IO_WORKERS_NETWORK", 2),
-    )
-    with ContextExecutor(max_workers=worker_count, thread_name_prefix="tdlib-mixed-preflight") as executor:
-        for index, result in enumerate(
-            ordered_bounded_map(executor, items, worker, worker_count),
-            1,
-        ):
-            if cancel_event is not None and cancel_event.is_set():
-                raise TimeoutError("混合预检已取消")
-            if result:
-                skipped.append(result)
-                target.warning(f"跳过无法读取的混合媒体：{relative_name(result['path'])}")
-                target.log(f"跳过混合媒体详情：{result['path']}\n原因：{result['reason']}")
-            if getattr(config, "MIXED_VERIFY_MEDIA", False):
-                target.info(f"预检混合媒体 {index}/{len(items)} · {Path(items[index - 1]['path']).name}")
+    for index, result in enumerate(
+        media_io_results(items, worker, config=config, root=config.MIXED_DIR,
+                         cancel_event=cancel_event, executor=executor),
+        1,
+    ):
+        if cancel_event is not None and cancel_event.is_set():
+            raise TimeoutError("混合预检已取消")
+        if result:
+            skipped.append(result)
+            target.warning(f"跳过无法读取的混合媒体：{relative_name(result['path'])}")
+            target.log(f"跳过混合媒体详情：{result['path']}\n原因：{result['reason']}")
+        if getattr(config, "MIXED_VERIFY_MEDIA", False):
+            target.info(f"预检混合媒体 {index}/{len(items)} · {Path(items[index - 1]['path']).name}")
     return skipped
 
 
@@ -458,6 +453,8 @@ def _mixed_input_video(
     group_key: str | None = None,
     max_bytes: int | None = None,
     is_premium: bool | None = None,
+    staged_paths=None,
+    preflight_verified=False,
 ):
     # Keep one authoritative TDLib video payload implementation.  Mixed
     # orchestration still owns grouping/captions/state, while the shared
@@ -479,6 +476,10 @@ def _mixed_input_video(
         kwargs["max_bytes"] = max_bytes
     if is_premium is not None:
         kwargs["is_premium"] = is_premium
+    if staged_paths is not None:
+        kwargs["staged_paths"] = staged_paths
+    if preflight_verified:
+        kwargs["preflight_verified"] = True
     return video_core.input_video(item, caption, **kwargs)
 
 
@@ -490,18 +491,21 @@ def build_mixed_contents(
     group_key: str | None = None,
     max_bytes: int | None = None,
     is_premium: bool | None = None,
+    *,
+    staged_paths=None,
+    preflight_verified=False,
+    executor=None,
 ):
     target = ui or UI
-    image_core.UI = target
-    video_core.UI = target
-    contents, valid, skipped = [], [], []
-    for item in items:
+    config = pipeline_config(cfg)
+    items = tuple(items)
+
+    def build(item):
         media_kind = item.get("media_kind")
         if media_kind not in {"video", "image"}:
             raise ValueError(f"未知混合媒体类型：{media_kind!r}")
         try:
             if media_kind == "video":
-                item_caption = caption if not valid else ""
                 video_kwargs = {}
                 if group_key is not None:
                     video_kwargs["group_key"] = group_key
@@ -511,38 +515,23 @@ def build_mixed_contents(
                     video_kwargs["max_bytes"] = max_bytes
                 if is_premium is not None:
                     video_kwargs["is_premium"] = is_premium
-                content = _mixed_input_video(item, item_caption, **video_kwargs)
+                if staged_paths is not None:
+                    video_kwargs["staged_paths"] = staged_paths
+                if preflight_verified:
+                    video_kwargs["preflight_verified"] = True
+                content = _mixed_input_video(item, "", **video_kwargs)
             elif media_kind == "image":
                 expected_size = item.get("scan_size")
                 expected_mtime_ns = item.get("scan_mtime_ns")
-                if expected_size is not None or expected_mtime_ns is not None:
-                    if expected_size is None or expected_mtime_ns is None:
-                        # A partial snapshot cannot prove that the source is
-                        # unchanged; let input_photo perform its existence
-                        # check without inventing a second value.
-                        expected_size = expected_mtime_ns = None
-                    else:
-                        pipeline_value(image_core, "IMAGE_SCAN_SNAPSHOTS")[stable_path(item["path"])] = (
-                            int(expected_size),
-                            int(expected_mtime_ns),
-                        )
-                else:
-                    # Do not let a snapshot left by a previous mixed scan
-                    # impose a stale JIT identity on a legacy caller that
-                    # supplies only a path.
-                    pipeline_value(image_core, "IMAGE_SCAN_SNAPSHOTS").pop(
-                        stable_path(item["path"]),
-                        None,
-                    )
-                item_caption = caption if not valid else ""
-                if cancel_event is None:
-                    content = image_core.input_photo(item["path"], item_caption)
-                else:
-                    content = image_core.input_photo(
-                        item["path"], item_caption, cancel_event=cancel_event
-                    )
-            contents.append(content)
-            valid.append(item)
+                if expected_size is None or expected_mtime_ns is None:
+                    expected_size = expected_mtime_ns = None
+                content = call_supported(
+                    image_core.input_photo, (item["path"], ""),
+                    expected_size=expected_size, expected_mtime_ns=expected_mtime_ns,
+                    use_scan_snapshot=False, ui=target, cancel_event=cancel_event,
+                    staged_paths=staged_paths, preflight_verified=preflight_verified,
+                )
+            return item, content, None
         except Exception as exc:
             path = item["path"]
             record = {
@@ -555,7 +544,20 @@ def build_mixed_contents(
             if readiness_record:
                 record.update(readiness_record)
                 record["category"] = readiness_record["category"]
+            return item, None, record
+
+    contents, valid, skipped = [], [], []
+    for item, content, record in media_io_results(
+        items, build, config=config, root=config.MIXED_DIR, cancel_event=cancel_event, executor=executor,
+    ):
+        if record:
             skipped.append(record)
+            path = record["path"]
             target.warning(f"跳过上传前无法读取的混合媒体：{relative_name(path)}")
             target.log(f"跳过混合媒体详情：{path}\n原因：{record['reason']}")
+        else:
+            if not contents:
+                content = {**content, "caption": formatted_text(caption)}
+            contents.append(content)
+            valid.append(item)
     return contents, valid, skipped

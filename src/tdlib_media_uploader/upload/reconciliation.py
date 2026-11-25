@@ -1,5 +1,7 @@
 """Local checkpoint recovery independent of TDLib transport."""
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 import importlib
 from pathlib import Path
@@ -11,10 +13,20 @@ from ..core.upload_journal import (
     _record_target,
     normalize_target,
 )
+from ..core.models import FileSnapshot
 
 
 class SourceRootRequired(ValueError):
     """An old journal needs an explicitly selected original source root."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciledAlbum:
+    """The source and target identity of durably confirmed snapshots."""
+
+    source_root: Path
+    target: Mapping
+    snapshots: tuple[FileSnapshot, ...]
 
 
 def _item_delivery(record: dict) -> list[dict]:
@@ -83,10 +95,8 @@ class ReconciliationService:
             item["path"] = Path(item["path"])
             # UploadState implementations accept the scanner spelling while
             # journal records use concise snapshot keys.
-            if item.get("size") is not None and item.get("scan_size") is None:
-                item["scan_size"] = item["size"]
-            if item.get("mtime_ns") is not None and item.get("scan_mtime_ns") is None:
-                item["scan_mtime_ns"] = item["mtime_ns"]
+            if item.get("size") is not None and item.get("mtime_ns") is not None:
+                item["scan_size"], item["scan_mtime_ns"] = item["size"], item["mtime_ns"]
             capture_time = item.get("capture_time")
             if isinstance(capture_time, str) and capture_time:
                 try:
@@ -161,7 +171,8 @@ class ReconciliationService:
             raise ValueError("来源目录不包含上传记录中的文件，已保留保护记录")
         from ..core.upload_state import UploadState
         return UploadState(kind=kind, source_root=Path(root), target=target,
-                           state_dir=module.STATE_DIR, reset=False)
+                           state_dir=module.STATE_DIR, reset=False,
+                           database=getattr(self.inflight_journal, "database", None))
 
     def reconcile_inflight(
         self,
@@ -172,7 +183,7 @@ class ReconciliationService:
         message_ids=None,
         target=None,
         source_root=None,
-    ) -> None:
+    ) -> ReconciledAlbum | None:
         """Apply an Album-level decision without querying Telegram history."""
 
         requested_target = normalize_target(target)
@@ -220,9 +231,17 @@ class ReconciliationService:
             fallback_target=requested_target or None,
             source_root=source_root,
         )
-        # ``mark_album_completed`` performs an atomic fsync-backed save.  Do
-        # not touch the journal until it returns; a save failure therefore
-        # leaves the UNKNOWN/SUBMITTED record blocking automatic resends.
+        confirmation = None
+        if getattr(state, "source_root", None) is not None:
+            confirmation = ReconciledAlbum(state.source_root, state.target, tuple(
+                FileSnapshot(str(item["path"]), int(item["scan_size"]), int(item["scan_mtime_ns"]))
+                for item in items
+            ))
+        complete = getattr(self.inflight_journal, "complete_album", None)
+        if callable(complete) and complete(state, items, ids, kind=selected_kind, album_key=album_key,
+                                          target=lookup_target, reconcile=True):
+            return confirmation
+        # Preserve the protection record until the standalone checkpoint is durable.
         state.mark_album_completed(items, ids)
         self.inflight_journal.mark_confirmed(
             selected_kind,
@@ -231,6 +250,7 @@ class ReconciliationService:
             target=lookup_target,
         )
         self.inflight_journal.finalize(selected_kind, album_key, target=lookup_target)
+        return confirmation
 
     def recover_confirmed(
         self,
@@ -269,7 +289,10 @@ class ReconciliationService:
             current,
             fallback_target=effective_target or None,
         )
-        # The journal remains present until this durable write returns.
+        complete = getattr(self.inflight_journal, "complete_album", None)
+        if callable(complete) and complete(checkpoint, items, ids, kind=kind, album_key=album_key,
+                                          target=effective_target):
+            return True
         checkpoint.mark_album_completed(items, ids)
         self.inflight_journal.finalize(kind, album_key, target=effective_target)
         return True

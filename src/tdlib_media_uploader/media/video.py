@@ -17,6 +17,7 @@ import importlib
 from pathlib import Path
 from typing import Any
 
+from .common import build_source_options
 from .runtime import media_scope, pipeline_value
 from ..core.compat import call_supported as _call_supported
 from ..contracts import CancelToken, EventSink, UploadContext
@@ -770,6 +771,7 @@ class VideoStrategy:
                 cancel_event=cancel_event,
                 group_key=plan.key,
                 is_premium=is_premium,
+                **build_source_options(context, plan),
             )
         _check_cancel(cancel_token)
         normalized = self._normalize_contents(value, plan, source_root)
@@ -797,46 +799,42 @@ class VideoStrategy:
                 )
         return normalized
 
-    def preflight_item(
-        self,
-        item: MediaItem,
-        *,
-        context: UploadContext | None = None,
-    ) -> Mapping[str, str]:
-        """Expose the legacy video preflight as an engine-compatible checker.
-
-        The method is intentionally an extra adapter helper rather than a new
-        ``MediaStrategy`` requirement.  A GUI can inject
-        ``strategy.preflight_item`` into ``UploadContext.preflight`` while the
-        generic engine continues to own the partition and lifecycle.
-        """
-
-        if not isinstance(item, MediaItem) or item.media_kind != self.kind:
-            raise TypeError("视频预检需要 video MediaItem")
-        _check_cancel(context.cancel_token if context is not None else None)
-        preflight = getattr(self.legacy, "preflight_videos", None)
-        if not callable(preflight):
-            return {"status": "READY"}
+    def preflight_items(self, items, *, context=None):
+        """Check a complete Album using the shared bounded media executor."""
+        items = tuple(items)
+        if not items:
+            return ()
+        if any(not isinstance(item, MediaItem) or item.media_kind != self.kind for item in items):
+            raise TypeError("视频预检收到不匹配的 MediaItem")
         token = context.cancel_token if context is not None else None
-        cancel_event = self._cancel_event(token)
-        event_sink = context.event_sink if context is not None else None
-        ui = _StrategyUI(event_sink, self.kind)
-        with self._legacy_root(item.source_root, (item,)):
+        sink = context.event_sink if context is not None else None
+        executor = context.metadata.get("io_executor") if context is not None else None
+        _check_cancel(token)
+        checker = getattr(self.legacy, "preflight_videos", None)
+        if not callable(checker):
+            return tuple({"status": "READY"} for _ in items)
+        with self._legacy_root(items[0].source_root, items):
             skipped = _call_supported(
-                preflight,
-                ([self._legacy_item(item)],),
-                ui=ui,
-                cancel_event=cancel_event,
+                checker, (tuple(self._legacy_item(item) for item in items),),
+                ui=_StrategyUI(sink, self.kind), cancel_event=self._cancel_event(token), executor=executor,
             )
         _check_cancel(token)
-        if not skipped:
-            return {"status": "READY"}
-        record = skipped[0] if isinstance(skipped[0], Mapping) else {}
-        category = self._skip_category(record)
-        return {
-            "status": "DEFERRED" if category == "deferred" else "FAILED",
-            "reason": str(record.get("reason", "视频预检失败") or "视频预检失败"),
-        }
+        failures = {str(record["path"]): record for record in skipped or ()}
+        decisions = []
+        for item in items:
+            record = failures.get(str(item.path))
+            if record is None:
+                decisions.append({"status": "READY"})
+                continue
+            deferred = self._skip_category(record) == "deferred"
+            decisions.append({
+                "status": "DEFERRED" if deferred else "FAILED",
+                "reason": str(record.get("reason") or "视频预检失败"),
+            })
+        return tuple(decisions)
+
+    def preflight_item(self, item: MediaItem, *, context: UploadContext | None = None):
+        return self.preflight_items((item,), context=context)[0]
 
 
 VideoMediaStrategy = VideoStrategy

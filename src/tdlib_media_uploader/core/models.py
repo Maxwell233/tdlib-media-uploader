@@ -117,6 +117,13 @@ class ProgressEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class PreliminaryProgressEvent:
+    uploaded_bytes: int
+    total_bytes: int
+    bytes_per_second: float
+
+
+@dataclass(frozen=True, slots=True)
 class LogEvent:
     """A durable/log-view update independent of Qt widgets."""
 
@@ -167,9 +174,10 @@ class UploadRunResult:
     scanned_items: tuple[MediaItem, ...] = ()
     cancelled: bool = False
     confirmed_before_run: tuple[MediaItem, ...] = ()
+    paused: bool = False
 
 
-Event = ProgressEvent | LogEvent | AuthEvent | AlbumAttemptEvent
+Event = ProgressEvent | PreliminaryProgressEvent | LogEvent | AuthEvent | AlbumAttemptEvent
 
 
 __all__ = [
@@ -182,6 +190,7 @@ __all__ = [
     "FileSnapshot",
     "LogEvent",
     "MediaItem",
+    "PreliminaryProgressEvent",
     "ProgressEvent",
     "ScanResult",
     "UploadBatchResult",

@@ -13,6 +13,7 @@ import importlib
 from pathlib import Path
 from typing import Any
 
+from .common import build_source_options
 from .runtime import media_scope, pipeline_value
 from ..core.compat import call_supported as _call_supported
 from ..contracts import CancelToken, EventSink, UploadContext
@@ -476,6 +477,7 @@ class ImageStrategy:
                 (paths, caption),
                 ui=ui,
                 cancel_event=cancel_event,
+                **build_source_options(context, plan),
             )
         _check_cancel(cancel_token)
         normalized = self._normalize_contents(result, plan)
@@ -504,6 +506,9 @@ class ImageStrategy:
         items = tuple(items)
         if not items:
             return ()
+        if any(not isinstance(item, MediaItem) or item.media_kind != self.kind for item in items):
+            raise TypeError("图片预检需要 image MediaItem")
+        executor = context.metadata.get("io_executor") if context is not None else None
         token = context.cancel_token if context is not None else None
         _check_cancel(token)
         checker = getattr(self.legacy, "preflight_images", None)
@@ -512,7 +517,7 @@ class ImageStrategy:
         with self._legacy_scope(items[0].source_root, items):
             skipped = _call_supported(checker, (tuple(item.path for item in items),),
                 ui=_StrategyUI(context.event_sink if context is not None else None),
-                cancel_event=_CancelEventBridge(token))
+                cancel_event=_CancelEventBridge(token), executor=executor)
         _check_cancel(token)
         failures = {str(record["path"]): record for record in skipped or ()}
         return tuple(
@@ -521,39 +526,8 @@ class ImageStrategy:
             if str(item.path) in failures else {"status": "READY"}
             for item in items)
 
-    def preflight_item(
-        self,
-        item: MediaItem,
-        *,
-        context: UploadContext | None = None,
-    ) -> Mapping[str, str]:
-        """Expose one-item legacy preflight for an engine context adapter."""
-
-        if not isinstance(item, MediaItem) or item.media_kind != self.kind:
-            raise TypeError("图片预检需要 image MediaItem")
-        token = context.cancel_token if context is not None else None
-        _check_cancel(token)
-        checker = getattr(self.legacy, "preflight_images", None)
-        if not callable(checker):
-            return {"status": "READY"}
-        ui = _StrategyUI(context.event_sink if context is not None else None)
-        cancel_event = _CancelEventBridge(token)
-        with self._legacy_scope(item.source_root, (item,)):
-            skipped = _call_supported(
-                checker,
-                ((item.path,),),
-                ui=ui,
-                cancel_event=cancel_event,
-            )
-        _check_cancel(token)
-        if not skipped:
-            return {"status": "READY"}
-        record = skipped[0] if isinstance(skipped[0], Mapping) else {}
-        category = self._category(record)
-        return {
-            "status": "DEFERRED" if category == "deferred" else "FAILED",
-            "reason": str(record.get("reason", "图片预检失败") or "图片预检失败"),
-        }
+    def preflight_item(self, item: MediaItem, *, context: UploadContext | None = None):
+        return self.preflight_items((item,), context=context)[0]
 
 
 ImageMediaStrategy = ImageStrategy
