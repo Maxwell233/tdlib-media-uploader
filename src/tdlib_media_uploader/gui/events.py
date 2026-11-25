@@ -175,12 +175,13 @@ class GuiConsoleUI(QObject):
         suffix = f" / {payload['topic_name']}" if payload["topic_name"] else "（频道）"
         self._message("success", f"Telegram 目标：{payload['chat_title']}{suffix}")
 
-    def album(self, *, kind, title, subtitle="", rows=None):
+    def album(self, *, kind, title, subtitle="", rows=None, album_key: str = ""):
         self.album_changed.emit({
             "kind": kind,
             "title": title,
             "subtitle": subtitle,
             "rows": list(rows or []),
+            "album_key": album_key,
         })
 
     def album_attempt(self, event):

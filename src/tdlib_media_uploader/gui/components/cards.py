@@ -12,16 +12,23 @@ from ..theme import THEME
 class StatCard(QFrame):
     """Modern elevated card displaying a key metric or status."""
 
+    clicked = Signal()
+
     def __init__(
         self,
         title: str,
         value: str = "—",
         subtitle: str = "",
         *,
+        clickable: bool = False,
         parent=None,
     ):
         super().__init__(parent)
+        self._clickable = bool(clickable)
         self.setObjectName("statCard")
+        if self._clickable:
+            self.setProperty("clickable", "true")
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(6)
@@ -51,6 +58,11 @@ class StatCard(QFrame):
             self.value_label.setProperty("good", good)
             self.value_label.style().unpolish(self.value_label)
             self.value_label.style().polish(self.value_label)
+
+    def mousePressEvent(self, event):
+        if self._clickable and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 from ..icons import get_svg_pixmap
 

@@ -12,6 +12,7 @@ from ..contracts import CancelToken, EventSink, UploadContext
 from ..core.concurrency import ContextExecutor, ordered_bounded_map
 from ..core.filesystem import io_worker_count
 from ..core.models import AlbumPlan, MediaItem, ProgressEvent
+from ..core.readiness import FileReadinessError, readiness_category
 from .planner import restrict_plan, validate_plan
 
 
@@ -128,6 +129,7 @@ def _normalize_decision(value: Any) -> PreflightDecision:
         "READY": PreflightStatus.READY,
         "DEFER": PreflightStatus.DEFERRED,
         "DEFERRED": PreflightStatus.DEFERRED,
+        "CHANGED": PreflightStatus.DEFERRED,
         "SKIP": PreflightStatus.DEFERRED,
         "FAILED": PreflightStatus.FAILED,
         "FAIL": PreflightStatus.FAILED,
@@ -137,6 +139,16 @@ def _normalize_decision(value: Any) -> PreflightDecision:
     except KeyError as exc:
         raise ValueError(f"未知预检状态：{raw_status}") from exc
     return PreflightDecision(status, str(reason or ""))
+
+
+def _exception_decision(error: BaseException) -> PreflightDecision:
+    if isinstance(error, FileReadinessError):
+        if readiness_category(error.readiness) == "deferred":
+            return PreflightDecision.deferred(str(error))
+        return PreflightDecision.failed(str(error))
+    if isinstance(error, (OSError, TimeoutError)):
+        return PreflightDecision.deferred(str(error))
+    return PreflightDecision.failed(str(error))
 
 
 def _emit(
@@ -181,7 +193,8 @@ def preflight_items(
         except BaseException as error:
             if _looks_cancelled(error) or _is_cancelled(cancel_token):
                 return PreflightResult(original, cancelled=True)
-            batch = tuple(PreflightDecision.failed(str(error)) for _ in original)
+            decision = _exception_decision(error)
+            batch = tuple(decision for _ in original)
 
     def decide(item):
         try:
@@ -190,7 +203,7 @@ def preflight_items(
         except BaseException as error:
             if _looks_cancelled(error) or _is_cancelled(cancel_token):
                 raise
-            return PreflightDecision.failed(str(error))
+            return _exception_decision(error)
 
     def decisions():
         if batch is not None:

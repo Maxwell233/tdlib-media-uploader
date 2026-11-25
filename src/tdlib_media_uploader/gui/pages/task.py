@@ -3,18 +3,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QColor, QTextCursor
 from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QListWidget,
+    QListWidgetItem,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -23,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from ...core.filesystem import stable_path
 from ...upload.queue import ACTIVE, RECOVERABLE, AlbumStatus, TaskStatus
+from ..theme import status_color
 from ..tools import format_eta, format_size, kind_label
 
 
@@ -36,6 +44,7 @@ class TaskPage(QWidget):
     queue_move_requested = Signal(str, int)
     queue_top_requested = Signal(str)
     queue_remove_requested = Signal(str)
+    queue_clear_requested = Signal()
     queue_restore_requested = Signal(str)
     queue_skip_requested = Signal(str)
     queue_recheck_requested = Signal(str)
@@ -54,10 +63,14 @@ class TaskPage(QWidget):
         super().__init__(parent)
         self._size_formatter = size_formatter or format_size
         self._eta_formatter = eta_formatter or format_eta
+        self._target_label_provider: Callable[[Mapping[str, Any]], Mapping[str, str]] | None = None
+        self._live_album_key: str | None = None
+        self._live_album_rows: list[str] = []
+        self._log_entries: list[tuple[str, str]] = []
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(28, 20, 28, 20)
+        layout.setSpacing(12)
 
         # Header Row
         title_row = QHBoxLayout()
@@ -70,14 +83,23 @@ class TaskPage(QWidget):
         title_row.addStretch(1)
         title_row.addWidget(self.task_status)
         layout.addLayout(title_row)
-        self._build_queue(layout)
+
+        self.main_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.main_splitter.setChildrenCollapsible(False)
+        queue_card = self._build_queue()
+        self.main_splitter.addWidget(queue_card)
+
+        lower_container = QWidget()
+        lower_layout = QVBoxLayout(lower_container)
+        lower_layout.setContentsMargins(0, 4, 0, 0)
+        lower_layout.setSpacing(12)
 
         # 1. Dual Progress & Real-time Metrics Card (No QGroupBox)
         progress_card = QFrame()
         progress_card.setObjectName("surfaceCard")
         progress_layout = QVBoxLayout(progress_card)
-        progress_layout.setContentsMargins(18, 16, 18, 16)
-        progress_layout.setSpacing(10)
+        progress_layout.setContentsMargins(18, 14, 18, 14)
+        progress_layout.setSpacing(8)
 
         # Album title and progress bar
         self.album_label = QLabel("当前 Album：尚未开始")
@@ -104,11 +126,11 @@ class TaskPage(QWidget):
         self.preliminary_metrics.hide()
         progress_layout.addWidget(self.preliminary_metrics)
 
-        layout.addWidget(progress_card)
+        lower_layout.addWidget(progress_card)
 
         # 2. Split Area: Current Album Files + Live Upload Log Terminal
-        split = QHBoxLayout()
-        split.setSpacing(14)
+        self.detail_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.detail_splitter.setChildrenCollapsible(False)
 
         # Current Album files panel
         album_card = QFrame()
@@ -125,12 +147,12 @@ class TaskPage(QWidget):
         self.albums.setHeaderLabels(["Album", "状态", "文件", "进度", "原因"])
         for column in (2, 4):
             self.albums.header().setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
-        self.albums.itemSelectionChanged.connect(self._update_album_controls)
+        self.albums.itemSelectionChanged.connect(self._on_album_selection_changed)
         album_layout.addWidget(self.albums, 2)
 
         album_actions = QHBoxLayout()
         self.album_skip = QPushButton("跳过 Album")
-        self.album_retry = QPushButton("仅重试失败文件")
+        self.album_retry = QPushButton("重试该 Album")
         for button in (self.album_skip, self.album_retry):
             button.setObjectName("secondaryButton")
             button.setEnabled(False)
@@ -147,7 +169,7 @@ class TaskPage(QWidget):
         self.album_files.setObjectName("albumFilesList")
         self.album_files.setAlternatingRowColors(True)
         album_layout.addWidget(self.album_files, 1)
-        split.addWidget(album_card, 1)
+        self.detail_splitter.addWidget(album_card)
 
         # Live terminal log panel
         log_card = QFrame()
@@ -157,14 +179,30 @@ class TaskPage(QWidget):
         log_layout.setSpacing(8)
 
         log_header = QHBoxLayout()
+        log_header.setSpacing(8)
         log_title = QLabel("实时上传日志")
         log_title.setObjectName("sectionTitle")
         log_header.addWidget(log_title)
         log_header.addStretch(1)
 
+        self.log_filter = QComboBox()
+        self.log_filter.addItem("全部日志", "all")
+        self.log_filter.addItem("仅警告/错误", "issues")
+        self.log_filter.currentIndexChanged.connect(self._rebuild_log_view)
+        log_header.addWidget(self.log_filter)
+
+        self.auto_scroll_check = QCheckBox("自动滚动")
+        self.auto_scroll_check.setChecked(True)
+        log_header.addWidget(self.auto_scroll_check)
+
+        self.copy_log_btn = QPushButton("复制日志")
+        self.copy_log_btn.setObjectName("ghostButton")
+        self.copy_log_btn.clicked.connect(self._copy_log)
+        log_header.addWidget(self.copy_log_btn)
+
         self.clear_log_btn = QPushButton("清空日志")
         self.clear_log_btn.setObjectName("ghostButton")
-        self.clear_log_btn.clicked.connect(lambda: self.log.clear())
+        self.clear_log_btn.clicked.connect(self._clear_log)
         log_header.addWidget(self.clear_log_btn)
         log_layout.addLayout(log_header)
 
@@ -172,9 +210,17 @@ class TaskPage(QWidget):
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(3000)
         log_layout.addWidget(self.log, 1)
-        split.addWidget(log_card, 2)
+        self.detail_splitter.addWidget(log_card)
+        self.detail_splitter.setStretchFactor(0, 2)
+        self.detail_splitter.setStretchFactor(1, 3)
+        self.detail_splitter.setSizes([380, 580])
 
-        layout.addLayout(split, 1)
+        lower_layout.addWidget(self.detail_splitter, 1)
+        self.main_splitter.addWidget(lower_container)
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 3)
+        self.main_splitter.setSizes([210, 470])
+        layout.addWidget(self.main_splitter, 1)
 
         # 3. Bottom Action Bar (Semantic secondary vs danger button)
         bottom = QHBoxLayout()
@@ -195,11 +241,48 @@ class TaskPage(QWidget):
         bottom.addWidget(self.immediate_stop_button)
         layout.addLayout(bottom)
 
-    def _build_queue(self, layout):
+    def set_target_label_provider(
+        self,
+        provider: Callable[[Mapping[str, Any]], Mapping[str, str]] | None,
+    ):
+        self._target_label_provider = provider
+        self.refresh_target_labels()
+
+    def _format_task_target(self, target: Mapping[str, Any]) -> tuple[str, str]:
+        raw = str(target.get("chat_id", ""))
+        if target.get("forum_topic_id"):
+            raw += f" / {target['forum_topic_id']}"
+        if self._target_label_provider is not None:
+            cached = dict(self._target_label_provider(target) or {})
+            chat_title = str(cached.get("chat_title", "") or "").strip()
+            topic_name = str(cached.get("topic_name", "") or "").strip()
+            if chat_title or topic_name:
+                chat_part = chat_title or str(target.get("chat_id", ""))
+                if target.get("forum_topic_id"):
+                    topic_part = topic_name or str(target["forum_topic_id"])
+                    display = f"{chat_part} / {topic_part}"
+                else:
+                    display = f"{chat_part}（频道）" if chat_title else raw
+                return display, f"{display}\nID: {raw}"
+        return raw, raw
+
+    def refresh_target_labels(self):
+        for task_id, row in self._queue_rows.items():
+            task = self._queue_tasks.get(task_id)
+            if task is None:
+                continue
+            display, tooltip = self._format_task_target(task.target)
+            row.setText(4, display)
+            row.setToolTip(4, tooltip)
+
+    def _build_queue(self) -> QFrame:
         card = QFrame()
         card.setObjectName("surfaceCard")
         queue_layout = QVBoxLayout(card)
+        queue_layout.setContentsMargins(14, 12, 14, 12)
+        queue_layout.setSpacing(8)
         controls = QHBoxLayout()
+        controls.setSpacing(6)
         title = QLabel("上传队列")
         title.setObjectName("sectionTitle")
         controls.addWidget(title)
@@ -233,18 +316,25 @@ class TaskPage(QWidget):
         self.queue_list.setRootIsDecorated(False)
         self.queue_list.setAlternatingRowColors(True)
         self.queue_list.setHeaderLabels(["顺序", "状态", "类型", "来源目录", "上传目标", "文件", "大小"])
-        self.queue_list.setMinimumHeight(84)
-        self.queue_list.setMaximumHeight(165)
+        self.queue_list.setMinimumHeight(90)
         header = self.queue_list.header()
         for index in (0, 2, 5, 6):
             header.setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         header.setStretchLastSection(False)
         self.queue_list.setColumnWidth(1, 96)
-        self.queue_list.setColumnWidth(4, 142)
+        self.queue_list.setColumnWidth(4, 168)
         self.queue_list.itemSelectionChanged.connect(self._queue_selection_changed)
-        queue_layout.addWidget(self.queue_list)
+        queue_layout.addWidget(self.queue_list, 1)
+
         actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.queue_clear = QPushButton("清理已结束")
+        self.queue_clear.setObjectName("ghostButton")
+        self.queue_clear.setToolTip("从列表中移除已完成和已跳过的任务")
+        self.queue_clear.setEnabled(False)
+        self.queue_clear.clicked.connect(self.queue_clear_requested)
+        actions.addWidget(self.queue_clear)
         actions.addStretch(1)
         self.queue_restore = QPushButton("重新验证并恢复")
         self.queue_skip = QPushButton("跳过此任务")
@@ -262,7 +352,6 @@ class TaskPage(QWidget):
         self.queue_cancel.clicked.connect(self.queue_cancel_requested)
         self.queue_cancel.hide()
         queue_layout.addLayout(actions)
-        layout.addWidget(card)
         self._queue_paused = False
         self._queue_pending = []
         self._queue_actions_allowed = False
@@ -273,6 +362,7 @@ class TaskPage(QWidget):
         self._displayed_task = None
         self._album_rows = {}
         self._update_queue_controls()
+        return card
 
     def _selected_task(self):
         row = self.queue_list.currentItem()
@@ -310,26 +400,100 @@ class TaskPage(QWidget):
         row = self.albums.currentItem()
         return row.data(0, Qt.ItemDataRole.UserRole) if row is not None else ""
 
+    def _on_album_selection_changed(self):
+        self._update_album_controls()
+        self._render_album_files()
+
     def _update_album_controls(self):
         task = self._displayed_task
         row = self.albums.currentItem()
-        if not self._queue_actions_allowed or task is None or row is None:
+        if task is None or row is None:
             self.album_skip.setEnabled(False)
+            self.album_retry.setText("重试该 Album")
+            self.album_retry.setToolTip("")
             self.album_retry.setEnabled(False)
             return
         outcome = row.data(1, Qt.ItemDataRole.UserRole)
+        scope, _ = task.album_retry_policy(outcome.album_key)
+        if scope == "review_required":
+            self.album_retry.setText("需要人工核对")
+            self.album_retry.setToolTip("存在未确认、持久化异常或缺少阶段信息的旧记录，请先核对或使用整任务“重新验证并恢复”")
+        elif scope == "failed_files":
+            self.album_retry.setText("仅重试失败文件")
+            self.album_retry.setToolTip("仅重试部分投递中明确失败且已解除保护的未确认成员")
+        else:
+            self.album_retry.setText("重试该 Album")
+            self.album_retry.setToolTip("按原 Album 顺序、目标与标题重试全部未确认成员")
+        if not self._queue_actions_allowed:
+            self.album_skip.setEnabled(False)
+            self.album_retry.setEnabled(False)
+            return
         actionable = task.status in RECOVERABLE | {TaskStatus.PENDING}
         self.album_skip.setEnabled(actionable and outcome.status not in {
             AlbumStatus.COMPLETED, AlbumStatus.UNKNOWN, AlbumStatus.SKIPPED,
         })
         self.album_retry.setEnabled(
-            task.status in RECOVERABLE and bool(outcome.failed_paths)
-            and outcome.status in {AlbumStatus.FAILED, AlbumStatus.PARTIAL}
+            task.status in RECOVERABLE and scope in {"album", "failed_files"}
         )
+
+    def _render_album_files(self):
+        self.album_files.clear()
+        task = self._displayed_task
+        album_key = self._selected_album()
+        is_live_view = (
+            bool(self._live_album_rows)
+            and (
+                task is None
+                or (
+                    task.task_id == self._active_task_id
+                    and (not album_key or not self._live_album_key or album_key == self._live_album_key)
+                )
+            )
+        )
+        if is_live_view:
+            for row in self._live_album_rows:
+                self.album_files.addItem(str(row))
+            return
+        if task is None:
+            return
+        plan = next((entry for entry in task.plans if entry.key == album_key), None)
+        if plan is None:
+            hint = QListWidgetItem("点击上方任意 Album 查看其中的文件明细")
+            hint.setFlags(Qt.ItemFlag.NoItemFlags)
+            hint.setForeground(QColor(status_color("MUTED")))
+            self.album_files.addItem(hint)
+            return
+        outcomes = task.album_statuses()
+        outcome = outcomes.get(plan.key)
+        confirmed = set(task.confirmed_paths) | task.known_confirmed
+        failed = set(outcome.failed_paths) if outcome is not None else set()
+        deferred = set(outcome.deferred_paths) if outcome is not None else set()
+        for item in plan.items:
+            key = stable_path(item.path)
+            if outcome is not None and outcome.status is AlbumStatus.UNKNOWN:
+                state_text = "待核对"
+            elif key in confirmed:
+                state_text = "已完成"
+            elif (outcome is not None and outcome.status is AlbumStatus.SKIPPED) or task.status is TaskStatus.SKIPPED:
+                state_text = "已跳过"
+            elif key in failed:
+                state_text = "失败"
+            elif key in deferred:
+                state_text = "暂缓"
+            else:
+                state_text = "待上传"
+            entry = QListWidgetItem(
+                f"{kind_label(item.media_kind)} · {state_text} · {self._size_formatter(item.snapshot.size)} · {item.path.name}"
+            )
+            entry.setData(Qt.ItemDataRole.UserRole, state_text)
+            entry.setForeground(QColor(status_color(state_text)))
+            entry.setToolTip(str(item.path))
+            self.album_files.addItem(entry)
 
     def _render_albums(self, task):
         if task == self._displayed_task:
             self._update_album_controls()
+            self._render_album_files()
             return
         selection = self._selected_album()
         self._displayed_task = task
@@ -350,12 +514,14 @@ class TaskPage(QWidget):
                 if len(names) > 3:
                     summary += f" 等 {len(names)} 个"
                 done = sum(stable_path(item.path) in confirmed for item in plan.items)
+                status_text = labels[outcome.status]
                 row = QTreeWidgetItem([
-                    f"{plan.group_label} · {plan.number}", labels[outcome.status],
+                    f"{plan.group_label} · {plan.number}", status_text,
                     summary, f"{done}/{len(names)}", outcome.error or "",
                 ])
                 row.setData(0, Qt.ItemDataRole.UserRole, plan.key)
                 row.setData(1, Qt.ItemDataRole.UserRole, outcome)
+                row.setForeground(1, QColor(status_color(status_text)))
                 row.setToolTip(2, "\n".join(names))
                 row.setToolTip(4, outcome.error or "")
                 self.albums.addTopLevelItem(row)
@@ -363,6 +529,7 @@ class TaskPage(QWidget):
                 if plan.key == selection:
                     self.albums.setCurrentItem(row)
         self._update_album_controls()
+        self._render_album_files()
 
     @Slot(str, bool)
     def show_recovery_progress(self, message, cancelable):
@@ -391,17 +558,17 @@ class TaskPage(QWidget):
         }
         for index, task in enumerate(store.tasks, 1):
             state = "部分完成" if task.status is TaskStatus.FAILED and task.outcome == "PARTIAL" else labels[task.status]
-            target = str(task.target["chat_id"])
-            if task.target["forum_topic_id"]:
-                target += f" / {task.target['forum_topic_id']}"
+            display_target, target_tooltip = self._format_task_target(task.target)
             row = QTreeWidgetItem([
                 str(index), state, kind_label(task.kind), str(task.source_root),
-                target, str(len(task.items)), self._size_formatter(task.total_bytes),
+                display_target, str(len(task.items)), self._size_formatter(task.total_bytes),
             ])
             row.setData(0, Qt.ItemDataRole.UserRole, task.task_id)
+            row.setData(1, Qt.ItemDataRole.UserRole, state)
+            row.setForeground(1, QColor(status_color(state)))
             row.setToolTip(1, task.error or state)
             row.setToolTip(3, str(task.source_root))
-            row.setToolTip(4, target)
+            row.setToolTip(4, target_tooltip)
             self.queue_list.addTopLevelItem(row)
             self._queue_rows[task.task_id] = row
             if task.status is TaskStatus.PENDING and not (recovering or blocked or store.error):
@@ -409,6 +576,11 @@ class TaskPage(QWidget):
             if task.task_id == selected:
                 self.queue_list.setCurrentItem(row)
         self.queue_list.blockSignals(False)
+        has_finished = any(
+            status in {TaskStatus.COMPLETED, TaskStatus.SKIPPED}
+            for status in self._queue_states.values()
+        )
+        self.queue_clear.setEnabled(has_finished and not recovering and not blocked and not store.error)
         self.queue_toggle.setText("继续队列" if store.paused else "暂停队列")
         self.queue_toggle.setEnabled(not (
             recovering or blocked or store.error
@@ -434,11 +606,15 @@ class TaskPage(QWidget):
         if self._selected_task() == self._active_task_id:
             row = self._album_rows.get(event.album_key)
             if row is not None:
-                row.setText(1, "冷却中" if event.retry_in_seconds is not None else "上传中")
+                status = "冷却中" if event.retry_in_seconds is not None else "上传中"
+                row.setText(1, status)
+                row.setForeground(1, QColor(status_color(status)))
                 row.setText(4, event.last_error or "")
 
     def start_session(self, kind: str, result: dict):
         self.preliminary_metrics.hide()
+        self._live_album_key = None
+        self._live_album_rows = []
         self.title.setText(f"任务中心 · {kind_label(kind)}")
         self.task_status.setText("正在启动…")
         self.stop_button.setEnabled(True)
@@ -451,21 +627,57 @@ class TaskPage(QWidget):
             f"{self._size_formatter(result['pending_bytes'])} · "
             f"{result['album_count']} 个 Album"
         )
-        self.album_files.clear()
+        self._render_album_files()
+        self._clear_log()
+
+    def _clear_log(self):
+        self._log_entries.clear()
         self.log.clear()
+
+    def _copy_log(self):
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(self.log.toPlainText())
+
+    def _log_matches_filter(self, level: str) -> bool:
+        mode = self.log_filter.currentData() if hasattr(self, "log_filter") else "all"
+        if mode == "issues":
+            return level in {"warning", "error"}
+        return True
+
+    def _append_log_line(self, level: str, line: str):
+        self._log_entries.append((level, line))
+        if len(self._log_entries) > 3000:
+            self._log_entries = self._log_entries[-3000:]
+        if self._log_matches_filter(level):
+            self.log.appendPlainText(line)
+            if self.auto_scroll_check.isChecked():
+                self.log.moveCursor(QTextCursor.MoveOperation.End)
+
+    def _rebuild_log_view(self):
+        self.log.setUpdatesEnabled(False)
+        try:
+            self.log.clear()
+            lines = [line for level, line in self._log_entries if self._log_matches_filter(level)]
+            if lines:
+                self.log.setPlainText("\n".join(lines))
+                if self.auto_scroll_check.isChecked():
+                    self.log.moveCursor(QTextCursor.MoveOperation.End)
+        finally:
+            self.log.setUpdatesEnabled(True)
 
     @Slot(str, str)
     def add_message(self, level: str, text: str):
         prefix = {"success": "✓", "warning": "!", "error": "✗", "info": "ℹ"}.get(level, "·")
-        self.log.appendPlainText(f"{prefix} {text}")
+        self._append_log_line(level, f"{prefix} {text}")
         self.task_status.setText(text.splitlines()[0][:100] if text else "运行中")
 
     @Slot(object)
     def show_album(self, payload: dict):
         self.album_label.setText(f"{payload.get('title', '')} · {payload.get('subtitle', '')}")
-        self.album_files.clear()
-        for row in payload.get("rows", []):
-            self.album_files.addItem(str(row))
+        self._live_album_key = str(payload.get("album_key") or "") or None
+        self._live_album_rows = [str(row) for row in payload.get("rows", [])]
+        self._render_album_files()
 
     @Slot(object)
     def show_progress(self, payload: dict):
@@ -496,6 +708,8 @@ class TaskPage(QWidget):
         if row is not None:
             status = "上传中" if seconds is None else f"冷却中 · {seconds} 秒"
             row.setText(1, status)
+            row.setData(1, Qt.ItemDataRole.UserRole, status)
+            row.setForeground(1, QColor(status_color(status)))
             row.setToolTip(1, status)
 
     @Slot(object)
@@ -513,11 +727,25 @@ class TaskPage(QWidget):
         self.immediate_stop_button.setEnabled(False)
         self.attempt_label.hide()
         self.task_status.setText("已完成" if success else message)
-        self.log.appendPlainText(("✓ " if success else "! ") + message)
+        self._append_log_line("success" if success else "warning", ("✓ " if success else "! ") + message)
 
     def refresh_theme(self):
         """Re-apply dynamic theme styling."""
-        pass
+        for row in self._queue_rows.values():
+            state = row.data(1, Qt.ItemDataRole.UserRole) or row.text(1)
+            row.setForeground(1, QColor(status_color(str(state))))
+        for row in self._album_rows.values():
+            row.setForeground(1, QColor(status_color(row.text(1))))
+        for i in range(self.album_files.count()):
+            item = self.album_files.item(i)
+            if item is not None:
+                state = item.data(Qt.ItemDataRole.UserRole)
+                if state:
+                    item.setForeground(QColor(status_color(str(state))))
+        if self._displayed_task is not None and self.album_files.count() == 1:
+            first = self.album_files.item(0)
+            if first is not None and not first.flags():
+                first.setForeground(QColor(status_color("MUTED")))
 
 
 __all__ = ["TaskPage", "format_eta", "format_size", "kind_label"]

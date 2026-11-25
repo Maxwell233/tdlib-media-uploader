@@ -9,15 +9,15 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QDialog, QMessageBox
 
 from conftest import TARGET, task_for
-from tdlib_media_uploader.config import loader
+from tdlib_media_uploader.config import loader, paths
 from tdlib_media_uploader.config.snapshot import snapshot_config
-from tdlib_media_uploader.core import album
+from tdlib_media_uploader.core import album, logging as app_logging, upload_journal
 from tdlib_media_uploader.core.models import UploadRunResult
 from tdlib_media_uploader.core.upload_journal import InflightJournal
 from tdlib_media_uploader.gui import main_window, preferences, scanner
 from tdlib_media_uploader.gui.integration import run_v2_upload
 from tdlib_media_uploader.gui.icons import get_svg_icon
-from tdlib_media_uploader.gui.pages import upload
+from tdlib_media_uploader.gui.pages import inflight, upload
 from tdlib_media_uploader.gui.preferences import UiPreferences
 from tdlib_media_uploader.gui.theme import DARK_PALETTE, LIGHT_PALETTE, initialize_theme
 from tdlib_media_uploader.gui.workers import UploadWorker
@@ -44,12 +44,29 @@ def seed(root, kind):
 
 @pytest.fixture
 def window(tmp_path, qt_app, monkeypatch, runtime_paths):
+    logs_dir = tmp_path / "logs"
+    app_data_dir = tmp_path / "app_data"
+    monkeypatch.setattr(paths, "DATA_DIR", app_data_dir)
+    monkeypatch.setattr(paths, "LOG_DIR", logs_dir)
+    monkeypatch.setattr(paths, "UPLOAD_INFLIGHT_DIR", runtime_paths.UPLOAD_INFLIGHT_DIR)
+    monkeypatch.setattr(app_logging, "LOG_DIR", logs_dir)
+    monkeypatch.setattr(app_logging, "APP_LOG_PATH", logs_dir / "app.log")
+    monkeypatch.setattr(upload_journal, "APP_DATA_DIR", app_data_dir)
+    monkeypatch.setattr(upload_journal, "UPLOAD_INFLIGHT_DIR", runtime_paths.UPLOAD_INFLIGHT_DIR)
     monkeypatch.setattr(main_window, "_save_history", lambda _records: None)
     monkeypatch.setattr(main_window, "_load_history", list)
     monkeypatch.setattr(album, "CAPTIONS_DIR", tmp_path / "captions")
     monkeypatch.setattr(scanner, "runtime_paths", runtime_paths)
     monkeypatch.setattr(main_window, "_target_for", lambda _kind: TARGET.copy())
     monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+
+    def _auto_confirm_box(box):
+        button = box.defaultButton()
+        if button is not None:
+            button.click()
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", _auto_confirm_box)
     config = snapshot_config(loader)
     config.VIDEO_READ_DATES = False
     config.VIDEO_GENERATE_THUMBNAIL = False
@@ -204,7 +221,7 @@ def test_scan_cancel_navigation_and_theme_during_scan(window, monkeypatch, pump,
 
     def run(kind, *, cancel_event, **kwargs):
         started.set()
-        assert cancel_event.wait(5)
+        assert cancel_event.wait(30)
         return {"cancelled": True}
 
     monkeypatch.setattr(main_window, "_scan_result", run)

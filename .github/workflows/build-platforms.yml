@@ -34,13 +34,16 @@ jobs:
           python-version: "3.13"
           architecture: x64
           cache: pip
-          cache-dependency-path: requirements-build-lock.txt
+          cache-dependency-path: |
+            requirements-build-lock.txt
+            requirements-test.txt
 
-      - name: Install build dependencies
+      - name: Install build and test dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install --no-binary imageio-ffmpeg -r requirements-build-lock.txt
+          python -m pip install -r requirements-test.txt
           python -m pip check
 
       - name: Cache Windows FFmpeg archive
@@ -49,14 +52,11 @@ jobs:
           path: ${{ runner.temp }}/tdlib-media-uploader-ffmpeg
           key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/ffmpeg-windows.json') }}
 
-      - name: Build one-folder EXE
+      - name: Stage verified LGPL FFmpeg
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $projectDir = (Get-Location).Path
-          $version = (Get-Content -Raw -LiteralPath ".\VERSION").Trim()
-          if ([string]::IsNullOrWhiteSpace($version)) { throw "VERSION 文件为空。" }
-
           $ffmpegManifest = Get-Content -Raw -LiteralPath "tools/ffmpeg-windows.json" | ConvertFrom-Json
           $ffmpegTag = $ffmpegManifest.release_tag
           $ffmpegArchiveName = $ffmpegManifest.archive
@@ -105,6 +105,34 @@ jobs:
           $ffmpegLicense = Get-Content -Raw -LiteralPath $ffmpegLicensePath
           if ($ffmpegLicense -notmatch "LESSER GENERAL PUBLIC LICENSE") { throw "FFmpeg 许可文件不是 LGPL 文本。" }
 
+      - name: Run offline verification suite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $projectDir = (Get-Location).Path
+          $ffmpegStage = Join-Path $projectDir "tools\ffmpeg"
+          $env:PATH = "$ffmpegStage;$env:PATH"
+          $env:PYTHONPATH = Join-Path $projectDir "src"
+          $env:QT_QPA_PLATFORM = "offscreen"
+
+          python -m compileall -q src tests
+          if ($LASTEXITCODE -ne 0) { throw "compileall 检查失败。" }
+
+          python -m pytest tests -v
+          if ($LASTEXITCODE -ne 0) { throw "离线 pytest 回归测试失败。" }
+
+          python -c "from tdlib_media_uploader.app import run_self_test; raise SystemExit(run_self_test())"
+          if ($LASTEXITCODE -ne 0) { throw "源码自检失败。" }
+          Remove-Item -LiteralPath ".\data" -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Build one-folder EXE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $projectDir = (Get-Location).Path
+          $version = (Get-Content -Raw -LiteralPath ".\VERSION").Trim()
+          if ([string]::IsNullOrWhiteSpace($version)) { throw "VERSION 文件为空。" }
+
           Remove-Item -LiteralPath ".\build", ".\dist" -Recurse -Force -ErrorAction SilentlyContinue
           python -m PyInstaller --noconfirm --clean --distpath ".\dist" --workpath ".\build" ".\tdlib_media_uploader.spec"
           if ($LASTEXITCODE -ne 0) { throw "PyInstaller 构建失败。" }
@@ -118,24 +146,6 @@ jobs:
           $zipPath = Join-Path $projectDir "dist\TDLib.Media.Uploader-v$version-windows-x64.zip"
           Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
           Compress-Archive -Path (Join-Path $distDir "*") -DestinationPath $zipPath -CompressionLevel Optimal
-
-      - name: Run packaged self-test
-        shell: pwsh
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          $exe = (Resolve-Path -LiteralPath "dist\TDLib Media Uploader\TDLib Media Uploader.exe").Path
-          if (-not (Test-Path -LiteralPath $exe)) { throw "EXE not found: $exe" }
-          $stdoutPath = Join-Path $env:RUNNER_TEMP "tdlib-self-test.stdout"
-          $stderrPath = Join-Path $env:RUNNER_TEMP "tdlib-self-test.stderr"
-          Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
-          $process = Start-Process -FilePath $exe -ArgumentList @("--self-test") -Wait -PassThru `
-            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-          $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { "" }
-          $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { "" }
-          if ($stdout) { Write-Output $stdout }
-          if ($stderr) { Write-Output $stderr }
-          if ($process.ExitCode -ne 0) { throw "Packaged Windows self-test failed: $($process.ExitCode)" }
 
       - name: Validate Windows x64 package
         shell: pwsh
@@ -174,8 +184,42 @@ jobs:
           if ($null -eq $archive) {
             throw "Portable ZIP not found in dist"
           }
+          $bundleRoot = "dist\TDLib Media Uploader"
+          foreach ($dirRoot in @($bundleRoot, (Join-Path $bundleRoot "_internal"))) {
+            foreach ($forbiddenName in @("tests", "pytest", "_pytest", "pytest_mock", "data")) {
+              $candidate = Join-Path $dirRoot $forbiddenName
+              if (Test-Path -LiteralPath $candidate) {
+                throw "Release build must not include tests, pytest, or data directory: $candidate"
+              }
+            }
+          }
+          $leakedMeta = Get-ChildItem -LiteralPath $bundleRoot -Recurse -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -like "pytest-*.dist-info" -or $_.Name -eq "test_audit_regressions.py"
+          }
+          if ($leakedMeta) {
+            $pathsList = ($leakedMeta | ForEach-Object { $_.FullName }) -join ", "
+            throw "Release build must not include pytest metadata or test files: $pathsList"
+          }
           Write-Host "Validated: $exe"
           Write-Host "Validated: $($archive.FullName)"
+
+      - name: Run packaged self-test
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $exe = (Resolve-Path -LiteralPath "dist\TDLib Media Uploader\TDLib Media Uploader.exe").Path
+          if (-not (Test-Path -LiteralPath $exe)) { throw "EXE not found: $exe" }
+          $stdoutPath = Join-Path $env:RUNNER_TEMP "tdlib-self-test.stdout"
+          $stderrPath = Join-Path $env:RUNNER_TEMP "tdlib-self-test.stderr"
+          Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+          $process = Start-Process -FilePath $exe -ArgumentList @("--self-test") -Wait -PassThru `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+          $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { "" }
+          $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { "" }
+          if ($stdout) { Write-Output $stdout }
+          if ($stderr) { Write-Output $stderr }
+          if ($process.ExitCode -ne 0) { throw "Packaged Windows self-test failed: $($process.ExitCode)" }
 
       - name: Compute Windows artifact label
         id: windows_artifact
@@ -215,14 +259,17 @@ jobs:
           python-version: "3.13"
           architecture: arm64
           cache: pip
-          cache-dependency-path: requirements-build-lock.txt
+          cache-dependency-path: |
+            requirements-build-lock.txt
+            requirements-test.txt
 
-      - name: Install build dependencies
+      - name: Install build and test dependencies
         shell: bash
         run: |
           python -m venv .build_venv
           .build_venv/bin/python -m pip install --upgrade pip
           .build_venv/bin/python -m pip install --no-binary imageio-ffmpeg -r requirements-build-lock.txt
+          .build_venv/bin/python -m pip install -r requirements-test.txt
           .build_venv/bin/python -m pip check
 
       - name: Cache verified macOS FFmpeg tools
@@ -232,24 +279,21 @@ jobs:
           # Includes source checksum, configure flags and validation code.
           key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e-${{ hashFiles('.github/workflows/build-platforms.yml') }}
 
-      - name: Build macOS arm64 app
+      - name: Stage verified LGPL FFmpeg
         shell: bash
         env:
           MACOSX_DEPLOYMENT_TARGET: "14.0"
         run: |
           set -Eeuo pipefail
           PROJECT_DIR="$PWD"
-          VERSION="$(tr -d '[:space:]' < VERSION)"
-          BUILD_PYTHON="$PROJECT_DIR/.build_venv/bin/python"
           BUILD_DIR="$PROJECT_DIR/build"
-          DIST_DIR="$PROJECT_DIR/dist"
           FFMPEG_VERSION="9.0.2"
           FFMPEG_ARCHIVE="ffmpeg-${FFMPEG_VERSION}.tar.xz"
           FFMPEG_URL="https://ffmpeg.org/releases/${FFMPEG_ARCHIVE}"
           FFMPEG_SOURCE_SHA256="8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e"
           FFMPEG_WORK_DIR="$BUILD_DIR/ffmpeg-${FFMPEG_VERSION}"
           FFMPEG_STAGE_DIR="$PROJECT_DIR/tools/ffmpeg"
-          rm -rf "$BUILD_DIR" "$DIST_DIR"
+          rm -rf "$BUILD_DIR"
           mkdir -p "$BUILD_DIR"
 
           ensure_lgpl_ffmpeg() {
@@ -306,6 +350,35 @@ jobs:
           EOF
           }
 
+          ensure_lgpl_ffmpeg
+
+      - name: Run offline verification suite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PATH="$PWD/tools/ffmpeg:$PATH"
+          export PYTHONPATH="$PWD/src"
+          export QT_QPA_PLATFORM="offscreen"
+          .build_venv/bin/python -m compileall -q src tests
+          .build_venv/bin/python -m pytest tests -v
+          .build_venv/bin/python -c "from tdlib_media_uploader.app import run_self_test; raise SystemExit(run_self_test())"
+          rm -rf data
+
+      - name: Build macOS arm64 app
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
+        run: |
+          set -Eeuo pipefail
+          PROJECT_DIR="$PWD"
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          BUILD_PYTHON="$PROJECT_DIR/.build_venv/bin/python"
+          BUILD_DIR="$PROJECT_DIR/build"
+          DIST_DIR="$PROJECT_DIR/dist"
+          FFMPEG_STAGE_DIR="$PROJECT_DIR/tools/ffmpeg"
+          rm -rf "$BUILD_DIR" "$DIST_DIR"
+          mkdir -p "$BUILD_DIR"
+
           make_icon() {
             local iconset="$BUILD_DIR/tdlib_media_uploader.iconset"
             local icon_path="$BUILD_DIR/tdlib_media_uploader_icon.icns"
@@ -318,7 +391,6 @@ jobs:
             if iconutil -c icns "$iconset" -o "$icon_path" >/dev/null 2>&1; then printf '%s\n' "$icon_path"; fi
           }
 
-          ensure_lgpl_ffmpeg
           ICON_PATH="$(make_icon)"
           export PYINSTALLER_CONFIG_DIR="$BUILD_DIR/pyinstaller-config"
           TDLIB_MACOS_ICON_PATH="$ICON_PATH" "$BUILD_PYTHON" -m PyInstaller --noconfirm --clean --distpath "$DIST_DIR" --workpath "$BUILD_DIR/pyinstaller" "$PROJECT_DIR/tdlib_media_uploader.spec"
@@ -404,6 +476,18 @@ jobs:
           done
           test -d "$MOUNT_POINT/TDLib Media Uploader.app"
           test -L "$MOUNT_POINT/Applications"
+          for root_dir in "$APP" "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"; do
+            for forbidden in tests pytest _pytest pytest_mock data; do
+              if [[ -e "$root_dir/$forbidden" ]]; then
+                echo "Unexpected test or data artifact in macOS bundle: $root_dir/$forbidden" >&2
+                exit 1
+              fi
+            done
+          done
+          if find "$APP" \( -name 'pytest-*.dist-info' -o -name 'test_audit_regressions.py' \) | grep -q .; then
+            echo "Unexpected pytest metadata or test file in macOS bundle" >&2
+            exit 1
+          fi
 
       - name: Compute macOS artifact label
         id: macos_artifact

@@ -7,12 +7,20 @@ from collections.abc import Mapping
 from pathlib import Path, PureWindowsPath
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
+    QListWidget,
+    QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -20,13 +28,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..tools import kind_label as _kind_label
+from ..theme import status_color
+from ..tools import (
+    apply_capped_column_widths,
+    existing_directory_for,
+    kind_label as _kind_label,
+    open_in_file_manager,
+)
 
 
 class InflightPage(QWidget):
     """Review send attempts whose Telegram result was not confirmed."""
 
     reconciliation_requested = Signal(object, bool)
+    records_changed = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -79,14 +94,24 @@ class InflightPage(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
-        self.table.setWordWrap(True)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+        self.table.cellDoubleClicked.connect(lambda _r, _c: self._show_record_details())
         layout.addWidget(self.table, 1)
 
         # Action buttons
         buttons = QHBoxLayout()
         refresh = QPushButton("刷新列表")
         refresh.clicked.connect(self.reload_records)
+
+        self.detail_button = QPushButton("查看详情")
+        self.detail_button.setObjectName("secondaryButton")
+        self.detail_button.setEnabled(False)
+        self.detail_button.clicked.connect(self._show_record_details)
 
         self.sent_button = QPushButton("标记为已发送")
         self.sent_button.setObjectName("primaryButton")
@@ -97,6 +122,7 @@ class InflightPage(QWidget):
         self.not_sent_button.clicked.connect(lambda: self._emit_choice(False))
 
         buttons.addWidget(refresh)
+        buttons.addWidget(self.detail_button)
         buttons.addStretch(1)
         buttons.addWidget(self.sent_button)
         buttons.addWidget(self.not_sent_button)
@@ -185,9 +211,90 @@ class InflightPage(QWidget):
 
     def _update_actions(self):
         record = None if getattr(self, "_review_blocked", False) else self._selected_record()
+        selected = self._selected_record()
+        if hasattr(self, "detail_button"):
+            self.detail_button.setEnabled(selected is not None)
         status = str(record.get("status", "")).upper() if record else ""
         self.sent_button.setEnabled(record is not None and status != "CORRUPT")
         self.not_sent_button.setEnabled(status in {"PREPARED", "SUBMITTED", "UNKNOWN"})
+
+    def _show_context_menu(self, pos):
+        record = self._selected_record()
+        if record is None:
+            return
+        paths = self._item_paths(record)
+        source_dir = self._source_text(paths) if paths else ""
+        directory = existing_directory_for(paths[0]) if paths else None
+        menu = QMenu(self)
+        detail_action = menu.addAction("查看组内文件与详情")
+        open_action = menu.addAction("打开所在目录")
+        open_action.setEnabled(directory is not None)
+        copy_action = menu.addAction("复制源目录路径")
+        copy_action.setEnabled(bool(source_dir) and paths != [])
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen == detail_action:
+            self._show_record_details()
+        elif chosen == open_action and directory is not None:
+            open_in_file_manager(directory)
+        elif chosen == copy_action and paths:
+            clipboard = QApplication.clipboard()
+            if clipboard is not None:
+                clipboard.setText(str(directory or source_dir))
+
+    def _show_record_details(self):
+        record = self._selected_record()
+        if record is None:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("未确认上传记录详情")
+        dialog.setMinimumSize(580, 420)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+
+        status = str(record.get("status", "")).upper()
+        paths = self._item_paths(record)
+        info = QLabel(
+            f"媒体类型：{_kind_label(record.get('kind', 'unknown'))} · "
+            f"状态：{self._status_text(status)}\n"
+            f"Telegram 目标：{self._target_text(record)}\n"
+            f"创建时间：{record.get('created_at', '—')} · 最后更新：{record.get('updated_at', '—')}\n"
+            f"源目录：{self._source_text(paths)}"
+        )
+        info.setWordWrap(True)
+        info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(info)
+
+        files_list = QListWidget()
+        item_results = record.get("item_results") or ()
+        per_item_state = {
+            entry.get("index"): str(entry.get("status", ""))
+            for entry in item_results
+            if isinstance(entry, Mapping)
+        }
+        state_labels = {"succeeded": "已送达", "failed": "失败", "pending": "待确认"}
+        for idx, path_str in enumerate(paths):
+            item_state = per_item_state.get(idx)
+            suffix = f" [{state_labels.get(item_state, item_state)}]" if item_state else ""
+            files_list.addItem(f"{idx + 1}. {path_str}{suffix}")
+        if not paths:
+            files_list.addItem("（无文件明细：旧版记录或记录已损坏）")
+        layout.addWidget(files_list, 1)
+
+        err_text = str(record.get("error", "") or "")
+        if err_text:
+            err_box = QPlainTextEdit(err_text)
+            err_box.setReadOnly(True)
+            err_box.setMaximumHeight(96)
+            layout.addWidget(err_box)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        if paths and existing_directory_for(paths[0]) is not None:
+            open_btn = buttons.addButton("打开所在目录", QDialogButtonBox.ButtonRole.ActionRole)
+            open_btn.clicked.connect(lambda: open_in_file_manager(paths[0]))
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def _emit_choice(self, sent: bool):
         if getattr(self, "_review_blocked", False):
@@ -259,14 +366,16 @@ class InflightPage(QWidget):
             self.table.setRowCount(0)
             self.hint.setText(f"读取未确认记录失败：{exc}")
             self._update_actions()
+            self.records_changed.emit(0)
             return
         self.table.setRowCount(len(records))
         for row, record in enumerate(records):
             paths = self._item_paths(record)
+            raw_status = str(record.get("status", "")).upper()
             values = [
                 _kind_label(record.get("kind", "unknown")),
                 self._summary(record),
-                self._status_text(str(record.get("status", ""))),
+                self._status_text(raw_status),
                 record.get("created_at", ""),
                 record.get("updated_at", ""),
                 self._target_text(record),
@@ -276,15 +385,23 @@ class InflightPage(QWidget):
             ]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
+                cell.setToolTip(str(value))
                 if column == 0:
                     cell.setData(Qt.ItemDataRole.UserRole, record)
+                if column == 2:
+                    cell.setForeground(QColor(status_color(raw_status)))
                 self.table.setItem(row, column, cell)
-        self.table.resizeColumnsToContents()
+        apply_capped_column_widths(
+            self.table,
+            max_widths={1: 220, 3: 155, 4: 155, 5: 220, 6: 260, 8: 280},
+            min_widths={0: 76, 2: 145, 7: 64},
+        )
         self._update_actions()
         self.hint.setText(
             f"当前有 {len(records)} 条未确认记录。处理“已发送”前必须先核对 Telegram。"
             if records else "没有未确认上传记录。"
         )
+        self.records_changed.emit(len(records))
 
     def refresh_theme(self):
         """Re-render inflight view on theme switch."""

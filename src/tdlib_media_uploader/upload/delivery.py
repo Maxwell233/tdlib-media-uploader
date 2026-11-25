@@ -34,6 +34,7 @@ class _ObservedSend:
     preserve_journal: bool = False
     request_rejection: SendRequestRejected | None = None
     journal_attempt_number: int = 0
+    source_changed: bool = False
 
     def flood_wait(self) -> float | None:
         delays = [row["retry_after"] for row in self.item_results
@@ -65,6 +66,8 @@ class _ObservedSend:
 
     def album_retry_delay(self, expected_count: int, *, complete_album=True, flood_only=False) -> float | None:
         """Require a definite rejection or one terminal transient failure per submitted item."""
+        if self.source_changed:
+            return None
         rejection = self._unsubmitted_rejection()
         if rejection is not None:
             return rejection.retry_after_seconds if rejection.rate_limited or not flood_only else None

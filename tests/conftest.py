@@ -1,15 +1,132 @@
+import gc
 import os
+from pathlib import Path
 import time
 from types import SimpleNamespace
 
-import pytest
-from PySide6.QtWidgets import QApplication
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import PySide6
+_plugins_dir = Path(PySide6.__file__).resolve().parent / "Qt" / "plugins"
+if _plugins_dir.is_dir() and not os.environ.get("QT_PLUGIN_PATH"):
+    os.environ["QT_PLUGIN_PATH"] = str(_plugins_dir)
+
+import pytest
+from PySide6.QtCore import QEvent, QThread, QTimer
+from PySide6.QtWidgets import QApplication
+from shiboken6 import getCppPointer, isValid
+
+from tdlib_media_uploader.config import paths
+from tdlib_media_uploader.core import album, logging as app_logging, upload_journal
 from tdlib_media_uploader.core.models import AlbumPlan, FileSnapshot, MediaItem
+from tdlib_media_uploader.gui import history_service, preferences
 from tdlib_media_uploader.upload.queue import UploadTask
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 TARGET = {"target_mode": "channel", "chat_id": -100123}
+
+
+@pytest.fixture(autouse=True)
+def _isolate_test_data_dirs(request, tmp_path, monkeypatch):
+    """Prevent tests from writing logs or SQLite databases into repo ./data."""
+    if getattr(request.module, "__name__", "") == "test_data_layout":
+        return
+    base = tmp_path / "_isolated_app_data"
+    logs_dir = base / "logs"
+    inflight_dir = base / "upload_inflight"
+    state_dir = base / "state"
+    cache_dir = base / "cache"
+    telegram_dir = base / "telegram"
+    captions_dir = base / "captions"
+    monkeypatch.setattr(paths, "DATA_DIR", base)
+    monkeypatch.setattr(paths, "APP_DATA_DIR", base)
+    monkeypatch.setattr(paths, "LOG_DIR", logs_dir)
+    monkeypatch.setattr(paths, "UPLOAD_INFLIGHT_DIR", inflight_dir)
+    monkeypatch.setattr(paths, "STATE_DIR", state_dir)
+    monkeypatch.setattr(paths, "VIDEO_STATE_DIR", state_dir / "video")
+    monkeypatch.setattr(paths, "IMAGE_STATE_DIR", state_dir / "image")
+    monkeypatch.setattr(paths, "MIXED_STATE_DIR", state_dir / "mixed")
+    monkeypatch.setattr(paths, "CACHE_DIR", cache_dir)
+    monkeypatch.setattr(paths, "THUMBNAIL_CACHE_DIR", cache_dir / "thumbnails")
+    monkeypatch.setattr(paths, "IMAGE_COMPRESSION_CACHE_DIR", cache_dir / "image_compression")
+    monkeypatch.setattr(paths, "VIDEO_PROCESSED_CACHE_DIR", cache_dir / "video_processed")
+    monkeypatch.setattr(paths, "STAGING_CACHE_DIR", cache_dir / "staging")
+    monkeypatch.setattr(paths, "TELEGRAM_DIR", telegram_dir)
+    monkeypatch.setattr(paths, "TDLIB_DATABASE_DIR", telegram_dir / "database")
+    monkeypatch.setattr(paths, "TDLIB_FILES_DIR", telegram_dir / "files")
+    monkeypatch.setattr(paths, "CAPTIONS_DIR", captions_dir)
+    monkeypatch.setattr(paths, "HISTORY_PATH", base / "history.json")
+    monkeypatch.setattr(paths, "CONFIG_PATH", base / "config.toml")
+    monkeypatch.setattr(app_logging, "APP_DATA_DIR", base)
+    monkeypatch.setattr(app_logging, "LOG_DIR", logs_dir)
+    monkeypatch.setattr(app_logging, "APP_LOG_PATH", logs_dir / "app.log")
+    monkeypatch.setattr(app_logging, "TDLIB_LOG_PATH", logs_dir / "tdlib.log")
+    monkeypatch.setattr(upload_journal, "APP_DATA_DIR", base)
+    monkeypatch.setattr(upload_journal, "UPLOAD_INFLIGHT_DIR", inflight_dir)
+    monkeypatch.setattr(album, "CAPTIONS_DIR", captions_dir)
+    monkeypatch.setattr(history_service, "HISTORY_PATH", base / "history.json")
+    monkeypatch.setattr(preferences, "PREFERENCES_PATH", base / "ui_preferences.json", raising=False)
+
+
+def _drain_qt_widgets(app: QApplication, widgets) -> None:
+    targets = [widget for widget in widgets if isValid(widget)]
+    for widget in targets:
+        if not isValid(widget):
+            continue
+        for timer in widget.findChildren(QTimer):
+            if isValid(timer):
+                timer.stop()
+        for thread in widget.findChildren(QThread):
+            if isValid(thread) and thread.isRunning():
+                thread.requestInterruption()
+                thread.quit()
+                thread.wait(2000)
+        if widget.parent() is None:
+            widget.hide()
+            widget.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+    for widget in targets:
+        if isValid(widget):
+            widget.hide()
+            widget.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cleanup_qt_session():
+    yield
+    app = QApplication.instance()
+    if app is None:
+        return
+    app.setStyleSheet("")
+    remaining = [widget for widget in app.topLevelWidgets() if isValid(widget)]
+    if remaining:
+        _drain_qt_widgets(app, remaining)
+    gc.collect()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+    gc.collect()
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_qt_widgets():
+    app = QApplication.instance()
+    existing_ptrs = (
+        {int(getCppPointer(widget)[0]) for widget in app.topLevelWidgets() if isValid(widget)}
+        if app is not None
+        else set()
+    )
+    yield
+    app = QApplication.instance()
+    if app is None:
+        return
+    created = [
+        widget for widget in app.topLevelWidgets()
+        if isValid(widget) and int(getCppPointer(widget)[0]) not in existing_ptrs
+    ]
+    if created:
+        _drain_qt_widgets(app, created)
 
 
 @pytest.fixture(scope="session")
@@ -19,7 +136,7 @@ def qt_app():
 
 @pytest.fixture
 def pump(qt_app):
-    def until(condition, timeout=5):
+    def until(condition, timeout=20):
         deadline = time.monotonic() + timeout
         while not condition():
             qt_app.processEvents()

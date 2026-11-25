@@ -7,6 +7,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from tdlib_media_uploader.config import paths
+from tdlib_media_uploader.core.filesystem import stable_path
 from tdlib_media_uploader.core.models import UploadRunResult
 from tdlib_media_uploader.core.upload_journal import InflightJournal
 from tdlib_media_uploader.core.uploader_database import (
@@ -51,7 +52,7 @@ class MediaCacheRetentionTest(unittest.TestCase):
         with database_for(self.root / "uploader.db").read() as connection:
             rows = connection.execute("SELECT stable_path, probe FROM media_metadata_cache").fetchall()
         self.assertEqual(len(rows), 2)
-        self.assertEqual({name for name, _probe in rows}, {str(original)})
+        self.assertEqual({name for name, _probe in rows}, {stable_path(original)})
 
     def test_caps_metadata_rows_and_cleans_preexisting_staging_entries(self):
         records = [(self.root / f"file-{index}.jpg", 1, 2, {"index": index}) for index in range(5)]
@@ -63,11 +64,14 @@ class MediaCacheRetentionTest(unittest.TestCase):
         legacy_staging = self.root / "old-custom" / ".tdlib-media-uploader-staging" / "old.jpg"
         with database.write() as connection:
             for path in (self.cache / "staging" / "old.jpg", self.staging_dir / "old.jpg", legacy_staging):
-                connection.execute("INSERT INTO media_metadata_cache VALUES (?, 1, 2, 'probe', '{}')", (str(path),))
+                connection.execute(
+                    "INSERT INTO media_metadata_cache VALUES (?, 1, 2, 'probe', '{}')",
+                    (stable_path(path),),
+                )
         prune_media_metadata(self.config)
         with database.read() as connection:
             remaining = {row[0] for row in connection.execute("SELECT stable_path FROM media_metadata_cache")}
-        self.assertEqual(remaining, {str(record[0]) for record in records[2:]})
+        self.assertEqual(remaining, {stable_path(record[0]) for record in records[2:]})
 
     def test_completed_job_trims_artifacts_and_unknown_job_keeps_them(self):
         thumbnails = self.cache / "thumbnails"

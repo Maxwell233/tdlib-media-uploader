@@ -49,6 +49,15 @@ from ..upload.engine import (
 )
 
 
+def _format_bytes(value: float | int | None) -> str:
+    size = float(value or 0)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024 or unit == "TiB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} TiB"
+
+
 _MEDIA_PIPELINES = {
     "image": "tdlib_media_uploader.media.image_pipeline",
     "mixed": "tdlib_media_uploader.media.mixed_pipeline",
@@ -433,12 +442,14 @@ class GuiUploadProgress:
                 media = item.media_kind if isinstance(item, MediaItem) else (
                     item.get("media_kind", self.kind) if isinstance(item, Mapping) else self.kind
                 )
-                rows.append(f"{media} · {self.sizes.get(stable_path(path), 0)} B · {path}")
+                size_text = _format_bytes(self.sizes.get(stable_path(path), 0))
+                rows.append(f"{media} · {size_text} · {path.name}")
             album(
                 kind=self.kind.upper(),
                 title=f"{self.album_label} · 组内 Album {plan.number} · {self.album_number}/{self.album_total}",
                 subtitle=f"{len(items)} 个媒体 · Caption={plan.caption or '无'}",
                 rows=rows,
+                album_key=self.album_key,
             )
         self.draw(force=True)
 

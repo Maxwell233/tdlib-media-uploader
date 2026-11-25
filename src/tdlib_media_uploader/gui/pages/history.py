@@ -7,14 +7,19 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -24,8 +29,14 @@ from PySide6.QtWidgets import (
 
 from ..components.cards import StatCard
 from ..history_service import load_history, save_history
-from ..theme import THEME
-from ..tools import format_size, kind_label
+from ..theme import status_color
+from ..tools import (
+    apply_capped_column_widths,
+    existing_directory_for,
+    format_size,
+    kind_label,
+    open_in_file_manager,
+)
 
 
 _kind_label = kind_label
@@ -105,8 +116,13 @@ class HistoryPage(QWidget):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+        self.table.cellDoubleClicked.connect(lambda _r, _c: self._show_selected_details())
         layout.addWidget(self.table, 1)
 
         self._all_records: list[dict] = []
@@ -150,8 +166,9 @@ class HistoryPage(QWidget):
         self.table.setRowCount(len(filtered))
         for row, record in enumerate(filtered):
             is_success = bool(record.get("success"))
+            raw_status = str(record.get("status", ""))
             status = "成功" if is_success else "停止/失败"
-            if record.get("status") == "SKIPPED":
+            if raw_status == "SKIPPED":
                 status = "已跳过"
             values = [
                 record.get("finished_at", record.get("started_at", "")),
@@ -164,11 +181,88 @@ class HistoryPage(QWidget):
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
+                item.setToolTip(str(value))
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, record)
                 if column == 5:
-                    item.setForeground(QColor(THEME.success if is_success else THEME.warning))
+                    color_key = "SKIPPED" if raw_status == "SKIPPED" else ("SUCCESS" if is_success else "WARNING")
+                    item.setForeground(QColor(status_color(color_key)))
                 self.table.setItem(row, column, item)
 
-        self.table.resizeColumnsToContents()
+        apply_capped_column_widths(
+            self.table,
+            max_widths={0: 175, 2: 280, 6: 320},
+            min_widths={1: 68, 3: 64, 4: 86, 5: 84},
+        )
+
+    def _selected_record(self) -> dict | None:
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        item = self.table.item(row, 0)
+        value = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        return value if isinstance(value, dict) else None
+
+    def _show_context_menu(self, pos):
+        record = self._selected_record()
+        if record is None:
+            return
+        source_dir = str(record.get("source_dir", "") or "")
+        menu = QMenu(self)
+        detail_action = menu.addAction("查看记录详情")
+        open_action = menu.addAction("打开来源目录")
+        open_action.setEnabled(existing_directory_for(source_dir) is not None)
+        copy_action = menu.addAction("复制来源路径")
+        copy_action.setEnabled(bool(source_dir))
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen == detail_action:
+            self._show_selected_details()
+        elif chosen == open_action:
+            open_in_file_manager(source_dir)
+        elif chosen == copy_action:
+            clipboard = QApplication.clipboard()
+            if clipboard is not None:
+                clipboard.setText(source_dir)
+
+    def _show_selected_details(self):
+        record = self._selected_record()
+        if record is None:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("历史上传记录详情")
+        dialog.setMinimumWidth(540)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+
+        source_dir = str(record.get("source_dir", "") or "")
+        status_label = "已跳过" if record.get("status") == "SKIPPED" else (
+            "成功" if record.get("success") else "停止/失败"
+        )
+        summary = QLabel(
+            f"媒体类型：{_kind_label(record.get('kind', ''))}\n"
+            f"结果：{status_label}\n"
+            f"开始时间：{record.get('started_at', '—')}\n"
+            f"结束时间：{record.get('finished_at', '—')}\n"
+            f"文件数：{record.get('total_files', 0)} · 总大小：{_fmt_size(record.get('total_bytes', 0))}\n"
+            f"来源目录：{source_dir or '—'}"
+        )
+        summary.setWordWrap(True)
+        summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(summary)
+
+        detail_box = QPlainTextEdit(str(record.get("message", "") or "无附加说明"))
+        detail_box.setReadOnly(True)
+        detail_box.setMaximumHeight(160)
+        layout.addWidget(detail_box)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        if existing_directory_for(source_dir) is not None:
+            open_btn = buttons.addButton("打开来源目录", QDialogButtonBox.ButtonRole.ActionRole)
+            open_btn.clicked.connect(lambda: open_in_file_manager(source_dir))
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def refresh_theme(self):
         """Update table foreground colors on theme change."""

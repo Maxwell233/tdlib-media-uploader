@@ -440,7 +440,7 @@ class HeadlessUI:
     def target(self, chat_title, topic_name, chat_id, topic_id):
         self._write_log("INFO", f"Telegram 目标：{chat_title} / {topic_name or '频道'} ({chat_id})")
 
-    def album(self, *, kind, title, subtitle="", rows=None):
+    def album(self, *, kind, title, subtitle="", rows=None, album_key: str = ""):
         self._write_log("INFO", f"{title}\n{subtitle}".strip())
 
     def progress(self, **kwargs):

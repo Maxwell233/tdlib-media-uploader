@@ -10,8 +10,8 @@ import subprocess
 import sys
 from typing import Any
 
-from PySide6.QtCore import QLibraryInfo
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import QLibraryInfo, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon
 
 from ..config.paths import DATA_DIR, RESOURCE_DIR
 from ..processes.runner import run_cancellable_process
@@ -196,6 +196,48 @@ def application_icon() -> QIcon:
     return QIcon()
 
 
+def existing_directory_for(path_value: str | Path | None) -> Path | None:
+    """Resolve the nearest existing directory for a file or folder path."""
+    if not path_value:
+        return None
+    text = str(path_value).strip()
+    if not text:
+        return None
+    candidate = Path(text)
+    if candidate.is_dir():
+        return candidate
+    if candidate.parent.is_dir():
+        return candidate.parent
+    return None
+
+
+def open_in_file_manager(path_value: str | Path | None) -> bool:
+    """Open the resolved directory in the OS file manager via Qt."""
+    directory = existing_directory_for(path_value)
+    if directory is None:
+        return False
+    return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory))))
+
+
+def apply_capped_column_widths(
+    table,
+    *,
+    max_widths: dict[int, int] | None = None,
+    min_widths: dict[int, int] | None = None,
+) -> None:
+    """Fit table columns cleanly without letting long text overflow horizontally."""
+    table.resizeColumnsToContents()
+    max_map = max_widths or {}
+    min_map = min_widths or {}
+    for col in range(table.columnCount()):
+        width = table.columnWidth(col)
+        if col in min_map:
+            width = max(width, min_map[col])
+        if col in max_map:
+            width = min(width, max_map[col])
+        table.setColumnWidth(col, width)
+
+
 __all__ = [
     "CAPTION_EDITOR_SOFT_LIMIT",
     "ICON_NAME",
@@ -207,11 +249,14 @@ __all__ = [
     "PROJECT_DIR",
     "WINDOWS_APP_USER_MODEL_ID",
     "application_icon",
+    "apply_capped_column_widths",
     "detect_ffmpeg",
+    "existing_directory_for",
     "format_eta",
     "format_size",
     "hidden_subprocess_kwargs",
     "kind_label",
+    "open_in_file_manager",
     "path_text",
     "prepare_qt_plugins",
     "prepare_windows_app_identity",

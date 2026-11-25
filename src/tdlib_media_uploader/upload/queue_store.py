@@ -8,10 +8,11 @@ from threading import Lock
 
 from ..config import paths
 from ..core.concurrency import CancellationRequested, raise_if_cancelled
+from ..core.filesystem import stable_path
 from ..core.persistence import atomic_write_json, atomic_write_text
 from ..core.uploader_database import database_for, encode_record
 from .queue import (
-    ACTION_REQUIRED, ACTIVE, RECOVERABLE, AlbumStatus, TaskStatus, UploadTask, finish_task, now,
+    ACTION_REQUIRED, ACTIVE, RECOVERABLE, AlbumOutcome, AlbumStatus, TaskStatus, UploadTask, finish_task, now,
     retry_failed_album, skip_album,
 )
 from .queue_recovery import recover_task, review_matches_task, verify_delivery, verify_task
@@ -335,7 +336,29 @@ class UploadQueue:
             retry = retry_failed_album(task, album_key, confirmed)
             verify_task(retry, self.runtime_paths, cancel_event=cancel_event, progress=progress, database=self.database)
             return retry
-        outcomes = tuple(outcome for outcome in task.album_outcomes if outcome.status is not AlbumStatus.UNKNOWN)
+        confirmed_set = set(confirmed)
+        plans_by_key = {plan.key: plan for plan in task.plans}
+        outcomes = []
+        for outcome in task.album_outcomes:
+            if outcome.status is not AlbumStatus.UNKNOWN:
+                outcomes.append(outcome)
+                continue
+            plan = plans_by_key.get(outcome.album_key)
+            if plan is None or outcome.failure_stage == "persistence":
+                continue
+            pending = {stable_path(item.path) for item in plan.pending_items}
+            remaining = sorted(pending - confirmed_set)
+            if (pending & confirmed_set) and remaining:
+                outcomes.append(
+                    AlbumOutcome(
+                        outcome.album_key,
+                        AlbumStatus.PARTIAL,
+                        outcome.error,
+                        failed_paths=tuple(remaining),
+                        failure_stage="partial_delivery",
+                    )
+                )
+        outcomes = tuple(outcomes)
         if action == "restore":
             return replace(task, status=TaskStatus.PENDING, confirmed_paths=confirmed, album_outcomes=outcomes,
                            started_at=None, finished_at=None, outcome=None, error=None, paused_by_policy=False)
@@ -388,6 +411,15 @@ class UploadQueue:
     def remove(self, task_id):
         index = self._pending_index(task_id)
         self._commit(self.tasks[:index] + self.tasks[index + 1:], self.paused)
+
+    @_queue_write
+    def clear_finished(self):
+        terminal = {TaskStatus.COMPLETED, TaskStatus.SKIPPED}
+        remaining = tuple(task for task in self.tasks if task.status not in terminal)
+        removed = len(self.tasks) - len(remaining)
+        if removed:
+            self._commit(remaining, self.paused)
+        return removed
 
     @_queue_write
     def move(self, task_id, direction):

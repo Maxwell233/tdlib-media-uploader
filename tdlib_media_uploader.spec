@@ -101,7 +101,15 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "pytest",
+        "_pytest",
+        "pluggy",
+        "iniconfig",
+        "pygments",
+        "pytest_mock",
+        "tests",
+    ],
     noarchive=False,
 )
 

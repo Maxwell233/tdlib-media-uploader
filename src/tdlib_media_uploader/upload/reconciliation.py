@@ -22,11 +22,18 @@ class SourceRootRequired(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ReconciledAlbum:
-    """The source and target identity of durably confirmed snapshots."""
+    """Structured outcome and verified identity for one reconciled Album."""
 
-    source_root: Path
+    source_root: Path | None
     target: Mapping
-    snapshots: tuple[FileSnapshot, ...]
+    snapshots: tuple[FileSnapshot, ...] = ()
+    kind: str = ""
+    album_key: str = ""
+    sent: bool = True
+    confirmed_snapshots: tuple[FileSnapshot, ...] = ()
+    reupload_snapshots: tuple[FileSnapshot, ...] = ()
+    syncable: bool = True
+    reason: str = ""
 
 
 def _item_delivery(record: dict) -> list[dict]:
@@ -124,6 +131,38 @@ class ReconciliationService:
             )
         return items
 
+    @staticmethod
+    def _resolve_record_source_root(
+        record: dict,
+        *,
+        source_root=None,
+        require_explicit: bool = True,
+    ) -> Path | None:
+        roots = {
+            str(item.get("source_root"))
+            for item in record.get("items", ())
+            if isinstance(item, dict) and item.get("source_root")
+        }
+        if record.get("source_root"):
+            roots.add(str(record["source_root"]))
+        if len(roots) > 1:
+            raise ValueError("上传记录包含多个来源目录，已保留保护记录")
+        root = next(iter(roots), None) or source_root
+        if root is None:
+            if require_explicit:
+                raise SourceRootRequired("旧记录缺少来源目录，请选择当时扫描的根目录；不会使用当前配置猜测")
+            return None
+        from ..core.filesystem import stable_path
+
+        normalized_root = Path(stable_path(root))
+        if any(
+            not Path(stable_path(item["path"])).is_relative_to(normalized_root)
+            for item in record.get("items", ())
+            if isinstance(item, dict) and item.get("path")
+        ):
+            raise ValueError("来源目录不包含上传记录中的文件，已保留保护记录")
+        return normalized_root
+
     def _state_for_journal(self, kind: str, record: dict, *, fallback_target=None, source_root=None):
         """Create the matching uploader state without touching source files.
 
@@ -154,25 +193,65 @@ class ReconciliationService:
             module = importlib.import_module("tdlib_media_uploader.media.mixed_pipeline")
         else:
             raise ValueError(f"无法为未知媒体类型恢复上传断点：{kind}")
-        roots = {str(item.get("source_root")) for item in record.get("items", ())
-                 if isinstance(item, dict) and item.get("source_root")}
-        if record.get("source_root"):
-            roots.add(str(record["source_root"]))
-        if len(roots) > 1:
-            raise ValueError("上传记录包含多个来源目录，已保留保护记录")
-        root = next(iter(roots), None) or source_root
-        if root is None:
-            raise SourceRootRequired("旧记录缺少来源目录，请选择当时扫描的根目录；不会使用当前配置猜测")
-        from ..core.filesystem import stable_path
-        normalized_root = Path(stable_path(root))
-        if any(not Path(stable_path(item["path"])).is_relative_to(normalized_root)
-               for item in record.get("items", ())
-               if isinstance(item, dict) and item.get("path")):
-            raise ValueError("来源目录不包含上传记录中的文件，已保留保护记录")
+        root = self._resolve_record_source_root(record, source_root=source_root, require_explicit=True)
         from ..core.upload_state import UploadState
         return UploadState(kind=kind, source_root=Path(root), target=target,
                            state_dir=module.STATE_DIR, reset=False,
                            database=getattr(self.inflight_journal, "database", None))
+
+    @staticmethod
+    def _to_snapshots(items) -> tuple[FileSnapshot, ...]:
+        from ..core.filesystem import stable_path
+
+        return tuple(
+            FileSnapshot(stable_path(item["path"]), int(item["scan_size"]), int(item["scan_mtime_ns"]))
+            for item in items
+        )
+
+    def _build_reconciled_album(
+        self,
+        *,
+        kind: str,
+        album_key: str,
+        sent: bool,
+        record: dict,
+        confirmed_items=(),
+        reupload_items=(),
+        verified_target: Mapping | None = None,
+        verified_source_root: Path | None = None,
+        fallback_reason: str = "",
+    ) -> ReconciledAlbum:
+        recorded_target = self._journal_target(record)
+        target = dict(recorded_target) if recorded_target else {}
+        if not target and verified_target:
+            # Keep empty when the journal itself lacked a target so GUI sync never skips target checks.
+            pass
+        confirmed_snaps = self._to_snapshots(confirmed_items)
+        reupload_snaps = self._to_snapshots(reupload_items)
+        has_all_snaps = bool(confirmed_snaps or reupload_snaps)
+        syncable = bool(
+            kind in {"video", "image", "mixed"}
+            and album_key
+            and recorded_target
+            and verified_source_root is not None
+            and has_all_snaps
+            and not fallback_reason
+        )
+        reason = fallback_reason
+        if not syncable and not reason:
+            reason = "旧记录缺少目标、来源目录或完整文件快照，已保留对账结果，请重新扫描目录。"
+        return ReconciledAlbum(
+            source_root=verified_source_root,
+            target=target,
+            snapshots=confirmed_snaps if not sent else (*confirmed_snaps, *reupload_snaps),
+            kind=str(kind or "").strip().lower(),
+            album_key=str(album_key or ""),
+            sent=bool(sent),
+            confirmed_snapshots=confirmed_snaps,
+            reupload_snapshots=reupload_snaps,
+            syncable=syncable,
+            reason=reason,
+        )
 
     def reconcile_inflight(
         self,
@@ -183,7 +262,7 @@ class ReconciliationService:
         message_ids=None,
         target=None,
         source_root=None,
-    ) -> ReconciledAlbum | None:
+    ) -> ReconciledAlbum:
         """Apply an Album-level decision without querying Telegram history."""
 
         requested_target = normalize_target(target)
@@ -204,17 +283,53 @@ class ReconciliationService:
                 row["message_id"] for row in successful
             ):
                 raise ValueError("上传记录中的成功消息无法对应到源文件，已保留保护记录")
+            confirmed_items: list[dict] = []
+            reupload_items: list[dict] = []
+            verified_root: Path | None = None
+            verified_target: Mapping = {}
+            fallback_reason = ""
             if successful:
                 snapshots = self._snapshot_items(record)
                 state = self._state_for_journal(
                     selected_kind, record, fallback_target=requested_target or None, source_root=source_root,
                 )
+                successful_indices = {row["index"] for row in successful}
+                confirmed_items = [snapshots[row["index"]] for row in successful]
+                reupload_items = [
+                    snapshots[index] for index in range(len(snapshots)) if index not in successful_indices
+                ]
                 state.mark_album_completed(
-                    [snapshots[row["index"]] for row in successful],
+                    confirmed_items,
                     [row["message_id"] for row in successful],
                 )
+                if getattr(state, "source_root", None) is not None:
+                    from ..core.filesystem import stable_path
+
+                    verified_root = Path(stable_path(state.source_root))
+                verified_target = dict(getattr(state, "target", {}) or {})
             self.inflight_journal.mark_not_sent(selected_kind, album_key, target=lookup_target)
-            return
+            if not successful:
+                try:
+                    snapshots = self._snapshot_items(record)
+                    reupload_items = list(snapshots)
+                    verified_root = self._resolve_record_source_root(
+                        record, source_root=source_root, require_explicit=False,
+                    )
+                except (RuntimeError, ValueError) as exc:
+                    fallback_reason = str(exc)
+                    reupload_items = []
+                    verified_root = None
+            return self._build_reconciled_album(
+                kind=selected_kind,
+                album_key=album_key,
+                sent=False,
+                record=record,
+                confirmed_items=confirmed_items,
+                reupload_items=reupload_items,
+                verified_target=verified_target,
+                verified_source_root=verified_root,
+                fallback_reason=fallback_reason,
+            )
         items = self._snapshot_items(record)
         if message_ids is not None:
             ids = list(message_ids)
@@ -231,12 +346,21 @@ class ReconciliationService:
             fallback_target=requested_target or None,
             source_root=source_root,
         )
-        confirmation = None
+        verified_root = None
         if getattr(state, "source_root", None) is not None:
-            confirmation = ReconciledAlbum(state.source_root, state.target, tuple(
-                FileSnapshot(str(item["path"]), int(item["scan_size"]), int(item["scan_mtime_ns"]))
-                for item in items
-            ))
+            from ..core.filesystem import stable_path
+
+            verified_root = Path(stable_path(state.source_root))
+        confirmation = self._build_reconciled_album(
+            kind=selected_kind,
+            album_key=album_key,
+            sent=True,
+            record=record,
+            confirmed_items=items,
+            reupload_items=(),
+            verified_target=dict(getattr(state, "target", {}) or {}),
+            verified_source_root=verified_root,
+        )
         complete = getattr(self.inflight_journal, "complete_album", None)
         if callable(complete) and complete(state, items, ids, kind=selected_kind, album_key=album_key,
                                           target=lookup_target, reconcile=True):

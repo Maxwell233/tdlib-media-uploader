@@ -25,6 +25,16 @@ class BatchStatus(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+FAILURE_STAGES: tuple[str, ...] = (
+    "pre_submit",
+    "request_rejected",
+    "send_failed",
+    "partial_delivery",
+    "unknown",
+    "persistence",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class FileSnapshot:
     """The one-stat source identity captured during discovery."""
@@ -102,6 +112,7 @@ class UploadBatchResult:
     confirmed_items: tuple[MediaItem, ...] = ()
     error: str | None = None
     deferred_items: tuple[MediaItem, ...] = ()
+    failure_stage: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
