@@ -161,7 +161,8 @@ class ReconciliationService:
             raise ValueError("来源目录不包含上传记录中的文件，已保留保护记录")
         from ..core.upload_state import UploadState
         return UploadState(kind=kind, source_root=Path(root), target=target,
-                           state_dir=module.STATE_DIR, reset=False)
+                           state_dir=module.STATE_DIR, reset=False,
+                           database=getattr(self.inflight_journal, "database", None))
 
     def reconcile_inflight(
         self,
@@ -220,9 +221,11 @@ class ReconciliationService:
             fallback_target=requested_target or None,
             source_root=source_root,
         )
-        # ``mark_album_completed`` performs an atomic fsync-backed save.  Do
-        # not touch the journal until it returns; a save failure therefore
-        # leaves the UNKNOWN/SUBMITTED record blocking automatic resends.
+        complete = getattr(self.inflight_journal, "complete_album", None)
+        if callable(complete) and complete(state, items, ids, kind=selected_kind, album_key=album_key,
+                                          target=lookup_target, reconcile=True):
+            return
+        # Preserve the protection record until the standalone checkpoint is durable.
         state.mark_album_completed(items, ids)
         self.inflight_journal.mark_confirmed(
             selected_kind,
@@ -269,7 +272,10 @@ class ReconciliationService:
             current,
             fallback_target=effective_target or None,
         )
-        # The journal remains present until this durable write returns.
+        complete = getattr(self.inflight_journal, "complete_album", None)
+        if callable(complete) and complete(checkpoint, items, ids, kind=kind, album_key=album_key,
+                                          target=effective_target):
+            return True
         checkpoint.mark_album_completed(items, ids)
         self.inflight_journal.finalize(kind, album_key, target=effective_target)
         return True

@@ -2,6 +2,9 @@
 
 import math
 from dataclasses import dataclass
+from random import uniform
+from threading import Lock
+from time import monotonic
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,3 +32,54 @@ class AlbumRetryPolicy:
     @property
     def max_attempts(self):
         return 1 + (self.max_retries if self.enabled else 0)
+
+
+@dataclass(frozen=True, slots=True)
+class QueueSendPolicy:
+    error_policy: str
+    pause_on_unknown: bool
+    min_interval: float
+    flood_jitter: float
+    flood_max_retries: int = 1
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(
+            getattr(config, "UPLOAD_QUEUE_ERROR_POLICY", "pause_on_error"),
+            getattr(config, "UPLOAD_PAUSE_ON_UNKNOWN", True),
+            getattr(config, "UPLOAD_MIN_SEND_INTERVAL", 0.0),
+            getattr(config, "UPLOAD_FLOOD_JITTER", 0.25),
+            getattr(config, "UPLOAD_FLOOD_MAX_RETRIES", 1),
+        )
+
+    def pauses_for(self, *, unknown=False):
+        return self.error_policy == "pause_on_error" or (unknown and self.pause_on_unknown)
+
+
+class TargetSendGate:
+    """Share rate limits across consecutive jobs using the same target."""
+
+    def __init__(self):
+        self._lock = Lock()
+        self._cooldowns = {}
+        self._last_send = -math.inf
+
+    def remaining(self, target, interval):
+        with self._lock:
+            now = monotonic()
+            for expired in tuple(key for key, value in self._cooldowns.items() if value <= now):
+                del self._cooldowns[expired]
+            return max(0.0, self._last_send + interval - now, self._cooldowns.get(target, now) - now)
+
+    def mark_send(self):
+        with self._lock:
+            self._last_send = monotonic()
+
+    def cool_down(self, target, seconds, jitter):
+        with self._lock:
+            self._cooldowns[target] = max(
+                self._cooldowns.get(target, 0.0), monotonic() + seconds + uniform(0, jitter),
+            )
+
+
+target_send_gate = TargetSendGate()

@@ -196,6 +196,8 @@ class UploadWorker(QThread):
         source_root_provider: Callable[[str], Path | str] | None = None,
         config: Any | None = None,
         runtime_paths: Any | None = None,
+        session_manager=None,
+        queue_task_id: str | None = None,
     ):
         super().__init__()
         self.kind = _require_kind(kind)
@@ -209,6 +211,8 @@ class UploadWorker(QThread):
         self.source_root_provider = source_root_provider
         self.config = config
         self.runtime_paths = runtime_paths
+        self.session_manager = session_manager
+        self.queue_task_id = queue_task_id
         self.ui = GuiConsoleUI(
             auth_bridge,
             kind,
@@ -270,6 +274,8 @@ class UploadWorker(QThread):
                 preview_result=self.preview_result,
                 config=self._config(),
                 runtime_paths=self._runtime_paths(),
+                **({"session_manager": self.session_manager} if self.session_manager is not None else {}),
+                **({"queue_task_id": self.queue_task_id} if self.queue_task_id is not None else {}),
                 on_ready=self._ready,
             )
             if not isinstance(self.result, UploadRunResult):

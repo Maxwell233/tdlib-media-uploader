@@ -152,9 +152,6 @@ thumb_target_kib = 80
 
 verify_all_metadata_before_upload = false
 
-# 上传当前组时是否后台提前准备/扫描下一组（最多提前1组，避免占用过多资源）
-prefetch_next_album = true
-
 # 视频兼容处理策略：
 # "remux"（默认）：遇到兼容的非 MP4 容器（MKV、AVI、TS、MTS、M2TS 等），
 #   当内部编码兼容（视频 H.264/HEVC，音频 AAC/MP3 或无音轨）时，
@@ -191,6 +188,13 @@ directory = "cache/staging"
 cleanup_on_start = true
 cleanup_days = 7
 cleanup_after_success = true
+
+
+[cache]
+
+# 启动时在任务开始前按最近使用时间清理受管缓存。单位 MiB，0 代表清空该缓存。
+thumbnail_max_mib = 512
+image_compression_max_mib = 2048
 
 
 [scan]
@@ -275,6 +279,16 @@ database_encryption_key = ""
 use_file_database = true
 use_chat_info_database = true
 use_message_database = false
+enable_preliminary_upload = false
+max_concurrent_file_uploads = 4
+preliminary_wait_seconds = 30
+
+
+[upload]
+# 三种媒体共享后台准备队列。字节上限包含正在发送的已准备相册。
+prefetch_next_album = true
+prefetch_slots = 3
+prefetch_max_bytes = 8589934592
 
 
 [upload_retry]
@@ -282,3 +296,8 @@ use_message_database = false
 enabled = false
 max_retries = 2
 retry_delay_seconds = 1.0
+queue_error_policy = "pause_on_error"
+pause_on_unknown = true
+min_send_interval_seconds = 0.0
+flood_jitter_seconds = 0.25
+flood_max_retries = 1

@@ -11,9 +11,10 @@ TDLib adapters; in-memory stores support standalone engine use and tests.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future
+from concurrent.futures import Future, wait
 from dataclasses import dataclass, field, replace
 import hashlib
+from itertools import chain
 import math
 import time
 from uuid import uuid4
@@ -22,7 +23,8 @@ from pathlib import Path
 import threading
 from typing import Any, Protocol
 
-from ..core.concurrency import ContextExecutor, cancelable_sleep
+from ..core.concurrency import CancellationRequested, UploadPreparationExecutor, cancelable_sleep
+from ..core.filesystem import io_worker_count
 from ..core.compat import call_supported as _call_supported
 from ..telegram.send_result import SendRequestRejected
 from .delivery import _as_ids, _ObservedSend, _normalize_send_result, _normalize_status
@@ -44,7 +46,7 @@ from ..core.models import (
 from .planner import item_identity, restrict_plan, validate_plan
 from .preflight import preflight_plan
 from .prepared_media import PreparedMedia, SourceChanged, capture_prepared_media
-from .retry import AlbumRetryPolicy
+from .retry import AlbumRetryPolicy, target_send_gate
 from ..core.source_snapshot import validate_snapshots
 
 
@@ -124,17 +126,15 @@ class _NullEventSink:
 
 
 class _PrefetchEventSink:
-    """EventSink wrapper for background prefetch that filters out ProgressEvent.
+    """Keep speculative and cancelled preparation from overwriting live progress."""
 
-    This ensures that background preparation (preflight/probing) of the next album
-    does not overwrite or interfere with the active album's upload progress display.
-    """
-
-    def __init__(self, target_sink: EventSink | None):
+    def __init__(self, target_sink: EventSink | None, token: CancelToken, *, show_progress: bool):
         self.target_sink = target_sink
+        self.token = token
+        self.show_progress = show_progress
 
     def emit(self, event: Any) -> None:
-        if isinstance(event, ProgressEvent):
+        if self.token.is_cancelled() or (not self.show_progress and isinstance(event, ProgressEvent)):
             return
         if self.target_sink is not None:
             emit = getattr(self.target_sink, "emit", None)
@@ -154,6 +154,13 @@ class _PrefetchCancelToken:
 
     def cancel(self) -> None:
         self._cancelled.set()
+
+    @property
+    def event(self):
+        return self
+
+    def is_set(self) -> bool:
+        return self.is_cancelled()
 
     def is_cancelled(self) -> bool:
         return (
@@ -269,6 +276,7 @@ class _PreparedBatch:
     batch_result: UploadBatchResult | None = None
     managed_processed_paths: tuple[Path, ...] = ()
     prepared_media: PreparedMedia | None = None
+    remote_album: Any = None
 
 
 
@@ -421,6 +429,7 @@ class UploadEngine:
             metadata=metadata,
             scan_result=context.scan_result if context else None,
             plans=context.plans if context else None,
+            queue_task_id=context.queue_task_id if context else None,
         )
 
     @staticmethod
@@ -507,6 +516,31 @@ class UploadEngine:
         function = getattr(stager, "cleanup", None)
         if callable(function):
             _call_supported(function, (plan,), context=context, confirmed=confirmed)
+
+    def _cancel_prefetch(self, future, token, context):
+        token.cancel()
+        future.cancel()
+
+        def cleanup(completed):
+            if completed.cancelled():
+                return
+            try:
+                unconsumed = completed.result()
+            except Exception as error:
+                self._log(context.event_sink, "WARNING", f"清理未发送的预取 Album 失败：{error}")
+                return
+            try:
+                if context.stager is not None and unconsumed.effective_plan is not None:
+                    self._cleanup(context.stager, unconsumed.effective_plan, context, confirmed=False)
+            except Exception as error:
+                self._log(context.event_sink, "WARNING", f"清理未发送的预取 Album 失败：{error}")
+            try:
+                if unconsumed.remote_album is not None:
+                    unconsumed.remote_album.close()
+            except Exception as error:
+                self._log(context.event_sink, "WARNING", f"取消未发送的预上传 Album 失败：{error}")
+
+        future.add_done_callback(cleanup)
 
     @staticmethod
     def _normalize_content_result(
@@ -762,6 +796,8 @@ class UploadEngine:
                     preflight_failed=preflight_failed,
                     preflight_deferred=preflight_deferred,
                 )
+            if getattr(checker, "validated_file_readiness", False):
+                run_context = replace(run_context, metadata={**run_context.metadata, "preflight_verified": True})
 
         ready_items = tuple(current_plan.pending_items)
         batch_deferred = tuple(plan_deferred)
@@ -806,10 +842,13 @@ class UploadEngine:
                 )
 
         errors: list[str] = []
-        if getattr(strategy, "validate_source_snapshots", False):
+        if (getattr(strategy, "validate_source_snapshots", False)
+                and not run_context.metadata.get("preflight_verified")):
             try:
                 capture_prepared_media(effective_plan.pending_items, ())
             except SourceChanged as exc:
+                if run_context.stager is not None:
+                    self._cleanup(run_context.stager, effective_plan, run_context, confirmed=False)
                 return _PreparedBatch(plan=plan, skipped=True, errors=[str(exc)],
                     plan_deferred=tuple((*plan_deferred, *effective_plan.pending_items)),
                     preflight_failed=preflight_failed, preflight_deferred=preflight_deferred)
@@ -956,12 +995,23 @@ class UploadEngine:
                 prepared_media = capture_prepared_media(ready_items, contents)
             except SourceChanged as exc:
                 # Defer the complete Album to preserve its caption and membership.
+                if run_context.stager is not None:
+                    self._cleanup(run_context.stager, effective_plan, run_context, confirmed=False)
                 return _PreparedBatch(plan=plan, skipped=True, errors=[*errors, str(exc)],
                     plan_deferred=tuple((*plan_deferred, *ready_items)),
                     build_deferred=build_deferred, build_failed=build_failed,
                     preflight_failed=preflight_failed, preflight_deferred=preflight_deferred)
 
         send_plan = restrict_plan(effective_plan, ready_items)
+        remote_album = None
+        prepare_remote = getattr(run_context.sender, "prepare_remote", None)
+        if callable(prepare_remote):
+            try:
+                remote_album = prepare_remote(contents, context=run_context)
+            except CancellationRequested:
+                return _PreparedBatch(plan=plan, effective_plan=effective_plan, cancelled=True, errors=errors)
+            except Exception as error:
+                self._log(sink, "WARNING", f"Album {plan.key} 预上传不可用：{error}")
         return _PreparedBatch(
             plan=plan,
             effective_plan=effective_plan,
@@ -978,29 +1028,44 @@ class UploadEngine:
             errors=errors,
             managed_processed_paths=tuple(managed_paths),
             prepared_media=prepared_media,
+            remote_album=remote_album,
         )
 
-    def _attempts(self, prep, context, ordinal, policy):
+    def _attempts(self, prep, context, ordinal, policy, *, first_attempt=1, last_attempt=None, previous=None):
         """Keep one prepared payload and close each failed attempt before retrying."""
         plan = prep.plan
         items = prep.ready_items
-        contents = prep.contents
+        contents = prep.remote_album.contents if prep.remote_album is not None else prep.contents
         token, sink, journal, target = (
             context.cancel_token, context.event_sink, context.journal, context.target
         )
+        schedule = context.metadata.get("queue_send_policy")
+        gate = context.metadata.get("target_send_gate", target_send_gate) if schedule is not None else None
+        target_key = _stable_target(target)
+        max_attempts = policy.max_attempts
+        if not policy.enabled and schedule is not None:
+            max_attempts += schedule.flood_max_retries
 
         def stopped():
             return _is_cancel_requested(token) or _stop_after_current_requested(token)
 
-        last_error = None
-        observed = None
-        for attempt in range(1, policy.max_attempts + 1):
+        last_error = previous.error if previous is not None else None
+        observed = previous
+        last_attempt = max_attempts if last_attempt is None else last_attempt
+        for attempt in range(first_attempt, last_attempt + 1):
             if stopped():
                 return observed, True
+            if gate is not None:
+                while (remaining := gate.remaining(target_key, schedule.min_interval)) > 0:
+                    self._emit(sink, AlbumAttemptEvent(
+                        ordinal, plan.key, attempt, max_attempts, last_error, math.ceil(remaining),
+                    ))
+                    if not cancelable_sleep(min(1.0, remaining), cancel_token=stopped):
+                        return observed, True
             if attempt > 1:
                 try:
                     validate_snapshots((item.path, item.snapshot.size, item.snapshot.mtime_ns)
-                                       for item in plan.items)
+                                       for item in items)
                     if prep.prepared_media is not None:
                         prep.prepared_media.validate()
                 except SourceChanged as exc:
@@ -1013,6 +1078,14 @@ class UploadEngine:
                         return _ObservedSend(BatchStatus.UNKNOWN, error="发送记录仍受保护，已取消整组重试", preserve_journal=True), False
                 except Exception as exc:
                     return _ObservedSend(BatchStatus.UNKNOWN, error=f"重试前状态核对失败：{exc}", preserve_journal=True), False
+
+            wait_until_ready = getattr(context.sender, "wait_until_ready", None)
+            if callable(wait_until_ready):
+                try:
+                    if not wait_until_ready(context):
+                        return observed, True
+                except Exception as error:
+                    return _ObservedSend(BatchStatus.FAILED, error=str(error)), stopped()
 
             # The stable key still protects the same Album; each try gets a
             # separate identifier for diagnostics in its durable journal.
@@ -1031,15 +1104,17 @@ class UploadEngine:
                 self._discard_unsent(journal, plan, target)
                 return observed, True
 
-            self._emit(sink, AlbumAttemptEvent(ordinal, plan.key, attempt, policy.max_attempts, last_error))
+            self._emit(sink, AlbumAttemptEvent(ordinal, plan.key, attempt, max_attempts, last_error))
             if attempt > 1:
-                self._log(sink, "INFO", f"Album {ordinal} 开始第 {attempt}/{policy.max_attempts} 次尝试")
+                self._log(sink, "INFO", f"Album {ordinal} 开始第 {attempt}/{max_attempts} 次尝试")
             try:
                 if prep.prepared_media is not None:
                     prep.prepared_media.validate()
                 if stopped():
                     self._discard_unsent(journal, plan, target)
                     return observed, True
+                if gate is not None:
+                    gate.mark_send()
                 raw = self._send(context.sender, contents, prep.send_plan, context, prep.prepared_media)
                 observed = _normalize_send_result(raw, len(items))
             except _JournalProtectionError:
@@ -1059,6 +1134,10 @@ class UploadEngine:
                     observed = _ObservedSend(status, error=str(exc) or status.value)
 
             cancelled = _is_cancel_requested(token)
+            rate_limit = observed.flood_wait()
+            if gate is not None:
+                if rate_limit is not None:
+                    gate.cool_down(target_key, rate_limit, schedule.flood_jitter if rate_limit > 0 else 0)
             if observed.status is not BatchStatus.FAILED:
                 return observed, cancelled
 
@@ -1080,22 +1159,24 @@ class UploadEngine:
             eligible_delay = observed.album_retry_delay(
                 len(items), complete_album=len(items) == len(plan.items)
             )
+            if not policy.enabled and rate_limit is None:
+                eligible_delay = None
             if cancelled or _stop_after_current_requested(token) or eligible_delay is None:
                 return observed, stopped()
-            if attempt == policy.max_attempts:
-                if policy.enabled:
-                    self._log(sink, "WARNING", f"Album {ordinal} 已达到最大尝试次数（{attempt}/{policy.max_attempts}），继续后续 Album")
+            if attempt == last_attempt:
+                if max_attempts > 1 and attempt == max_attempts:
+                    self._log(sink, "WARNING", f"Album {ordinal} 已达到最大尝试次数（{attempt}/{max_attempts}）")
                 return observed, False
 
-            delay = max(policy.delay_seconds, eligible_delay)
-            reason = "发送请求被限流拒绝" if rejection is not None else "全部消息明确失败"
+            delay = max(policy.delay_seconds if policy.enabled else 0, eligible_delay)
+            reason = "发送请求被 Telegram 拒绝" if rejection is not None else "全部消息明确失败"
             self._log(sink, "WARNING",
                       f"Album {ordinal} 第 {attempt} 次尝试{reason}：{last_error}，{delay:g} 秒后重试")
             deadline = time.monotonic() + delay
             remaining = delay
             while remaining > 0:
                 self._emit(sink, AlbumAttemptEvent(
-                    ordinal, plan.key, attempt, policy.max_attempts, last_error, math.ceil(remaining)
+                    ordinal, plan.key, attempt, max_attempts, last_error, math.ceil(remaining)
                 ))
                 if not cancelable_sleep(min(1.0, remaining), cancel_token=stopped):
                     return observed, True
@@ -1155,6 +1236,15 @@ class UploadEngine:
         confirmed_count = 0
         confirmed_recovery_failed = False
         retry_policy = run_context.metadata.get("album_retry", AlbumRetryPolicy())
+        send_policy = run_context.metadata.get("queue_send_policy")
+        reserve_tail_attempt = (retry_policy.enabled and send_policy is not None
+                                and send_policy.error_policy == "skip_and_retry")
+        paused = False
+        tail = []
+        delayed_failures = {}
+
+        def should_pause(*, unknown=False):
+            return send_policy is not None and send_policy.pauses_for(unknown=unknown)
 
         try:
             _check_cancel(token)
@@ -1210,7 +1300,28 @@ class UploadEngine:
                     state=state,
                     context=run_context,
                 )
-            plans = tuple(raw_plans)
+            candidates = []
+            candidate_bytes = []
+            pending_total = 0
+            for plan in raw_plans:
+                _check_cancel(token)
+                pending = tuple(item for item in plan.pending_items if not self._state_completed(state, item))
+                if pending:
+                    pending_total += 1
+                    candidates.append(plan)
+                    candidate_bytes.append(sum(max(0, item.snapshot.size) for item in pending))
+                elif plan.pending_items:
+                    # A fully checkpointed Album can still carry a protected
+                    # journal record from an interrupted finalization.
+                    try:
+                        unresolved = self._journal_call(journal, "unresolved", kind, plan.key, target=run_context.target)
+                    except Exception:
+                        unresolved = True
+                    if unresolved:
+                        candidates.append(plan)
+                        candidate_bytes.append(0)
+            plans = tuple(candidates)
+            run_context = replace(run_context, metadata={**run_context.metadata, "pending_plan_total": pending_total})
             if _stop_after_current_requested(token):
                 return UploadRunResult(
                     RUN_CANCELLED,
@@ -1237,45 +1348,109 @@ class UploadEngine:
             if self.prefetch_next is not None
             else bool(run_context.metadata.get("prefetch_next", False))
         )
-        executor = ContextExecutor(max_workers=1) if prefetch_enabled else None
-        prefetch_future: Future[_PreparedBatch] | None = None
-        prefetch_cancel_token: _PrefetchCancelToken | None = None
-        prefetched_plan_index: int | None = None
+        slots = max(1, int(run_context.metadata.get("prefetch_slots", 3)))
+        byte_limit = max(1, int(run_context.metadata.get("prefetch_max_bytes", 8 * 1024 ** 3)))
+        worker_count = io_worker_count(
+            run_context.source_root,
+            local=run_context.metadata.get("io_workers_local", 4),
+            network=run_context.metadata.get("io_workers_network", 2),
+        )
+        io_executor = UploadPreparationExecutor(worker_count, "tdlib-media-io")
+        run_context = replace(run_context, metadata={**run_context.metadata, "io_executor": io_executor})
+        executor = UploadPreparationExecutor(slots if prefetch_enabled else 1, "tdlib-prepare")
+        prefetched: dict[int, tuple[Future[_PreparedBatch], _PrefetchCancelToken, int]] = {}
+        reserved_bytes = 0
+        next_index = 0
+        consumed_index: int | None = None
+        active_remote = None
+
+        def schedule(index, plan, amount, *, show_progress):
+            prefetch_token = _PrefetchCancelToken(token)
+            prefetch_sink = _PrefetchEventSink(sink, prefetch_token, show_progress=show_progress)
+            prefetch_context = replace(run_context, cancel_token=prefetch_token, event_sink=prefetch_sink)
+            future = executor.submit(
+                self._prepare_plan, strategy, plan, prefetch_context,
+                state, journal, prefetch_token, prefetch_sink, kind,
+            )
+            slot = (future, prefetch_token, amount)
+            prefetched[index] = slot
+            return slot
+
+        def refill():
+            nonlocal next_index, reserved_bytes
+            if not prefetch_enabled:
+                return
+            while (next_index < len(plans) and len(prefetched) < slots
+                   and not (_is_cancel_requested(token) or _stop_after_current_requested(token))):
+                next_plan = plans[next_index]
+                amount = candidate_bytes[next_index]
+                if reserved_bytes + amount > byte_limit:
+                    return
+                schedule(next_index, next_plan, amount, show_progress=next_index == 0)
+                reserved_bytes += amount
+                next_index += 1
 
         try:
-            for plan_index, plan in enumerate(plans):
+            primary = ((index, plan, False) for index, plan in enumerate(plans))
+            for plan_index, initial_plan, tail_retry in chain(primary, tail):
+                plan = initial_plan
+                if active_remote is not None:
+                    active_remote.close()
+                    active_remote = None
+                if consumed_index is not None:
+                    reserved_bytes -= prefetched.pop(consumed_index)[2]
+                    consumed_index = None
                 if _stop_after_current_requested(token) or _is_cancel_requested(token):
                     cancelled = True
                     break
 
-                if prefetch_future is not None and prefetched_plan_index == plan_index:
-                    try:
-                        prep = prefetch_future.result()
-                    except Exception as exc:
-                        message = f"Album {plan.key} 预加载异常：{exc}"
-                        errors.append(message)
-                        batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
-                        failed_items.extend(getattr(plan, "pending_items", ()))
-                        prefetch_future = None
-                        prefetched_plan_index = None
-                        continue
-                    finally:
-                        prefetch_future = None
-                        prefetch_cancel_token = None
-                        prefetched_plan_index = None
-                else:
-                    prep = self._prepare_plan(
-                        strategy,
-                        plan,
-                        run_context,
-                        state,
-                        journal,
-                        token,
-                        sink,
-                        kind,
-                    )
+                if tail_retry:
+                    previous, _, _, retry_at = delayed_failures[initial_plan.key]
+                    while (remaining := retry_at - time.monotonic()) > 0:
+                        self._emit(sink, AlbumAttemptEvent(
+                            plan_index + 1, initial_plan.key, retry_policy.max_attempts,
+                            retry_policy.max_attempts, previous.error, math.ceil(remaining),
+                        ))
+                        if not cancelable_sleep(min(1.0, remaining), cancel_token=lambda: (
+                            _is_cancel_requested(token) or _stop_after_current_requested(token)
+                        )):
+                            cancelled = True
+                            break
+                    if cancelled:
+                        break
+
+                if not tail_retry:
+                    refill()
+                slot = None if tail_retry else prefetched.get(plan_index)
+                if slot is None:
+                    # Prepare Albums larger than the entire budget only when
+                    # active, outside the speculative buffer.
+                    if not tail_retry:
+                        next_index = plan_index + 1
+                    slot = schedule(plan_index, plan, 0, show_progress=True)
+
+                prefetch_future = slot[0]
+                while not prefetch_future.done() and not (
+                    _is_cancel_requested(token) or _stop_after_current_requested(token)
+                ):
+                    wait((prefetch_future,), timeout=0.05)
+                if _is_cancel_requested(token) or _stop_after_current_requested(token):
+                    cancelled = True
+                    break
+                consumed_index = plan_index
+                try:
+                    prep = prefetch_future.result()
+                except Exception as exc:
+                    message = f"Album {plan.key} 预加载异常：{exc}"
+                    errors.append(message)
+                    batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
+                    failed_items.extend(getattr(plan, "pending_items", ()))
+                    if (paused := should_pause()):
+                        break
+                    continue
 
                 plan = prep.plan
+                active_remote = prep.remote_album
                 errors.extend(prep.errors)
                 failed_items.extend(prep.extra_failed_items)
                 failed_items.extend(prep.preflight_failed)
@@ -1290,13 +1465,24 @@ class UploadEngine:
 
                 if prep.cancelled:
                     cancelled = True
+                    if run_context.stager is not None and prep.effective_plan is not None:
+                        self._cleanup(run_context.stager, prep.effective_plan, run_context, confirmed=False)
                     break
 
                 if prep.batch_result is not None:
                     batches.append(prep.batch_result)
+                    if prep.confirmed_recovery_failed and (paused := should_pause(unknown=True)):
+                        break
+                    if prep.batch_result.status is BatchStatus.FAILED and (paused := should_pause()):
+                        break
+                    if prep.batch_result.status in {BatchStatus.PREPARED, BatchStatus.SUBMITTED, BatchStatus.UNKNOWN}:
+                        if (paused := should_pause(unknown=True)):
+                            break
                     continue
 
                 if prep.skipped:
+                    if (prep.ambiguous or prep.confirmed_recovery_failed) and (paused := should_pause(unknown=True)):
+                        break
                     continue
 
                 effective_plan = prep.effective_plan
@@ -1305,10 +1491,17 @@ class UploadEngine:
                 ready_items = prep.ready_items
                 batch_deferred = prep.batch_deferred
 
+                if prep.ambiguous and should_pause(unknown=True):
+                    paused = True
+                    batches.append(UploadBatchResult(plan.key, BatchStatus.UNKNOWN, error="Album 有待核对的发送记录"))
+                    if run_context.stager is not None and effective_plan is not None:
+                        self._cleanup(run_context.stager, effective_plan, run_context, confirmed=False)
+                    break
+
                 if not ready_items or send_plan is None or not contents:
                     continue
 
-                if _stop_after_current_requested(token):
+                if _stop_after_current_requested(token) or _is_cancel_requested(token):
                     if run_context.stager is not None and effective_plan is not None:
                         try:
                             self._cleanup(
@@ -1339,57 +1532,56 @@ class UploadEngine:
                             errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
                     continue
 
-                if executor is not None and plan_index + 1 < len(plans):
-                    if not (_is_cancel_requested(token) or _stop_after_current_requested(token)):
-                        prefetch_sink = _PrefetchEventSink(sink)
-                        prefetch_cancel_token = _PrefetchCancelToken(token)
-                        prefetch_context = replace(
-                            run_context,
-                            cancel_token=prefetch_cancel_token,
-                            event_sink=prefetch_sink,
-                        )
-                        next_plan = plans[plan_index + 1]
-                        prefetch_future = executor.submit(
-                            self._prepare_plan,
-                            strategy,
-                            next_plan,
-                            prefetch_context,
-                            state,
-                            journal,
-                            prefetch_cancel_token,
-                            prefetch_sink,
-                            kind,
-                        )
-                        prefetched_plan_index = plan_index + 1
-
                 try:
-                    observed, attempt_cancelled = self._attempts(prep, run_context, plan_index + 1, retry_policy)
+                    observed, attempt_cancelled = self._attempts(
+                        prep, run_context, plan_index + 1, retry_policy,
+                        first_attempt=retry_policy.max_attempts if tail_retry else 1,
+                        last_attempt=retry_policy.max_attempts - 1 if reserve_tail_attempt and not tail_retry else None,
+                        previous=delayed_failures[initial_plan.key][0] if tail_retry else None,
+                    )
                 except SourceChanged as error:
                     deferred_items.extend(ready_items)
                     errors.append(str(error))
+                    if run_context.stager is not None:
+                        self._cleanup(run_context.stager, effective_plan, run_context, confirmed=False)
                     continue
                 except _JournalProtectionError as error:
                     observed = _ObservedSend(BatchStatus.UNKNOWN, error=str(error), preserve_journal=True)
                     attempt_cancelled = _is_cancel_requested(token) or _stop_after_current_requested(token)
                 cancelled = cancelled or attempt_cancelled
                 if observed is None:
+                    if run_context.stager is not None:
+                        self._cleanup(run_context.stager, effective_plan, run_context, confirmed=False)
                     break
 
+                if tail_retry:
+                    delayed_failures.pop(initial_plan.key, None)
+
                 if observed.status is BatchStatus.FAILED:
-                    failed_items.extend(ready_items)
                     message = observed.error or "Album 发送失败"
-                    errors.append(f"Album {plan.key} 发送失败：{message}")
                     self._log(sink, "ERROR", message)
-                    batches.append(UploadBatchResult(
+                    batch = UploadBatchResult(
                         plan.key, BatchStatus.FAILED, message_ids=observed.message_ids,
                         error=message, deferred_items=batch_deferred,
-                    ))
+                    )
+                    tail_delay = observed.album_retry_delay(
+                        len(ready_items), complete_album=len(ready_items) == len(plan.items),
+                    ) if reserve_tail_attempt and not tail_retry and not cancelled else None
+                    if tail_delay is not None:
+                        retry_at = time.monotonic() + max(tail_delay, retry_policy.delay_seconds)
+                        delayed_failures[initial_plan.key] = (observed, batch, ready_items, retry_at)
+                        tail.append((plan_index, initial_plan, True))
+                        self._log(sink, "INFO", f"Album {plan.key} 已排入队尾重试")
+                    else:
+                        failed_items.extend(ready_items)
+                        errors.append(f"Album {plan.key} 发送失败：{message}")
+                        batches.append(batch)
                     if run_context.stager is not None and effective_plan is not None:
                         try:
                             self._cleanup(run_context.stager, effective_plan, run_context, confirmed=False)
                         except Exception as cleanup_error:
                             errors.append(f"Album {plan.key} 暂存清理失败：{cleanup_error}")
-                    if cancelled:
+                    if cancelled or (paused := should_pause()):
                         break
                     continue
 
@@ -1441,7 +1633,7 @@ class UploadEngine:
                         )
                     )
                     ambiguous = True
-                    if cancelled:
+                    if cancelled or (paused := should_pause(unknown=True)):
                         break
                     continue
 
@@ -1457,6 +1649,8 @@ class UploadEngine:
                         )
                     )
                     ambiguous = True
+                    if (paused := should_pause(unknown=True)):
+                        break
                     continue
 
                 try:
@@ -1480,11 +1674,20 @@ class UploadEngine:
                         )
                     )
                     ambiguous = True
+                    if (paused := should_pause(unknown=True)):
+                        break
                     continue
 
                 ids = observed.succeeded_ids or observed.message_ids
                 try:
-                    self._state_mark_completed(state, ready_items, ids)
+                    complete_album = getattr(journal, "complete_album", None)
+                    committed = callable(complete_album) and complete_album(
+                        state, [_item_payload(item) for item in ready_items], ids,
+                        kind=kind, album_key=plan.key, target=run_context.target,
+                        queue_task_id=run_context.queue_task_id,
+                    )
+                    if not committed:
+                        self._state_mark_completed(state, ready_items, ids)
                 except Exception as state_error:
                     # CONFIRMED remains durable and blocks a duplicate until the
                     # checkpoint can be repaired; do not finalize this journal.
@@ -1500,18 +1703,21 @@ class UploadEngine:
                             error=message,
                         )
                     )
+                    if (paused := should_pause(unknown=True)):
+                        break
                     continue
 
-                try:
-                    self._journal_call(
-                        journal,
-                        "finalize",
-                        kind,
-                        plan.key,
-                        target=run_context.target,
-                    )
-                except Exception as cleanup_error:
-                    errors.append(f"Album {plan.key} 日志确认失败：{cleanup_error}")
+                if not committed:
+                    try:
+                        self._journal_call(
+                            journal,
+                            "finalize",
+                            kind,
+                            plan.key,
+                            target=run_context.target,
+                        )
+                    except Exception as cleanup_error:
+                        errors.append(f"Album {plan.key} 日志确认失败：{cleanup_error}")
 
                 if run_context.stager is not None:
                     try:
@@ -1551,7 +1757,7 @@ class UploadEngine:
                         kind=kind,
                         phase="upload",
                         completed=confirmed_count,
-                        total=len(plans),
+                        total=pending_total,
                         path=str(ready_items[-1].path),
                         message=f"Album {plan.key} 已确认",
                     ),
@@ -1559,31 +1765,18 @@ class UploadEngine:
                 if cancelled:
                     break
         finally:
-            if executor is not None:
-                if prefetch_future is not None:
-                    if not prefetch_future.done():
-                        if prefetch_cancel_token is not None:
-                            prefetch_cancel_token.cancel()
-                        prefetch_future.cancel()
-                    try:
-                        unconsumed = prefetch_future.result(timeout=5)
-                        if (
-                            unconsumed is not None
-                            and unconsumed.effective_plan is not None
-                            and run_context.stager is not None
-                        ):
-                            try:
-                                self._cleanup(
-                                    run_context.stager,
-                                    unconsumed.effective_plan,
-                                    run_context,
-                                    confirmed=False,
-                                )
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                executor.shutdown(wait=True, cancel_futures=True)
+            if active_remote is not None:
+                active_remote.close()
+            for index, (future, prefetch_token, _) in prefetched.items():
+                if index != consumed_index:
+                    self._cancel_prefetch(future, prefetch_token, run_context)
+            executor.shutdown(wait=False, cancel_futures=True)
+            io_executor.shutdown(wait=False, cancel_futures=True)
+
+        for _, batch, items, _ in delayed_failures.values():
+            batches.append(batch)
+            failed_items.extend(items)
+            errors.append(f"Album {batch.album_key} 发送失败：{batch.error}")
 
         if cancelled:
             return UploadRunResult(
@@ -1610,6 +1803,7 @@ class UploadEngine:
             status = RUN_COMPLETED
         return UploadRunResult(
             status,
+            paused=paused,
             batches=tuple(batches),
             error="；".join(errors) if errors else None,
             deferred_items=tuple(deferred_items),

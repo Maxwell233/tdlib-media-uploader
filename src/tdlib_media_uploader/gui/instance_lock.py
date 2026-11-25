@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Cross-process lock for one GUI instance per DATA_DIR."""
+"""Cross-process lock for one GUI instance per application data directory."""
 
 from __future__ import annotations
 

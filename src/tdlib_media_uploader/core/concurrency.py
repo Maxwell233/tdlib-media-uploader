@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Executor, Future, ThreadPoolExecutor, wait
 from contextvars import copy_context
 import os
+from queue import Empty, SimpleQueue
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -16,6 +17,64 @@ class ContextExecutor(ThreadPoolExecutor):
 
     def submit(self, fn, /, *args, **kwargs):
         return super().submit(copy_context().run, fn, *args, **kwargs)
+
+
+class UploadPreparationExecutor(Executor):
+    """Bounded workers that cannot hold process shutdown on an offline share."""
+
+    def __init__(self, max_workers: int, thread_name_prefix: str):
+        self.max_workers = max_workers
+        self.thread_name_prefix = thread_name_prefix
+        self._queue = SimpleQueue()
+        self._threads = []
+        self._lock = threading.Lock()
+        self._shutdown = False
+
+    def submit(self, fn, /, *args, **kwargs):
+        with self._lock:
+            if self._shutdown:
+                raise RuntimeError("上传准备线程池已关闭")
+            future = Future()
+            self._queue.put((future, copy_context(), fn, args, kwargs))
+            if len(self._threads) < self.max_workers:
+                worker = threading.Thread(
+                    target=self._work,
+                    name=f"{self.thread_name_prefix}-{len(self._threads) + 1}",
+                    daemon=True,
+                )
+                worker.start()
+                self._threads.append(worker)
+            return future
+
+    def _work(self):
+        while (job := self._queue.get()) is not None:
+            future, context, fn, args, kwargs = job
+            if future.set_running_or_notify_cancel():
+                try:
+                    result = context.run(fn, *args, **kwargs)
+                except BaseException as error:
+                    future.set_exception(error)
+                else:
+                    future.set_result(result)
+                    del result
+            del job, future, context, fn, args, kwargs
+
+    def shutdown(self, wait=True, *, cancel_futures=False):
+        with self._lock:
+            if not self._shutdown:
+                self._shutdown = True
+                if cancel_futures:
+                    while True:
+                        try:
+                            future, *_ = self._queue.get_nowait()
+                        except Empty:
+                            break
+                        future.cancel()
+                for _ in self._threads:
+                    self._queue.put(None)
+        if wait:
+            for worker in self._threads:
+                worker.join()
 
 
 class CancellationRequested(TimeoutError):

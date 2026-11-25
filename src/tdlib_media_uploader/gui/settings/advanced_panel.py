@@ -267,14 +267,14 @@ class AdvancedPanel(SettingsPanel):
 
         self.exiftool_timeout.setValue(int(_cfg("EXIFTOOL_TIMEOUT_SECONDS", 120)))
         self.ffmpeg_metadata_timeout.setValue(int(_cfg("FFMPEG_METADATA_TIMEOUT_SECONDS", 30)))
-        self.ffmpeg_thumbnail_timeout.setValue(int(_cfg("FFMPEG_THUMBNAIL_TIMEOUT_SECONDS", 30)))
+        self.ffmpeg_thumbnail_timeout.setValue(int(_cfg("FFMPEG_THUMBNAIL_TIMEOUT_SECONDS", 45)))
 
         self.scan_discovery_attempts.setValue(int(_cfg("SCAN_DISCOVERY_ATTEMPTS", 3)))
         self.scan_discovery_initial_delay.setValue(float(_cfg("SCAN_DISCOVERY_INITIAL_DELAY_SECONDS", 0.15)))
         self.scan_discovery_max_delay.setValue(float(_cfg("SCAN_DISCOVERY_MAX_DELAY_SECONDS", 1.0)))
         self.scan_readiness_attempts.setValue(int(_cfg("SCAN_READINESS_ATTEMPTS", 3)))
         self.scan_probe_bytes.setValue(int(_cfg("SCAN_READ_PROBE_BYTES", 65536)))
-        self.exiftool_batch_size.setValue(int(_cfg("EXIFTOOL_BATCH_SIZE", 64)))
+        self.exiftool_batch_size.setValue(int(_cfg("EXIFTOOL_BATCH_SIZE", 256)))
         self.exiftool_retries.setValue(int(_cfg("EXIFTOOL_RETRIES", 2)))
 
         self.album_retry_enabled.setChecked(bool(_cfg("UPLOAD_RETRY_ENABLED", False)))

@@ -2,12 +2,14 @@
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from threading import RLock
 
 from ..config.snapshot import snapshot_config
 from ..core.filesystem import stable_path
 
 _CONFIG = ContextVar("media_config", default=None)
 _DATA = ContextVar("media_data", default=None)
+pipeline_paths_lock = RLock()
 
 _SCOPE_VALUES = {
     "LAST_SCAN_ERRORS": list,
@@ -18,6 +20,7 @@ _SCOPE_VALUES = {
     "LAST_SCAN_SNAPSHOTS": dict,
     "IMAGE_SCAN_SNAPSHOTS": dict,
     "STAGED_UPLOAD_PATHS": dict,
+    "IMAGE_UPLOAD_PATHS": dict,
 }
 
 
@@ -55,7 +58,8 @@ def media_scope(config, *, kind=None, root=None, items=()):
         name = f"{__package__}.{mode}_pipeline"
         values = {key: factory() for key, factory in _SCOPE_VALUES.items()}
         if parent is not None:
-            values["STAGED_UPLOAD_PATHS"] = parent[name]["STAGED_UPLOAD_PATHS"]
+            for key in ("STAGED_UPLOAD_PATHS", "IMAGE_UPLOAD_PATHS"):
+                values[key] = parent[name][key]
         data[name] = values
     for item in items:
         name = f"{__package__}.{item.media_kind}_pipeline"

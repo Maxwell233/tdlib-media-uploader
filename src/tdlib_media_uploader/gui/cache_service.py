@@ -9,6 +9,7 @@ import stat
 
 from ..config.paths import (
     CAPTIONS_DIR,
+    DATA_DIR,
     HISTORY_PATH,
     IMAGE_COMPRESSION_CACHE_DIR,
     IMAGE_STATE_DIR,
@@ -21,6 +22,8 @@ from ..config.paths import (
     VIDEO_STATE_DIR,
 )
 from ..core.filesystem import is_link_or_junction
+from ..core.upload_state import reset_checkpoints
+from ..core.uploader_database import database_for
 from .config_service import get_cfg
 from .tools import format_size
 
@@ -35,11 +38,13 @@ CACHE_TARGETS: dict[str, tuple[str, Path]] = {
     "image_album_captions": ("图片 Album 标题", CAPTIONS_DIR / "image.json"),
     "mixed_album_captions": ("混合 Album 标题", CAPTIONS_DIR / "mixed.json"),
     "upload_inflight": ("未确认上传记录", UPLOAD_INFLIGHT_DIR),
+    "media_metadata": ("媒体元数据缓存", DATA_DIR / "uploader.db"),
     "staging": ("本地暂存文件", STAGING_CACHE_DIR),
     "gui_history": ("GUI 历史记录", HISTORY_PATH),
     "logs": ("运行日志", LOG_DIR),
 }
-ALL_CACHE_KEYS = tuple(CACHE_TARGETS)
+ALL_CACHE_KEYS = tuple(key for key in CACHE_TARGETS if key != "upload_inflight")
+_CHECKPOINT_KINDS = {"video_state": "video", "image_state": "image", "mixed_state": "mixed"}
 
 
 def current_cache_targets(base_targets: dict[str, tuple[str, Path]] | None = None) -> dict[str, tuple[str, Path]]:
@@ -98,9 +103,30 @@ def cache_usage(path: Path, cancel_event=None) -> tuple[int, int]:
 def cache_status_text(cancel_event=None) -> str:
     """Return human-readable summary of all cache targets."""
     rows = []
-    for label, path in current_cache_targets().values():
+    database_path = DATA_DIR / "uploader.db"
+    for key, (label, path) in current_cache_targets().items():
         if cancel_event is not None and cancel_event.is_set():
             return "统计已取消"
+        if database_path.is_file() and key in {*_CHECKPOINT_KINDS, "upload_inflight", "media_metadata"}:
+            database = database_for(database_path)
+            with database.read() as connection:
+                if key in _CHECKPOINT_KINDS:
+                    prefix = database.key(path) + os.sep
+                    count, total = connection.execute(
+                        "SELECT COUNT(*), COALESCE(SUM(length(CAST(metadata AS BLOB))), 0) FROM checkpoint_items "
+                        "WHERE substr(source_key, 1, ?)=?", (len(prefix), prefix)
+                    ).fetchone()
+                elif key == "upload_inflight":
+                    count, total = connection.execute(
+                        "SELECT COUNT(*), COALESCE(SUM(length(CAST(metadata AS BLOB))), 0) FROM inflight "
+                        "WHERE journal_root=? AND status<>'FAILED'", (database.key(path),)
+                    ).fetchone()
+                else:
+                    count, total = connection.execute(
+                        "SELECT COUNT(*), COALESCE(SUM(length(CAST(metadata AS BLOB))), 0) FROM media_metadata_cache"
+                    ).fetchone()
+            rows.append(f"{label} {count} 项 · {format_size(total)}")
+            continue
         if not (path.exists() or path.is_symlink()):
             continue
         count, total = cache_usage(path, cancel_event=cancel_event)
@@ -156,13 +182,24 @@ def clear_cache(
     for key in keys:
         if cancel_event is not None and cancel_event.is_set():
             break
-        if key not in active_targets:
+        if key not in active_targets or key == "upload_inflight":
             continue
         label, path = active_targets[key]
-        if not (path.exists() or path.is_symlink()):
+        production_checkpoint = key in _CHECKPOINT_KINDS and path == CACHE_TARGETS[key][1]
+        metadata_cache = key == "media_metadata" and path == CACHE_TARGETS[key][1]
+        if not (production_checkpoint or path.exists() or path.is_symlink()):
             continue
         try:
-            if key == "staging":
+            if production_checkpoint or metadata_cache:
+                if progress is not None:
+                    progress(str(path))
+                database = database_for(DATA_DIR / "uploader.db")
+                if production_checkpoint:
+                    reset_checkpoints(database, path, _CHECKPOINT_KINDS[key])
+                else:
+                    with database.write() as connection:
+                        connection.execute("DELETE FROM media_metadata_cache")
+            elif key == "staging":
                 from ..upload.staging import cleanup_staging
                 cleanup_staging(path, remove_empty=True, cancel_event=cancel_event, progress=progress)
             else:
@@ -170,7 +207,7 @@ def clear_cache(
             if cancel_event is not None and cancel_event.is_set():
                 break
             removed.append(label)
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             errors.append(f"{label}：{exc}")
     return removed, errors
 

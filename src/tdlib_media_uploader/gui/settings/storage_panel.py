@@ -93,8 +93,8 @@ class StoragePanel(SettingsPanel):
         cache_layout.addWidget(self.cache_status)
 
         cache_hint = QLabel(
-            "“清理所有”将清空视频/图片/混合断点状态、标题缓存、视频封面、历史记录、未确认记录、暂存副本和日志。\n"
-            "不会删除 config.toml 或 Telegram 登录账号会话。"
+            "“清理所有”将清空上传断点、标题、封面、处理缓存、暂存副本、历史记录和日志。\n"
+            "保留未确认记录、配置和 Telegram 登录会话。"
         )
         cache_hint.setObjectName("mutedLabel")
         cache_hint.setWordWrap(True)

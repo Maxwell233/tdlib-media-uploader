@@ -24,8 +24,9 @@ def run_self_test(*, emit=print) -> int:
     """Run the offline health check without importing the Qt application."""
 
     from ..core.self_test import run_self_test as check  # noqa: PLC0415
+    from . import gui_dependency_errors
 
-    return check(emit=emit)
+    return check(emit=emit, dependency_errors=gui_dependency_errors())
 
 
 def main() -> int:

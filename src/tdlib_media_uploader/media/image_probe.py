@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, __version__ as PILLOW_VERSION
+
+from ..core.filesystem import stable_path
+from ..core.source_snapshot import validate_snapshots
+from ..core.uploader_database import load_media_metadata, store_media_metadata
 
 TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024**2
 TELEGRAM_PHOTO_TARGET_BYTES = int(9.5 * 1024**2)
@@ -20,6 +24,7 @@ TELEGRAM_PHOTO_MAX_DIMENSION_SUM = 10000
 TELEGRAM_PHOTO_MAX_ASPECT_RATIO = 20.0
 
 PHOTO_TARGET_MAX_SIDE = 2560
+_CACHE_PROBE = f"pillow-photo-v1:{PILLOW_VERSION}"
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,16 @@ def probe_image(path: Path | str) -> ImageMediaInfo:
     file_size = stat.st_size
     if file_size <= 0:
         raise RuntimeError(f"图片文件为空：{file_path.name}")
+    snapshot = (file_path, file_size, stat.st_mtime_ns)
+    cached = load_media_metadata(_CACHE_PROBE, (snapshot,)).get(stable_path(file_path))
+    if isinstance(cached, dict):
+        try:
+            result = ImageMediaInfo(**cached, source_snapshot=snapshot[1:])
+        except TypeError:
+            pass
+        else:
+            validate_snapshots((snapshot,))
+            return result
 
     try:
         with Image.open(file_path) as raw_img:
@@ -132,9 +147,8 @@ def probe_image(path: Path | str) -> ImageMediaInfo:
         and not exif_rotated
     )
 
-    from ..core.source_snapshot import validate_snapshots
-    validate_snapshots(((file_path, stat.st_size, stat.st_mtime_ns),))
-    return ImageMediaInfo(
+    validate_snapshots((snapshot,))
+    result = ImageMediaInfo(
         format=fmt,
         width=width,
         height=height,
@@ -149,3 +163,5 @@ def probe_image(path: Path | str) -> ImageMediaInfo:
         telegram_compatible=telegram_compatible,
         source_snapshot=(stat.st_size, stat.st_mtime_ns),
     )
+    store_media_metadata(_CACHE_PROBE, ((*snapshot, dict(result)),))
+    return result

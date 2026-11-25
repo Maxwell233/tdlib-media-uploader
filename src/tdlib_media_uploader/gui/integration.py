@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 import importlib
 import threading
@@ -30,6 +31,7 @@ from ..core.models import (
     BatchStatus,
     LogEvent,
     MediaItem,
+    PreliminaryProgressEvent,
     ProgressEvent,
     ScanResult,
     UploadRunResult,
@@ -38,7 +40,8 @@ from ..media import ImageStrategy, MixedStrategy, VideoStrategy
 from ..media.runtime import media_scope, pipeline_value
 from ..core.source_snapshot import validate_snapshots
 from ..telegram.send_result import SendResult
-from ..upload.retry import AlbumRetryPolicy
+from ..upload.retry import AlbumRetryPolicy, QueueSendPolicy
+from ..upload.staging import LocalStager
 from ..upload.engine import (
     UploadCancelled,
     UploadEngine,
@@ -150,6 +153,11 @@ class GuiEventSink:
             method(message)
 
     def emit(self, event: Any) -> None:
+        if isinstance(event, PreliminaryProgressEvent):
+            callback = getattr(self.ui, "preliminary_progress", None)
+            if callable(callback):
+                callback(event)
+            return
         if isinstance(event, AlbumAttemptEvent):
             callback = getattr(self.ui, "album_attempt", None)
             if callable(callback):
@@ -300,12 +308,25 @@ class _ConfirmedStateAdapter:
         self.state = state
         self.cleanup = cleanup
         self.path = getattr(state, "path", "")
+        self.database = getattr(state, "database", None)
 
     def is_completed(self, item: Any) -> bool:
         return bool(self.state.is_completed(_legacy_item(item) if isinstance(item, MediaItem) else item))
 
     def mark_album_completed(self, items: Sequence[Any], message_ids=None) -> None:
         self.state.mark_album_completed(items, message_ids)
+        self._cleanup(items)
+
+    def persist_album(self, connection, items, message_ids=None):
+        publish = self.state.persist_album(connection, items, message_ids)
+
+        def after_commit():
+            publish()
+            self._cleanup(items)
+
+        return after_commit
+
+    def _cleanup(self, items):
         if self.cleanup is not None:
             try:
                 self.cleanup(items)
@@ -336,9 +357,11 @@ class GuiUploadProgress:
         self.current_keys: dict[str, str] = {}
         self.current_uploaded: dict[str, int] = {}
         self.file_id_to_key: dict[int, str] = {}
+        self.album_sequence: dict[str, int] = {}
         self.album_number = 0
         self.album_total = 0
         self.album_label = ""
+        self.album_key = ""
         self.samples = deque()
         self.last_draw = 0.0
         self.lock = threading.RLock()
@@ -393,9 +416,10 @@ class GuiUploadProgress:
                 key: 0 for key in keys if key is not None
             }
             self.file_id_to_key = {}
-            self.album_number = int(plan.number)
+            self.album_number = self.album_sequence.setdefault(plan.key, len(self.album_sequence) + 1)
             self.album_total = int(total_albums)
             self.album_label = str(plan.group_label or "")
+            self.album_key = str(plan.key)
             self.samples.clear()
             self.last_draw = 0.0
         album = getattr(self.ui, "album", None)
@@ -411,7 +435,7 @@ class GuiUploadProgress:
                 rows.append(f"{media} · {self.sizes.get(stable_path(path), 0)} B · {path}")
             album(
                 kind=self.kind.upper(),
-                title=f"{self.album_label} · Album {plan.number} · {self.album_total}",
+                title=f"{self.album_label} · 组内 Album {plan.number} · {self.album_number}/{self.album_total}",
                 subtitle=f"{len(items)} 个媒体 · Caption={plan.caption or '无'}",
                 rows=rows,
             )
@@ -505,6 +529,8 @@ class GuiUploadProgress:
                 return
             self.last_draw = now
             current = sum(self.current_uploaded.values())
+            current_total = sum(self.sizes[key] for key in self.current_uploaded)
+            album_ratio = current / current_total if current_total else float(bool(self.album_key))
             done_bytes = self.completed_bytes + current
             ratio = min(done_bytes / self.total_bytes, 1.0) if self.total_bytes else 0.0
             speed = self._speed(done_bytes)
@@ -519,6 +545,8 @@ class GuiUploadProgress:
                 "detail": self.album_label,
                 "album_number": self.album_number,
                 "album_total": self.album_total,
+                "album_key": self.album_key,
+                "album_ratio": album_ratio,
                 "done_files": done_files,
                 "total_files": total_files,
                 "done_bytes": done_bytes,
@@ -556,11 +584,37 @@ class TDLibSender:
         ui: Any,
         *,
         total_albums: int = 0,
+        before_send=None,
     ):
         self.client = client
         self.progress = progress
         self.ui = ui
         self.total_albums = int(total_albums)
+        self.before_send = before_send
+        self._preliminary = None
+        config = getattr(client, "config", None)
+        if getattr(config, "TDLIB_ENABLE_PRELIMINARY_UPLOAD", False) is True:
+            from ..telegram.preliminary import PreliminaryUploader
+
+            self._preliminary = PreliminaryUploader(
+                client, config.TDLIB_MAX_CONCURRENT_FILE_UPLOADS, config.TDLIB_PRELIMINARY_WAIT_SECONDS,
+            )
+
+    def wait_until_ready(self, context):
+        return self.before_send is None or self.before_send(context.cancel_token)
+
+    def prepare_remote(self, contents, *, context):
+        if self._preliminary is None:
+            return None
+        if not self.wait_until_ready(context):
+            from ..core.concurrency import CancellationRequested
+
+            raise CancellationRequested("预上传已取消")
+        return self._preliminary.prepare(contents, context=context)
+
+    def close_preliminary(self):
+        if self._preliminary is not None:
+            self._preliminary.close()
 
     def send_contents(
         self,
@@ -578,7 +632,8 @@ class TDLibSender:
             if plan is None:
                 raise TypeError("TDLibSender 需要 AlbumPlan")
             items = tuple(plan.pending_items)
-            self.progress.begin_album(items, plan, self.total_albums)
+            total = context.metadata.get("pending_plan_total", self.total_albums) if context else self.total_albums
+            self.progress.begin_album(items, plan, total)
             legacy_items = tuple(_legacy_item(item) for item in items)
         except Exception as error:
             error.submitted = False
@@ -597,7 +652,8 @@ class TDLibSender:
                     item_results=value.get("item_results"), target=dict(target or {}),
                 )
         policy = context.metadata.get("album_retry") if context is not None else None
-        request_options = {"retry_rate_limit": False} if policy and policy.enabled else {}
+        scheduled = context is not None and context.metadata.get("queue_send_policy") is not None
+        request_options = {"retry_rate_limit": False} if scheduled or (policy and policy.enabled) else {}
         try:
             value = _call_supported(
                 self.client.send_contents,
@@ -647,9 +703,9 @@ class TDLibSender:
 
 
 def _premium_checker(strategy: Any, client: Any):
-    """Add the legacy Premium rule to the generic per-item preflight hook."""
+    """Add the account's Premium rule to the batched source preflight."""
 
-    def check(item: MediaItem, *, context=None):
+    def premium_result(item, context):
         metadata = item.metadata if isinstance(item.metadata, Mapping) else {}
         if item.media_kind == "video" and metadata.get("requires_premium"):
             from ..media import video_pipeline
@@ -661,13 +717,25 @@ def _premium_checker(strategy: Any, client: Any):
                     "status": "FAILED",
                     "reason": "视频超过约 2 GB，需要 Telegram Premium 才能上传",
                 }
+
+    def check(item: MediaItem, *, context=None):
+        if result := premium_result(item, context):
+            return result
         checker = getattr(strategy, "preflight_item", None)
         if callable(checker):
             return checker(item, context=context)
         return {"status": "READY"}
 
-    if strategy.kind == "image" and callable(getattr(strategy, "preflight_items", None)):
-        check.check_many = strategy.preflight_items
+    def check_many(items, *, context=None):
+        decisions = strategy.preflight_items(items, context=context)
+        return tuple(
+            (premium_result(item, context) or result) if result.get("status") == "READY" else result
+            for item, result in zip(items, decisions, strict=True)
+        )
+
+    if callable(getattr(strategy, "preflight_items", None)):
+        check.check_many = check_many
+        check.validated_file_readiness = True
     return check
 
 
@@ -744,8 +812,10 @@ def _run_v2_upload(
     config: Any | None = None,
     runtime_paths: Any | None = None,
     client_factory: Callable[..., Any] | None = None,
+    session_manager=None,
     engine_factory: Callable[..., Any] | None = None,
     on_ready: Callable[[], UploadRunResult | None] | None = None,
+    queue_task_id: str | None = None,
 ) -> UploadRunResult:
     """Run one GUI upload through ``UploadEngine`` and a legacy TDLib client."""
 
@@ -770,7 +840,7 @@ def _run_v2_upload(
         try:
             validate_snapshots(
                 (item.path, item.snapshot.size, item.snapshot.mtime_ns)
-                for plan in captured_plans for item in plan.items
+                for plan in captured_plans for item in plan.pending_items
             )
             known = (preview_result or {}).get("known_confirmed")
             if known is None:
@@ -791,22 +861,22 @@ def _run_v2_upload(
         from ..telegram.tdlib_common import TDJsonClient  # noqa: PLC0415
 
         client_factory = TDJsonClient
-    client = _call_supported(
-        client_factory,
-        (ui, _DEVICE_MODELS[normalized]),
-        config=config,
-    )
+    session = ExitStack()
+    client = None
     callback_added = False
     try:
-        login = getattr(client, "login", None)
-        if callable(login):
-            login()
-        refresh = getattr(client, "refresh_account_limits", None)
-        if callable(refresh):
-            refresh()
-        fast_options = getattr(client, "set_fast_options", None)
-        if callable(fast_options):
-            fast_options()
+        if session_manager is not None:
+            client = session.enter_context(session_manager.acquire(
+                ui, _DEVICE_MODELS[normalized], config=config, factory=client_factory,
+            ))
+            if not session_manager.wait_until_ready(token):
+                return UploadRunResult("CANCELLED", error="等待连接期间已停止", cancelled=True)
+        else:
+            client = _call_supported(client_factory, (ui, _DEVICE_MODELS[normalized]), config=config)
+            for method_name in ("login", "refresh_account_limits", "set_fast_options"):
+                method = getattr(client, method_name, None)
+                if callable(method):
+                    method()
         validate_target = getattr(client, "validate_target", None)
         if callable(validate_target):
             validate_target()
@@ -825,9 +895,12 @@ def _run_v2_upload(
             client,
             progress,
             ui,
+            before_send=session_manager.wait_until_ready if session_manager is not None else None,
             total_albums=int((preview_result or {}).get("album_count", 0) or 0),
         )
+        session.callback(sender.close_preliminary)
         context = UploadContext(
+            queue_task_id=queue_task_id,
             scan_result=captured_scan,
             plans=captured_plans,
             source_root=root,
@@ -838,20 +911,20 @@ def _run_v2_upload(
             state=state_adapter,
             journal=journal,
             sender=sender,
+            stager=LocalStager(config),
             preflight=_premium_checker(strategy, client),
             metadata={
                 "is_premium": getattr(client, "is_premium", None),
                 "album_retry": AlbumRetryPolicy.from_config(config),
+                "queue_send_policy": QueueSendPolicy.from_config(config),
                 "frozen_caption": bool((preview_result or {}).get("queued")),
                 "caption_limit": int(caption_limit),
                 "caption_length_limit": int(caption_limit),
-                "prefetch_next": bool(
-                    getattr(
-                        config,
-                        "VIDEO_PREFETCH_NEXT_ALBUM" if normalized == "video" else "PREFETCH_NEXT_ALBUM",
-                        getattr(config, "PREFETCH_NEXT_ALBUM", True),
-                    )
-                ),
+                "prefetch_next": bool(getattr(config, "PREFETCH_NEXT_ALBUM", getattr(config, "VIDEO_PREFETCH_NEXT_ALBUM", True))),
+                "prefetch_slots": int(getattr(config, "PREFETCH_SLOTS", 3)),
+                "prefetch_max_bytes": int(getattr(config, "PREFETCH_MAX_BYTES", 8 * 1024 ** 3)),
+                "io_workers_local": int(getattr(config, "IO_WORKERS_LOCAL", 4)),
+                "io_workers_network": int(getattr(config, "IO_WORKERS_NETWORK", 2)),
             },
         )
         if engine_factory is None:
@@ -863,6 +936,7 @@ def _run_v2_upload(
             state=state_adapter,
             journal=journal,
             preflight=context.preflight,
+            stager=context.stager,
             prefetch_next=context.metadata.get("prefetch_next"),
         )
         if on_ready is not None:
@@ -902,9 +976,16 @@ def _run_v2_upload(
             remove_callback = getattr(client, "remove_update_callback", None)
             if callable(remove_callback):
                 cleanup_call("移除上传进度监听", lambda: remove_callback(progress.handle_update))
-        close = getattr(client, "close", None)
-        if callable(close):
-            cleanup_call("关闭 Telegram 数据库", close)
+        if session_manager is not None:
+            cleanup_call("释放 Telegram 会话", session.close)
+        elif client is not None:
+            cleanup_call("清理预上传", session.close)
+            unregister = getattr(ui, "unregister_client", None)
+            if callable(unregister):
+                unregister(client)
+            close = getattr(client, "close", None)
+            if callable(close):
+                cleanup_call("关闭 Telegram 数据库", close)
         for method_name in ("cleanup_staging_cache", "cleanup_compressed_images"):
             method = getattr(legacy, method_name, None)
             if callable(method):

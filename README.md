@@ -121,25 +121,25 @@ thumbnail_timestamp_seconds = 1.25
 
 “安全停止”会等待当前 Album 发送完成并保存断点，然后退出；已在后台准备的下一组不会发送。“立即中断”会取消当前上传，未确认的发送结果会保留在“未确认上传”中，核对后才能恢复。只有整组消息确认发送成功后才记录完成状态；重新扫描时，已完成的组自动跳过。
 
-默认开启 `[video].prefetch_next_album = true`，视频、图片和混合上传都可在发送当前组时提前准备下一组。视频准备包含文件就绪检查、必要的无损封装、输出验证与封面生成；最多只提前一组。需要节省本地读取或处理资源时，可关闭此选项，改为逐组准备和发送。
+三种上传模式共享 `[upload]` 的预取设置。默认最多同时准备 3 个 Album，预取窗口按源文件大小预留 8 GiB。单组超过预算时，轮到它后再准备。关闭预取后，程序逐组准备和发送。暂停或中断会清理尚未发送的暂存副本。
 
-文件路径、大小或修改时间变化后，会被视为新文件。V1.9.1 将状态、标题、登录数据库、缓存、历史和日志统一保存到 `data/`，三种模式分别使用 `data/state/video`、`data/state/image`、`data/state/mixed`。
+文件路径、大小或修改时间变化后，会被视为新文件。上传断点、未确认记录、任务队列和媒体探测缓存保存在 `data/uploader.db`。程序首次读取旧版数据时导入原有 JSON，原文件保留供备份。
 
 “设置与诊断”提供三类清理：
 
 - **仅清理视频封面**：删除 `data/cache/thumbnails` 的生成文件，之后需要时重新生成。
 - **仅清理已处理视频**：删除 `data/cache/video_processed` 中暂存的重新封装视频文件。
-- **清理所有**：清空状态、标题、封面、任务历史、未确认记录、已处理视频、暂存副本和运行日志。保留 `data/config.toml` 及 Telegram 登录数据库。清理断点后重新上传可能产生重复消息。
+- **清理所有**：清空上传断点、标题、封面、任务历史、已处理视频、暂存副本和运行日志。保留未确认记录、配置与 Telegram 登录数据库。清理断点后重新上传可能产生重复消息。
 
 各媒体上传页提供“重置本类型断点”：确认后仅一次性清空所选类型的全部断点（包括该类型不同来源目录和上传目标的记录），其他类型、标题、缓存、登录数据和未确认上传记录均保留。扫描或上传运行时不能重置；重置后需重新扫描，已上传文件会再次列为待上传，继续上传可能产生重复消息。未确认上传仍须先核对处理，重置断点不会允许重发未确认的内容。旧配置中的 `reset_state` 已忽略，即使保留 `true`，扫描和上传也不会自动清空断点。
 
-历史记录保留最近 100 次任务。所有用户数据都位于 `data/`：`telegram/database` 和 `telegram/files` 保存 TDLib 登录数据库及文件缓存，`captions` 保存标题，`state` 保存断点，`upload_inflight` 保存未确认记录，`cache` 保存封面、压缩和暂存副本，`logs` 保存日志，`history.json` 保存任务历史。V1.9.1 按全量更新处理，不读取 V1.8.x 或旧开发版的散落状态文件。
+历史记录保留最近 100 次任务。`data/` 同时保存配置、TDLib 登录数据、标题、缓存和运行日志。迁移支持 V1.9 的断点、未确认记录与任务队列。
 
 ### 迁移与备份 data
 
 升级或更换电脑时，先**完全退出** TDLib Media Uploader，再直接复制整个 `data/` 目录即可保留 V1.9 的登录数据、任务历史、标题、断点和未确认记录。不要在上传、登录或 TDLib 数据库仍在写入时复制；`data/telegram/database` 是登录状态的关键数据，不建议只复制其中部分文件。Windows 便携版使用程序目录下的 `data/`；macOS 发布版使用 `~/Library/Application Support/TDLib Media Uploader/data/`。安装或解压新版本后，把完整的 `data/` 放到对应位置即可。复制时不要套多一层 `data/data`，并先保留一份备份。最简单可靠的迁移方式是整体复制 `data/`，不需要分别寻找配置、登录数据库、断点、标题、历史或日志文件。V1.9 不承诺读取 V1.8.x 或旧开发版的状态格式。
 
-V1.9.1 的目录职责固定如下；程序资源和 PyInstaller `_internal` 目录只读，不会用作登录或其他用户数据目录：
+当前数据目录结构如下。旧版的 `state/`、`upload_inflight/` 和 `upload_queue.json` 在迁移后仍可作为备份保留。
 
 ```text
 data/
@@ -147,12 +147,8 @@ data/
 ├── telegram/
 │   ├── database/   # TDLib database_directory，包含登录状态
 │   └── files/      # TDLib files_directory
-├── state/video/    # 视频断点
-├── state/image/    # 图片断点
-├── state/mixed/    # 混合断点
+├── uploader.db    # 上传断点、未确认记录、任务队列和媒体元数据
 ├── captions/      # Album 标题
-├── upload_inflight/
-├── upload_queue.json
 ├── ui_preferences.json
 ├── cache/          # 封面、压缩和暂存副本
 ├── logs/
@@ -163,15 +159,19 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 
 视频、图片或混合媒体无法被 FFmpeg/Pillow 读取时，程序会在预检阶段跳过该文件，继续上传其他文件；暂时不可读的项目会标记为 deferred，网络恢复后重新扫描即可重试。预检生成的 Album 计划会保留完整成员，deferred 文件不会让后面的文件向前补位。上传前还会再次检查文件存在、可读且大小/修改时间没有变化。坏文件不会写入断点，跳过文件的完整路径和原因会显示在任务日志中，并保存到应用数据目录的 `logs/app.log`。TDLib 原生诊断写入同目录的 `logs/tdlib.log`，可用于排查上传失败。
 
-每个待发送 Album 在请求前会写入 `data/upload_inflight/<hash>.json`。状态依次记录为 `PREPARED`、`SUBMITTED`、`CONFIRMED`，正常断点写入后才删除；超时、断线、取消或部分成功会记录为 `UNKNOWN`，下一次不会自动重发可能已经提交的 Album。请打开侧栏的“未确认上传”，先在 Telegram 中核对对应目标，再手动处理。
+每个待发送 Album 在消息请求前先持久化为 `PREPARED`。随后记录 `SUBMITTED` 和 `CONFIRMED`，确认后的断点、任务进度和日志清理由 SQLite 事务保存。消息提交后超时、断线、中断或部分成功的 Album 会保留为 `UNKNOWN`，需要从侧栏的“未确认上传”进入核对。
 
 在 Telegram 核对整组文件后，可以选择“标记为已发送”保存整组断点，或选择“允许重新上传”解除保护。已有明确成功结果的文件会先写入断点，下次上传时跳过。旧日志含已成功的消息且无法对应到源文件时，程序会保留保护记录。关闭 Telegram 数据库超时会单独提示，不会把已经完成的上传改报为失败。
 
 `config.toml` 中的凭据以明文保存在本机，`data/telegram` 含登录数据；不要公开配置或整个 `data/` 目录。日志也可能包含本地路径和 Chat ID，分享排障资料前请先脱敏。POSIX 系统会将应用数据目录权限收紧为 `0700`，配置和新写入的断点文件使用 `0600`。Windows 保留目录继承权限，启动时只读取 data 目录的权限条目；“环境与许可”会显示其他账户的读取授权或“无法检查”。如需调整，可使用文件夹“属性 → 安全”，或将便携版放到个人用户目录。程序不会扫描、改写子文件权限或检查网络共享权限。
 
-发送重试的等待可由“安全停止”或“立即中断”取消。已接受的消息只有在 TDLib 明确标记为失败、允许重试且无需额外操作时，才会使用 `resendMessages` 重发一次，并保留文件顺序和逐项断点。超时等结果未知的请求仍需要人工核对。
+发送重试的等待可由“安全停止”或“立即中断”取消。只有整组消息均明确失败时，程序才会重试 TDLib 明确允许且无需额外操作的消息。部分成功或结果未知的 Album 需要人工核对。
 
-发送前会递归校验混合 Album 中每个 Photo/Video 的 `InputFile` 结构，并检查临时本地文件是否仍可读取；空的 `photo`/`video` 不会被提交给 TDLib，也不会先写入发送 journal。源码构建固定使用 `tdjson 1.8.69`。
+`[upload_retry].queue_error_policy` 默认值 `pause_on_error` 会在 Album 失败或结果未确认时暂停。`skip_and_retry` 可以先处理后续 Album，再用自动重试额度中的最后一次尝试处理明确失败且可重试的组。`min_send_interval_seconds` 控制两次 Album 发送的最小间隔。等待 Telegram 限流恢复时，任务页显示倒计时。关闭普通 Album 重试时，明确的 FloodWait 仍可按 `flood_max_retries` 重试，默认为一次。
+
+可通过 `[tdlib].enable_preliminary_upload` 启用实验性的远程预上传。程序并发准备主照片和视频，再按 Album 顺序提交消息。缩略图仍使用本地文件。预上传超时或无法使用时会回到直传。在消息提交前停止预上传时，只取消文件传输。
+
+发送前会递归校验混合 Album 中每个 Photo/Video 的 `InputFile` 结构，并检查临时本地文件是否仍可读取；空的 `photo`/`video` 不会被提交给 TDLib，也不会先写入发送 journal。源码构建固定使用 `tdjson 1.8.71`。
 
 如果源文件位于 SMB/NAS，可在“设置与诊断”中选择本地暂存模式，或在配置中设置 `[staging] mode`：`off` 直接读取源文件，`network` 只暂存网络盘，`always` 暂存所有文件。程序会在 `data/cache/staging` 或你指定的受管目录中创建带 marker 的暂存副本，只清理自己创建的文件，不会递归删除 base directory 中的其他用户文件。
 
@@ -238,7 +238,7 @@ Windows 便携版的实际位置是 `程序目录/data/telegram/`；macOS 冻结
 
 应用仅支持从 [GitHub Releases](https://github.com/Maxwell233/tdlib-media-uploader/releases) 下载 Windows 便携包或 macOS arm64 DMG 后运行；仓库不再提供源码启动方式。源码仅用于开发和 CI 的离线回归验证，不作为用户运行入口。
 
-构建使用 Python 3.13 和 `requirements-build-lock.txt` 中的固定版本。界面依赖 PySide6 Essentials，上传请求使用 TDLib 1.8.69 的媒体结构。
+构建使用 Python 3.13 和 `requirements-build-lock.txt` 中的固定版本。界面依赖 PySide6 Essentials，上传请求使用 TDLib 1.8.71 的媒体结构。
 
 发布包支持 `--self-test` 离线诊断。全新包即使还没有 `data/config.toml` 也可以直接运行该命令，检查资源、可写数据目录、TDLib 路径和内置 FFmpeg/FFprobe。
 
@@ -254,7 +254,7 @@ GitHub Actions 在 Windows x64 和 macOS arm64 runner 上读取 `tdlib_media_upl
 
 ## 断点与维护
 
-已确认的上传记录继续使用原有 JSON 格式，无需迁移。每个 Album 确认后，通过写入临时文件并原子替换保存断点；保存成功后才更新内存中的完成状态，失败时保留原记录。重置断点也使用原子替换，避免写入失败时丢失旧记录。备份或迁移 `data/state` 时先停止任务并退出应用，再复制整个目录。
+SQLite 使用 WAL。退出应用后复制整个 `data/` 目录，可以同时备份上传队列、未确认记录和断点。封面与压缩图片缓存设有容量上限，程序按最近使用时间清理超额文件。
 
 清理缓存在后台执行，可以取消；取消保留尚未删除的文件，已经删除的缓存不会恢复。清理期间暂停启动扫描、上传、修改配置和处理未确认记录。关闭应用时会等待清理线程结束，以及 TDLib 返回最终数据库关闭状态；关闭超时会提示等待，稍后可重试退出。
 

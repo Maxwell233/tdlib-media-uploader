@@ -5,6 +5,7 @@ from copy import deepcopy
 from PySide6.QtCore import QObject, Qt, Signal
 
 from ..core.models import UploadRunResult
+from ..upload.queue import ACTION_REQUIRED, TaskStatus
 from ..upload.queue_store import UploadQueue
 from .workers import QueueRecoveryResult, QueueRecoveryWorker
 
@@ -28,6 +29,7 @@ class QueueController(QObject):
         self.task = None
         self.closing = False
         self.write_blocked = False
+        self._resume_after_recovery = False
 
     @property
     def recovery_busy(self):
@@ -53,11 +55,37 @@ class QueueController(QObject):
     def set_paused(self, paused):
         if self.write_blocked:
             self.error.emit("任务结果尚未安全写入队列，请检查数据目录后重启。")
-        elif self._change(self.store.set_paused, paused) and not paused:
+            return False
+        if not self._change(self.store.set_paused, paused):
+            return False
+        if not paused:
             self.schedule()
+        return True
+
+    def request_paused(self, paused):
+        if paused:
+            if self.set_paused(True) and self.worker is not None:
+                self.worker.request_safe_stop()
+            return
+        if self.worker is not None:
+            return
+        tasks = self.store.tasks
+        head = next((task for task in tasks if task.status in ACTION_REQUIRED | {TaskStatus.PENDING}), None)
+        resumable = head is not None and (
+            head.status is TaskStatus.INTERRUPTED
+            or head.status is TaskStatus.FAILED and head.paused_by_policy
+        )
+        if (resumable
+                and not any(task.status is TaskStatus.NEEDS_REVIEW for task in tasks)):
+            self._resume_after_recovery = self.restore(head.task_id)
+            return
+        self.set_paused(False)
 
     def move(self, task_id, direction):
         self._change(self.store.move, task_id, direction)
+
+    def move_to_top(self, task_id):
+        self._change(self.store.move_to_top, task_id)
 
     def remove(self, task_id):
         self._change(self.store.remove, task_id)
@@ -73,6 +101,12 @@ class QueueController(QObject):
 
     def skip(self, task_id):
         return self._start_recovery("skip", task_id)
+
+    def skip_album(self, task_id, album_key):
+        return self._start_recovery("skip_album", (task_id, album_key))
+
+    def retry_album(self, task_id, album_key):
+        return self._start_recovery("retry_album", (task_id, album_key))
 
     def _start_recovery(self, action, subject):
         if self.recovery_busy:
@@ -113,6 +147,8 @@ class QueueController(QObject):
         if self.recovery_worker is not worker or worker.isRunning():
             return
         result = worker.result or QueueRecoveryResult(worker.action, error="后台操作未返回结果")
+        auto_resume = self._resume_after_recovery
+        self._resume_after_recovery = False
         self.recovery_worker = None
         worker.deleteLater()
         self.changed.emit()
@@ -121,6 +157,8 @@ class QueueController(QObject):
         elif result.action == "skip" and result.task is not None:
             self.skipped.emit(result.task)
         self.recovery_finished.emit(result)
+        if auto_resume and not result.error and not result.cancelled and not self.closing:
+            self.set_paused(False)
 
     def schedule(self):
         if self.recovery_busy or self.worker is not None or self.closing or self.write_blocked:

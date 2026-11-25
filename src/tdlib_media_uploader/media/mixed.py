@@ -14,6 +14,7 @@ import importlib
 from pathlib import Path
 from typing import Any
 
+from .common import build_source_options
 from .runtime import media_scope, pipeline_value
 from ..core.compat import call_supported as _call_compatible
 from ..contracts import CancelToken, EventSink, UploadContext
@@ -702,55 +703,47 @@ class MixedMediaStrategy:
                 cancel_event=cancel_event,
                 group_key=plan.key,
                 is_premium=is_premium,
+                **build_source_options(context, plan),
             )
             _raise_if_cancelled(cancel_token)
         return self._normalize_contents(result, plan, context=context)
 
-    def preflight_item(
-        self,
-        item: MediaItem,
-        *,
-        context: UploadContext | None = None,
-    ) -> Mapping[str, str]:
-        """Expose the legacy mixed-media readiness check to UploadEngine."""
-
-        if not isinstance(item, MediaItem) or item.media_kind not in {"image", "video"}:
-            raise TypeError("混合媒体预检需要 image/video MediaItem")
+    def preflight_items(self, items, *, context=None):
+        """Check a complete Album using the shared bounded media executor."""
+        items = tuple(items)
+        if not items:
+            return ()
+        if any(not isinstance(item, MediaItem) or item.media_kind not in {"image", "video"} for item in items):
+            raise TypeError("混合媒体预检收到不匹配的 MediaItem")
         token = context.cancel_token if context is not None else None
+        sink = context.event_sink if context is not None else None
+        executor = context.metadata.get("io_executor") if context is not None else None
         _raise_if_cancelled(token)
         checker = getattr(self._legacy, "preflight_mixed", None)
         if not callable(checker):
-            return {"status": "READY"}
-        sink = context.event_sink if context is not None else None
-        ui = _EventUI(sink)
-        cancel_event = _LegacyCancelEvent(token)
-        with self._legacy_scope(Path(item.source_root)):
+            return tuple({"status": "READY"} for _ in items)
+        with self._legacy_scope(items[0].source_root):
             skipped = _call_compatible(
-                checker,
-                ((self._legacy_item(item),),),
-                ui=ui,
-                cancel_event=cancel_event,
+                checker, (tuple(self._legacy_item(item) for item in items),),
+                ui=_EventUI(sink), cancel_event=_LegacyCancelEvent(token), executor=executor,
             )
         _raise_if_cancelled(token)
-        if not skipped:
-            return {"status": "READY"}
-        record = skipped[0] if isinstance(skipped[0], Mapping) else {}
-        category = (
-            str(record.get("category", "unreadable") or "unreadable").strip().lower()
-        )
-        deferred = category in {
-            "deferred",
-            "changed",
-            "network",
-            "cancelled",
-            "read_failed",
-        }
-        return {
-            "status": "DEFERRED" if deferred else "FAILED",
-            "reason": str(
-                record.get("reason", "混合媒体预检失败") or "混合媒体预检失败"
-            ),
-        }
+        failures = {str(record["path"]): record for record in skipped or ()}
+        decisions = []
+        for item in items:
+            record = failures.get(str(item.path))
+            if record is None:
+                decisions.append({"status": "READY"})
+                continue
+            deferred = str(record.get("category", "unreadable") or "unreadable").strip().lower() in {"deferred", "changed", "network", "cancelled", "read_failed"}
+            decisions.append({
+                "status": "DEFERRED" if deferred else "FAILED",
+                "reason": str(record.get("reason") or "混合媒体预检失败"),
+            })
+        return tuple(decisions)
+
+    def preflight_item(self, item: MediaItem, *, context: UploadContext | None = None):
+        return self.preflight_items((item,), context=context)[0]
 
 
 # Keep the shorter name available for callers that use the strategy names from

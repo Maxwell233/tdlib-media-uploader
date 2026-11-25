@@ -31,8 +31,8 @@ def review_matches_task(record, task):
     return any(stable_path(item.path) in paths for item in task.items)
 
 
-def protection_for(task, runtime_paths, *, cancel_event=None):
-    journal = InflightJournal(runtime_paths.UPLOAD_INFLIGHT_DIR)
+def protection_for(task, runtime_paths, *, cancel_event=None, database=None):
+    journal = InflightJournal(runtime_paths.UPLOAD_INFLIGHT_DIR, database=database)
     target = dict(task.target)
     for plan in task.plans:
         raise_if_cancelled(cancel_event=cancel_event)
@@ -42,10 +42,10 @@ def protection_for(task, runtime_paths, *, cancel_event=None):
     return journal.unresolved_for_items(task.kind, _snapshots(task), target=target)
 
 
-def _checkpoint_paths(task, runtime_paths, *, cancel_event=None):
+def _checkpoint_paths(task, runtime_paths, *, cancel_event=None, database=None):
     state = UploadState(
         kind=task.kind, source_root=task.source_root, target=dict(task.target),
-        state_dir=getattr(runtime_paths, f"{task.kind.upper()}_STATE_DIR"), create=False,
+        state_dir=getattr(runtime_paths, f"{task.kind.upper()}_STATE_DIR"), create=False, database=database,
     )
     data = state.data
     if (data.get("kind") != task.kind or data.get("source_root") != stable_path(task.source_root)
@@ -74,22 +74,25 @@ def _checkpoint_paths(task, runtime_paths, *, cancel_event=None):
     return tuple(sorted(confirmed))
 
 
-def verify_delivery(task, runtime_paths, *, cancel_event=None):
+def verify_delivery(task, runtime_paths, *, cancel_event=None, database=None):
     """Verify the target-scoped journal and checkpoints without accessing source files."""
     raise_if_cancelled(cancel_event=cancel_event)
-    record = protection_for(task, runtime_paths, cancel_event=cancel_event)
+    record = protection_for(task, runtime_paths, cancel_event=cancel_event, database=database)
     if record is not None:
         raise ValueError(
             f"仍有未解决的上传记录（{record['status']}，Album {record.get('album_key') or '未知'}）。"
             "请先在“未确认上传”核对。"
         )
-    return _checkpoint_paths(task, runtime_paths, cancel_event=cancel_event)
+    return _checkpoint_paths(task, runtime_paths, cancel_event=cancel_event, database=database)
 
 
 def _validate_files(task, cancel_event, progress):
     if not task.source_root.is_dir():
         raise ValueError(f"原始来源目录不可用：{task.source_root}")
-    items = task.items
+    if task.retry_album_key is not None or task.skipped_albums:
+        items = tuple(item for plan in task.execution_plans() for item in plan.pending_items)
+    else:
+        items = task.items
     total = len(items)
 
     def snapshots():
@@ -106,7 +109,7 @@ def _validate_files(task, cancel_event, progress):
     validate_snapshots(snapshots())
 
 
-def verify_task(task, runtime_paths, *, verify_source=True, cancel_event=None, progress=None):
+def verify_task(task, runtime_paths, *, verify_source=True, cancel_event=None, progress=None, database=None):
     """Read the original task and its latest protections without opening a Worker."""
     if progress is None:
         progress = lambda _message, _cancelable: None
@@ -120,13 +123,13 @@ def verify_task(task, runtime_paths, *, verify_source=True, cancel_event=None, p
         raise_if_cancelled(cancel_event=cancel_event)
         _validate_files(task, cancel_event, progress)
     progress("正在核对上传断点和发送记录…", True)
-    return verify_delivery(task, runtime_paths, cancel_event=cancel_event)
+    return verify_delivery(task, runtime_paths, cancel_event=cancel_event, database=database)
 
 
-def recover_task(task, *, runtime_paths=paths):
+def recover_task(task, *, runtime_paths=paths, database=None):
     """Record an interrupted run and keep any uncertain delivery blocked."""
     try:
-        confirmed = verify_task(task, runtime_paths, verify_source=False)
+        confirmed = verify_task(task, runtime_paths, verify_source=False, database=database)
     except (OSError, ValueError, TypeError, RuntimeError) as exc:
         return replace(task, status=TaskStatus.NEEDS_REVIEW, finished_at=now(), outcome="RESTARTED",
                        error=f"上次运行的任务需要核对：{exc}")

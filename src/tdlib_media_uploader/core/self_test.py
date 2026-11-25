@@ -55,9 +55,9 @@ def _is_within(child: Path, parent: Path) -> bool:
         return False
 
 
-def run_self_test(*, emit=print) -> int:
+def run_self_test(*, emit=print, dependency_errors=()) -> int:
     configure_cli_encoding()
-    failures: list[str] = []
+    failures: list[str] = list(dependency_errors)
     emit(f"TDLib Media Uploader V{read_version()}")
     emit(f"资源目录：{RESOURCE_DIR}")
     emit(f"数据目录：{DATA_DIR}")
@@ -103,7 +103,7 @@ def run_self_test(*, emit=print) -> int:
     if not TEMPLATE_CONFIG_PATH.is_file():
         failures.append(f"缺少配置模板：{TEMPLATE_CONFIG_PATH}")
     for module_name in (
-        "tdjson", "PySide6", "PySide6.QtSvg", "PIL", "tdlib_media_uploader.telegram.tdlib_common",
+        "tdjson", "PIL", "tdlib_media_uploader.telegram.tdlib_common",
         "tdlib_media_uploader.media.video_pipeline", "tdlib_media_uploader.media.image_pipeline",
         "tdlib_media_uploader.media.mixed_pipeline",
     ):

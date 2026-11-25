@@ -17,7 +17,8 @@ import subprocess
 from typing import Any
 
 from ..config.paths import APP_DATA_DIR, RESOURCE_DIR
-from ..core.filesystem import display_path
+from ..core.filesystem import display_path, file_snapshot, stable_path
+from ..core.uploader_database import load_media_metadata, store_media_metadata
 from ..processes.runner import run_cancellable_process
 
 PROJECT_DIR = RESOURCE_DIR
@@ -555,6 +556,8 @@ def probe_video(
     timeout: float = 45.0,
 ) -> VideoMediaInfo:
     """Probe video file and return structured VideoMediaInfo."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise TimeoutError("读取视频媒体信息已取消")
     file_path = Path(path)
     if not file_path.is_file():
         raise RuntimeError(f"视频文件不存在：{file_path}")
@@ -567,8 +570,22 @@ def probe_video(
             file_path, cancel_event=cancel_event, timeout=timeout
         )
     else:
+        cache_probe = f"ffprobe-video-v1:{stable_path(ffprobe)}:{file_snapshot(ffprobe)}"
+        cached = load_media_metadata(cache_probe, (snapshot,)).get(stable_path(file_path))
+        if isinstance(cached, dict):
+            try:
+                result = VideoMediaInfo(**cached, source_snapshot=snapshot[1:])
+            except TypeError:
+                pass
+            else:
+                validate_snapshots((snapshot,))
+                if cancel_event is not None and cancel_event.is_set():
+                    raise TimeoutError("读取视频媒体信息已取消")
+                return result
         result = _probe_with_ffprobe(
             file_path, ffprobe, cancel_event=cancel_event, timeout=timeout
         )
     validate_snapshots((snapshot,))
+    if ffprobe and result.compatibility != "invalid":
+        store_media_metadata(cache_probe, ((*snapshot, dict(result)),))
     return replace(result, source_snapshot=snapshot[1:])

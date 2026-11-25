@@ -9,7 +9,11 @@ from threading import Lock
 from ..config import paths
 from ..core.concurrency import CancellationRequested, raise_if_cancelled
 from ..core.persistence import atomic_write_json, atomic_write_text
-from .queue import ACTION_REQUIRED, ACTIVE, RECOVERABLE, TaskStatus, UploadTask, finish_task, now
+from ..core.uploader_database import database_for, encode_record
+from .queue import (
+    ACTION_REQUIRED, ACTIVE, RECOVERABLE, AlbumStatus, TaskStatus, UploadTask, finish_task, now,
+    retry_failed_album, skip_album,
+)
 from .queue_recovery import recover_task, review_matches_task, verify_delivery, verify_task
 
 
@@ -35,8 +39,8 @@ def _queue_write(action):
 class UploadQueue:
     """Serialize mutations across threads. Readers see the last durable task tuple."""
 
-    def __init__(self, path: Path, recover=None, *, runtime_paths=paths):
-        self.path = path
+    def __init__(self, path: Path, recover=None, *, runtime_paths=paths, database=None):
+        self.path = Path(path)
         self.runtime_paths = runtime_paths
         self.tasks: tuple[UploadTask, ...] = ()
         self.paused = False
@@ -44,25 +48,85 @@ class UploadQueue:
         self._writer = Lock()
         self._revision = 0
         self._recovering = False
+        self.database = database
         try:
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
+            if self.path == paths.DATA_DIR / "upload_queue.json":
+                from ..core.upload_journal import InflightJournal
+                from ..core.upload_state import migrate_checkpoints
+
+                if self.database is None:
+                    self.database = database_for(paths.DATA_DIR / "uploader.db")
+                migrate_checkpoints(self.database, paths.STATE_DIR)
+                InflightJournal(paths.UPLOAD_INFLIGHT_DIR, database=self.database)
+            if self.database is not None:
+                self._queue_key = self.database.key(self.path)
+                self.database.migrate("queue", self._queue_key, self._import_legacy)
+                with self.database.read() as connection:
+                    raw = self._read_database(connection)
+                    tasks = self._database_tasks(connection, raw) if raw is not None else ()
+            else:
+                raw = self._read_legacy()
+                tasks = self._read_tasks(raw) if raw is not None else ()
+            if raw is None:
                 return
-            if raw["schema_version"] != 1 or type(raw["paused"]) is not bool:
-                raise ValueError("队列文件版本或格式不受支持")
-            tasks = tuple(UploadTask.from_record(entry) for entry in raw["tasks"])
-            if len({task.task_id for task in tasks}) != len(tasks):
-                raise ValueError("队列包含重复任务 ID")
             self.tasks, self.paused = tasks, True
             if any(task.status in ACTIVE for task in tasks) or not raw["paused"]:
                 if recover is None:
-                    recover = lambda task: recover_task(task, runtime_paths=runtime_paths)
+                    recover = lambda task: recover_task(task, runtime_paths=runtime_paths, database=self.database)
                 recovered = tuple(recover(task) if task.status in ACTIVE else task for task in tasks)
                 self._commit(recovered, True)
         except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError) as exc:
             self.paused = True
             self.error = f"无法恢复上传队列（{path}）：{exc}"
+
+    def _read_legacy(self):
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+
+    @staticmethod
+    def _read_tasks(raw):
+        if raw["schema_version"] != 1 or type(raw["paused"]) is not bool:
+            raise ValueError("队列文件版本或格式不受支持")
+        tasks = tuple(UploadTask.from_record(entry) for entry in raw["tasks"])
+        if len({task.task_id for task in tasks}) != len(tasks):
+            raise ValueError("队列包含重复任务 ID")
+        return tasks
+
+    def _import_legacy(self, connection):
+        raw = self._read_legacy()
+        if raw is not None:
+            self._read_tasks(raw)
+            self._write_database(connection, raw)
+
+    def _read_database(self, connection):
+        row = connection.execute(
+            "SELECT metadata FROM upload_queues WHERE queue_key=?", (self._queue_key,)
+        ).fetchone()
+        return json.loads(row[0]) if row is not None else None
+
+    def _write_database(self, connection, raw):
+        connection.execute(
+            "INSERT INTO upload_queues VALUES (?, ?) ON CONFLICT(queue_key) DO UPDATE SET metadata=excluded.metadata",
+            (self._queue_key, encode_record(raw)),
+        )
+
+    def _database_tasks(self, connection, raw):
+        tasks = self._read_tasks(raw)
+        return tuple(self._incorporate_receipts(connection, task) for task in tasks)
+
+    @staticmethod
+    def _incorporate_receipts(connection, task):
+        rows = connection.execute(
+            "SELECT paths FROM queue_album_receipts WHERE task_id=?", (task.task_id,)
+        ).fetchall()
+        if not rows:
+            return task
+        confirmed = set(task.confirmed_paths)
+        for (saved,) in rows:
+            confirmed.update(json.loads(saved))
+        return replace(task, confirmed_paths=tuple(sorted(confirmed)))
 
     @property
     def revision(self):
@@ -80,7 +144,14 @@ class UploadQueue:
         self._revision += 1
 
     def _commit(self, tasks, paused):
-        atomic_write_json(self.path, self._record(tasks, paused))
+        raw = self._record(tasks, paused)
+        if self.database is None:
+            atomic_write_json(self.path, raw)
+        else:
+            with self.database.write() as connection:
+                self._write_database(connection, raw)
+                removed = {task.task_id for task in self.tasks} - {task.task_id for task in tasks}
+                connection.executemany("DELETE FROM queue_album_receipts WHERE task_id=?", ((key,) for key in removed))
         self._publish(tasks, paused)
 
     @_queue_write
@@ -146,6 +217,21 @@ class UploadQueue:
 
     def _commit_recovery(self, tasks, verified, revision, cancel_event, progress):
         progress("正在准备保存队列状态…", True)
+        if self.database is not None:
+            raise_if_cancelled(cancel_event=cancel_event)
+            progress("正在保存队列状态…", False)
+            with self.database.write() as connection:
+                self._check_revision(revision)
+                saved = self._read_database(connection)
+                if (saved is None or saved["paused"] is not self.paused
+                        or self._database_tasks(connection, saved) != self.tasks):
+                    raise self._disk_conflict("磁盘上的队列状态已变化")
+                for task, expected in verified:
+                    if verify_delivery(task, self.runtime_paths, database=self.database) != expected:
+                        raise QueueRecoveryConflict("上传断点已变化，请重新验证任务")
+                self._write_database(connection, self._record(tasks, paused=True))
+            self._publish(tasks, paused=True)
+            return
         previous = self._read_recovery_queue()
         try:
             saved = json.loads(previous)
@@ -228,25 +314,36 @@ class UploadQueue:
         finally:
             self._recovering = False
 
-    def _recover_task(self, action, task_id, cancel_event, progress):
+    def _recover_task(self, action, subject, cancel_event, progress):
+        album_action = action in {"skip_album", "retry_album"}
+        task_id, album_key = subject if album_action else (subject, None)
         task = self._action_task(task_id, {
             "restore": ACTION_REQUIRED, "skip": RECOVERABLE, "recheck": {TaskStatus.NEEDS_REVIEW},
+            "skip_album": RECOVERABLE | {TaskStatus.PENDING}, "retry_album": RECOVERABLE,
         }[action])
-        if action == "restore" and any(
+        if action in {"restore", "retry_album"} and any(
             entry.status is TaskStatus.PENDING and entry.overlaps(task) for entry in self.tasks
         ):
             raise ValueError("队列中有重叠的等待任务，请先移除重复项")
         confirmed = verify_task(
             task, self.runtime_paths, verify_source=action == "restore",
-            cancel_event=cancel_event, progress=progress,
+            cancel_event=cancel_event, progress=progress, database=self.database,
         )
+        if action == "skip_album":
+            return skip_album(task, album_key, confirmed)
+        if action == "retry_album":
+            retry = retry_failed_album(task, album_key, confirmed)
+            verify_task(retry, self.runtime_paths, cancel_event=cancel_event, progress=progress, database=self.database)
+            return retry
+        outcomes = tuple(outcome for outcome in task.album_outcomes if outcome.status is not AlbumStatus.UNKNOWN)
         if action == "restore":
-            return replace(task, status=TaskStatus.PENDING, confirmed_paths=confirmed,
-                           started_at=None, finished_at=None, outcome=None, error=None)
+            return replace(task, status=TaskStatus.PENDING, confirmed_paths=confirmed, album_outcomes=outcomes,
+                           started_at=None, finished_at=None, outcome=None, error=None, paused_by_policy=False)
         if action == "skip":
             return replace(task, status=TaskStatus.SKIPPED, confirmed_paths=confirmed,
-                           finished_at=now(), outcome="SKIPPED", error="用户选择跳过未完成的任务。")
-        return replace(task, status=TaskStatus.INTERRUPTED, confirmed_paths=confirmed,
+                           finished_at=now(), outcome="SKIPPED", error="用户选择跳过未完成的任务。",
+                           paused_by_policy=False)
+        return replace(task, status=TaskStatus.INTERRUPTED, confirmed_paths=confirmed, album_outcomes=outcomes,
                        error="发送记录和断点已核对。请选择恢复或跳过此任务。")
 
     def _review_updates(self, record, cancel_event, progress):
@@ -275,6 +372,12 @@ class UploadQueue:
     def skip(self, task_id):
         return self.recover("skip", task_id)
 
+    def skip_album(self, task_id, album_key):
+        return self.recover("skip_album", (task_id, album_key))
+
+    def retry_album(self, task_id, album_key):
+        return self.recover("retry_album", (task_id, album_key))
+
     def _pending_index(self, task_id):
         for index, task in enumerate(self.tasks):
             if task.task_id == task_id and task.status is TaskStatus.PENDING:
@@ -295,6 +398,18 @@ class UploadQueue:
             other = indices[destination]
             tasks = list(self.tasks)
             tasks[index], tasks[other] = tasks[other], tasks[index]
+            self._commit(tuple(tasks), self.paused)
+
+    @_queue_write
+    def move_to_top(self, task_id):
+        index = self._pending_index(task_id)
+        indices = [i for i, task in enumerate(self.tasks) if task.status is TaskStatus.PENDING]
+        destination = indices.index(index)
+        if destination > 0:
+            tasks = list(self.tasks)
+            for old, new in zip(reversed(indices[:destination]), reversed(indices[1:destination + 1])):
+                tasks[new] = self.tasks[old]
+            tasks[indices[0]] = self.tasks[index]
             self._commit(tuple(tasks), self.paused)
 
     def _replace(self, task, *, paused):
@@ -318,4 +433,4 @@ class UploadQueue:
         if task.status not in ACTIVE or task not in self.tasks:
             raise ValueError("任务已结束或不存在")
         finished = finish_task(task, result)
-        return self._replace(finished, paused=self.paused or finished.status is not TaskStatus.COMPLETED)
+        return self._replace(finished, paused=self.paused or result.paused or finished.status is not TaskStatus.COMPLETED)

@@ -34,14 +34,23 @@ class _ObservedSend:
     preserve_journal: bool = False
     request_rejection: SendRequestRejected | None = None
 
+    def flood_wait(self) -> float | None:
+        delays = [row["retry_after"] for row in self.item_results
+                  if isinstance(row, Mapping) and row.get("error_code") in (420, 429)
+                  and type(row.get("retry_after")) in (int, float)
+                  and math.isfinite(row["retry_after"]) and row["retry_after"] >= 0]
+        if self.request_rejection is not None and self.request_rejection.rate_limited:
+            delays.append(self.request_rejection.retry_after)
+        return max(delays, default=None)
+
     def album_retry_delay(self, expected_count: int, *, complete_album=True) -> float | None:
         """Require a distinct, terminal and transient failure for every item."""
         if self.status is not BatchStatus.FAILED or self.succeeded_ids or self.pending_ids:
             return None
         rejection = self.request_rejection
         if rejection is not None:
-            if rejection.rate_limited and not (self.message_ids or self.failed_ids or self.item_results):
-                return rejection.retry_after
+            if rejection.retryable and not (self.message_ids or self.failed_ids or self.item_results):
+                return rejection.retry_after_seconds
             return None
         if (not complete_album or not expected_count
                 or len(self.failed_ids) != expected_count or len(self.item_results) != expected_count

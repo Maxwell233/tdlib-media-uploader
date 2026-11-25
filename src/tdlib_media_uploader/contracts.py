@@ -55,6 +55,7 @@ class UploadContext:
     metadata: Mapping[str, Any] = field(default_factory=dict)
     scan_result: ScanResult | None = None
     plans: tuple[AlbumPlan, ...] | None = None
+    queue_task_id: str | None = None
 
 
 class MediaStrategy(Protocol):

@@ -49,6 +49,7 @@ class GuiConsoleUI(QObject):
     progress_changed = Signal(object)
     album_changed = Signal(object)
     album_attempt_changed = Signal(object)
+    preliminary_progress_changed = Signal(object)
     target_changed = Signal(object)
     rate_limit_changed = Signal(int)
 
@@ -91,10 +92,20 @@ class GuiConsoleUI(QObject):
     def register_client(self, client):
         with self._client_lock:
             self._client = client
-            stop_already_requested = self._stop_requested.is_set()
-        if stop_already_requested:
-            # Only an immediate stop may cancel a client during startup.
-            client.cancel()
+            if self._stop_requested.is_set():
+                self._cancel_client(client)
+
+    def unregister_client(self, client):
+        with self._client_lock:
+            if self._client is client:
+                self._client = None
+
+    @staticmethod
+    def _cancel_client(client):
+        stop = getattr(client, "cancel_upload_work", None)
+        if stop is None:
+            stop = client.cancel
+        stop()
 
     def request_safe_stop(self):
         """Finish the current Album, then stop at the next Album boundary."""
@@ -109,9 +120,8 @@ class GuiConsoleUI(QObject):
         self._stop_after_current.set()
         self.auth_bridge.answer("")
         with self._client_lock:
-            client = self._client
-        if client is not None:
-            client.cancel()
+            if self._client is not None:
+                self._cancel_client(self._client)
 
     def prompt(self, text: str, *, password: bool = False) -> str:
         value = self.auth_bridge.ask(text, password, stopped=self._stop_after_current)
@@ -181,6 +191,9 @@ class GuiConsoleUI(QObject):
 
     def rate_limit(self, seconds: int):
         self.rate_limit_changed.emit(seconds)
+
+    def preliminary_progress(self, event):
+        self.preliminary_progress_changed.emit(event)
 
     def finish(self):
         return None

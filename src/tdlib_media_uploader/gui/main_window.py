@@ -23,7 +23,7 @@ if __name__ == "__main__" and not getattr(sys, "frozen", False):
 
 from ..core.album import album_key
 from ..core.logging import write_app_log
-from PySide6.QtCore import QTimer, Slot, Qt
+from PySide6.QtCore import QTimer, Signal, Slot, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -43,8 +43,8 @@ from ..config.paths import (
     APP_DATA_DIR, CONFIG_PATH, RESOURCE_DIR, TEMPLATE_CONFIG_PATH, DATA_DIR,
     read_version, ensure_data_dirs,
 )
-from ..core.instance_lock import InstanceLock
-from ..core.self_test import run_self_test
+from .instance_lock import InstanceLock
+from .application import run_self_test
 from .events import AuthBridge
 from .pages import (
     HomePage,
@@ -58,6 +58,7 @@ from .pages import (
 from .workers import ScanWorker, UploadWorker
 from .queue_controller import QueueController
 from ..config.snapshot import snapshot_config
+from ..telegram.session import TDLibSessionManager
 from ..upload.queue import ACTION_REQUIRED, ACTIVE, TaskStatus, UploadTask
 from ..upload.queue_store import UploadQueue
 
@@ -112,6 +113,8 @@ from .preferences import UiPreferences
 
 
 class MainWindow(QMainWindow):
+    telegram_connection_changed = Signal(str)
+
     def __init__(self, *, queue_store=None, preferences=None):
         super().__init__()
         global cfg
@@ -124,20 +127,28 @@ class MainWindow(QMainWindow):
         self.resize(1240, 800)
         self._cache_clear_worker = None
         self._close_after_recovery = False
+        self._close_after_upload = False
+        self._close_after_session = False
         self.scanners: dict[str, ScanWorker] = {}
         self._build_ui(preferences)
+        self.telegram_connection_changed.connect(self._telegram_connection, Qt.ConnectionType.QueuedConnection)
+        self.telegram_session = TDLibSessionManager(self.telegram_connection_changed.emit)
         store = queue_store if queue_store is not None else UploadQueue(DATA_DIR / "upload_queue.json")
         self.queue = QueueController(store, self._make_upload_worker, self._can_start_queue, self)
         self.queue.changed.connect(self._refresh_queue)
         self.queue.error.connect(self._queue_error)
         self.queue.launched.connect(self._upload_launched)
         self.queue.ended.connect(self._upload_finished)
-        self.task_page.queue_pause_requested.connect(self.queue.set_paused)
+        self.task_page.queue_pause_requested.connect(self.queue.request_paused)
+        self.task_page.disconnect_requested.connect(self._disconnect_telegram)
         self.task_page.queue_move_requested.connect(self.queue.move)
+        self.task_page.queue_top_requested.connect(self.queue.move_to_top)
         self.task_page.queue_remove_requested.connect(self.queue.remove)
         self.task_page.queue_restore_requested.connect(self._restore_queued_task)
         self.task_page.queue_recheck_requested.connect(self._recheck_queued_task)
         self.task_page.queue_skip_requested.connect(self._skip_queued_task)
+        self.task_page.album_skip_requested.connect(self._skip_queued_album)
+        self.task_page.album_retry_requested.connect(self._retry_queued_album)
         self.task_page.queue_inflight_requested.connect(
             lambda: self.sidebar.setCurrentRow(self.sidebar_rows["inflight"])
         )
@@ -151,6 +162,8 @@ class MainWindow(QMainWindow):
         if store.error:
             write_app_log("ERROR", store.error, source="upload/queue")
             self.statusBar().showMessage(store.error)
+        elif store.paused and any(task.status in ACTION_REQUIRED | {TaskStatus.PENDING} for task in store.tasks):
+            self.statusBar().showMessage("发现未完成的上传队列。请在任务中心查看并继续队列。")
 
     @property
     def worker(self):
@@ -239,7 +252,6 @@ class MainWindow(QMainWindow):
         self.settings_page.config_saved.connect(self._on_settings_saved)
 
         self.statusBar().showMessage("就绪")
-        self._telegram_connected = False
 
     def _theme_warning(self, message):
         write_app_log("WARNING", message, source="ui/preferences")
@@ -441,6 +453,42 @@ class MainWindow(QMainWindow):
         recovering = self.queue.recovery_busy
         self.task_page.show_queue(self.queue.store, self.queue.write_blocked, recovering=recovering)
         self.inflight_page.set_review_blocked(recovering)
+        immediate = (
+            self.worker is None and not recovering and not self.queue.store.paused
+            and not self.queue.store.error and not self.queue.store.blocked_reason
+        )
+        for page in self.upload_pages.values():
+            page.set_queue_immediate(immediate)
+        self._update_disconnect_button()
+
+    def _update_disconnect_button(self):
+        self.task_page.disconnect_button.setEnabled(
+            self.worker is None and self.telegram_session.connection_state != "disconnected"
+        )
+
+    @Slot(str)
+    def _telegram_connection(self, _state):
+        state = self.telegram_session.connection_state
+        label = {
+            "disconnected": "未连接",
+            "connectionStateReady": "已连接",
+            "connectionStateWaitingForNetwork": "等待网络恢复",
+            "connectionStateConnectingToProxy": "正在连接代理",
+            "connectionStateUpdating": "正在同步 Telegram",
+        }.get(state, "正在连接 Telegram")
+        connected = state == "connectionStateReady"
+        self.home.set_connection(label, connected)
+        self.nav_sidebar.set_connection_status(connected, label)
+        self._update_disconnect_button()
+
+    @Slot()
+    def _disconnect_telegram(self):
+        if self.worker is not None or not self.queue.set_paused(True):
+            return
+        try:
+            self.telegram_session.disconnect()
+        except TimeoutError:
+            self.statusBar().showMessage("正在关闭 Telegram 会话")
 
     def _queue_recovery_allowed(self):
         if self.queue.recovery_busy:
@@ -468,10 +516,14 @@ class MainWindow(QMainWindow):
                 "restore": "任务已恢复到原位置。请选择继续队列。",
                 "recheck": "记录已核对。请选择恢复或跳过此任务。",
                 "skip": "已跳过未完成的上传任务。请选择继续队列。",
+                "skip_album": "已跳过所选 Album。请继续队列。",
+                "retry_album": "已验证所选 Album 的失败文件。继续队列后将重试这些文件。",
                 "refresh_reviews": "未确认上传记录已更新。请在任务中心查看恢复状态。",
             }[result.action]
             self.task_page.queue_notice.setText(message)
             self.statusBar().showMessage(message)
+            if result.task is not None and result.action in {"skip", "skip_album"}:
+                self._upload_page(result.task.kind).sync_task_outcomes(result.task)
         if self._close_after_recovery:
             self._close_after_recovery = False
             QTimer.singleShot(0, self.close)
@@ -489,6 +541,21 @@ class MainWindow(QMainWindow):
         )
         if answer == QMessageBox.StandardButton.Yes and self._queue_recovery_allowed():
             self.queue.skip(task_id)
+
+    def _skip_queued_album(self, task_id, album_key):
+        if not self._queue_recovery_allowed():
+            return
+        answer = QMessageBox.question(
+            self, "跳过 Album", "是否跳过所选 Album 中仍未上传的文件？原始文件将保留。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes and self._queue_recovery_allowed():
+            self.queue.skip_album(task_id, album_key)
+
+    def _retry_queued_album(self, task_id, album_key):
+        if self._queue_recovery_allowed():
+            self.queue.retry_album(task_id, album_key)
 
     def _record_skipped_task(self, task):
         message = "已跳过未完成的上传任务。"
@@ -550,7 +617,8 @@ class MainWindow(QMainWindow):
             self.queue.set_paused(True)
             self._queue_error("队列已暂停，请先配置 Telegram API ID 和 API Hash，再继续队列。")
             return False
-        if TDJsonClient.unclosed_instance() is not None:
+        active_client = TDJsonClient.unclosed_instance()
+        if active_client is not None and not self.telegram_session.owns(active_client):
             self.queue.set_paused(True)
             self._queue_error("队列已暂停，请等待 Telegram 数据库关闭后再继续。")
             return False
@@ -562,6 +630,8 @@ class MainWindow(QMainWindow):
             task.kind, auth_bridge, task.preview(),
             target_provider=lambda _kind: task.target,
             config=task.execution_config(config_service.get_config()),
+            session_manager=self.telegram_session,
+            queue_task_id=task.task_id,
         )
         worker.wait_for_scheduler = True
         auth_bridge.requested.connect(
@@ -571,11 +641,13 @@ class MainWindow(QMainWindow):
         return worker
 
     def _upload_launched(self, task, worker):
-        pending = [item for plan in task.plans for item in plan.pending_items]
+        plans = task.execution_plans()
+        pending = [item for plan in plans for item in plan.pending_items]
+        self.task_page.select_task(task.task_id)
         self.task_page.start_session(task.kind, {
             "pending_files": len(pending),
             "pending_bytes": sum(item.snapshot.size for item in pending),
-            "album_count": sum(bool(plan.pending_items) for plan in task.plans),
+            "album_count": sum(bool(plan.pending_items) for plan in plans),
         })
         for signal, callback in (
             (worker.ui.message_added, self.task_page.add_message),
@@ -583,6 +655,7 @@ class MainWindow(QMainWindow):
             (worker.ui.rate_limit_changed, self.task_page.show_rate_limit),
             (worker.ui.album_changed, self.task_page.show_album),
             (worker.ui.album_attempt_changed, self.task_page.show_album_attempt),
+            (worker.ui.preliminary_progress_changed, self.task_page.show_preliminary_progress),
             (worker.ui.target_changed, self._target_from_worker),
         ):
             signal.connect(
@@ -591,9 +664,8 @@ class MainWindow(QMainWindow):
             )
         for page in self.upload_pages.values():
             page.set_running(True)
-        self.home.set_task_running(task.kind, f"{len(pending)} 个待上传文件 · {len(task.plans)} 个 Album")
-        self.home.set_connection("上传中", True)
-        self.nav_sidebar.set_connection_status(True, "上传中")
+        self.home.set_task_running(task.kind, f"{len(pending)} 个待上传文件 · {len(plans)} 个 Album")
+        self._update_disconnect_button()
 
     def _on_worker_progress(self, payload: dict):
         self.task_page.show_progress(payload)
@@ -606,9 +678,6 @@ class MainWindow(QMainWindow):
         self.home.set_task_progress(current, total, speed_str, eta_str)
 
     def _target_from_worker(self, payload: dict):
-        self._telegram_connected = True
-        self.home.set_connection("已连接", True)
-        self.nav_sidebar.set_connection_status(True, "已连接")
         is_channel = payload.get("target_mode") == "channel"
         self.statusBar().showMessage(
             f"目标已确认：{payload.get('chat_title')}"
@@ -665,11 +734,15 @@ class MainWindow(QMainWindow):
         self.task_page.finish_session(success, message.splitlines()[0][:180])
         for upload_page in self.upload_pages.values():
             upload_page.set_running(False)
+        if not self.queue.write_blocked:
+            self._upload_page(task.kind).sync_task_outcomes(task)
         self.home.set_task_idle()
-        self.home.set_connection("已连接" if self._telegram_connected else "未连接", self._telegram_connected)
-        self.nav_sidebar.set_connection_status(self._telegram_connected, "已连接" if self._telegram_connected else "未连接")
+        self._update_disconnect_button()
         self.statusBar().showMessage(message.splitlines()[0][:180])
         self.inflight_page.reload_records()
+        if self._close_after_upload:
+            self._close_after_upload = False
+            QTimer.singleShot(0, self.close)
 
     @Slot(object, bool)
     def _reconcile_inflight(self, record: object, sent: bool):
@@ -725,7 +798,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("请等待当前队列检查结束后再清理缓存")
             return False
         from ..telegram.tdlib_common import TDJsonClient
-        if TDJsonClient.unclosed_instance() is not None:
+        active_client = TDJsonClient.unclosed_instance()
+        if active_client is not None and not self.telegram_session.owns(active_client):
             self.statusBar().showMessage("请等待 Telegram 任务和数据库关闭后再清理缓存")
             return False
         if self._cache_clear_worker is not None:
@@ -798,13 +872,13 @@ class MainWindow(QMainWindow):
         if self.queue.store.error or any(
             task.status in ACTIVE | ACTION_REQUIRED | {TaskStatus.PENDING} for task in self.queue.store.tasks
         ):
-            self.statusBar().showMessage("请先处理未完成的上传任务，再清理断点和未确认记录")
+            self.statusBar().showMessage("请先处理未完成的上传任务，再清理断点和缓存")
             return
         answer = QMessageBox.warning(
             self,
             "确认清理所有缓存",
-            "将清空视频/图片/混合上传状态、标题、视频封面缓存、历史记录、未确认上传记录、暂存副本和运行日志，保留目录本身。\n\n"
-            "config.toml 和 Telegram 登录数据库不会被删除。是否继续？",
+            "将清空视频/图片/混合上传断点、标题、媒体缓存、历史记录、暂存副本和运行日志。\n\n"
+            "未确认上传记录、队列、配置和 Telegram 登录数据库将保留。是否继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -887,6 +961,9 @@ class MainWindow(QMainWindow):
                 worker.request_stop()
 
     def closeEvent(self, event):
+        if self._close_after_upload:
+            event.ignore()
+            return
         if self.queue.recovery_busy:
             self._close_after_recovery = True
             self.queue.closing = True
@@ -907,7 +984,7 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "任务运行中",
-                "上传任务仍在运行。是否立即停止上传并退出？",
+                "上传任务仍在运行。是否等待当前 Album 完成后退出？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
@@ -915,19 +992,26 @@ class MainWindow(QMainWindow):
                 self.queue.schedule()
                 event.ignore()
                 return
-            if self.worker is worker:
-                worker.request_stop()
-            if self.worker is worker and not worker.wait(10000):
-                QMessageBox.warning(self, "仍在运行", "TDLib 尚未结束，请稍后再关闭窗口。")
+            if self.worker is worker and worker.isRunning():
+                self._close_after_upload = True
+                self.queue.set_paused(True)
+                worker.request_safe_stop()
+                self.statusBar().showMessage("正在等待当前 Album 安全停止后退出")
                 event.ignore()
                 return
         self.queue.finish_after_wait()
         from ..telegram.tdlib_common import TDJsonClient
         closing_client = TDJsonClient.unclosed_instance()
-        if closing_client is not None:
-            closing_client._send_close_now()
-            QMessageBox.warning(self, "正在关闭", "Telegram 数据库尚未关闭，请稍后再退出。")
-            self.queue.closing = False
+        try:
+            if closing_client is None or self.telegram_session.owns(closing_client):
+                self.telegram_session.disconnect()
+            else:
+                closing_client.close(timeout=0)
+        except TimeoutError:
+            self.statusBar().showMessage("正在等待 Telegram 安全关闭数据库")
+            if not self._close_after_session:
+                self._close_after_session = True
+                QTimer.singleShot(100, self._retry_close_session)
             event.ignore()
             return
         for scanner in list(self.scanners.values()):
@@ -947,6 +1031,10 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
         event.accept()
+
+    def _retry_close_session(self):
+        self._close_after_session = False
+        self.close()
 
 
 def main() -> int:
@@ -985,6 +1073,8 @@ def main() -> int:
         return 1
     try:
         write_app_log("INFO", f"启动 TDLib Media Uploader V{APP_VERSION}", source="startup")
+        from ..media.artifact_cache import prune_media_artifacts
+        prune_media_artifacts(cfg)
         app.setApplicationName("TDLib Media Uploader")
         app.setApplicationVersion(APP_VERSION)
         app.setWindowIcon(_application_icon())

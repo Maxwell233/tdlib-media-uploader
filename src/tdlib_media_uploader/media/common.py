@@ -6,9 +6,11 @@ from collections.abc import Iterable, MutableMapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ..core.readiness import FileReadinessError, readiness_category
-from ..core.filesystem import stable_path
+from ..core.concurrency import ContextExecutor, ordered_bounded_map, raise_if_cancelled
+from ..core.readiness import CHANGED, FileReadiness, FileReadinessError, readiness_category
+from ..core.filesystem import io_worker_count, revalidate_file, stable_path
 from ..upload.staging import cleanup_staging, remove_staged_file
+from .runtime import pipeline_paths_lock
 
 
 def readiness_options(config: Any, *, network: bool, default_attempts: int = 3) -> dict:
@@ -46,6 +48,46 @@ def readiness_record(error: BaseException) -> dict | None:
     }
 
 
+def revalidate_ready_source(path, *, expected_size, expected_mtime_ns, cancel_event):
+    """Check the same snapshot after a successful full preflight in this run."""
+
+    raise_if_cancelled(cancel_event=cancel_event)
+    try:
+        return revalidate_file(path, expected_size=expected_size, expected_mtime_ns=expected_mtime_ns)
+    except (RuntimeError, OSError) as exc:
+        raise FileReadinessError(path, FileReadiness(CHANGED, reason=str(exc), attempts=1)) from exc
+
+
+def build_source_options(context, plan):
+    if context is None:
+        return {}
+    paths_for = getattr(context.stager, "paths_for", None)
+    return {
+        "staged_paths": paths_for(plan) if callable(paths_for) else None,
+        "preflight_verified": bool(context.metadata.get("preflight_verified")),
+        "executor": context.metadata.get("io_executor"),
+    }
+
+
+def media_io_results(items, worker, *, config, root, cancel_event=None, executor=None):
+    """Run bounded media I/O with the same order and cancellation in each mode."""
+
+    if len(items) <= 1 and executor is None:
+        for item in items:
+            raise_if_cancelled(cancel_event=cancel_event)
+            yield worker(item)
+        return
+    count = min(len(items), io_worker_count(
+        root, local=getattr(config, "IO_WORKERS_LOCAL", 4),
+        network=getattr(config, "IO_WORKERS_NETWORK", 2),
+    ))
+    if executor is not None:
+        yield from ordered_bounded_map(executor, items, worker, count, cancel_event=cancel_event)
+    else:
+        with ContextExecutor(max_workers=count, thread_name_prefix="tdlib-media-io") as pool:
+            yield from ordered_bounded_map(pool, items, worker, count, cancel_event=cancel_event)
+
+
 def format_size(value: float | int) -> str:
     value = float(value)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
@@ -79,6 +121,7 @@ def cleanup_confirmed_staging(
     for path in paths or ():
         key = stable_path(path)
         for mapping in staged_maps:
-            staged = mapping.pop(key, None)
+            with pipeline_paths_lock:
+                staged = mapping.pop(key, None)
             if staged is not None:
                 remove_staged_file(staged)

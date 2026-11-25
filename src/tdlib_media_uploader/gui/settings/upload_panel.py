@@ -62,6 +62,20 @@ class UploadPanel(SettingsPanel):
         segment_layout.addStretch(1)
         main_layout.addWidget(segment_card)
 
+        shared, shared_layout = self.create_card("三种媒体共享的准备队列")
+        queue_form = QFormLayout()
+        self.prefetch_enabled = QCheckBox("后台准备后续 Album")
+        self.prefetch_slots = QSpinBox()
+        self.prefetch_slots.setRange(1, 16)
+        self.prefetch_budget = QSpinBox()
+        self.prefetch_budget.setRange(1, 1_048_576)
+        self.prefetch_budget.setSuffix(" MiB")
+        queue_form.addRow("并行准备", self.prefetch_enabled)
+        queue_form.addRow("准备槽位", self.prefetch_slots)
+        queue_form.addRow("准备字节预算", self.prefetch_budget)
+        shared_layout.addLayout(queue_form)
+        main_layout.addWidget(shared)
+
         # 2. Stack of 3 media settings sub-panels
         self.stack = QStackedWidget()
 
@@ -77,6 +91,9 @@ class UploadPanel(SettingsPanel):
 
         self.btn_video.setChecked(True)
         self.btn_group.idClicked.connect(self._on_segment_clicked)
+        self.prefetch_enabled.toggled.connect(self._check_dirty)
+        self.prefetch_slots.valueChanged.connect(self._check_dirty)
+        self.prefetch_budget.valueChanged.connect(self._check_dirty)
 
         self.load()
 
@@ -401,6 +418,10 @@ class UploadPanel(SettingsPanel):
     # ------------------ LOAD & DIRTY ------------------
     def load(self):
         self.blockSignals(True)
+        self.prefetch_enabled.setChecked(bool(_cfg("PREFETCH_NEXT_ALBUM", True)))
+        self.prefetch_slots.setValue(int(_cfg("PREFETCH_SLOTS", 3)))
+        self._prefetch_budget_bytes = int(_cfg("PREFETCH_MAX_BYTES", 8 * 1024 ** 3))
+        self.prefetch_budget.setValue((self._prefetch_budget_bytes + 1024 ** 2 - 1) // 1024 ** 2)
         # 1. Video
         self.video_target_editor.load("video")
         read_dates = bool(_cfg("VIDEO_READ_DATES", True))
@@ -474,6 +495,9 @@ class UploadPanel(SettingsPanel):
 
     def _current_values_dict(self) -> dict:
         return {
+            "prefetch_enabled": self.prefetch_enabled.isChecked(),
+            "prefetch_slots": self.prefetch_slots.value(),
+            "prefetch_budget": self.prefetch_budget.value(),
             "video_read_dates": self.video_read_dates.isChecked(),
             "video_missing_date": self.video_missing_date.currentData(),
             "video_media_creation": self.video_media_creation.isChecked(),
@@ -525,7 +549,15 @@ class UploadPanel(SettingsPanel):
         return True, ""
 
     def collect_values(self) -> dict:
-        values = {}
+        budget = self.prefetch_budget.value()
+        values = {
+            ("upload", "prefetch_next_album"): self.prefetch_enabled.isChecked(),
+            ("upload", "prefetch_slots"): self.prefetch_slots.value(),
+            ("upload", "prefetch_max_bytes"): (
+                self._prefetch_budget_bytes if budget == self._initial_values.get("prefetch_budget")
+                else budget * 1024 ** 2
+            ),
+        }
         values.update(self.video_target_editor.collect_values("video"))
         values.update(self.image_target_editor.collect_values("image"))
         values.update(self.mixed_target_editor.collect_values("mixed"))

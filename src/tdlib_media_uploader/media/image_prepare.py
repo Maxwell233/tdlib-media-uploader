@@ -19,6 +19,7 @@ from PIL import Image, ImageOps
 from ..core.source_snapshot import capture_snapshot, validate_snapshots
 from ..config.paths import IMAGE_COMPRESSION_CACHE_DIR
 from ..core.filesystem import stable_path
+from .artifact_cache import record_cache_access
 from .image_probe import (
     PHOTO_TARGET_MAX_SIDE,
     TELEGRAM_PHOTO_MAX_ASPECT_RATIO,
@@ -238,6 +239,7 @@ def prepare_image_for_telegram(
                         raise ValueError("缓存图片不符合当前尺寸或格式限制")
                 if cancel_event is not None and cancel_event.is_set():
                     raise TimeoutError("图片准备已取消")
+                record_cache_access(cache_path, cache_stat)
                 return PreparedImage(
                     source_path=source_path,
                     upload_path=cache_path,

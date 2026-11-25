@@ -10,6 +10,7 @@ Album can safely be sent to another topic/channel.
 
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
 import copy
 import hashlib
 import json
@@ -21,7 +22,8 @@ from pathlib import Path
 from .identity import canonical_target
 from .filesystem import file_snapshot, stable_path
 from .persistence import atomic_write_json, durable_unlink, ensure_private_directory
-from ..config.paths import APP_DATA_DIR
+from .uploader_database import database_for, encode_record
+from ..config.paths import APP_DATA_DIR, UPLOAD_INFLIGHT_DIR
 
 
 PREPARED = "PREPARED"
@@ -96,9 +98,9 @@ def _target_matches(record: dict, target=None) -> bool:
 
 
 class InflightJournal:
-    """One JSON record per Album, written atomically under ``data/upload_inflight``."""
+    """Durable Album records with indexed lookups in the application database."""
 
-    def __init__(self, root: Path | None = None):
+    def __init__(self, root: Path | None = None, *, database=None):
         # Resolve the default from APP_DATA_DIR at construction time so
         # embedders/tests can redirect the data root without re-importing the
         # module.  V1.9's APP_DATA_DIR is already DATA_DIR.
@@ -108,6 +110,23 @@ class InflightJournal:
         self._index = None
         self._records = []
         self._corrupt = []
+        if database is None and (root is None or self.root == UPLOAD_INFLIGHT_DIR):
+            database = database_for(self.root.parent / "uploader.db")
+        self.database = database
+        if database is not None:
+            self._root_key = database.key(self.root)
+            database.migrate("inflight", self._root_key, self._import_legacy)
+
+    def _import_legacy(self, connection):
+        for path in sorted(self.root.glob("*.json")):
+            record = self._read_legacy_path(path)
+            if record is not None:
+                self._write_database(connection, path, record)
+
+    @contextmanager
+    def _mutation(self):
+        with self._lock, self.database.write() if self.database is not None else nullcontext():
+            yield
 
     @staticmethod
     def _key_hash(kind: str, album_key: str, target=None) -> str:
@@ -125,11 +144,40 @@ class InflightJournal:
         return self.root / f"{self._key_hash(kind, album_key, target)}.json"
 
     def _write(self, path: Path, record: dict) -> None:
+        if self.database is not None:
+            with self.database.write() as connection:
+                self._write_database(connection, path, record)
+            return
         try:
             atomic_write_json(path, record)
         finally:
             # A directory fsync can fail after replace has changed the file.
             self._index = None
+
+    def _write_database(self, connection, path, record):
+        identity = (self._root_key, path.name)
+        connection.execute(
+            "INSERT INTO inflight VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(journal_root, filename) DO UPDATE SET "
+            "kind=excluded.kind, album_key=excluded.album_key, status=excluded.status, metadata=excluded.metadata",
+            (*identity, str(record.get("kind") or "").strip().lower() or None,
+             record.get("album_key"), record["status"], encode_record(record)),
+        )
+        connection.execute("DELETE FROM inflight_items WHERE journal_root=? AND filename=?", identity)
+        connection.executemany(
+            "INSERT OR IGNORE INTO inflight_items VALUES (?, ?, ?)",
+            ((*identity, stable_path(item["path"])) for item in record.get("items", ())
+             if isinstance(item, dict) and item.get("path")),
+        )
+
+    def _read_path(self, path, **expected):
+        if self.database is None:
+            return self._read_legacy_path(path, **expected)
+        with self.database.read() as connection:
+            row = connection.execute(
+                "SELECT metadata FROM inflight WHERE journal_root=? AND filename=?", (self._root_key, path.name)
+            ).fetchone()
+        return json.loads(row[0]) if row is not None else None
 
     @staticmethod
     def _corrupt_record(
@@ -155,7 +203,7 @@ class InflightJournal:
             record.update(normalized_target)
         return record
 
-    def _read_path(
+    def _read_legacy_path(
         self,
         path: Path,
         *,
@@ -167,7 +215,7 @@ class InflightJournal:
             value = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(value, dict):
                 raise ValueError("journal must be an object")
-            if not value.get("kind") or not value.get("album_key"):
+            if not all(isinstance(value.get(key), str) and value[key] for key in ("kind", "album_key")):
                 raise ValueError("journal identity is missing")
             status = str(value.get("status", "")).strip().upper()
             if status not in UNRESOLVED | {FAILED}:
@@ -177,6 +225,9 @@ class InflightJournal:
             value["status"] = status
             if "items" in value and not isinstance(value["items"], list):
                 raise ValueError("invalid item snapshot list")
+            if any(isinstance(item, dict) and item.get("path") and not isinstance(item["path"], str)
+                   for item in value.get("items", ())):
+                raise ValueError("invalid item snapshot path")
             if "target" in value and not isinstance(value["target"], dict):
                 raise ValueError("invalid target identity")
             return value
@@ -215,6 +266,24 @@ class InflightJournal:
         self._index, self._records, self._corrupt = index, records, corrupt
 
     def _entries(self, kind: str | None, album_key: str, target=None):
+        if self.database is not None:
+            normalized_kind = str(kind).strip().lower() if kind else None
+            with self.database.read() as connection:
+                rows = connection.execute(
+                    "SELECT filename, metadata FROM inflight WHERE journal_root=? AND ("
+                    "(album_key=? AND (? IS NULL OR kind=?)) OR status=?) "
+                    "ORDER BY status=? ASC, filename",
+                    (self._root_key, str(album_key), normalized_kind, normalized_kind, CORRUPT, CORRUPT),
+                ).fetchall()
+            for name, value in rows:
+                record = json.loads(value)
+                if record.get("kind") and normalized_kind and record["kind"].strip().lower() != normalized_kind:
+                    continue
+                if record.get("album_key") and record["album_key"] != str(album_key):
+                    continue
+                if _target_matches(record, target):
+                    yield self.root / name, record
+            return
         self._ensure_index()
         if kind:
             candidates = self._index.get((str(kind).strip().lower(), str(album_key)), ())
@@ -277,8 +346,23 @@ class InflightJournal:
             requested_by_path.setdefault(ident[0], []).append(ident)
 
         with self._lock:
-            self._ensure_index()
-            for _path, record in self._records:
+            if self.database is None:
+                self._ensure_index()
+                candidates = self._records
+            else:
+                # Album-sized lookups keep the overlap guard independent of
+                # the number of older FAILED or unrelated unresolved records.
+                with self.database.read() as connection:
+                    rows = {}
+                    for path in requested_by_path:
+                        rows.update(connection.execute(
+                            "SELECT i.filename, i.metadata FROM inflight_items s INNER JOIN inflight i "
+                            "USING (journal_root, filename) WHERE s.journal_root=? AND s.stable_path=? "
+                            "AND i.kind=? AND i.status<>?",
+                            (self._root_key, path, kind, FAILED),
+                        ))
+                candidates = ((name, json.loads(value)) for name, value in rows.items())
+            for _path, record in candidates:
                 if (record.get("kind") == kind and record.get("status") in UNRESOLVED
                         and _target_matches(record, target)):
                     for item in record.get("items", ()):
@@ -364,7 +448,7 @@ class InflightJournal:
         if attempt_id is not None:
             record.update(attempt_id=attempt_id, attempt_number=attempt_number)
         self._with_target(record, target)
-        with self._lock:
+        with self._mutation():
             path = self.path_for(kind, album_key, target)
             existing_path, existing = self.get_entry(kind, album_key, target)
             if existing is not None:
@@ -413,7 +497,7 @@ class InflightJournal:
         normalized = str(status).strip().upper()
         if normalized not in {PREPARED, SUBMITTED, CONFIRMED, FAILED, UNKNOWN}:
             raise ValueError(f"未知上传日志状态：{status}")
-        with self._lock:
+        with self._mutation():
             existing_path, record = self.get_entry(kind, album_key, target)
             path = existing_path or self.path_for(kind, album_key, target)
             if record and record.get("status") == CORRUPT:
@@ -463,17 +547,61 @@ class InflightJournal:
     def finalize(self, kind: str, album_key: str, *, target=None) -> bool:
         """Remove a journal only after the normal checkpoint was persisted."""
 
-        with self._lock:
+        with self._mutation():
             path, _record = self.get_entry(kind, album_key, target)
             if path is None:
                 return False
             if _record.get("status") == CORRUPT:
                 raise RuntimeError("不能删除损坏的上传记录")
+            self._delete(path)
+            return True
+
+    def _delete(self, path):
+        if self.database is not None:
+            with self.database.write() as connection:
+                connection.execute(
+                    "DELETE FROM inflight WHERE journal_root=? AND filename=?", (self._root_key, path.name)
+                )
+        else:
             try:
                 durable_unlink(path)
             finally:
                 self.invalidate()
-            return True
+
+    def complete_album(self, state, items, ids, *, kind, album_key, target=None, queue_task_id=None, reconcile=False):
+        """Atomically checkpoint and clear a confirmed Album with its queue receipt."""
+        persist = getattr(state, "persist_album", None)
+        state_database = getattr(state, "database", None)
+        if self.database is None or state_database is None or self.database.path != state_database.path:
+            return False
+        if persist is None:
+            raise TypeError("上传状态不支持 SQLite Album 事务")
+        with self._lock, self.database.write() as connection:
+            path, record = self.get_entry(kind, album_key, target)
+            if record is None or record["status"] == CORRUPT or (not reconcile and record["status"] != CONFIRMED):
+                raise RuntimeError(f"无法结案未确认的上传记录：{kind} / {album_key}")
+            if record["status"] != CONFIRMED:
+                self.mark_confirmed(kind, album_key, ids, target=target)
+            publish = persist(connection, items, ids)
+            if queue_task_id is not None:
+                self._save_queue_receipt(connection, queue_task_id, album_key, items)
+            self._delete(path)
+        publish()
+        return True
+
+    @staticmethod
+    def _save_queue_receipt(connection, task_id, album_key, items):
+        paths = {stable_path(item["path"]) for item in items}
+        saved = connection.execute(
+            "SELECT paths FROM queue_album_receipts WHERE task_id=? AND album_key=?", (task_id, album_key)
+        ).fetchone()
+        if saved is not None:
+            paths.update(json.loads(saved[0]))
+        connection.execute(
+            "INSERT INTO queue_album_receipts VALUES (?, ?, ?) "
+            "ON CONFLICT(task_id, album_key) DO UPDATE SET paths=excluded.paths",
+            (task_id, album_key, encode_record(sorted(paths))),
+        )
 
     def failed(self, kind: str, album_key: str, error: str = "", *, target=None) -> dict:
         return self.update(kind, album_key, FAILED, error=error, target=target)
@@ -484,23 +612,26 @@ class InflightJournal:
     def mark_not_sent(self, kind: str, album_key: str, *, target=None) -> None:
         """Manual reconciliation: it is safe to submit the Album again."""
 
-        with self._lock:
+        with self._mutation():
             path, _record = self.get_entry(kind, album_key, target)
             if _record and _record.get("status") in {CONFIRMED, CORRUPT}:
                 raise ValueError("Telegram 已确认或记录损坏，不能标记为未发送")
             if path is not None:
-                try:
-                    durable_unlink(path)
-                finally:
-                    self.invalidate()
+                self._delete(path)
 
     def list_unresolved(self, *, refresh=False) -> list[dict]:
         with self._lock:
-            if refresh:
-                self.invalidate()
-            self._ensure_index()
-            records = [copy.deepcopy(record) for _, record in self._records
-                       if record.get("status") in UNRESOLVED]
+            if self.database is not None:
+                with self.database.read() as connection:
+                    records = [json.loads(value) for (value,) in connection.execute(
+                        "SELECT metadata FROM inflight WHERE journal_root=? AND status<>?", (self._root_key, FAILED)
+                    )]
+            else:
+                if refresh:
+                    self.invalidate()
+                self._ensure_index()
+                records = [copy.deepcopy(record) for _, record in self._records
+                           if record.get("status") in UNRESOLVED]
             return sorted(records, key=lambda r: str(r.get("updated_at") or
                           r.get("created_at") or ""), reverse=True)
 

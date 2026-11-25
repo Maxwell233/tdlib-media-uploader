@@ -25,21 +25,25 @@ from ..core.album import CaptionStore, album_key, compose_caption
 from ..core.album import with_filename_description as with_filename_description
 from ..core.identity import media_file_signature
 from ..core.upload_state import UploadState as SharedUploadState
-from ..core.concurrency import cancelable_sleep, ordered_bounded_map
+from ..core.concurrency import cancelable_sleep
 from ..core.filesystem import display_path, file_snapshot, is_network_path, io_worker_count, iter_files, stable_path, validate_scan_root
 from ..core.sorting import media_path_sort, relative_name as stable_relative_name
+from ..core.uploader_database import load_media_metadata, store_media_metadata
 from ..processes.runner import run_cancellable_process
 from ..core.readiness import raise_for_file_readiness, wait_for_file_ready
+from .artifact_cache import record_cache_access
 from .common import (
     cleanup_confirmed_staging as _cleanup_confirmed_staging,
     format_size,
+    media_io_results,
     prune_staging_cache as _prune_staging_cache,
     readiness_options as _shared_readiness_options,
     readiness_record as _readiness_record,
+    revalidate_ready_source,
 )
 from ..config import loader as cfg
 from ..core.concurrency import ContextExecutor
-from .runtime import pipeline_config, pipeline_locals
+from .runtime import pipeline_config, pipeline_locals, pipeline_paths_lock
 from ..telegram.tdlib_common import HeadlessUI, formatted_text
 from ..config.paths import APP_DATA_DIR, RESOURCE_DIR, VIDEO_STATE_DIR, THUMBNAIL_CACHE_DIR
 from ..upload.staging import should_stage, stage_file
@@ -544,6 +548,13 @@ def read_exif_metadata(
         )
     requested_keys = {normalize_path(path) for path in requested}
     reported_keys: set[str] = set()
+    snapshots = {
+        normalize_path(path): (path, *snapshot)
+        for path in requested if (snapshot := _snapshot_for_path(path)) is not None
+    }
+    probe = f"exiftool-date-v1:{stable_path(config.EXIFTOOL_PATH)}:{file_snapshot(config.EXIFTOOL_PATH)}"
+    index = load_media_metadata(probe, snapshots.values())
+    reported_keys.update(index)
 
     def emit_progress(path=None):
         _emit_scan_progress(
@@ -559,11 +570,11 @@ def read_exif_metadata(
     emit_progress()
 
     batch_size = int(getattr(config, "EXIFTOOL_BATCH_SIZE", EXIFTOOL_BATCH_SIZE))
+    uncached = [path for path in requested if normalize_path(path) not in index]
     batches = [
-        requested[offset:offset + batch_size]
-        for offset in range(0, len(requested), batch_size)
+        uncached[offset:offset + batch_size]
+        for offset in range(0, len(uncached), batch_size)
     ]
-    index = {}
     diagnostics = []
 
     def collect(batch):
@@ -574,6 +585,7 @@ def read_exif_metadata(
             cancel_event=cancel_event,
         )
         returned = set()
+        records = []
         for row in rows:
             source = row.get("SourceFile")
             if source:
@@ -581,9 +593,13 @@ def read_exif_metadata(
                 if key in requested_keys:
                     index[key] = row
                     returned.add(key)
+                    snapshot = snapshots.get(key)
+                    if snapshot is not None and not row.get("Error") and file_snapshot(snapshot[0]) == snapshot[1:]:
+                        records.append((*snapshot, row))
                     if key not in reported_keys:
                         reported_keys.add(key)
                         emit_progress(source)
+        store_media_metadata(probe, records)
 
         # A warning on a complete batch is useful for the log, but it must not
         # trigger another ExifTool invocation.  Only unresolved SourceFile
@@ -1270,6 +1286,7 @@ def build_thumbnail(
             with Image.open(final_path) as image:
                 image.verify()
             with Image.open(final_path) as image:
+                record_cache_access(final_path, final_path.stat())
                 return final_path, image.width, image.height
         except (OSError, ValueError):
             # A killed process can leave a zero-byte or partially written
@@ -1386,7 +1403,7 @@ def can_remux_video(path: Path, *, info=None, cancel_event=None) -> bool:
     return getattr(info, "compatibility", None) == "remux"
 
 
-def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
+def preflight_videos(items, ui=None, cancel_event=None, *, executor=None) -> list[dict]:
     """Find unreadable videos before login and Album construction.
 
     The source file remains in the scan and is intentionally not marked as
@@ -1475,24 +1492,19 @@ def preflight_videos(items, ui=None, cancel_event=None) -> list[dict]:
                 record.update(readiness_record)
             return record
 
-    worker_count = io_worker_count(
-        config.VIDEO_DIR,
-        local=getattr(config, "IO_WORKERS_LOCAL", MEDIA_DATE_MAX_WORKERS),
-        network=getattr(config, "IO_WORKERS_NETWORK", 2),
-    )
-    with ContextExecutor(max_workers=worker_count, thread_name_prefix="tdlib-preflight") as executor:
-        for index, result in enumerate(
-            ordered_bounded_map(executor, items, worker, worker_count),
-            1,
-        ):
-            if _cancel_requested(cancel_event):
-                raise TimeoutError("视频预检已取消")
-            if getattr(config, "VIDEO_VERIFY_ALL_METADATA", False):
-                target.info(f"预检视频 {index}/{total} · {items[index-1]['path'].name}")
-            if result:
-                skipped.append(result)
-                target.warning(f"跳过无法读取的视频：{relative_name(result['path'])}")
-                target.log(f"跳过视频详情：{result['path']}\n原因：{result['reason']}")
+    for index, result in enumerate(
+        media_io_results(items, worker, config=config, root=config.VIDEO_DIR,
+                         cancel_event=cancel_event, executor=executor),
+        1,
+    ):
+        if _cancel_requested(cancel_event):
+            raise TimeoutError("视频预检已取消")
+        if getattr(config, "VIDEO_VERIFY_ALL_METADATA", False):
+            target.info(f"预检视频 {index}/{total} · {items[index-1]['path'].name}")
+        if result:
+            skipped.append(result)
+            target.warning(f"跳过无法读取的视频：{relative_name(result['path'])}")
+            target.log(f"跳过视频详情：{result['path']}\n原因：{result['reason']}")
 
     return skipped
 
@@ -1505,16 +1517,19 @@ def build_video_contents(
     group_key: str | None = None,
     max_bytes: int | None = None,
     is_premium: bool | None = None,
+    *,
+    staged_paths=None,
+    preflight_verified=False,
+    executor=None,
 ):
     """Build an Album while isolating files that became unreadable later."""
 
     target = ui or UI
-    contents = []
-    valid_items = []
-    skipped = []
-    for item in items:
+    config = pipeline_config(cfg)
+    items = tuple(items)
+
+    def build(item):
         try:
-            item_caption = caption if not valid_items else ""
             video_kwargs = {}
             if group_key is not None:
                 video_kwargs["group_key"] = group_key
@@ -1524,8 +1539,11 @@ def build_video_contents(
                 video_kwargs["max_bytes"] = max_bytes
             if is_premium is not None:
                 video_kwargs["is_premium"] = is_premium
-            contents.append(input_video(item, item_caption, **video_kwargs))
-            valid_items.append(item)
+            if staged_paths is not None:
+                video_kwargs["staged_paths"] = staged_paths
+            if preflight_verified:
+                video_kwargs["preflight_verified"] = True
+            return item, input_video(item, "", **video_kwargs), None
         except Exception as exc:
             path = item["path"]
             record = {
@@ -1541,9 +1559,22 @@ def build_video_contents(
             if readiness_record:
                 record.update(readiness_record)
                 record["category"] = readiness_record["category"]
+            return item, None, record
+
+    contents, valid_items, skipped = [], [], []
+    for item, content, record in media_io_results(
+        items, build, config=config, root=config.VIDEO_DIR, cancel_event=cancel_event, executor=executor,
+    ):
+        if record:
             skipped.append(record)
+            path = record["path"]
             target.warning(f"跳过上传前变得无法读取的视频：{relative_name(path)}")
             target.log(f"跳过视频详情：{path}\n原因：{record['reason']}")
+        else:
+            if not contents:
+                content = {**content, "caption": formatted_text(caption)}
+            contents.append(content)
+            valid_items.append(item)
     return contents, valid_items, skipped
 
 
@@ -1557,6 +1588,8 @@ def input_video(
     group_key: str | None = None,
     max_bytes: int | None = None,
     is_premium: bool | None = None,
+    staged_paths=None,
+    preflight_verified=False,
 ):
     """Build one TDLib video content object for standalone and mixed albums.
 
@@ -1566,27 +1599,34 @@ def input_video(
     config = pipeline_config(cfg)
 
     path = item["path"]
-    readiness = wait_for_file_ready(
-        path,
-        expected_size=item.get("scan_size"),
-        expected_mtime_ns=item.get("scan_mtime_ns"),
-        **_readiness_options(path),
-        cancel_event=cancel_event,
-    )
-    raise_for_file_readiness(path, readiness)
-    source_path = path
-    staging_mode = getattr(config, "STAGING_MODE", None)
-    if staging_mode is None or (staging_mode == "off" and getattr(config, "STAGING_ENABLED", False)):
-        staging_mode = "always" if getattr(config, "STAGING_ENABLED", False) else "off"
-    if should_stage(path, staging_mode):
-        source_path = stage_file(
-            path,
-            readiness.snapshot,
-            staging_dir=config.STAGING_DIR,
-            staging_base_dir=getattr(config, "STAGING_BASE_DIR", config.STAGING_DIR),
+    key = stable_path(path)
+    expected_size = item.get("scan_size")
+    expected_mtime_ns = item.get("scan_mtime_ns")
+    if preflight_verified and expected_size is not None and expected_mtime_ns is not None:
+        snapshot = revalidate_ready_source(
+            path, expected_size=expected_size, expected_mtime_ns=expected_mtime_ns,
             cancel_event=cancel_event,
         )
-        pipeline_locals(globals())["STAGED_UPLOAD_PATHS"][stable_path(path)] = source_path
+    else:
+        readiness = wait_for_file_ready(
+            path, expected_size=expected_size, expected_mtime_ns=expected_mtime_ns,
+            **_readiness_options(path), cancel_event=cancel_event,
+        )
+        raise_for_file_readiness(path, readiness)
+        snapshot = readiness.snapshot
+    source_path = path if staged_paths is None else staged_paths.get(key, path)
+    if staged_paths is None:
+        staging_mode = getattr(config, "STAGING_MODE", "off")
+        if not staging_mode or (staging_mode == "off" and getattr(config, "STAGING_ENABLED", False)):
+            staging_mode = "always" if getattr(config, "STAGING_ENABLED", False) else "off"
+        if should_stage(path, staging_mode):
+            source_path = stage_file(
+                path, snapshot, staging_dir=config.STAGING_DIR,
+                staging_base_dir=getattr(config, "STAGING_BASE_DIR", config.STAGING_DIR),
+                cancel_event=cancel_event,
+            )
+            with pipeline_paths_lock:
+                pipeline_locals(globals())["STAGED_UPLOAD_PATHS"][key] = source_path
 
     info = (
         video_info(source_path)

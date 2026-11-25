@@ -17,6 +17,16 @@ FAILED = BatchStatus.FAILED.value
 UNKNOWN = BatchStatus.UNKNOWN.value
 
 
+def flood_wait_seconds(code: int | None, message: str) -> float | None:
+    if code not in {420, 429}:
+        return None
+    match = re.search(r"(?:FLOOD_WAIT_|retry after\s+)(\d+(?:\.\d+)?)", message, re.IGNORECASE)
+    if match is None:
+        return None
+    seconds = float(match[1])
+    return seconds if math.isfinite(seconds) else None
+
+
 class SendRequestRejected(RuntimeError):
     """A correlated TDLib error returned before any message was accepted."""
 
@@ -35,6 +45,14 @@ class SendRequestRejected(RuntimeError):
             and math.isfinite(self.retry_after)
             and self.retry_after >= 0
         )
+
+    @property
+    def retryable(self) -> bool:
+        return self.rate_limited or 500 <= self.error_code <= 599
+
+    @property
+    def retry_after_seconds(self) -> float | None:
+        return self.retry_after if self.rate_limited else (0.0 if self.retryable else None)
 
     def as_dict(self) -> dict:
         return {
@@ -112,12 +130,14 @@ def _failure_options(value):
     state = message.get("sending_state") or {}
     error = value.get("error") or state.get("error") or {}
     code = _as_id(error.get("code")) if isinstance(error, Mapping) else None
-    delay = max(0.0, float(state.get("retry_after", 0) or 0))
-    if code in {420, 429}:
-        wait = re.search(r"(?:FLOOD_WAIT_|retry after\s+)(\d+(?:\.\d+)?)",
-                         str(error.get("message", "")), re.IGNORECASE)
-        if wait:
-            delay = max(delay, float(wait[1]))
+    try:
+        delay = float(state.get("retry_after") or 0)
+    except (TypeError, ValueError, OverflowError):
+        delay = 0.0
+    if not math.isfinite(delay) or delay < 0:
+        delay = 0.0
+    if isinstance(error, Mapping):
+        delay = max(delay, flood_wait_seconds(code, str(error.get("message", ""))) or 0.0)
     return {
         "error_code": code,
         "can_retry": bool(state.get("can_retry", False)),

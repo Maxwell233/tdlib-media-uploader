@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QModelIndex, QPersistentModelIndex, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -22,8 +22,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QTreeWidget,
-    QTreeWidgetItem,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
@@ -37,11 +36,14 @@ from ...core.album import (
     with_filename_description,
 )
 from ...core.filesystem import stable_path
+from ...core.identity import canonical_target
 from ...config.paths import RESOURCE_DIR
+from ...upload.queue import AlbumStatus, TaskStatus
 from ..icons import get_svg_icon
 from ..theme import THEME
 from ..config_service import get_cfg as _config_getter, target_for as _target_getter
 from ..models import item_size as _item_size
+from ..preview_tree import PreviewRow, PreviewTreeFilter, PreviewTreeModel
 from ..tools import (
     KIND_PATH_KEYS,
     format_size as _format_size,
@@ -99,6 +101,9 @@ class UploadPage(QWidget):
         self.result = None
         self._running = False
         self._scanning = False
+        self._file_rows = {}
+        self._album_rows = {}
+        self._group_rows = []
         accent = self.services.kind_label(self.kind)
 
         layout = QVBoxLayout(self)
@@ -242,7 +247,7 @@ class UploadPage(QWidget):
         self.edit_caption_button.setToolTip("编辑所选媒体组标题，也可双击媒体组")
         self.edit_caption_button.setEnabled(False)
         self.edit_caption_button.setVisible(True)
-        self.edit_caption_button.clicked.connect(lambda: self._edit_album(self.tree.currentItem()))
+        self.edit_caption_button.clicked.connect(lambda: self._edit_album(self.tree.currentIndex()))
 
         expand_btn = QPushButton("展开全部")
         expand_btn.setObjectName("ghostButton")
@@ -257,17 +262,19 @@ class UploadPage(QWidget):
         filters.addWidget(collapse_btn)
         preview_layout.addLayout(filters)
 
-        # Tree widget
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["状态", "日期 / 分组", "大小", "文件路径"])
+        self.tree = QTreeView()
+        self._preview_model = PreviewTreeModel(self.tree)
+        self._preview_filter = PreviewTreeFilter(self._preview_model, self.tree)
+        self.tree.setModel(self._preview_filter)
+        self.tree.setUniformRowHeights(True)
         self.tree.header().setStretchLastSection(True)
         self.tree.setRootIsDecorated(True)
         self.tree.setAlternatingRowColors(True)
         self.tree.setMinimumHeight(150)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
-        self.tree.itemDoubleClicked.connect(self._edit_album)
-        self.tree.itemSelectionChanged.connect(self._update_edit_button)
+        self.tree.doubleClicked.connect(self._edit_album)
+        self.tree.selectionModel().currentChanged.connect(self._update_edit_button)
 
         expand_btn.clicked.connect(self.tree.expandAll)
         collapse_btn.clicked.connect(self.tree.collapseAll)
@@ -402,17 +409,18 @@ class UploadPage(QWidget):
         )
 
     def _build_scan_result_tree(self, result: dict, completed_paths: set[str]):
-        self.tree.clear()
+        root = PreviewRow()
+        self._file_rows.clear()
+        self._album_rows.clear()
+        self._group_rows.clear()
         for group in result["groups"]:
             label = (
                 f"{group['label']} · {len(group['items'])} 个 · "
                 f"已完成 {group['completed']} · 待上传 {group['pending']} · "
                 f"{group['albums']} 组待上传"
             )
-            top = QTreeWidgetItem(["分组", group["label"], "", label])
-            if self.kind in {"video", "mixed"}:
-                self.tree.addTopLevelItem(top)
-                top.setExpanded(True)
+            top = root if self.kind == "image" else PreviewRow(["分组", group["label"], "", label], root)
+            self._group_rows.append(top if self.kind != "image" else None)
             for plan in group["album_plans"]:
                 album_items = plan.get("items", [])
                 pending_count = len(plan.get("pending_items", []))
@@ -435,7 +443,7 @@ class UploadPage(QWidget):
                     bool(self._cfg(number_key, True)),
                     max_chars=int(self.services.caption_limit),
                 )
-                album_row = QTreeWidgetItem(
+                album_row = PreviewRow(
                     [
                         "待上传" if pending_count else "已完成",
                         self._album_title(plan),
@@ -443,15 +451,11 @@ class UploadPage(QWidget):
                             sum(self._size(item) for item in album_items)
                         ),
                         f"{len(album_items)} 个文件 · 已完成 {completed_count} · 待上传 {pending_count}",
-                    ]
+                    ],
+                    top, plan=plan,
                 )
-
-                album_row.setData(0, Qt.ItemDataRole.UserRole, plan)
-                album_row.setToolTip(1, caption_text or "无标题")
-                if self.kind == "image":
-                    self.tree.addTopLevelItem(album_row)
-                else:
-                    top.addChild(album_row)
+                self._album_rows[plan["key"]] = album_row
+                album_row.tooltips[1] = caption_text or "无标题"
                 for item in album_items:
                     path = _item_path(item)
                     completed = self._stable(path) in completed_paths
@@ -462,24 +466,25 @@ class UploadPage(QWidget):
                         date_value = (
                             "图片" if item.get("media_kind") == "image" else "视频"
                         )
-                    row = QTreeWidgetItem(
+                    row = PreviewRow(
                         [
                             "待上传" if not completed else "已完成",
                             self._format_date(date_value),
                             self.services.size_formatter(self._size(item)),
                             str(path),
-                        ]
+                        ],
+                        album_row,
                     )
-                    album_row.addChild(row)
-                    row.setToolTip(3, str(path))
+                    self._file_rows[self._stable(path)] = row
+                    row.tooltips[3] = str(path)
                     if isinstance(item, Mapping):
                         source = item.get("date_tag") or "未知"
-                        row.setToolTip(
-                            1,
-                            f"{self._format_date(date_value)}\n日期来源：{source}",
-                        )
+                        row.tooltips[1] = f"{self._format_date(date_value)}\n日期来源：{source}"
+        self._preview_model.set_root(root)
         for column, width in enumerate((140, 250, 100)):
             self.tree.setColumnWidth(column, width)
+        if self.kind != "image":
+            self.tree.expandToDepth(0)
         self._filter_preview()
 
     def set_result(self, result: dict):
@@ -501,6 +506,115 @@ class UploadPage(QWidget):
 
         self._update_scan_summary_chips_and_labels(result)
 
+    def sync_task_outcomes(self, task):
+        result = self.result
+        if (not result or result.get("cancelled") or not result.get("target")
+                or self._stable(result["source_dir"]) != self._stable(task.source_root)
+                or canonical_target(result["target"]) != canonical_target(dict(task.target))):
+            return
+        outcomes = task.album_statuses()
+        known_confirmed = task.known_confirmed
+        snapshots = {}
+        for plan in task.plans:
+            outcome = outcomes[plan.key]
+            failed = set(outcome.failed_paths)
+            deferred = set(outcome.deferred_paths)
+            for item in plan.items:
+                path = self._stable(item.path)
+                if outcome.status is AlbumStatus.UNKNOWN:
+                    status = "待核对"
+                elif path in known_confirmed:
+                    status = "已完成"
+                elif outcome.status is AlbumStatus.SKIPPED or task.status is TaskStatus.SKIPPED:
+                    status = "已跳过"
+                elif path in failed:
+                    status = "失败"
+                elif path in deferred:
+                    status = "暂缓"
+                else:
+                    continue
+                snapshots[path] = (item.snapshot, status, outcome.error)
+
+        completed = set(result["completed_paths"])
+        skipped = set(result.get("skipped_album_keys", ()))
+        labels = {
+            AlbumStatus.FAILED: "失败", AlbumStatus.DEFERRED: "暂缓", AlbumStatus.PARTIAL: "部分完成",
+            AlbumStatus.UNKNOWN: "待核对", AlbumStatus.SKIPPED: "已跳过",
+        }
+        self.tree.setUpdatesEnabled(False)
+        try:
+            pending_files = pending_bytes = album_count = 0
+            for group, group_row in zip(result["groups"], self._group_rows):
+                group_pending = group_completed = group_albums = 0
+                for plan in group["album_plans"]:
+                    key = plan["key"]
+                    outcome = outcomes.get(key)
+                    row = self._album_rows[key]
+                    items = plan["items"]
+                    changes = []
+                    for item in items:
+                        path = self._stable(_item_path(item))
+                        change = snapshots.get(path)
+                        if change is None:
+                            continue
+                        snapshot, status, error = change
+                        if (item.get("scan_size"), item.get("scan_mtime_ns")) != snapshot.as_tuple():
+                            continue
+                        self._preview_model.update_row(self._file_rows[path], text={0: status},
+                                                       tooltips={0: error or status})
+                        if status == "已完成":
+                            completed.add(path)
+                        changes.append(status)
+                    if changes and outcome is not None and set(changes) <= {"已完成", "已跳过"} and (
+                        outcome.status is AlbumStatus.SKIPPED or task.status is TaskStatus.SKIPPED
+                    ):
+                        skipped.add(key)
+                    pending = [
+                        item for item in plan["pending_items"]
+                        if self._stable(_item_path(item)) not in completed
+                    ]
+                    plan["pending_items"] = pending
+                    done = sum(self._stable(_item_path(item)) in completed for item in items)
+                    count = 0 if key in skipped else len(pending)
+                    label = "已完成" if done == len(items) else "待上传"
+                    if key in skipped:
+                        label = "已跳过"
+                    elif outcome is not None and changes:
+                        label = labels.get(outcome.status, label)
+                    self._preview_model.update_row(row, text={
+                        0: label, 3: f"{len(items)} 个文件 · 已完成 {done} · 待上传 {count}",
+                    })
+                    group_pending += count
+                    group_completed += done
+                    group_albums += bool(count)
+                    if count:
+                        pending_bytes += sum(self._size(item) for item in pending)
+                if not group["album_plans"]:
+                    group_pending = group["pending"]
+                group.update(pending=group_pending, completed=group_completed, albums=group_albums)
+                if group_row is not None:
+                    label = group["label"]
+                    self._preview_model.update_row(group_row, text={3: (
+                        f"{label} · {len(group['items'])} 个 · 已完成 {group_completed} · "
+                        f"待上传 {group_pending} · {group_albums} 组待上传"
+                    )})
+                pending_files += group_pending
+                album_count += group_albums
+            result["plans"] = tuple(
+                replace(plan, pending_items=tuple(
+                    item for item in plan.pending_items if self._stable(item.path) not in completed
+                ))
+                for plan in result["plans"]
+            )
+            result.update(
+                completed_paths=sorted(completed), completed_files=len(completed), pending_files=pending_files,
+                pending_bytes=pending_bytes, album_count=album_count, skipped_album_keys=tuple(sorted(skipped)),
+            )
+            self._filter_preview()
+        finally:
+            self.tree.setUpdatesEnabled(True)
+        self._update_scan_summary_chips_and_labels(result)
+
     @staticmethod
     def _format_date(value) -> str:
         if value is None:
@@ -512,7 +626,7 @@ class UploadPage(QWidget):
 
     def set_cancelled(self, result: dict | None = None):
         self.result = result
-        self.tree.clear()
+        self._clear_preview_rows()
         self.chip_files.setText("—")
         self.chip_bytes.setText("—")
         self.chip_done.setText("—")
@@ -524,30 +638,28 @@ class UploadPage(QWidget):
         self._update_edit_button()
 
     def _show_tree_context_menu(self, pos):
-        item = self.tree.itemAt(pos)
-        if item is None or self._scanning:
+        index = self.tree.indexAt(pos)
+        if self._scanning or self._album_row(index) is None:
             return
-        plan = item.data(0, Qt.ItemDataRole.UserRole)
-        if not isinstance(plan, dict) and item.parent() is not None:
-            item = item.parent()
-            plan = item.data(0, Qt.ItemDataRole.UserRole)
-        if not isinstance(plan, dict) or not plan.get("key"):
-            return
+        index = QPersistentModelIndex(index)
         menu = QMenu(self)
         edit_action = menu.addAction("编辑标题")
         action = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if action == edit_action:
-            self._edit_album(item)
+            self._edit_album(QModelIndex(index))
 
-    def _edit_album(self, item, _column=0):
+    def _album_row(self, index):
+        if not index.isValid():
+            return None
+        row = self._preview_model.row(self._preview_filter.mapToSource(index))
+        album = row if row.plan is not None else row.parent
+        return album if album is not None and album.plan is not None else None
+
+    def _edit_album(self, index):
+        item = self._album_row(index)
         if item is None or self._scanning:
             return
-        plan = item.data(0, Qt.ItemDataRole.UserRole)
-        if not isinstance(plan, dict) and item.parent() is not None:
-            item = item.parent()
-            plan = item.data(0, Qt.ItemDataRole.UserRole)
-        if not isinstance(plan, dict) or not plan.get("key"):
-            return
+        plan = item.plan
         current = plan.get("caption") or {}
         base_label = str(current.get("base_label", ""))
         custom_text = str(current.get("custom_text", ""))
@@ -603,8 +715,6 @@ class UploadPage(QWidget):
                 "base_label": new_base,
                 "custom_text": new_custom,
             }
-            item.setData(0, Qt.ItemDataRole.UserRole, plan)
-            item.setText(1, self._album_title(plan))
             caption_text = self.services.filename_description(
                 rendered,
                 plan.get("items", []),
@@ -612,19 +722,14 @@ class UploadPage(QWidget):
                 bool(self._cfg(number_key, True)),
                 max_chars=caption_limit,
             )
-            item.setToolTip(1, caption_text or "无标题")
+            self._preview_model.update_row(item, text={1: self._album_title(plan)},
+                                           tooltips={1: caption_text or "无标题"})
+            self._filter_preview()
 
 
     def _update_edit_button(self):
-        item = self.tree.currentItem()
-        if item is not None and not isinstance(item.data(0, Qt.ItemDataRole.UserRole), dict):
-            item = item.parent()
         self.edit_caption_button.setEnabled(
-            bool(
-                item is not None
-                and isinstance(item.data(0, Qt.ItemDataRole.UserRole), dict)
-                and not self._scanning
-            )
+            not self._scanning and self._album_row(self.tree.currentIndex()) is not None
         )
 
     def _album_title(self, plan: dict) -> str:
@@ -645,30 +750,20 @@ class UploadPage(QWidget):
 
     def _filter_preview(self):
         query = self.search_edit.text().strip().casefold()
+        self._preview_filter.set_filters(query, self.pending_only.isChecked())
+        if query:
+            self.tree.expandAll()
 
-        def visit(row, inherited=False):
-            matches = (
-                inherited
-                or not query
-                or query in " ".join(row.text(c) for c in range(4)).casefold()
-                or query in row.toolTip(1).casefold()
-            )
-            visible = False
-            for index in range(row.childCount()):
-                visible = visit(row.child(index), matches) or visible
-            if not row.childCount():
-                visible = matches and (not self.pending_only.isChecked() or row.text(0) != "已完成")
-            row.setHidden(not visible)
-            if query and visible:
-                row.setExpanded(True)
-            return visible
-
-        for index in range(self.tree.topLevelItemCount()):
-            visit(self.tree.topLevelItem(index))
+    def _clear_preview_rows(self):
+        self._preview_model.set_root()
+        self._file_rows.clear()
+        self._album_rows.clear()
+        self._group_rows.clear()
+        self._filter_preview()
 
     def clear_scan_result(self):
         self.result = None
-        self.tree.clear()
+        self._clear_preview_rows()
         self.chip_files.setText("—")
         self.chip_bytes.setText("—")
         self.chip_done.setText("—")
@@ -682,6 +777,9 @@ class UploadPage(QWidget):
     def set_running(self, active: bool):
         self._running = active
         self.reset_state_button.setEnabled(not active and not self._scanning)
+
+    def set_queue_immediate(self, immediate: bool):
+        self.start_button.setText("立即上传" if immediate else "加入上传队列")
 
     def refresh_theme(self):
         """Re-apply dynamic status styles when theme is toggled."""

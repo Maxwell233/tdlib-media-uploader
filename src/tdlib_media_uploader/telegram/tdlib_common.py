@@ -9,7 +9,6 @@ import json
 import math
 import platform
 import queue
-import re
 import sys
 import threading
 import time
@@ -19,6 +18,7 @@ from pathlib import Path
 import tdjson
 
 from ..config import loader as cfg
+from ..core.compat import call_supported
 from ..core.identity import validate_send_target
 from ..core.logging import TDLIB_LOG_PATH, write_app_log, write_exception
 from ..core.readiness import probe_readable
@@ -31,11 +31,11 @@ from ..core.upload_journal import (
     UNKNOWN,
     normalize_target,
 )
-from .send_result import SendRequestRejected
+from .send_result import SendRequestRejected, flood_wait_seconds
 from .send_result import _error_text as _send_failure_text
 
 
-REQUIRED_TDJSON_VERSION = "1.8.69"
+REQUIRED_TDJSON_VERSION = "1.8.71"
 
 
 class TDLibError(RuntimeError):
@@ -43,8 +43,7 @@ class TDLibError(RuntimeError):
         self.response_received = response_received
         self.code = int(code)
         self.message = str(message)
-        wait = re.search(r"(?:FLOOD_WAIT_|retry after\s+)(\d+(?:\.\d+)?)", self.message, re.IGNORECASE)
-        self.retry_after = float(wait[1]) if self.code in {420, 429} and wait else None
+        self.retry_after = flood_wait_seconds(self.code, self.message)
         super().__init__(f"TDLib error {self.code}: {self.message}")
 
 
@@ -541,6 +540,12 @@ class TDJsonClient:
         self.close_lock = threading.Lock()
         self.close_sent = False
         self.update_callbacks = []
+        self.connection_state = None
+        self.authorization_ready = False
+        self._upload_work_lock = threading.Lock()
+        self._message_send_active = False
+        self._upload_work_cancelled = threading.Event()
+        self.preliminary_generation = 0
         self.stop_event = threading.Event()
         self.cancel_event = threading.Event()
         self.is_premium: bool | None = None
@@ -559,13 +564,27 @@ class TDJsonClient:
             self.client_id = tdjson.td_create_client_id()
             TDJsonClient._active_client = self
             self.receiver_thread.start()
+        try:
+            self._register_ui_client()
+        except Exception:
+            self._send_close_now()
+            raise
+
+    def _register_ui_client(self):
         register_client = getattr(self.ui, "register_client", None)
         if callable(register_client):
-            try:
-                register_client(self)
-            except Exception:
-                self._send_close_now()
-                raise
+            register_client(self)
+
+    def bind_job(self, ui, config):
+        """Attach a task's immutable settings and callbacks to an idle client."""
+        from ..config.snapshot import snapshot_config
+
+        self._config = snapshot_config(config, immutable=True)
+        self.ui = ui
+        with self._upload_work_lock:
+            self._upload_work_cancelled.clear()
+            self.preliminary_generation += 1
+        self._register_ui_client()
 
     @property
     def config(self):
@@ -608,6 +627,36 @@ class TDJsonClient:
         with self.send_condition:
             self.send_condition.notify_all()
 
+    def cancel_upload_work(self):
+        """Keep a ready session open when no message send has started."""
+        with self._upload_work_lock:
+            self._upload_work_cancelled.set()
+            if self.authorization_ready and not self._message_send_active:
+                return
+        self.cancel()
+
+    def preliminary_upload_file(self, input_file, file_type, *, priority=16, generation=None):
+        response = self._request_once({
+            "@type": "preliminaryUploadFile", "file": dict(input_file),
+            "file_type": {"@type": file_type}, "priority": priority,
+        }, timeout=2, preliminary_generation=generation)
+        if (response.get("@type") != "file" or type(response.get("id")) is not int
+                or response["id"] <= 0):
+            raise RuntimeError("TDLib 未返回有效的预上传文件 ID")
+        return response
+
+    def preliminary_file_status(self, file_id):
+        return self.request({"@type": "getFile", "file_id": file_id}, timeout=2, retry_rate_limit=False)
+
+    def cancel_preliminary_upload_file(self, file_id, *, generation=None):
+        # There is no caller waiting for the result, and sending the command
+        # directly also works when a concurrent immediate stop closes TDLib.
+        with self._upload_work_lock:
+            if generation is not None and generation != self.preliminary_generation:
+                return
+            if not self.closed_event.is_set() and not self.close_sent:
+                self.send_raw({"@type": "cancelPreliminaryUploadFile", "file_id": file_id})
+
     def _send_close_now(self):
         """Send TDLib's close command once, without a cancellable waiter."""
         with self.close_lock:
@@ -636,7 +685,7 @@ class TDJsonClient:
             return self._request_once(query, timeout)
 
     def _safe_stop_before_retry(self):
-        return getattr(self.ui, "safe_stop_requested", False) is True
+        return getattr(getattr(self, "ui", None), "safe_stop_requested", False) is True
 
     def _wait_for_retry(self, seconds):
         """Honor Telegram's delay without blocking immediate cancellation."""
@@ -662,9 +711,19 @@ class TDJsonClient:
             if callable(show):
                 show(0)
 
-    def _request_once(self, query: dict, timeout: int | float | None = None):
-        try:
+    def _request_once(self, query: dict, timeout: int | float | None = None, *, preliminary_generation=None):
+        task_stop = getattr(self, "_upload_work_cancelled", None)
+        # Read the preliminary start reply even when cancelled so its file ID
+        # can be used to stop the native upload.
+        check_task_stop = task_stop is not None and query.get("@type") != "preliminaryUploadFile"
+
+        def check_cancelled():
             self._raise_if_cancelled()
+            if check_task_stop and task_stop.is_set():
+                raise TDLibCancelled("上传任务已立即停止")
+
+        try:
+            check_cancelled()
         except TDLibCancelled as error:
             error.submitted = False
             raise
@@ -677,7 +736,13 @@ class TDJsonClient:
         with self.pending_lock:
             self.pending[extra] = waiter
         try:
-            self.send_raw(payload)
+            if preliminary_generation is None:
+                self.send_raw(payload)
+            else:
+                with self._upload_work_lock:
+                    if preliminary_generation != self.preliminary_generation or task_stop.is_set():
+                        raise TDLibCancelled("预上传任务已结束")
+                    self.send_raw(payload)
         except Exception:
             with self.pending_lock:
                 self.pending.pop(extra, None)
@@ -691,11 +756,11 @@ class TDJsonClient:
                 try:
                     response = waiter.get(timeout=min(0.2, remaining))
                     if response is None:
-                        self._raise_if_cancelled()
+                        check_cancelled()
                         continue
                     break
                 except queue.Empty:
-                    self._raise_if_cancelled()
+                    check_cancelled()
         except (queue.Empty, TimeoutError, TDLibCancelled) as exc:
             with self.pending_lock:
                 self.pending.pop(extra, None)
@@ -744,10 +809,13 @@ class TDJsonClient:
                 if kind == "updateAuthorizationState":
                     state = obj.get("authorization_state")
                     if state:
+                        self.authorization_ready = state.get("@type") == "authorizationStateReady"
                         self.auth_queue.put(state)
                         if state.get("@type") == "authorizationStateClosed":
                             self.stop_event.set()
                             self.closed_event.set()
+                elif kind == "updateConnectionState":
+                    self.connection_state = (obj.get("state") or {}).get("@type")
                 elif kind in {"updateMessageSendSucceeded", "updateMessageSendFailed"}:
                     old_id = obj.get("old_message_id")
                     with self.send_condition:
@@ -848,6 +916,8 @@ class TDJsonClient:
         auth_deadline = time.monotonic() + 120
         while True:
             self._raise_if_cancelled()
+            if self._safe_stop_before_retry():
+                raise TDLibCancelled("等待 Telegram 登录时已停止")
             remaining = auth_deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("等待 TDLib 授权状态超时")
@@ -914,6 +984,8 @@ class TDJsonClient:
             value = value.strip()
         if not value:
             self._raise_if_cancelled()
+            if self._safe_stop_before_retry():
+                raise TDLibCancelled("等待 Telegram 验证时已停止")
         return value
 
     def _try_get_chat(self, chat_id: int):
@@ -1065,7 +1137,7 @@ class TDJsonClient:
                          if row["status"] == "failed" and row["can_retry"]
                          and not row["requires_action"] and row["index"] not in retried]
             can_resend = False
-            if retryable and chat_id is not None and not self._safe_stop_before_retry():
+            if result.status.value == FAILED and retryable and chat_id is not None and not self._safe_stop_before_retry():
                 try:
                     can_resend = self._wait_for_retry(max(row["retry_after"] for row in retryable)) is not False
                 except TDLibCancelled as error:
@@ -1254,9 +1326,17 @@ class TDJsonClient:
         retry_rate_limit=True,
     ):
         attempted = False
+        work_lock = getattr(self, "_upload_work_lock", None)
 
         def request_started():
             nonlocal attempted
+            if work_lock is not None:
+                with work_lock:
+                    if self._upload_work_cancelled.is_set():
+                        error = TDLibCancelled("上传任务已立即停止")
+                        error.submitted = False
+                        raise error
+                    self._message_send_active = True
             attempted = True
 
         try:
@@ -1271,6 +1351,10 @@ class TDJsonClient:
             if not hasattr(error, "submitted"):
                 error.submitted = attempted
             raise
+        finally:
+            if attempted and work_lock is not None:
+                with work_lock:
+                    self._message_send_active = False
 
     @staticmethod
     def _infer_upload_kind(contents) -> str:
@@ -1501,7 +1585,7 @@ class TDJsonClient:
             try:
                 if retry_rate_limit:
                     return self.request(query)
-                return self.request(query, retry_rate_limit=False)
+                return call_supported(self.request, (query,), retry_rate_limit=False)
             except TDLibError as error:
                 if not error.response_received:
                     raise

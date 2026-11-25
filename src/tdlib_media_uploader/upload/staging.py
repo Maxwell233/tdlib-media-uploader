@@ -1,11 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Optional local staging for media read from SMB/NAS locations.
-
-Staging is deliberately opt-in.  When enabled, the upload cores copy a
-validated source to a local cache immediately before constructing a TDLib
-input object.  State keys continue to use the original source path, so
-enabling staging does not invalidate existing checkpoints.
-"""
+"""Optional local staging with Album-owned copies and unchanged source identity."""
 
 from __future__ import annotations
 
@@ -13,9 +7,12 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
+from uuid import uuid4
 
+from ..core.concurrency import raise_if_cancelled
 from ..core.models import FileSnapshot
 from ..core.filesystem import is_link_or_junction, is_network_path, snapshot_file, stable_path
 from ..core.readiness import probe_readable
@@ -164,10 +161,10 @@ def _snapshot_values(snapshot) -> tuple[int, int]:
     return int(snapshot[0]), int(snapshot[1])
 
 
-def _stage_target(path: Path, snapshot, staging_dir: Path) -> Path:
+def _stage_target(path: Path, snapshot, staging_dir: Path, namespace: str = "") -> Path:
     size, mtime_ns = _snapshot_values(snapshot)
     digest = hashlib.sha256(
-        f"{stable_path(path)}|{size}|{mtime_ns}".encode("utf-8")
+        f"{namespace + '|' if namespace else ''}{stable_path(path)}|{size}|{mtime_ns}".encode("utf-8")
     ).hexdigest()
     suffix = path.suffix or ".media"
     return staging_dir / digest[:2] / f"{digest}{suffix}"
@@ -181,6 +178,7 @@ def stage_file(
     staging_base_dir: Path | None = None,
     cancel_event=None,
     buffer_size: int = 1024 * 1024,
+    namespace: str = "",
 ) -> Path:
     """Copy a source file atomically into the local staging cache."""
 
@@ -192,7 +190,7 @@ def stage_file(
     source_snapshot = snapshot_file(source) if snapshot is None else snapshot
     if source_snapshot is None:
         raise OSError(f"文件暂时不可读取或已被删除：{source}")
-    target = _stage_target(source, source_snapshot, root)
+    target = _stage_target(source, source_snapshot, root, namespace)
     _assert_safe_component(target, "暂存文件")
     if target.is_file():
         try:
@@ -239,6 +237,10 @@ def stage_file(
         os.replace(temporary, target)
         probe_readable(target, probe_bytes=min(buffer_size, 64 * 1024))
         return target
+    except BaseException:
+        if namespace:
+            remove_staged_file(target)
+        raise
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -342,7 +344,68 @@ def remove_staged_file(path) -> bool:
         return False
 
 
+class LocalStager:
+    """Own staged copies until their Album is confirmed or abandoned."""
+
+    def __init__(self, config):
+        mode = str(getattr(config, "STAGING_MODE", None) or "off").strip().lower()
+        self.mode = mode if mode != "off" else (
+            "always" if getattr(config, "STAGING_ENABLED", False) else "off"
+        )
+        self.directory = getattr(config, "STAGING_DIR", None)
+        self.base_directory = getattr(config, "STAGING_BASE_DIR", self.directory)
+        self.cleanup_after_success = getattr(config, "STAGING_CLEANUP_AFTER_SUCCESS", True)
+        self._lock = threading.Lock()
+        self._paths: dict[str, dict[str, Path]] = {}
+
+    def stage(self, plan, *, context):
+        sources = [item for item in plan.pending_items if should_stage(item.path, self.mode)]
+        if not sources:
+            return plan
+        if self.directory is None:
+            raise ValueError("已启用本地暂存，但未配置暂存目录")
+
+        class CancelEvent:
+            def is_set(self):
+                return context.cancel_token.is_cancelled()
+
+        token = context.cancel_token
+        namespace = uuid4().hex
+        paths = {}
+        with self._lock:
+            ensure_managed_staging_dir(self.directory, base_dir=self.base_directory)
+            self._paths[plan.key] = paths
+        try:
+            for item in sources:
+                raise_if_cancelled(token)
+                key = stable_path(item.path)
+                path = stage_file(
+                    item.path, item.snapshot, staging_dir=self.directory,
+                    staging_base_dir=self.base_directory, cancel_event=CancelEvent(),
+                    namespace=namespace,
+                )
+                with self._lock:
+                    paths[key] = path
+            raise_if_cancelled(token)
+        except BaseException:
+            self.cleanup(plan, context=context, confirmed=False)
+            raise
+        return plan
+
+    def paths_for(self, plan):
+        with self._lock:
+            return dict(self._paths.get(plan.key, {}))
+
+    def cleanup(self, plan, *, context, confirmed):
+        with self._lock:
+            paths = self._paths.pop(plan.key, {})
+        if not confirmed or self.cleanup_after_success:
+            for path in paths.values():
+                if not remove_staged_file(path):
+                    _log_staging_warning(f"无法删除本地暂存文件：{path}")
+
+
 __all__ = [
     "stage_file", "cleanup_staging", "remove_staged_file", "should_stage",
-    "ensure_managed_staging_dir", "MARKER_NAME",
+    "ensure_managed_staging_dir", "LocalStager", "MARKER_NAME",
 ]
