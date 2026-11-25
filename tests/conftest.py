@@ -1,3 +1,4 @@
+import gc
 import os
 from pathlib import Path
 import time
@@ -11,7 +12,9 @@ if _plugins_dir.is_dir() and not os.environ.get("QT_PLUGIN_PATH"):
     os.environ["QT_PLUGIN_PATH"] = str(_plugins_dir)
 
 import pytest
+from PySide6.QtCore import QEvent, QThread, QTimer
 from PySide6.QtWidgets import QApplication
+from shiboken6 import getCppPointer, isValid
 
 from tdlib_media_uploader.config import paths
 from tdlib_media_uploader.core import album, logging as app_logging, upload_journal
@@ -62,6 +65,68 @@ def _isolate_test_data_dirs(request, tmp_path, monkeypatch):
     monkeypatch.setattr(album, "CAPTIONS_DIR", captions_dir)
     monkeypatch.setattr(history_service, "HISTORY_PATH", base / "history.json")
     monkeypatch.setattr(preferences, "PREFERENCES_PATH", base / "ui_preferences.json", raising=False)
+
+
+def _drain_qt_widgets(app: QApplication, widgets) -> None:
+    targets = [widget for widget in widgets if isValid(widget)]
+    for widget in targets:
+        if not isValid(widget):
+            continue
+        for timer in widget.findChildren(QTimer):
+            if isValid(timer):
+                timer.stop()
+        for thread in widget.findChildren(QThread):
+            if isValid(thread) and thread.isRunning():
+                thread.requestInterruption()
+                thread.quit()
+                thread.wait(2000)
+        if widget.parent() is None:
+            widget.hide()
+            widget.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+    for widget in targets:
+        if isValid(widget):
+            widget.hide()
+            widget.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cleanup_qt_session():
+    yield
+    app = QApplication.instance()
+    if app is None:
+        return
+    app.setStyleSheet("")
+    remaining = [widget for widget in app.topLevelWidgets() if isValid(widget)]
+    if remaining:
+        _drain_qt_widgets(app, remaining)
+    gc.collect()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+    gc.collect()
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_qt_widgets():
+    app = QApplication.instance()
+    existing_ptrs = (
+        {int(getCppPointer(widget)[0]) for widget in app.topLevelWidgets() if isValid(widget)}
+        if app is not None
+        else set()
+    )
+    yield
+    app = QApplication.instance()
+    if app is None:
+        return
+    created = [
+        widget for widget in app.topLevelWidgets()
+        if isValid(widget) and int(getCppPointer(widget)[0]) not in existing_ptrs
+    ]
+    if created:
+        _drain_qt_widgets(app, created)
 
 
 @pytest.fixture(scope="session")
