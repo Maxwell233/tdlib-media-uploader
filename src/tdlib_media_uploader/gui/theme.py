@@ -745,39 +745,6 @@ QTreeView::item:selected, QTreeWidget::item:selected, QTableWidget::item:selecte
     font-weight: 500;
 }}
 
-QTreeWidget#taskQueueList, QTreeWidget#taskAlbumList, QListWidget#albumFilesList {{
-    background-color: transparent;
-    border: 0;
-    border-radius: 0;
-    padding: 0;
-}}
-
-QListWidget#albumFilesList {{
-    background-color: {palette.bg_input};
-    border-radius: 4px;
-}}
-
-QTreeWidget#taskQueueList::item, QTreeWidget#taskAlbumList::item, QListWidget#albumFilesList::item {{
-    padding: 4px 6px;
-    border-radius: 0;
-}}
-
-QTreeWidget#taskQueueList QHeaderView::section, QTreeWidget#taskAlbumList QHeaderView::section {{
-    background-color: transparent;
-    padding: 5px 6px;
-}}
-
-QPlainTextEdit#taskAlbumReason, QPlainTextEdit#taskLog {{
-    border: 0;
-    border-radius: 4px;
-    padding: 4px 6px;
-}}
-
-QPlainTextEdit#taskAlbumReason {{
-    color: {palette.text_primary};
-    background-color: {palette.bg_card};
-}}
-
 QHeaderView::section {{
     background-color: {palette.bg_card};
     color: {palette.text_muted};
@@ -908,25 +875,6 @@ QTabBar::tab:selected {{
 QTabBar::tab:hover:!selected {{
     background-color: {palette.bg_card_hover};
     color: {palette.text_secondary};
-}}
-
-QTabWidget#taskDetailTabs::pane {{
-    background-color: transparent;
-    border: 0;
-    padding: 0;
-}}
-
-QTabWidget#taskDetailTabs QTabBar::tab {{
-    background-color: transparent;
-    border: 0;
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
-    padding: 6px 12px;
-}}
-
-QTabWidget#taskDetailTabs QTabBar::tab:selected {{
-    border-bottom-color: {palette.accent};
-    color: {palette.text_primary};
 }}
 
 /* Theme toggle button (Sun / Moon) */

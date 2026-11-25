@@ -7,8 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QPoint, QTimer, Qt
-from PySide6.QtTest import QTest
+from PySide6.QtCore import QPoint, QTimer
 from PySide6.QtWidgets import QDialog, QMessageBox, QSplitter
 
 from conftest import TARGET, task_for
@@ -340,14 +339,17 @@ def test_task_center_fits_long_details_and_keeps_live_status_at_narrow_width(qt_
     page.setStyleSheet(build_stylesheet(LIGHT_PALETTE))
     page.set_target_label_provider(lambda _: {"chat_title": "很长的频道名称" * 12})
     page.show_queue(store)
+    page.resize(630, 530)
+    page.show()
+    qt_app.processEvents()
+    assert page.progress.isVisible() and page.progress.value() == 0
+
     page.start_session("image", {"task_name": "正在上传的目录", "pending_files": 10, "pending_bytes": 100, "album_count": 2})
-    page.show_album({"title": "组内 Album 1 · 1/2", "rows": [media_path.name]})
+    page.show_album({"title": "组内 Album 1 · 1/2", "rows": ["current.jpg"], "album_key": active.plans[0].key})
     page.show_progress({"ratio": 0.42, "done_files": 4, "total_files": 10})
     page.show_rate_limit(35)
     page.set_connection_status("等待网络恢复", False)
     page.add_message("warning", reason)
-    page.resize(630, 530)
-    page.show()
     qt_app.processEvents()
 
     assert page.width() == 630
@@ -357,6 +359,9 @@ def test_task_center_fits_long_details_and_keeps_live_status_at_narrow_width(qt_
     assert queue_origin.x() + page.queue_list.width() < details_origin.x()
     assert page.queue_list.isColumnHidden(4)
     assert page.albums.isColumnHidden(2)
+    assert page.albums.isHidden()
+    assert page.album_files.isVisible() and page.album_files.item(0).text() == "current.jpg"
+    assert page.progress.isVisible() and page.progress.value() == 420
     assert page.queue_inflight.isVisible()
     assert "35 秒" in page.transfer_notice.text() and "等待网络恢复" in page.transfer_notice.text()
     assert page.queue_list.topLevelItem(0).text(2) == "42%"
@@ -366,9 +371,6 @@ def test_task_center_fits_long_details_and_keeps_live_status_at_narrow_width(qt_
         assert tree.header().length() <= tree.viewport().width()
         assert not tree.horizontalScrollBar().isVisible()
 
-    album = page.albums.topLevelItem(0)
-    QTest.mouseClick(page.albums.viewport(), Qt.MouseButton.LeftButton, pos=page.albums.visualItemRect(album).center())
-    qt_app.processEvents()
     assert page.album_reason.isVisible()
     assert page.album_reason.toPlainText() == reason
     assert page.album_files.item(0).toolTip() == str(media_path)
@@ -385,6 +387,12 @@ def test_task_center_fits_long_details_and_keeps_live_status_at_narrow_width(qt_
     qt_app.processEvents()
     assert not page.queue_list.isColumnHidden(4)
     assert not page.albums.isColumnHidden(2)
+    page.finish_session(False, "已停止")
+    assert page.progress.isVisible() and page.progress.value() == 420
+    page.start_session("image", {"pending_files": 1, "pending_bytes": 100, "album_count": 1})
+    assert page.progress.isVisible() and page.progress.value() == 0
+    page.finish_session(True, "已完成")
+    assert page.progress.isVisible() and page.progress.value() == page.progress.maximum()
 
 
 def test_review_controls_follow_manual_reconciliation_and_skip_history(window, monkeypatch, tmp_path, runtime_paths, pump):
