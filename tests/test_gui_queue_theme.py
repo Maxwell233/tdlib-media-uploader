@@ -76,6 +76,9 @@ def window(tmp_path, qt_app, monkeypatch, runtime_paths):
     config.PREFETCH_NEXT_ALBUM = False
     config.VIDEO_PREFETCH_NEXT_ALBUM = False
     config.IMAGE_ALBUM_SIZE = 2
+    # These fixtures are fully written before scanning. Keep the snapshot
+    # checks without waiting between observations of a stable local file.
+    config.SCAN_STABILITY_INTERVAL_LOCAL_SECONDS = 0.0
     monkeypatch.setattr(main_window.config_service, "cfg", config)
     ui_prefs = UiPreferences(tmp_path / "ui_preferences.json")
     initialize_theme(qt_app, ui_prefs)

@@ -73,8 +73,8 @@ class UploadConsistencyTest(unittest.TestCase):
         self.config.STAGING_MODE = 'off'; self.config.STAGING_ENABLED = False
         self.config.IMAGE_COMPRESS_OVERSIZE = False
         self.config.IMAGE_ALBUM_SIZE = 10
-        for name, value in [('STABILITY_CHECKS_LOCAL', 1), ('STABILITY_INTERVAL_LOCAL_SECONDS', 0)]:
-            setattr(self.config, name, value)
+        self.config.SCAN_STABILITY_CHECKS_LOCAL = 1
+        self.config.SCAN_STABILITY_INTERVAL_LOCAL_SECONDS = 0
         for obj, name, value in [(image_pipeline, 'cfg', self.config),
                                  (image_pipeline, 'STATE_DIR', self.runtime.IMAGE_STATE_DIR),
                                  (album, 'CAPTIONS_DIR', self.root/'captions')]:

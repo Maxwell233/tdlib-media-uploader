@@ -1,11 +1,8 @@
 # ============================================================
-# TDLib Media Uploader V1.9.7
+# TDLib Media Uploader 默认配置
 #
-# 首次使用：
-#   1. 复制本文件为 data/config.toml
-#   2. 填写 Telegram API、目标群/Topic 或频道和本地目录
-#
-# 各平台 setup / run 脚本在发现 data/config.toml 不存在时也会自动创建。
+# 程序首次启动时自动创建 data/config.toml。
+# 在“设置与诊断”中填写 Telegram API、上传目标和媒体目录。
 #
 # 路径支持绝对路径和 ~；Windows 也可以使用单引号保存反斜杠。
 # ============================================================
