@@ -52,8 +52,12 @@ class QueueSendPolicy:
             getattr(config, "UPLOAD_FLOOD_MAX_RETRIES", 1),
         )
 
+    @property
+    def is_strict_sequential(self) -> bool:
+        return str(self.error_policy or "").strip().lower() == "pause_on_error"
+
     def pauses_for(self, *, unknown=False):
-        return self.error_policy == "pause_on_error" or (unknown and self.pause_on_unknown)
+        return self.is_strict_sequential or (unknown and self.pause_on_unknown)
 
 
 class TargetSendGate:

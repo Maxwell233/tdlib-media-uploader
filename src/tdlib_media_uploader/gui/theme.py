@@ -999,6 +999,11 @@ def status_color(status: str, palette: Palette | None = None) -> str:
     """Return a semantic hex color token for a status key or localized label."""
     tokens = palette or THEME
     key = str(status or "").strip()
+    if key.endswith(" · 已排除"):
+        base = key[:-len(" · 已排除")].strip()
+        if base == "待上传":
+            return tokens.text_muted
+        key = base
     upper = key.upper()
     if upper in {"COMPLETED", "CONFIRMED", "SUCCESS"} or key in {"已完成", "成功"}:
         return tokens.success

@@ -7,15 +7,34 @@ from .theme import status_color
 
 
 class PreviewRow:
-    __slots__ = ("children", "parent", "position", "values", "tooltips", "plan")
+    __slots__ = (
+        "children",
+        "parent",
+        "position",
+        "values",
+        "tooltips",
+        "plan",
+        "delivery_status",
+        "excluded",
+    )
 
-    def __init__(self, values=(), parent=None, *, plan=None):
+    def __init__(
+        self,
+        values=(),
+        parent=None,
+        *,
+        plan=None,
+        delivery_status: str = "",
+        excluded: bool = False,
+    ):
         self.children = []
         self.parent = parent
         self.position = len(parent.children) if parent is not None else 0
         self.values = list(values)
         self.tooltips = {}
         self.plan = plan
+        self.delivery_status = str(delivery_status or (values[0] if values else ""))
+        self.excluded = bool(excluded)
         if parent is not None:
             parent.children.append(self)
 
@@ -78,9 +97,21 @@ class PreviewTreeModel(QAbstractItemModel):
             return self.headers[section]
         return None
 
-    def update_row(self, row, *, text=None, tooltips=None):
+    def update_row(
+        self,
+        row,
+        *,
+        text=None,
+        tooltips=None,
+        delivery_status=None,
+        excluded=None,
+    ):
         changed = set()
         roles = []
+        if delivery_status is not None:
+            row.delivery_status = str(delivery_status)
+        if excluded is not None:
+            row.excluded = bool(excluded)
         for column, value in (text or {}).items():
             if row.values[column] != value:
                 row.values[column] = value
@@ -129,7 +160,11 @@ class PreviewTreeFilter(QSortFilterProxyModel):
                     for child in row.children:
                         accepted = visit(child, match) or accepted
                 else:
-                    accepted = match and (not pending_only or row.values[0] not in {"已完成", "已跳过"})
+                    status = row.delivery_status or row.values[0]
+                    accepted = match and (
+                        not pending_only
+                        or (not row.excluded and status not in {"已完成", "已跳过"})
+                    )
                 if accepted:
                     visible.add(row)
                 return accepted

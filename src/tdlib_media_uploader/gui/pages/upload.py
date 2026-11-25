@@ -40,6 +40,7 @@ from ...core.filesystem import stable_path
 from ...core.identity import canonical_target
 from ...config.paths import RESOURCE_DIR
 from ...upload.queue import AlbumStatus, TaskStatus
+from ...upload.reconciliation import ReconciledAlbum
 from ..icons import get_svg_icon
 from ..theme import THEME
 from ..config_service import get_cfg as _config_getter, target_for as _target_getter
@@ -108,6 +109,10 @@ class UploadPage(QWidget):
         self._file_rows = {}
         self._album_rows = {}
         self._group_rows = []
+        self._album_delivery: dict[str, str] = {}
+        self._album_errors: dict[str, str] = {}
+        self._file_delivery: dict[str, str] = {}
+        self._file_errors: dict[str, str] = {}
         accent = self.services.kind_label(self.kind)
 
         layout = QVBoxLayout(self)
@@ -407,43 +412,93 @@ class UploadPage(QWidget):
             self.status_label.setText("正在扫描目录…")
         self._update_edit_button()
 
-    def _update_scan_summary_chips_and_labels(self, result: dict):
-        self.chip_files.setText(f"{result['total_files']} 个")
-        self.chip_bytes.setText(self.services.size_formatter(result["total_bytes"]))
-        self.chip_done.setText(f"{result['completed_files']} 个")
-        self.chip_pending.setText(f"{result['pending_files']} 个")
-        self.chip_albums.setText(f"{result['album_count']} 组")
+    @staticmethod
+    def _combined_status(delivery_status: str, excluded: bool) -> str:
+        if excluded and delivery_status not in {"已完成", "已跳过"}:
+            return f"{delivery_status} · 已排除"
+        return delivery_status
 
-        self.summary_label.setText(
-            f"共 {result['total_files']} 个 · {self.services.size_formatter(result['total_bytes'])} · "
-            f"已完成 {result['completed_files']} · 待上传 {result['pending_files']} · "
-            f"{result['album_count']} 组待上传"
+    def _unfinished_items(self, plan: Mapping[str, Any], completed: set[str]) -> list[Any]:
+        return [
+            entry for entry in plan.get("pending_items", ())
+            if self._stable(_item_path(entry)) not in completed
+        ]
+
+    @staticmethod
+    def _item_snapshot(item: Any) -> tuple[int, int] | None:
+        if isinstance(item, Mapping):
+            size_val = item.get("scan_size", item.get("size"))
+            mtime_val = item.get("scan_mtime_ns", item.get("mtime_ns"))
+        else:
+            snapshot = getattr(item, "snapshot", None)
+            size_val = getattr(snapshot, "size", None)
+            mtime_val = getattr(snapshot, "mtime_ns", None)
+        if size_val is None or mtime_val is None:
+            return None
+        try:
+            return int(size_val), int(mtime_val)
+        except (TypeError, ValueError):
+            return None
+
+    def _update_scan_summary_chips_and_labels(self, result: dict):
+        total_files = int(result.get("total_files", 0) or 0)
+        total_bytes = int(result.get("total_bytes", 0) or 0)
+        completed_files = int(result.get("completed_files", 0) or 0)
+        pending_files = int(result.get("pending_files", 0) or 0)
+        pending_bytes = int(result.get("pending_bytes", 0) or 0)
+        skipped_files = int(result.get("skipped_files", 0) or 0)
+        skipped_albums = int(result.get("skipped_albums", 0) or 0)
+        album_count = int(result.get("album_count", 0) or 0)
+
+        self.chip_files.setText(f"{total_files} 个")
+        self.chip_bytes.setText(self.services.size_formatter(total_bytes))
+        self.chip_done.setText(f"{completed_files} 个")
+        self.chip_pending.setText(
+            f"{pending_files} 个（跳过 {skipped_files}）" if skipped_files else f"{pending_files} 个"
         )
+        self.chip_albums.setText(
+            f"{album_count} 组（跳过 {skipped_albums}）" if skipped_albums else f"{album_count} 组"
+        )
+
+        summary_text = (
+            f"共 {total_files} 个 · {self.services.size_formatter(total_bytes)} · "
+            f"已完成 {completed_files} · 待上传 {pending_files}"
+            f"（{self.services.size_formatter(pending_bytes)}） · "
+            f"{album_count} 组待上传"
+        )
+        if skipped_albums or skipped_files:
+            summary_text += f" · 已跳过 {skipped_albums} 组（{skipped_files} 个文件）"
         if result.get("missing"):
-            self.summary_label.setText(
-                self.summary_label.text() + f" · 缺失日期 {len(result['missing'])}"
-            )
+            summary_text += f" · 缺失日期 {len(result['missing'])}"
         if result.get("scan_skipped_files"):
-            self.summary_label.setText(
-                self.summary_label.text()
-                + f" · 扫描跳过超限 {result['scan_skipped_files']} 个"
-            )
+            summary_text += f" · 扫描跳过超限 {result['scan_skipped_files']} 个"
         if result.get("scan_compress_files"):
-            self.summary_label.setText(
-                self.summary_label.text()
-                + f" · 上传时压缩 {result['scan_compress_files']} 个"
+            summary_text += f" · 上传时压缩 {result['scan_compress_files']} 个"
+        self.summary_label.setText(summary_text)
+
+        unknown_albums = sum(1 for status in self._album_delivery.values() if status == "待核对")
+        if total_files == 0:
+            self.status_label.setText("未找到可上传媒体，请检查目录或文件格式")
+        elif unknown_albums:
+            extra = f"（已排除 {skipped_albums} 组）" if skipped_albums else ""
+            self.status_label.setText(
+                f"存在待核对记录（{unknown_albums} 组{extra}），请先在“未确认上传”核对保护记录"
             )
-        if result.get("warning"):
+        elif result.get("warning"):
             self.status_label.setText(result["warning"])
-        elif result["total_files"] == 0:
-            self.status_label.setText("目录中没有支持的媒体文件，请检查目录或文件格式")
-        elif result["pending_files"] == 0:
-            self.status_label.setText("全部项目已在断点记录中")
+        elif pending_files == 0 and skipped_files == 0:
+            self.status_label.setText("全部项目已上传")
+        elif pending_files == 0 and skipped_files > 0:
+            self.status_label.setText("所有待上传 Album 已跳过")
+        elif skipped_albums > 0:
+            self.status_label.setText(
+                f"待上传 {pending_files} 个（{album_count} 组），已跳过 {skipped_files} 个（{skipped_albums} 组）"
+            )
         else:
             self.status_label.setText("扫描完成，可加入上传队列")
         self.start_button.setEnabled(
             bool(
-                result["pending_files"]
+                pending_files
                 and not result.get("cancelled")
             )
         )
@@ -462,6 +517,10 @@ class UploadPage(QWidget):
         self._file_rows.clear()
         self._album_rows.clear()
         self._group_rows.clear()
+        self._album_delivery.clear()
+        self._album_errors.clear()
+        self._file_delivery.clear()
+        self._file_errors.clear()
         skipped = set(result.get("skipped_album_keys", ()))
         source_root = Path(result["source_dir"]) if result.get("source_dir") else None
         for group in result["groups"]:
@@ -474,9 +533,12 @@ class UploadPage(QWidget):
             self._group_rows.append(top if self.kind != "image" else None)
             for plan in group["album_plans"]:
                 album_items = plan.get("items", [])
-                album_skipped = plan["key"] in skipped
-                pending_count = 0 if album_skipped else len(plan.get("pending_items", []))
-                completed_count = len(album_items) - len(plan.get("pending_items", []))
+                unfinished = self._unfinished_items(plan, completed_paths)
+                album_excluded = plan["key"] in skipped and bool(unfinished)
+                pending_count = 0 if album_excluded else len(unfinished)
+                completed_count = sum(
+                    self._stable(_item_path(item)) in completed_paths for item in album_items
+                )
                 caption = plan.get("caption", {}) or {}
                 include_key = {
                     "video": "VIDEO_CAPTION_INCLUDE_FILENAMES",
@@ -495,7 +557,13 @@ class UploadPage(QWidget):
                     bool(self._cfg(number_key, True)),
                     max_chars=int(self.services.caption_limit),
                 )
-                album_status = "已跳过" if album_skipped else ("待上传" if pending_count else "已完成")
+                album_delivery = (
+                    "已完成"
+                    if not unfinished
+                    else ("部分完成" if completed_count else "待上传")
+                )
+                self._album_delivery[plan["key"]] = album_delivery
+                album_status = self._combined_status(album_delivery, album_excluded)
                 album_row = PreviewRow(
                     [
                         album_status,
@@ -505,13 +573,17 @@ class UploadPage(QWidget):
                         ),
                         f"{len(album_items)} 个文件 · 已完成 {completed_count} · 待上传 {pending_count}",
                     ],
-                    top, plan=plan,
+                    top,
+                    plan=plan,
+                    delivery_status=album_delivery,
+                    excluded=album_excluded,
                 )
                 self._album_rows[plan["key"]] = album_row
                 album_row.tooltips[1] = caption_text or "无标题"
                 for item in album_items:
                     path = _item_path(item)
-                    completed = self._stable(path) in completed_paths
+                    stable = self._stable(path)
+                    completed = stable in completed_paths
                     date_value = (
                         item.get("capture_time") if isinstance(item, Mapping) else None
                     )
@@ -519,7 +591,10 @@ class UploadPage(QWidget):
                         date_value = (
                             "图片" if item.get("media_kind") == "image" else "视频"
                         )
-                    leaf_status = "已完成" if completed else ("已跳过" if album_skipped else "待上传")
+                    leaf_delivery = "已完成" if completed else "待上传"
+                    self._file_delivery[stable] = leaf_delivery
+                    leaf_excluded = not completed and album_excluded
+                    leaf_status = self._combined_status(leaf_delivery, leaf_excluded)
                     row = PreviewRow(
                         [
                             leaf_status,
@@ -528,14 +603,16 @@ class UploadPage(QWidget):
                             self._display_path(path, source_root),
                         ],
                         album_row,
+                        delivery_status=leaf_delivery,
+                        excluded=leaf_excluded,
                     )
-                    self._file_rows[self._stable(path)] = row
+                    self._file_rows[stable] = row
                     row.tooltips[3] = str(path)
                     if isinstance(item, Mapping):
                         source = item.get("date_tag") or "未知"
                         row.tooltips[1] = f"{self._format_date(date_value)}\n日期来源：{source}"
         self._preview_model.set_root(root)
-        for column, width in enumerate((120, 240, 96)):
+        for column, width in enumerate((148, 240, 96)):
             self.tree.setColumnWidth(column, width)
         if self.kind != "image":
             self.tree.expandToDepth(0)
@@ -555,86 +632,190 @@ class UploadPage(QWidget):
         self.tree.setUpdatesEnabled(False)
         try:
             self._build_scan_result_tree(result, completed_paths)
+            self._recompute_preview_totals(
+                completed_paths, set(result.get("skipped_album_keys", ())), {},
+            )
         finally:
             self.tree.setUpdatesEnabled(True)
 
         self._update_scan_summary_chips_and_labels(result)
+        self._update_edit_button()
 
     def _matches_preview(self, source_root, target):
         result = self.result
-        return (result and not result.get("cancelled") and result.get("target")
-                and self._stable(result["source_dir"]) == self._stable(source_root)
-                and canonical_target(result["target"]) == canonical_target(dict(target)))
+        return bool(
+            result
+            and not result.get("cancelled")
+            and target
+            and result.get("target")
+            and source_root
+            and result.get("source_dir")
+            and self._stable(result["source_dir"]) == self._stable(source_root)
+            and canonical_target(dict(result["target"])) == canonical_target(dict(target))
+        )
 
-    def sync_reconciled_album(self, confirmation):
-        if not self._matches_preview(confirmation.source_root, confirmation.target):
-            return
-        snapshots = {self._stable(snapshot.path): (snapshot, "已完成", None)
-                     for snapshot in confirmation.snapshots}
-        self._sync_file_outcomes(snapshots, {})
+    def _derive_album_delivery(self, plan: Mapping[str, Any], completed: set[str]) -> tuple[str, str | None]:
+        items = plan.get("items", ())
+        if not items:
+            return "已完成", None
+        if all(self._stable(_item_path(item)) in completed for item in items):
+            return "已完成", None
+        leaf_states = [self._file_delivery.get(self._stable(_item_path(item)), "待上传") for item in items]
+        leaf_errors = [
+            self._file_errors.get(self._stable(_item_path(item)))
+            for item in items
+            if self._file_errors.get(self._stable(_item_path(item)))
+        ]
+        error = leaf_errors[0] if leaf_errors else None
+        if "待核对" in leaf_states:
+            return "待核对", error
+        if "已跳过" in leaf_states and all(state in {"已完成", "已跳过"} for state in leaf_states):
+            return "已跳过", error
+        if "失败" in leaf_states:
+            return "失败", error
+        if "暂缓" in leaf_states:
+            return "暂缓", error
+        if any(self._stable(_item_path(item)) in completed for item in items):
+            return "部分完成", None
+        return "待上传", None
 
-    def sync_reconciled_not_sent(self, record: Mapping[str, Any], *, source_root_fallback=None):
-        """Clear pending-review preview markers when an inflight batch is cleared for re-upload."""
-        if not isinstance(record, Mapping) or self.result is None or self.result.get("cancelled"):
-            return
-        raw_target = record.get("target") if isinstance(record.get("target"), Mapping) else {
-            key: record.get(key)
-            for key in ("target_mode", "chat_id", "forum_topic_id", "channel_chat_id")
-            if key in record
-        }
-        raw_items = record.get("items", ()) or ()
-        roots = {
-            str(entry.get("source_root"))
-            for entry in raw_items
-            if isinstance(entry, Mapping) and entry.get("source_root")
-        }
-        if record.get("source_root"):
-            roots.add(str(record["source_root"]))
-        source_root = next(iter(roots), None) or source_root_fallback or self.result.get("source_dir")
-        if raw_target and not self._matches_preview(source_root, raw_target):
-            return
-        item_results = record.get("item_results") or ()
-        succeeded_indices = {
-            entry.get("index")
-            for entry in item_results
-            if isinstance(entry, Mapping) and entry.get("status") == "succeeded"
-        }
-        snapshots = {}
-        for index, entry in enumerate(raw_items):
-            if isinstance(entry, Mapping):
-                path_val = entry.get("path")
-                size_val = entry.get("scan_size", entry.get("size"))
-                mtime_val = entry.get("scan_mtime_ns", entry.get("mtime_ns"))
+    def sync_reconciled_album(self, confirmation) -> tuple[bool, str]:
+        if self.result is None or self.result.get("cancelled"):
+            if isinstance(confirmation, ReconciledAlbum) and not confirmation.syncable:
+                return False, confirmation.reason or "旧记录缺少目标或文件快照，已完成持久化对账，请重新扫描目录。"
+            return False, ""
+        if not isinstance(confirmation, ReconciledAlbum):
+            return False, "对账结果格式无效，请重新扫描目录。"
+        if not confirmation.syncable:
+            return False, confirmation.reason or "旧记录缺少目标、来源目录或完整文件快照，已完成持久化对账，请重新扫描目录。"
+        conf_kind = str(confirmation.kind or "").strip().lower()
+        if not conf_kind or conf_kind != self.kind:
+            return False, ""
+        if not confirmation.target or not self.result.get("target"):
+            return False, "对账记录缺少 Telegram 目标，已完成持久化对账，请重新扫描目录。"
+        if canonical_target(dict(confirmation.target)) != canonical_target(dict(self.result["target"])):
+            return False, ""
+        if not confirmation.source_root or not self.result.get("source_dir"):
+            return False, "对账记录缺少来源目录，已完成持久化对账，请重新扫描目录。"
+        if self._stable(confirmation.source_root) != self._stable(self.result["source_dir"]):
+            return False, ""
+
+        confirmed_snaps = tuple(
+            confirmation.confirmed_snapshots or (confirmation.snapshots if confirmation.sent else ())
+        )
+        reupload_snaps = tuple(confirmation.reupload_snapshots)
+        all_snaps = (*confirmed_snaps, *reupload_snaps)
+        if not all_snaps:
+            return False, "对账记录缺少完整文件快照，已完成持久化对账，请重新扫描目录。"
+
+        preview_items: dict[str, Any] = {}
+        for group in self.result.get("groups", ()):
+            for plan in group.get("album_plans", ()):
+                for item in plan.get("items", ()):
+                    preview_items[self._stable(_item_path(item))] = item
+        for item in self.result.get("items", ()):
+            preview_items.setdefault(self._stable(_item_path(item)), item)
+
+        for snapshot in all_snaps:
+            stable = self._stable(snapshot.path)
+            preview_item = preview_items.get(stable)
+            if preview_item is None or stable not in self._file_rows:
+                return False, "对账文件与当前预览列表不匹配，已完成持久化对账，请重新扫描目录。"
+            preview_snap = self._item_snapshot(preview_item)
+            if preview_snap is None or preview_snap != (int(snapshot.size), int(snapshot.mtime_ns)):
+                return False, "预览中的文件快照与对账记录不一致，已完成持久化对账，请重新扫描目录。"
+            try:
+                disk_stat = Path(snapshot.path).stat()
+            except OSError:
+                disk_stat = None
+            if disk_stat is not None and (disk_stat.st_size, disk_stat.st_mtime_ns) != (
+                int(snapshot.size),
+                int(snapshot.mtime_ns),
+            ):
+                return False, "文件大小或修改时间已发生变化，已完成持久化对账，请重新扫描目录。"
+
+        completed = set(self.result.get("completed_paths", ()))
+        skipped = set(self.result.get("skipped_album_keys", ()))
+        touched_paths: set[str] = set()
+        for snapshot in confirmed_snaps:
+            stable = self._stable(snapshot.path)
+            completed.add(stable)
+            self._file_delivery[stable] = "已完成"
+            self._file_errors.pop(stable, None)
+            touched_paths.add(stable)
+        for snapshot in reupload_snaps:
+            stable = self._stable(snapshot.path)
+            if stable in completed:
+                self._file_delivery[stable] = "已完成"
             else:
-                path_val, size_val, mtime_val = entry, None, None
-            if not path_val:
-                continue
-            stable = self._stable(path_val)
-            if stable not in self._file_rows:
-                continue
-            status = "已完成" if index in succeeded_indices else "待上传"
-            snapshot = (int(size_val), int(mtime_val)) if size_val is not None and mtime_val is not None else None
-            snapshots[stable] = (snapshot, status, status)
-        if snapshots:
-            self._sync_file_outcomes(snapshots, {})
+                self._file_delivery[stable] = "待上传"
+                self._file_errors.pop(stable, None)
+            touched_paths.add(stable)
+
+        for group in self.result.get("groups", ()):
+            for plan in group.get("album_plans", ()):
+                plan_paths = {self._stable(_item_path(item)) for item in plan.get("items", ())}
+                if plan_paths & touched_paths:
+                    delivery, error = self._derive_album_delivery(plan, completed)
+                    self._album_delivery[plan["key"]] = delivery
+                    if error:
+                        self._album_errors[plan["key"]] = error
+                    else:
+                        self._album_errors.pop(plan["key"], None)
+
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self._recompute_preview_totals(completed, skipped, {})
+        finally:
+            self.tree.setUpdatesEnabled(True)
+        self._update_scan_summary_chips_and_labels(self.result)
+        self._update_edit_button()
+        return True, ""
 
     def sync_task_outcomes(self, task):
         if not self._matches_preview(task.source_root, task.target):
             return
+        completed = set(self.result.get("completed_paths", ()))
+        skipped = set(self.result.get("skipped_album_keys", ()))
         outcomes = task.album_statuses()
         known_confirmed = task.known_confirmed
-        snapshots = {}
+        labels = {
+            AlbumStatus.FAILED: "失败",
+            AlbumStatus.DEFERRED: "暂缓",
+            AlbumStatus.PARTIAL: "部分完成",
+            AlbumStatus.UNKNOWN: "待核对",
+            AlbumStatus.SKIPPED: "已跳过",
+            AlbumStatus.COMPLETED: "已完成",
+        }
+        task_skipped = task.status is TaskStatus.SKIPPED
+        preview_items = {
+            self._stable(_item_path(item)): item
+            for group in self.result.get("groups", ())
+            for plan in group.get("album_plans", ())
+            for item in plan.get("items", ())
+        }
         for plan in task.plans:
             outcome = outcomes[plan.key]
             failed = set(outcome.failed_paths)
             deferred = set(outcome.deferred_paths)
+            all_matched = True
+            matched_any = False
             for item in plan.items:
                 path = self._stable(item.path)
-                if outcome.status is AlbumStatus.UNKNOWN:
-                    status = "待核对"
+                preview_item = preview_items.get(path)
+                if preview_item is None or self._item_snapshot(preview_item) != item.snapshot.as_tuple():
+                    all_matched = False
+                    continue
+                matched_any = True
+                if path in known_confirmed and outcome.status is not AlbumStatus.UNKNOWN:
+                    status = "已完成"
+                    completed.add(path)
+                elif outcome.status is AlbumStatus.UNKNOWN:
+                    status = "已完成" if path in completed else "待核对"
                 elif path in known_confirmed:
                     status = "已完成"
-                elif outcome.status is AlbumStatus.SKIPPED or task.status is TaskStatus.SKIPPED:
+                    completed.add(path)
+                elif outcome.status is AlbumStatus.SKIPPED or task_skipped:
                     status = "已跳过"
                 elif path in failed:
                     status = "失败"
@@ -642,86 +823,141 @@ class UploadPage(QWidget):
                     status = "暂缓"
                 else:
                     continue
-                snapshots[path] = (item.snapshot, status, outcome.error)
+                self._file_delivery[path] = status
+                if outcome.error and status not in {"已完成"}:
+                    self._file_errors[path] = outcome.error
+                else:
+                    self._file_errors.pop(path, None)
+            if plan.key in self._album_rows and matched_any and all_matched:
+                if outcome.status in labels:
+                    self._album_delivery[plan.key] = labels[outcome.status]
+                if outcome.error and outcome.status is not AlbumStatus.COMPLETED:
+                    self._album_errors[plan.key] = outcome.error
+                else:
+                    self._album_errors.pop(plan.key, None)
+                if outcome.status is AlbumStatus.SKIPPED or task_skipped:
+                    skipped.add(plan.key)
 
-        self._sync_file_outcomes(snapshots, outcomes, task_skipped=task.status is TaskStatus.SKIPPED)
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self._recompute_preview_totals(completed, skipped, {})
+        finally:
+            self.tree.setUpdatesEnabled(True)
+        self._update_scan_summary_chips_and_labels(self.result)
+        self._update_edit_button()
 
     def _recompute_preview_totals(
         self,
         completed: set[str],
         skipped: set[str],
-        outcomes: Mapping[str, Any],
+        outcomes: Mapping[str, Any] = (),
         *,
         snapshots: Mapping[str, Any] | None = None,
         task_skipped: bool = False,
         updated_album_keys: set[str] | None = None,
     ):
+        del outcomes, snapshots, task_skipped, updated_album_keys
         result = self.result
-        labels = {
-            AlbumStatus.FAILED: "失败", AlbumStatus.DEFERRED: "暂缓", AlbumStatus.PARTIAL: "部分完成",
-            AlbumStatus.UNKNOWN: "待核对", AlbumStatus.SKIPPED: "已跳过",
-        }
-        pending_files = pending_bytes = album_count = 0
+        completed_files = pending_files = pending_bytes = skipped_files = skipped_albums = album_count = 0
         for group, group_row in zip(result["groups"], self._group_rows):
-            group_pending = group_completed = group_albums = 0
+            group_pending = group_completed = group_albums = group_skipped_files = 0
             for plan in group["album_plans"]:
                 key = plan["key"]
-                outcome = outcomes.get(key)
                 row = self._album_rows[key]
                 items = plan["items"]
-                changes = []
-                if snapshots:
-                    for item in items:
-                        path = self._stable(_item_path(item))
-                        change = snapshots.get(path)
-                        if change is None:
-                            continue
-                        snapshot, status, error = change
-                        snapshot_tuple = (
-                            snapshot.as_tuple() if hasattr(snapshot, "as_tuple") else snapshot
-                        )
-                        if snapshot_tuple is not None and (item.get("scan_size"), item.get("scan_mtime_ns")) != snapshot_tuple:
-                            continue
-                        self._preview_model.update_row(
-                            self._file_rows[path], text={0: status}, tooltips={0: error or status}
-                        )
-                        if status == "已完成":
-                            completed.add(path)
-                        changes.append(status)
-                if changes and outcome is not None and set(changes) <= {"已完成", "已跳过"} and (
-                    outcome.status is AlbumStatus.SKIPPED or task_skipped
-                ):
-                    skipped.add(key)
-                pending = [
-                    item for item in plan["pending_items"]
-                    if self._stable(_item_path(item)) not in completed
-                ]
+                pending = self._unfinished_items(plan, completed)
                 plan["pending_items"] = pending
                 done = sum(self._stable(_item_path(item)) in completed for item in items)
-                count = 0 if key in skipped else len(pending)
-                row_text = {3: f"{len(items)} 个文件 · 已完成 {done} · 待上传 {count}"}
-                if key in skipped:
-                    row_text[0] = "已跳过"
-                elif changes or (updated_album_keys and key in updated_album_keys):
-                    label = "已完成" if done == len(items) else "部分完成" if done else "待上传"
-                    row_text[0] = labels.get(outcome.status, label) if outcome is not None else label
-                self._preview_model.update_row(row, text=row_text)
-                group_pending += count
+                if not pending:
+                    skipped.discard(key)
+                excluded = key in skipped and bool(pending)
+
+                for item in items:
+                    path = self._stable(_item_path(item))
+                    is_done = path in completed
+                    if is_done:
+                        leaf_delivery = "已完成"
+                        leaf_error = "已完成"
+                        self._file_delivery[path] = leaf_delivery
+                        self._file_errors.pop(path, None)
+                    else:
+                        leaf_delivery = self._file_delivery.get(path, "待上传")
+                        leaf_error = self._file_errors.get(path)
+                    leaf_excluded = not is_done and excluded
+                    display_leaf = self._combined_status(leaf_delivery, leaf_excluded)
+                    leaf_tooltip = (
+                        f"{leaf_error}（本次已排除入队）"
+                        if leaf_excluded and leaf_error
+                        else (leaf_error or display_leaf)
+                    )
+                    self._preview_model.update_row(
+                        self._file_rows[path],
+                        text={0: display_leaf},
+                        tooltips={0: leaf_tooltip},
+                        delivery_status=leaf_delivery,
+                        excluded=leaf_excluded,
+                    )
+
+                if not pending:
+                    album_delivery = "已完成"
+                    self._album_delivery[key] = album_delivery
+                    self._album_errors.pop(key, None)
+                else:
+                    album_delivery = self._album_delivery.get(key)
+                    if not album_delivery or album_delivery == "已完成":
+                        album_delivery, derived_err = self._derive_album_delivery(plan, completed)
+                        self._album_delivery[key] = album_delivery
+                        if derived_err:
+                            self._album_errors[key] = derived_err
+
+                display_album = self._combined_status(album_delivery, excluded)
+                album_error = self._album_errors.get(key)
+                album_tooltip = (
+                    f"{album_error}（本次已排除入队）"
+                    if excluded and album_error
+                    else (album_error or display_album)
+                )
+
+                selected_count = 0 if excluded else len(pending)
+                excluded_count = len(pending) if excluded else 0
+                desc = f"{len(items)} 个文件 · 已完成 {done} · 待上传 {selected_count}"
+                if excluded_count:
+                    desc += f" · 已跳过 {excluded_count}"
+
+                self._preview_model.update_row(
+                    row,
+                    text={0: display_album, 3: desc},
+                    tooltips={0: album_tooltip},
+                    delivery_status=album_delivery,
+                    excluded=excluded,
+                )
+
+                completed_files += done
                 group_completed += done
-                group_albums += bool(count)
-                if count:
+                if excluded:
+                    skipped_albums += 1
+                    skipped_files += len(pending)
+                    group_skipped_files += len(pending)
+                elif pending:
+                    album_count += 1
+                    pending_files += len(pending)
                     pending_bytes += sum(self._size(item) for item in pending)
+                    group_pending += len(pending)
+                    group_albums += 1
             if not group["album_plans"]:
                 group_pending = group["pending"]
             group.update(pending=group_pending, completed=group_completed, albums=group_albums)
             if group_row is not None:
                 label = group["label"]
-                self._preview_model.update_row(group_row, text={3: (
+                group_desc = (
                     f"{label} · {len(group['items'])} 个 · 已完成 {group_completed} · "
                     f"待上传 {group_pending} · {group_albums} 组待上传"
-                )})
-            pending_files += group_pending
-            album_count += group_albums
+                )
+                if group_skipped_files:
+                    group_desc += f" · 已跳过 {group_skipped_files}"
+                self._preview_model.update_row(group_row, text={3: group_desc})
+        if not result.get("groups"):
+            completed_files = len(completed)
         result["plans"] = tuple(
             replace(plan, pending_items=tuple(
                 item for item in plan.pending_items if self._stable(item.path) not in completed
@@ -729,23 +965,16 @@ class UploadPage(QWidget):
             for plan in result["plans"]
         )
         result.update(
-            completed_paths=sorted(completed), completed_files=len(completed), pending_files=pending_files,
-            pending_bytes=pending_bytes, album_count=album_count, skipped_album_keys=tuple(sorted(skipped)),
+            completed_paths=sorted(completed),
+            completed_files=completed_files,
+            pending_files=pending_files,
+            pending_bytes=pending_bytes,
+            skipped_files=skipped_files,
+            skipped_albums=skipped_albums,
+            album_count=album_count,
+            skipped_album_keys=tuple(sorted(skipped)),
         )
         self._filter_preview()
-
-    def _sync_file_outcomes(self, snapshots, outcomes, *, task_skipped=False):
-        result = self.result
-        completed = set(result["completed_paths"])
-        skipped = set(result.get("skipped_album_keys", ()))
-        self.tree.setUpdatesEnabled(False)
-        try:
-            self._recompute_preview_totals(
-                completed, skipped, outcomes, snapshots=snapshots, task_skipped=task_skipped
-            )
-        finally:
-            self.tree.setUpdatesEnabled(True)
-        self._update_scan_summary_chips_and_labels(result)
 
     def _toggle_album_skip(self, index):
         item = self._album_row(index)
@@ -755,30 +984,16 @@ class UploadPage(QWidget):
         key = plan["key"]
         completed = set(self.result.get("completed_paths", ()))
         skipped = set(self.result.get("skipped_album_keys", ()))
-        pending = [
-            entry for entry in plan.get("pending_items", ())
-            if self._stable(_item_path(entry)) not in completed
-        ]
+        pending = self._unfinished_items(plan, completed)
         if not pending and key not in skipped:
             return
-        will_skip = key not in skipped
-        if will_skip:
-            skipped.add(key)
-        else:
+        if key in skipped:
             skipped.remove(key)
+        else:
+            skipped.add(key)
         self.tree.setUpdatesEnabled(False)
         try:
-            for entry in plan.get("items", ()):
-                path = self._stable(_item_path(entry))
-                if path in completed:
-                    continue
-                file_row = self._file_rows.get(path)
-                if file_row is not None:
-                    status = "已跳过" if will_skip else "待上传"
-                    self._preview_model.update_row(file_row, text={0: status}, tooltips={0: status})
-            self._recompute_preview_totals(
-                completed, skipped, {}, updated_album_keys={key}
-            )
+            self._recompute_preview_totals(completed, skipped, {})
         finally:
             self.tree.setUpdatesEnabled(True)
         self._update_scan_summary_chips_and_labels(self.result)
@@ -825,13 +1040,10 @@ class UploadPage(QWidget):
         key = album_item.plan["key"]
         skipped = set((self.result or {}).get("skipped_album_keys", ()))
         completed = set((self.result or {}).get("completed_paths", ()))
-        has_pending = any(
-            self._stable(_item_path(entry)) not in completed
-            for entry in album_item.plan.get("pending_items", ())
-        )
+        has_pending = bool(self._unfinished_items(album_item.plan, completed))
         skip_action = None
         if has_pending or key in skipped:
-            skip_action = menu.addAction("恢复此 Album" if key in skipped else "跳过此 Album（暂不入队）")
+            skip_action = menu.addAction("恢复此 Album（纳入本次入队）" if key in skipped else "跳过此 Album（暂不入队）")
         leaf_path = self._selected_leaf_path(QModelIndex(index))
         open_action = copy_action = None
         if leaf_path:
@@ -941,10 +1153,7 @@ class UploadPage(QWidget):
         key = album_item.plan["key"]
         skipped = set(self.result.get("skipped_album_keys", ()))
         completed = set(self.result.get("completed_paths", ()))
-        has_pending = any(
-            self._stable(_item_path(entry)) not in completed
-            for entry in album_item.plan.get("pending_items", ())
-        )
+        has_pending = bool(self._unfinished_items(album_item.plan, completed))
         is_skipped = key in skipped
         self.toggle_skip_button.setText("恢复该组" if is_skipped else "跳过该组")
         self.toggle_skip_button.setEnabled(has_pending or is_skipped)
@@ -976,6 +1185,10 @@ class UploadPage(QWidget):
         self._file_rows.clear()
         self._album_rows.clear()
         self._group_rows.clear()
+        self._album_delivery.clear()
+        self._album_errors.clear()
+        self._file_delivery.clear()
+        self._file_errors.clear()
         self._filter_preview()
 
     def clear_scan_result(self):

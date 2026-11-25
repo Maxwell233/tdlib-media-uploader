@@ -22,6 +22,7 @@ if __name__ == "__main__" and not getattr(sys, "frozen", False):
     raise SystemExit(2)
 
 from ..core.album import album_key
+from ..core.identity import canonical_target
 from ..core.logging import write_app_log
 from PySide6.QtCore import QTimer, Signal, Slot, Qt
 from PySide6.QtWidgets import (
@@ -732,9 +733,12 @@ class MainWindow(QMainWindow):
             chat_title=chat_title,
             topic_name="" if is_channel else topic_name,
         ):
-            kind = str(payload.get("kind") or "").strip().lower()
-            if kind in self.upload_pages:
-                self.upload_pages[kind].refresh_target_label()
+            saved_target = canonical_target(target)
+            for page in self.upload_pages.values():
+                getter = getattr(getattr(page, "services", None), "target_getter", None)
+                page_target = getter(page.kind) if callable(getter) else _target_for(page.kind)
+                if canonical_target(dict(page_target or {})) == saved_target:
+                    page.refresh_target_label()
             self.task_page.refresh_target_labels()
         self.statusBar().showMessage(
             f"目标已确认：{chat_title}"
@@ -850,10 +854,16 @@ class MainWindow(QMainWindow):
             return
         self.inflight_page.reload_records()
         self.queue.refresh_reviews(record)
-        if sent and confirmation is not None:
-            self._upload_page(kind).sync_reconciled_album(confirmation)
-        elif not sent:
-            self._upload_page(kind).sync_reconciled_not_sent(record, source_root_fallback=source_root)
+        page = self._upload_page(kind)
+        sync_outcome = page.sync_reconciled_album(confirmation)
+        if isinstance(sync_outcome, tuple):
+            synced, sync_message = sync_outcome
+        else:
+            synced, sync_message = bool(sync_outcome), ""
+        if not synced and sync_message:
+            self.statusBar().showMessage(sync_message)
+            if page.result is not None and not page.result.get("cancelled"):
+                page.status_label.setText(sync_message)
 
     def _cache_operation_allowed(self) -> bool:
         if self.queue.recovery_busy:

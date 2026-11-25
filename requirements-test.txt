@@ -1,0 +1,4 @@
+# Offline unit/GUI verification dependencies for CI and local testing.
+# Runtime & packaging dependencies remain pinned in requirements-build-lock.txt.
+pytest==9.1.1
+pytest-mock==3.16.0

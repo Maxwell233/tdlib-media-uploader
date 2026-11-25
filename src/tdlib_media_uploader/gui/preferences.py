@@ -7,6 +7,7 @@ from typing import Any
 
 from ..config import paths
 from ..core.identity import canonical_target
+from ..core.logging import write_app_log
 from ..core.persistence import atomic_write_json
 
 
@@ -94,10 +95,21 @@ class UiPreferences:
         }
         if self.target_labels.get(key) == entry:
             return False
+        had_previous = key in self.target_labels
+        previous = dict(self.target_labels[key]) if had_previous else None
         self.target_labels[key] = entry
         try:
             atomic_write_json(self.path, self._payload())
-        except OSError:
+        except Exception as exc:
+            if had_previous and previous is not None:
+                self.target_labels[key] = previous
+            else:
+                self.target_labels.pop(key, None)
+            write_app_log(
+                "WARNING",
+                f"保存 Telegram 目标名称缓存失败（{self.path}）：{exc}",
+                source="gui/preferences",
+            )
             return False
         return True
 
