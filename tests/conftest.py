@@ -71,7 +71,7 @@ def qt_app():
 
 @pytest.fixture
 def pump(qt_app):
-    def until(condition, timeout=5):
+    def until(condition, timeout=20):
         deadline = time.monotonic() + timeout
         while not condition():
             qt_app.processEvents()

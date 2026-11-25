@@ -57,7 +57,7 @@ def _item(path: Path, root: Path, kind: str = "image", group_name: str = "26-11"
         path=path,
         source_root=root,
         media_kind=kind,
-        snapshot=FileSnapshot(stable_path(path), size, mtime_ns),
+        snapshot=FileSnapshot(str(path), size, mtime_ns),
         group_name=group_name,
     )
 
@@ -346,8 +346,8 @@ def test_strict_preflight_failure_retries_complete_unconfirmed_album_end_to_end(
     restored = reopened.tasks[0]
     exec_plans = restored.execution_plans()
     assert len(exec_plans) == 1
-    assert exec_plans[0].items == p1.items
-    assert exec_plans[0].pending_items == p1.items
+    assert exec_plans[0].items == task.plans[0].items
+    assert exec_plans[0].pending_items == task.plans[0].items
     assert exec_plans[0].caption == "strict album caption"
     assert dict(exec_plans[0].target) == validate_send_target(dict(TARGET))
 
@@ -381,7 +381,7 @@ def test_strict_build_failure_retries_all_unconfirmed_members(tmp_path, runtime_
 
     retrying = store.retry_album(finished.task_id, p1.key)
     selected = retrying.execution_plans()[0]
-    assert selected.pending_items == items
+    assert selected.pending_items == task.plans[0].items
 
 
 def test_strict_retry_never_duplicates_historically_confirmed_members(tmp_path, runtime_paths, qt_app):
@@ -427,7 +427,7 @@ def test_strict_retry_never_duplicates_historically_confirmed_members(tmp_path, 
 
     retrying = store.retry_album(finished.task_id, p1.key)
     selected = retrying.execution_plans()[0]
-    assert selected.items == items
+    assert selected.items == task.plans[0].items
     assert [i.path for i in selected.pending_items] == files[1:]
 
 
@@ -641,7 +641,7 @@ def test_legacy_task_without_failure_stage_uses_safe_recovery_path(tmp_path, run
     # Full restore still works cleanly across all items.
     restored = reopened.restore(loaded.task_id)
     assert restored.status is TaskStatus.PENDING
-    assert restored.execution_plans()[0].pending_items == items
+    assert restored.execution_plans()[0].pending_items == pending.plans[0].items
 
 
 def test_skip_and_retry_tail_retry_does_not_regress(tmp_path):

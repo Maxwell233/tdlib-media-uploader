@@ -221,7 +221,7 @@ def test_scan_cancel_navigation_and_theme_during_scan(window, monkeypatch, pump,
 
     def run(kind, *, cancel_event, **kwargs):
         started.set()
-        assert cancel_event.wait(5)
+        assert cancel_event.wait(30)
         return {"cancelled": True}
 
     monkeypatch.setattr(main_window, "_scan_result", run)

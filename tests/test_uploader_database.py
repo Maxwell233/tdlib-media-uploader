@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from conftest import task_for
+from tdlib_media_uploader.core.filesystem import stable_path
 from tdlib_media_uploader.core.upload_journal import CONFIRMED, CORRUPT, InflightJournal
 from tdlib_media_uploader.core.upload_state import UploadState
 from tdlib_media_uploader.core.uploader_database import UploaderDatabase
@@ -86,7 +87,7 @@ class DatabaseStorageTest(unittest.TestCase):
         self.assertIsNone(journal.unresolved("image", "album", self.target))
         with database.read() as connection:
             receipt = connection.execute("SELECT paths FROM queue_album_receipts").fetchone()
-        self.assertEqual(json.loads(receipt[0]), [str(self.item["path"])])
+        self.assertEqual(json.loads(receipt[0]), [stable_path(self.item["path"])])
 
     def test_cache_reset_clears_checkpoint_rows_without_reviving_backup_or_losing_unknown(self):
         database = UploaderDatabase(self.root / "uploader.db")
