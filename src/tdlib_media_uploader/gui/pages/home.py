@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -23,8 +23,14 @@ from ..theme import THEME
 from ..tools import format_size
 
 
-def _card(title: str, value: str = "—", subtitle: str = "") -> tuple[StatCard, QLabel]:
-    card = StatCard(title, value, subtitle)
+def _card(
+    title: str,
+    value: str = "—",
+    subtitle: str = "",
+    *,
+    clickable: bool = False,
+) -> tuple[StatCard, QLabel]:
+    card = StatCard(title, value, subtitle, clickable=clickable)
     return card, card.value_label
 
 
@@ -33,6 +39,7 @@ class HomePage(QWidget):
 
     start_upload = Signal(str)
     open_settings = Signal()
+    open_task_center = Signal()
 
     def __init__(
         self,
@@ -112,6 +119,9 @@ class HomePage(QWidget):
 
         self.task_card = QFrame()
         self.task_card.setObjectName("surfaceCard")
+        self.task_card.setProperty("clickable", "true")
+        self.task_card.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.task_card.installEventFilter(self)
         task_box_layout = QHBoxLayout(self.task_card)
         task_box_layout.setContentsMargins(18, 14, 18, 14)
         task_box_layout.setSpacing(14)
@@ -130,6 +140,10 @@ class HomePage(QWidget):
         task_info_layout.addWidget(self.task_hint)
         task_box_layout.addLayout(task_info_layout, 1)
 
+        self.task_action_hint = QLabel("查看任务中心 →")
+        self.task_action_hint.setObjectName("mutedLabel")
+        task_box_layout.addWidget(self.task_action_hint)
+
         task_section.addWidget(self.task_card)
         layout.addLayout(task_section)
 
@@ -138,8 +152,9 @@ class HomePage(QWidget):
         status_row.setSpacing(14)
 
         self.connection_card, self.connection_value = _card(
-            "Telegram 连接状态", "未连接", "TDLib 原生会话"
+            "Telegram 连接状态", "未连接", "TDLib 原生会话 · 点击前往设置", clickable=True
         )
+        self.connection_card.clicked.connect(self.open_settings)
         self.today_card, self.today_value = _card(
             "本次扫描统计", "—", "最近一次媒体扫描"
         )
@@ -150,6 +165,15 @@ class HomePage(QWidget):
 
         layout.addStretch(1)
         self.set_connection("未连接", False)
+
+    def eventFilter(self, watched, event):
+        if (
+            watched is getattr(self, "task_card", None)
+            and event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self.open_task_center.emit()
+        return super().eventFilter(watched, event)
 
     def update_scan(self, result: dict):
         self.today_value.setText(
@@ -179,9 +203,16 @@ class HomePage(QWidget):
             parts.append(f"ETA {eta}")
         self.task_hint.setText(" · ".join(parts))
 
-    def set_task_idle(self):
-        self.task_value.setText("无正在运行的上传任务")
-        self.task_hint.setText("在上方选择媒体类型即可进入上传工作台")
+    def set_task_idle(self, *, queued_count: int = 0, blocked: bool = False):
+        if blocked:
+            self.task_value.setText("队列需要人工确认或恢复")
+            self.task_hint.setText("存在待核对或中断任务，点击前往任务中心处理")
+        elif queued_count > 0:
+            self.task_value.setText(f"队列中有 {queued_count} 个待上传任务")
+            self.task_hint.setText("队列当前已暂停或待调度，点击查看队列并继续")
+        else:
+            self.task_value.setText("无正在运行的上传任务")
+            self.task_hint.setText("在上方选择媒体类型即可进入上传工作台")
 
     def refresh_theme(self):
         """Re-polish connection and dynamic values on theme change."""

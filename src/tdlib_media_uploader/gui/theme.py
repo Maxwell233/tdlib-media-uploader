@@ -712,7 +712,7 @@ QCheckBox::indicator:checked {{
 }}
 
 /* Tree, Table & List */
-QTreeWidget, QTableWidget, QListWidget {{
+QTreeView, QTreeWidget, QTableWidget, QListWidget {{
     background-color: {palette.bg_input};
     color: {palette.text_secondary};
     border: 1px solid {palette.border_subtle};
@@ -725,21 +725,21 @@ QTreeWidget, QTableWidget, QListWidget {{
     outline: 0;
 }}
 
-QTreeWidget:focus, QTableWidget:focus, QListWidget:focus {{
+QTreeView:focus, QTreeWidget:focus, QTableWidget:focus, QListWidget:focus {{
     border-color: {palette.border_hover};
 }}
 
-QTreeWidget::item, QTableWidget::item, QListWidget::item {{
+QTreeView::item, QTreeWidget::item, QTableWidget::item, QListWidget::item {{
     padding: 6px 8px;
     border-radius: 4px;
 }}
 
-QTreeWidget::item:hover, QTableWidget::item:hover, QListWidget::item:hover {{
+QTreeView::item:hover, QTreeWidget::item:hover, QTableWidget::item:hover, QListWidget::item:hover {{
     background-color: {palette.bg_card_hover};
     color: {palette.text_primary};
 }}
 
-QTreeWidget::item:selected, QTableWidget::item:selected, QListWidget::item:selected {{
+QTreeView::item:selected, QTreeWidget::item:selected, QTableWidget::item:selected, QListWidget::item:selected {{
     background-color: {palette.bg_selection};
     color: {palette.text_selection};
     font-weight: 500;
@@ -922,7 +922,104 @@ QPushButton#themeToggleBtn:hover {{
     background-color: {palette.bg_card_hover};
     border-color: {palette.border_hover};
 }}
+
+QPushButton#compactButton {{
+    min-height: 26px;
+    padding: 0 10px;
+    font-size: 12px;
+    border-radius: 6px;
+}}
+
+QPushButton#dangerGhostButton {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    color: {palette.danger};
+    font-weight: 500;
+}}
+
+QPushButton#dangerGhostButton:hover {{
+    background-color: {palette.danger_bg};
+    border-color: {palette.danger};
+    color: {palette.danger};
+}}
+
+QPushButton#dangerGhostButton:disabled {{
+    color: {palette.text_dim};
+    background-color: transparent;
+    border-color: transparent;
+}}
+
+QLabel#cardTitle {{
+    font-size: 15px;
+    font-weight: 600;
+    color: {palette.text_primary};
+}}
+
+QLabel#saveStatusLabel {{
+    color: {palette.text_secondary};
+    font-size: 12px;
+}}
+
+QLabel#saveStatusLabel[status="muted"] {{
+    color: {palette.text_muted};
+}}
+
+QLabel#saveStatusLabel[status="success"] {{
+    color: {palette.success};
+    font-weight: 600;
+}}
+
+QLabel#saveStatusLabel[status="warning"] {{
+    color: {palette.warning};
+    font-weight: 600;
+}}
+
+QLabel#saveStatusLabel[status="danger"] {{
+    color: {palette.danger};
+    font-weight: 600;
+}}
+
+QFrame#surfaceCard[clickable="true"]:hover, QFrame#statCard[clickable="true"]:hover {{
+    border-color: {palette.accent};
+    background-color: {palette.bg_card_hover};
+}}
+
+QSplitter::handle {{
+    background-color: {palette.border_subtle};
+    border-radius: 2px;
+}}
+
+QSplitter::handle:hover {{
+    background-color: {palette.accent};
+}}
 """
+
+
+def status_color(status: str, palette: Palette | None = None) -> str:
+    """Return a semantic hex color token for a status key or localized label."""
+    tokens = palette or THEME
+    key = str(status or "").strip()
+    upper = key.upper()
+    if upper in {"COMPLETED", "CONFIRMED", "SUCCESS"} or key in {"已完成", "成功"}:
+        return tokens.success
+    if upper in {"FAILED", "CORRUPT", "DANGER", "ERROR"} or key in {"失败", "损坏的上传记录", "停止/失败"}:
+        return tokens.danger
+    if (
+        upper in {"PARTIAL", "DEFERRED", "UNKNOWN", "INTERRUPTED", "NEEDS_REVIEW", "PREPARED", "SUBMITTED", "WARNING"}
+        or key in {
+            "部分完成", "暂缓", "待核对", "已中断", "待确认 / 尚未完成发送",
+            "已提交 / 等待确认", "未确认 / 禁止自动重试", "Telegram 已确认 / 本地断点待修复",
+        }
+        or key.startswith("冷却中")
+    ):
+        return tokens.warning
+    if upper in {"RUNNING", "PREPARING", "INFO"} or key in {"上传中", "准备中", "待上传"}:
+        return tokens.accent_hover
+    if upper in {"SKIPPED", "MUTED"} or key in {"已跳过"}:
+        return tokens.text_muted
+    if upper == "PENDING" or key in {"等待中"}:
+        return tokens.text_secondary
+    return tokens.text_secondary
 
 
 def initialize_theme(application, preferences):
@@ -942,6 +1039,7 @@ __all__ = [
     "get_current_theme_mode",
     "set_theme_mode",
     "toggle_theme",
+    "status_color",
     "APP_STYLE",
     "build_stylesheet",
     "initialize_theme",

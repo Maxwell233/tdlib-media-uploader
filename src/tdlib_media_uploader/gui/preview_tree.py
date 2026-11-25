@@ -1,6 +1,9 @@
 """Scan preview model with stable item indexes and in-place status updates."""
 
 from PySide6.QtCore import QAbstractItemModel, QModelIndex, QSortFilterProxyModel, Qt
+from PySide6.QtGui import QColor, QFont
+
+from .theme import status_color
 
 
 class PreviewRow:
@@ -58,6 +61,14 @@ class PreviewTreeModel(QAbstractItemModel):
             return row.values[index.column()]
         if role == Qt.ItemDataRole.ToolTipRole:
             return row.tooltips.get(index.column())
+        if role == Qt.ItemDataRole.ForegroundRole and index.column() == 0:
+            label = str(row.values[0] or "")
+            if label and label != "分组":
+                return QColor(status_color(label))
+        if role == Qt.ItemDataRole.FontRole and row.values[0] == "分组" and index.column() in (0, 1):
+            font = QFont()
+            font.setBold(True)
+            return font
         if role == Qt.ItemDataRole.UserRole and index.column() == 0:
             return row.plan
         return None
@@ -106,8 +117,13 @@ class PreviewTreeFilter(QSortFilterProxyModel):
             visible = set()
 
             def visit(row, inherited=False):
-                match = (inherited or not query or query in " ".join(row.values).casefold()
-                         or query in row.tooltips.get(1, "").casefold())
+                match = (
+                    inherited
+                    or not query
+                    or query in " ".join(row.values).casefold()
+                    or query in row.tooltips.get(1, "").casefold()
+                    or query in row.tooltips.get(3, "").casefold()
+                )
                 if row.children:
                     accepted = False
                     for child in row.children:

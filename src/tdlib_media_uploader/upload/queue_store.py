@@ -390,6 +390,15 @@ class UploadQueue:
         self._commit(self.tasks[:index] + self.tasks[index + 1:], self.paused)
 
     @_queue_write
+    def clear_finished(self):
+        terminal = {TaskStatus.COMPLETED, TaskStatus.SKIPPED}
+        remaining = tuple(task for task in self.tasks if task.status not in terminal)
+        removed = len(self.tasks) - len(remaining)
+        if removed:
+            self._commit(remaining, self.paused)
+        return removed
+
+    @_queue_write
     def move(self, task_id, direction):
         indices = [i for i, task in enumerate(self.tasks) if task.status is TaskStatus.PENDING]
         index = self._pending_index(task_id)

@@ -28,14 +28,11 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
-    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLineEdit,
     QMainWindow,
     QMessageBox,
-    QScrollArea,
-    QSizePolicy,
     QStackedWidget,
     QWidget,
 )
@@ -144,6 +141,7 @@ class MainWindow(QMainWindow):
         self.task_page.queue_move_requested.connect(self.queue.move)
         self.task_page.queue_top_requested.connect(self.queue.move_to_top)
         self.task_page.queue_remove_requested.connect(self.queue.remove)
+        self.task_page.queue_clear_requested.connect(self.queue.clear_finished)
         self.task_page.queue_restore_requested.connect(self._restore_queued_task)
         self.task_page.queue_recheck_requested.connect(self._recheck_queued_task)
         self.task_page.queue_skip_requested.connect(self._skip_queued_task)
@@ -216,24 +214,18 @@ class MainWindow(QMainWindow):
             "settings": 5,
         }
         for page in (self.home, self.upload_hub, self.task_page, self.inflight_page, self.history_page, self.settings_page):
-            if isinstance(page, SettingsPage):
-                scroll = QScrollArea()
-                scroll.setWidgetResizable(True)
-                scroll.setFrameShape(QFrame.Shape.NoFrame)
-                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-                page.setMinimumWidth(0)
-                page.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-                scroll.setWidget(page)
-                self.stack.addWidget(scroll)
-            else:
-                self.stack.addWidget(page)
+            self.stack.addWidget(page)
         root.addWidget(self.stack, 1)
 
         self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.sidebar.setCurrentRow(0)
         self.home.start_upload.connect(self._open_upload)
         self.home.open_settings.connect(lambda: self.sidebar.setCurrentRow(self.sidebar_rows["settings"]))
+        self.home.open_task_center.connect(lambda: self.sidebar.setCurrentRow(self.sidebar_rows["task"]))
+        prefs = self.nav_sidebar.preferences
+        self.task_page.set_target_label_provider(prefs.get_target_label)
         for page in self.upload_pages.values():
+            page.set_target_label_provider(prefs.get_target_label)
             page.scan_requested.connect(self._scan)
             page.scan_cancel_requested.connect(self._stop_scan)
             page.reset_state_requested.connect(self._reset_upload_state)
@@ -243,6 +235,7 @@ class MainWindow(QMainWindow):
             page.edit_parameters_requested.connect(self._open_upload_parameters)
         self.task_page.safe_stop_requested.connect(self._safe_stop_upload)
         self.task_page.immediate_stop_requested.connect(self._immediate_stop_upload)
+        self.inflight_page.records_changed.connect(self._update_inflight_badge)
         self.inflight_page.reconciliation_requested.connect(self._reconcile_inflight)
         self.settings_page.clear_all_requested.connect(self._clear_all_cache)
         self.settings_page.clear_thumb_requested.connect(self._clear_thumb_cache)
@@ -252,6 +245,9 @@ class MainWindow(QMainWindow):
         self.settings_page.config_saved.connect(self._on_settings_saved)
 
         self.statusBar().showMessage("就绪")
+
+    def _update_inflight_badge(self, count: int):
+        self.nav_sidebar.set_badge("inflight", count, tone="danger")
 
     def _theme_warning(self, message):
         write_app_log("WARNING", message, source="ui/preferences")
@@ -288,7 +284,13 @@ class MainWindow(QMainWindow):
     def _open_upload(self, kind: str):
         self.sidebar.setCurrentRow(self._sidebar_row(kind))
         self.upload_hub.set_current_kind(kind)
-        self._scan(kind)
+        raw_dir = str(_cfg(KIND_PATH_KEYS[kind], "") or "").strip()
+        if raw_dir and _source_root_for(kind).is_dir():
+            self._scan(kind)
+        else:
+            self._upload_page(kind).status_label.setText(
+                "请先选择有效的媒体来源目录，然后点击“扫描目录”"
+            )
 
     def _scan(self, kind: str):
         if self._cache_clear_worker is not None:
@@ -449,6 +451,23 @@ class MainWindow(QMainWindow):
             self.settings_page.refresh()
             self.statusBar().showMessage("目录配置已保存")
 
+    def _sync_home_queue_state(self):
+        tasks = self.queue.store.tasks
+        unresolved = [t for t in tasks if t.status in ACTIVE | ACTION_REQUIRED | {TaskStatus.PENDING}]
+        blocked = bool(
+            self.queue.store.error
+            or self.queue.store.blocked_reason
+            or any(t.status in ACTION_REQUIRED for t in unresolved)
+        )
+        self.nav_sidebar.set_badge(
+            "task",
+            len(unresolved),
+            tone="warning" if blocked else "accent",
+        )
+        if self.worker is None:
+            pending_count = sum(t.status is TaskStatus.PENDING for t in unresolved)
+            self.home.set_task_idle(queued_count=pending_count, blocked=blocked)
+
     def _refresh_queue(self):
         recovering = self.queue.recovery_busy
         self.task_page.show_queue(self.queue.store, self.queue.write_blocked, recovering=recovering)
@@ -460,6 +479,7 @@ class MainWindow(QMainWindow):
         for page in self.upload_pages.values():
             page.set_queue_immediate(immediate)
         self._update_disconnect_button()
+        self._sync_home_queue_state()
 
     def _update_disconnect_button(self):
         self.task_page.disconnect_button.setEnabled(
@@ -597,19 +617,32 @@ class MainWindow(QMainWindow):
             return
 
         target = task.target
-        answer = QMessageBox.question(
-            self,
-            "确认加入上传队列",
-            f"待上传 {result['pending_files']} 个文件，约 {_fmt_size(result['pending_bytes'])}，"
-            f"共 {result['album_count']} 组。\n"
-            f"来源：{task.source_root}\n目标 Chat ID：{target['chat_id']}\n"
-            + (f"话题 ID：{target['forum_topic_id']}\n" if target["forum_topic_id"] else "目标类型：频道\n")
-            + "入队后会按队列顺序自动执行。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if (answer == QMessageBox.StandardButton.Yes and not self.queue.recovery_busy
+        target_summary = self.nav_sidebar.preferences.format_target_summary(target)
+        detail_lines = [
+            f"待上传 {result['pending_files']} 个文件，约 {_fmt_size(result['pending_bytes'])}，共 {result['album_count']} 组。",
+            f"来源：{task.source_root}",
+            f"目标：{target_summary}（Chat ID: {target['chat_id']}"
+            + (f" · Topic: {target['forum_topic_id']}）" if target["forum_topic_id"] else " · 频道）"),
+            "入队后会按队列顺序自动执行。",
+        ]
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("确认加入上传队列")
+        box.setText("\n".join(detail_lines))
+        go_btn = box.addButton("加入并前往任务中心", QMessageBox.ButtonRole.AcceptRole)
+        stay_btn = box.addButton("加入并继续扫描", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(go_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if (clicked in (go_btn, stay_btn) and not self.queue.recovery_busy
                 and self.queue.enqueue(task)):
-            self.statusBar().showMessage("上传任务已加入队列，可继续扫描")
+            if clicked is go_btn:
+                self.sidebar.setCurrentRow(self.sidebar_rows["task"])
+                self.task_page.select_task(task.task_id)
+                self.statusBar().showMessage("上传任务已加入队列")
+            else:
+                self.statusBar().showMessage("上传任务已加入队列，可继续扫描")
 
     def _can_start_queue(self):
         if self._cache_clear_worker is not None:
@@ -682,10 +715,30 @@ class MainWindow(QMainWindow):
         self.home.set_task_progress(current, total, speed_str, eta_str)
 
     def _target_from_worker(self, payload: dict):
-        is_channel = payload.get("target_mode") == "channel"
+        mode = str(payload.get("target_mode") or "forum_topic")
+        is_channel = mode == "channel"
+        chat_id = payload.get("chat_id", 0)
+        topic_id = payload.get("topic_id", 0)
+        chat_title = str(payload.get("chat_title") or "")
+        topic_name = str(payload.get("topic_name") or "")
+        target = {
+            "target_mode": mode,
+            "chat_id": chat_id,
+            "forum_topic_id": 0 if is_channel else topic_id,
+            "channel_chat_id": chat_id if is_channel else 0,
+        }
+        if self.nav_sidebar.preferences.save_target_label(
+            target,
+            chat_title=chat_title,
+            topic_name="" if is_channel else topic_name,
+        ):
+            kind = str(payload.get("kind") or "").strip().lower()
+            if kind in self.upload_pages:
+                self.upload_pages[kind].refresh_target_label()
+            self.task_page.refresh_target_labels()
         self.statusBar().showMessage(
-            f"目标已确认：{payload.get('chat_title')}"
-            + ("（频道）" if is_channel else f" / {payload.get('topic_name')}")
+            f"目标已确认：{chat_title}"
+            + ("（频道）" if is_channel else f" / {topic_name}")
         )
 
     def _safe_stop_upload(self):
@@ -740,7 +793,7 @@ class MainWindow(QMainWindow):
             upload_page.set_running(False)
         if not self.queue.write_blocked:
             self._upload_page(task.kind).sync_task_outcomes(task)
-        self.home.set_task_idle()
+        self._sync_home_queue_state()
         self._update_disconnect_button()
         self.statusBar().showMessage(message.splitlines()[0][:180])
         self.inflight_page.reload_records()
@@ -768,6 +821,7 @@ class MainWindow(QMainWindow):
         if kind not in MEDIA_KINDS or not album_key:
             QMessageBox.warning(self, "记录无效", "这条未确认记录缺少媒体类型或 Album 标识。")
             return
+        source_root = None
         try:
             from ..upload.reconciliation import ReconciliationService, SourceRootRequired
 
@@ -796,8 +850,10 @@ class MainWindow(QMainWindow):
             return
         self.inflight_page.reload_records()
         self.queue.refresh_reviews(record)
-        if confirmation is not None:
+        if sent and confirmation is not None:
             self._upload_page(kind).sync_reconciled_album(confirmation)
+        elif not sent:
+            self._upload_page(kind).sync_reconciled_not_sent(record, source_root_fallback=source_root)
 
     def _cache_operation_allowed(self) -> bool:
         if self.queue.recovery_busy:

@@ -90,6 +90,11 @@ class QueueController(QObject):
     def remove(self, task_id):
         self._change(self.store.remove, task_id)
 
+    def clear_finished(self):
+        if self.write_blocked:
+            return False
+        return self._change(self.store.clear_finished)
+
     def restore(self, task_id):
         return self._start_recovery("restore", task_id)
 
