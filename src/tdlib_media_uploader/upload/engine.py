@@ -758,6 +758,7 @@ class UploadEngine:
                     album_key=str(getattr(plan, "key", "<unknown>")),
                     status=BatchStatus.FAILED,
                     error=message,
+                    failure_stage="pre_submit",
                 ),
             )
 
@@ -786,7 +787,9 @@ class UploadEngine:
                     plan=plan,
                     errors=[message],
                     extra_failed_items=tuple(current_plan.pending_items),
-                    batch_result=UploadBatchResult(plan.key, BatchStatus.FAILED, error=message),
+                    batch_result=UploadBatchResult(
+                        plan.key, BatchStatus.FAILED, error=message, failure_stage="pre_submit",
+                    ),
                 )
             preflight_deferrals = preflight_result.deferred_items
             plan_deferred = tuple((*plan_deferred, *preflight_deferrals))
@@ -825,6 +828,7 @@ class UploadEngine:
                         BatchStatus.FAILED,
                         error=failed_reason,
                         deferred_items=plan_deferred,
+                        failure_stage="pre_submit",
                     ),
                 )
             if not current_plan.pending_items or (strict_order and preflight_deferrals):
@@ -873,6 +877,7 @@ class UploadEngine:
                         BatchStatus.FAILED,
                         error=message,
                         deferred_items=plan_deferred,
+                        failure_stage="pre_submit",
                     ),
                 )
 
@@ -934,6 +939,7 @@ class UploadEngine:
                             BatchStatus.FAILED,
                             error=message,
                             deferred_items=batch_deferred,
+                            failure_stage="pre_submit",
                         ),
                     )
                 return _PreparedBatch(
@@ -980,7 +986,9 @@ class UploadEngine:
                 plan_deferred=plan_deferred,
                 preflight_failed=preflight_failed,
                 preflight_deferred=preflight_deferred,
-                batch_result=UploadBatchResult(plan.key, BatchStatus.FAILED, error=message),
+                batch_result=UploadBatchResult(
+                    plan.key, BatchStatus.FAILED, error=message, failure_stage="pre_submit",
+                ),
             )
 
         if _stop_after_current_requested(token) or _is_cancel_requested(token):
@@ -1043,6 +1051,7 @@ class UploadEngine:
                             BatchStatus.FAILED,
                             error=str(exc),
                             deferred_items=batch_deferred_all,
+                            failure_stage="pre_submit",
                         ),
                     )
                 return _PreparedBatch(
@@ -1507,7 +1516,9 @@ class UploadEngine:
                 except Exception as exc:
                     message = f"Album {plan.key} 预加载异常：{exc}"
                     errors.append(message)
-                    batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
+                    batches.append(
+                        UploadBatchResult(plan.key, BatchStatus.FAILED, error=message, failure_stage="pre_submit")
+                    )
                     failed_items.extend(getattr(plan, "pending_items", ()))
                     if (paused := should_pause()):
                         break
@@ -1591,7 +1602,9 @@ class UploadEngine:
                     message = "UploadEngine 未配置 sender，未发起 Telegram 请求"
                     errors.append(f"Album {plan.key} {message}")
                     failed_items.extend(ready_items)
-                    batches.append(UploadBatchResult(plan.key, BatchStatus.FAILED, error=message))
+                    batches.append(
+                        UploadBatchResult(plan.key, BatchStatus.FAILED, error=message, failure_stage="pre_submit")
+                    )
                     self._cleanup_unconfirmed_staging(
                         plan, run_context.stager, effective_plan, run_context, errors,
                     )
@@ -1631,9 +1644,10 @@ class UploadEngine:
                 if observed.status is BatchStatus.FAILED:
                     message = observed.error or "Album 发送失败"
                     self._log(sink, "ERROR", message)
+                    stage = "request_rejected" if observed._unsubmitted_rejection() is not None else "send_failed"
                     batch = UploadBatchResult(
                         plan.key, BatchStatus.FAILED, message_ids=observed.message_ids,
-                        error=message, deferred_items=batch_deferred,
+                        error=message, deferred_items=batch_deferred, failure_stage=stage,
                     )
                     tail_delay = observed.album_retry_delay(
                         len(ready_items), complete_album=len(ready_items) == len(plan.items),
@@ -1701,6 +1715,7 @@ class UploadEngine:
                             BatchStatus.UNKNOWN,
                             message_ids=observed.message_ids,
                             error=message,
+                            failure_stage="unknown",
                         )
                     )
                     ambiguous = True
@@ -1717,6 +1732,7 @@ class UploadEngine:
                             observed.status,
                             message_ids=observed.message_ids,
                             error=message,
+                            failure_stage="unknown",
                         )
                     )
                     ambiguous = True
@@ -1742,6 +1758,7 @@ class UploadEngine:
                             BatchStatus.UNKNOWN,
                             message_ids=observed.message_ids,
                             error=message,
+                            failure_stage="unknown",
                         )
                     )
                     ambiguous = True
@@ -1772,6 +1789,7 @@ class UploadEngine:
                             message_ids=ids,
                             confirmed_items=ready_items,
                             error=message,
+                            failure_stage="persistence",
                         )
                     )
                     if (paused := should_pause(unknown=True)):
@@ -1817,6 +1835,7 @@ class UploadEngine:
                         message_ids=ids,
                         confirmed_items=ready_items,
                         error=finalize_error,
+                        failure_stage="persistence" if finalize_error else None,
                     )
                 )
                 confirmed_count += 1

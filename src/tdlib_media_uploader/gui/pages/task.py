@@ -152,7 +152,7 @@ class TaskPage(QWidget):
 
         album_actions = QHBoxLayout()
         self.album_skip = QPushButton("跳过 Album")
-        self.album_retry = QPushButton("仅重试失败文件")
+        self.album_retry = QPushButton("重试该 Album")
         for button in (self.album_skip, self.album_retry):
             button.setObjectName("secondaryButton")
             button.setEnabled(False)
@@ -407,18 +407,33 @@ class TaskPage(QWidget):
     def _update_album_controls(self):
         task = self._displayed_task
         row = self.albums.currentItem()
-        if not self._queue_actions_allowed or task is None or row is None:
+        if task is None or row is None:
             self.album_skip.setEnabled(False)
+            self.album_retry.setText("重试该 Album")
+            self.album_retry.setToolTip("")
             self.album_retry.setEnabled(False)
             return
         outcome = row.data(1, Qt.ItemDataRole.UserRole)
+        scope, _ = task.album_retry_policy(outcome.album_key)
+        if scope == "review_required":
+            self.album_retry.setText("需要人工核对")
+            self.album_retry.setToolTip("存在未确认、持久化异常或缺少阶段信息的旧记录，请先核对或使用整任务“重新验证并恢复”")
+        elif scope == "failed_files":
+            self.album_retry.setText("仅重试失败文件")
+            self.album_retry.setToolTip("仅重试部分投递中明确失败且已解除保护的未确认成员")
+        else:
+            self.album_retry.setText("重试该 Album")
+            self.album_retry.setToolTip("按原 Album 顺序、目标与标题重试全部未确认成员")
+        if not self._queue_actions_allowed:
+            self.album_skip.setEnabled(False)
+            self.album_retry.setEnabled(False)
+            return
         actionable = task.status in RECOVERABLE | {TaskStatus.PENDING}
         self.album_skip.setEnabled(actionable and outcome.status not in {
             AlbumStatus.COMPLETED, AlbumStatus.UNKNOWN, AlbumStatus.SKIPPED,
         })
         self.album_retry.setEnabled(
-            task.status in RECOVERABLE and bool(outcome.failed_paths)
-            and outcome.status in {AlbumStatus.FAILED, AlbumStatus.PARTIAL}
+            task.status in RECOVERABLE and scope in {"album", "failed_files"}
         )
 
     def _render_album_files(self):

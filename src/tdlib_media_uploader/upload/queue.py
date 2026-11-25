@@ -16,7 +16,7 @@ from ..config.snapshot import FrozenConfig, snapshot_config
 from ..core.album import with_filename_description
 from ..core.filesystem import stable_path
 from ..core.identity import validate_send_target
-from ..core.models import AlbumPlan, BatchStatus, FileSnapshot, MediaItem, ScanResult
+from ..core.models import AlbumPlan, BatchStatus, FAILURE_STAGES, FileSnapshot, MediaItem, ScanResult
 from .retry import AlbumRetryPolicy
 
 KINDS = {"video", "image", "mixed"}
@@ -54,12 +54,16 @@ class AlbumOutcome:
     error: str | None = None
     failed_paths: tuple[str, ...] = ()
     deferred_paths: tuple[str, ...] = ()
+    failure_stage: str | None = None
 
     def to_record(self):
-        return {
+        record = {
             "album_key": self.album_key, "status": self.status.value, "error": self.error,
             "failed_paths": list(self.failed_paths), "deferred_paths": list(self.deferred_paths),
         }
+        if self.failure_stage is not None:
+            record["failure_stage"] = self.failure_stage
+        return record
 
 
 ACTIVE = {TaskStatus.PREPARING, TaskStatus.RUNNING}
@@ -258,13 +262,54 @@ class UploadTask:
         runtime.update(self.config)
         return FrozenConfig(**runtime)
 
+    def album_retry_policy(
+        self, album_key: str, *, confirmed: set[str] | None = None
+    ) -> tuple[str, tuple[str, ...]]:
+        """Return ``(scope, target_paths)`` for retrying ``album_key`` manually."""
+        if album_key in self.skipped_albums:
+            return "none", ()
+        plan = next((entry for entry in self.plans if entry.key == album_key), None)
+        if plan is None:
+            return "none", ()
+        known = self.known_confirmed if confirmed is None else (set(confirmed) | self.known_confirmed)
+        outcome = self._album_statuses(known).get(album_key)
+        if outcome is None:
+            return "none", ()
+        if outcome.status is AlbumStatus.UNKNOWN or outcome.failure_stage in {"unknown", "persistence"}:
+            return "review_required", ()
+        unconfirmed = tuple(
+            stable_path(item.path) for item in plan.pending_items if stable_path(item.path) not in known
+        )
+        if not unconfirmed:
+            return "none", ()
+        if outcome.status not in {AlbumStatus.FAILED, AlbumStatus.PARTIAL}:
+            return "none", ()
+        if outcome.failure_stage in {"pre_submit", "request_rejected", "send_failed"}:
+            return "album", unconfirmed
+        unconfirmed_set = set(unconfirmed)
+        failed_set = set(outcome.failed_paths) & unconfirmed_set
+        if outcome.failure_stage == "partial_delivery":
+            explicit = tuple(path for path in unconfirmed if path in failed_set)
+            return ("failed_files", explicit) if explicit else ("review_required", ())
+        # Legacy record missing failure_stage: refuse to split an unsubmitted Album safely.
+        deferred_set = set(outcome.deferred_paths) & unconfirmed_set
+        missing = unconfirmed_set - failed_set - deferred_set
+        if missing or not failed_set:
+            return "review_required", ()
+        if deferred_set or outcome.status is AlbumStatus.PARTIAL:
+            return "failed_files", tuple(path for path in unconfirmed if path in failed_set)
+        return "album", unconfirmed
+
     def execution_plans(self):
         plans = tuple(plan for plan in self.plans if plan.key not in self.skipped_albums)
         if self.retry_album_key is not None:
             plan = next(plan for plan in plans if plan.key == self.retry_album_key)
-            failed = set(next(outcome.failed_paths for outcome in self.album_outcomes if outcome.album_key == plan.key))
+            mode, allowed = self.album_retry_policy(plan.key)
+            if mode not in {"album", "failed_files"} or not allowed:
+                raise ValueError("当前 Album 状态不支持选择性重试，请先人工核对或使用整任务恢复")
+            allowed_set = set(allowed)
             plans = (replace(plan, pending_items=tuple(
-                item for item in plan.pending_items if stable_path(item.path) in failed
+                item for item in plan.pending_items if stable_path(item.path) in allowed_set
             )),)
         return plans
 
@@ -358,31 +403,36 @@ class UploadTask:
             album_key = entry["album_key"]
             failed = tuple(entry.get("failed_paths", ()))
             deferred = tuple(entry.get("deferred_paths", ()))
+            failure_stage = entry.get("failure_stage")
+            if failure_stage is not None and failure_stage not in FAILURE_STAGES:
+                raise ValueError("Album 失败阶段无效")
             if (album_key not in pending_by_album
                     or any(outcome.album_key == album_key for outcome in outcomes)
                     or not set((*failed, *deferred)).issubset(pending_by_album[album_key])
                     or set(failed).intersection(deferred)):
                 raise ValueError("Album 状态不属于任务的原始待上传清单")
-            outcomes.append(AlbumOutcome(album_key, AlbumStatus(entry["status"]), entry.get("error"), failed, deferred))
+            outcomes.append(
+                AlbumOutcome(
+                    album_key, AlbumStatus(entry["status"]), entry.get("error"),
+                    failed, deferred, failure_stage=failure_stage,
+                )
+            )
         skipped = tuple(raw.get("skipped_albums", ()))
         retry = raw.get("retry_album_key")
         paused_by_policy = raw.get("paused_by_policy", False)
         if type(paused_by_policy) is not bool:
             raise ValueError("无效的队列暂停状态")
-        if (len(set(skipped)) != len(skipped) or not set(skipped).issubset(pending_by_album)
-                or retry is not None and (
-                    retry in skipped or not any(
-                        outcome.album_key == retry and outcome.failed_paths
-                        and outcome.status in {AlbumStatus.FAILED, AlbumStatus.PARTIAL}
-                        for outcome in outcomes
-                    )
-                )):
-            raise ValueError("Album 跳过或重试选择不属于原始任务")
+        if len(set(skipped)) != len(skipped) or not set(skipped).issubset(pending_by_album):
+            raise ValueError("Album 跳过选择不属于原始任务")
         task = cls(task_id, kind, root, target, config, plans,
                    raw["created_at"], TaskStatus(raw["status"]), raw["started_at"],
                    raw["finished_at"], raw["outcome"], raw["error"], tuple(raw["scan_errors"]),
                    tuple(confirmed), album_outcomes=tuple(outcomes), skipped_albums=skipped,
                    retry_album_key=retry, paused_by_policy=paused_by_policy)
+        if retry is not None and (
+            retry in skipped or task.album_retry_policy(retry)[0] not in {"album", "failed_files"}
+        ):
+            raise ValueError("Album 跳过或重试选择不属于原始任务")
         digest = cls._digest(task._manifest())
         if "manifest_digest" in raw and raw["manifest_digest"] != digest:
             raise ValueError("原始任务清单已变化，Album 成员、顺序、目标与配置必须保持一致")
@@ -408,9 +458,10 @@ def skip_album(task, album_key, confirmed_paths):
 
 def retry_failed_album(task, album_key, confirmed_paths):
     task = replace(task, confirmed_paths=confirmed_paths)
-    outcome = task.album_statuses().get(album_key)
-    if (outcome is None or outcome.status not in {AlbumStatus.FAILED, AlbumStatus.PARTIAL}
-            or not set(outcome.failed_paths).difference(task.known_confirmed)):
+    scope, _ = task.album_retry_policy(album_key)
+    if scope == "review_required":
+        raise ValueError("此 Album 需要人工核对或使用整任务恢复，不能直接执行局部重试")
+    if scope not in {"album", "failed_files"}:
         raise ValueError("此 Album 没有已明确失败且仍可重试的文件")
     return replace(task, status=TaskStatus.PENDING, retry_album_key=album_key,
                    started_at=None, finished_at=None, outcome=None, error=None, paused_by_policy=False)
@@ -430,10 +481,19 @@ def _run_album_outcomes(task, result, confirmed):
             continue
         prior = outcomes.get(plan.key)
         selected_retry = task.retry_album_key == plan.key and prior is not None
+        stage = None
         if batch is not None:
             deferred.update(stable_path(item.path) for item in batch.deferred_items)
             if batch.status is BatchStatus.FAILED and not (failed or deferred):
                 failed = (set(prior.failed_paths) if selected_retry else paths) - confirmed
+            if batch.failure_stage is not None:
+                stage = batch.failure_stage
+            elif batch.status is BatchStatus.CONFIRMED and batch.error:
+                stage = "persistence"
+            elif batch.status in {BatchStatus.PREPARED, BatchStatus.SUBMITTED, BatchStatus.UNKNOWN}:
+                stage = "unknown"
+            elif selected_retry:
+                stage = prior.failure_stage
         if selected_retry:
             deferred.update(set(prior.deferred_paths) - failed - confirmed)
         if batch is not None and (
@@ -443,6 +503,7 @@ def _run_album_outcomes(task, result, confirmed):
             status = AlbumStatus.UNKNOWN
         elif paths <= confirmed:
             status = AlbumStatus.COMPLETED
+            stage = None
         elif paths & confirmed:
             status = AlbumStatus.PARTIAL
         elif failed:
@@ -452,6 +513,7 @@ def _run_album_outcomes(task, result, confirmed):
         outcomes[plan.key] = AlbumOutcome(
             plan.key, status, batch.error if batch is not None else result.error,
             tuple(sorted(failed - deferred - confirmed)), tuple(sorted(deferred - confirmed)),
+            failure_stage=stage,
         )
     return tuple(outcomes.values())
 
@@ -480,15 +542,17 @@ def finish_task(task: UploadTask, result) -> UploadTask:
     )
     if task.retry_album_key is not None and (
         status is TaskStatus.INTERRUPTED or status is TaskStatus.FAILED and result.paused
-    ) and any(
-        album.album_key == task.retry_album_key and album.status in {AlbumStatus.FAILED, AlbumStatus.PARTIAL}
-        and set(album.failed_paths).difference(confirmed)
-        for album in updated.album_outcomes
-    ):
+    ) and updated.album_retry_policy(task.retry_album_key, confirmed=confirmed)[0] in {"album", "failed_files"}:
         return replace(updated, retry_album_key=task.retry_album_key)
     if task.retry_album_key is not None and status is TaskStatus.COMPLETED and any(
         album.status not in {AlbumStatus.COMPLETED, AlbumStatus.SKIPPED}
         for album in updated._album_statuses(confirmed).values()
     ):
-        return replace(updated, status=TaskStatus.FAILED, outcome="PARTIAL", error="任务仍有未完成的 Album。")
+        return replace(
+            updated,
+            status=TaskStatus.FAILED,
+            outcome="PARTIAL",
+            error="任务仍有未完成的 Album。",
+            paused_by_policy=True,
+        )
     return updated

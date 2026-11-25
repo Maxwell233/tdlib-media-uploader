@@ -537,12 +537,17 @@ class MainWindow(QMainWindow):
             self.task_page.queue_notice.setText("已取消队列检查。")
             self.statusBar().showMessage("已取消队列检查。")
         elif result.error is None:
+            retry_msg = "已验证所选 Album 的失败文件。继续队列后将重试这些文件。"
+            if result.action == "retry_album" and result.task is not None and result.task.retry_album_key:
+                scope, _ = result.task.album_retry_policy(result.task.retry_album_key)
+                if scope == "album":
+                    retry_msg = "已验证所选 Album。继续队列后将重试该 Album 中所有未确认文件。"
             message = {
                 "restore": "任务已恢复到原位置。请选择继续队列。",
                 "recheck": "记录已核对。请选择恢复或跳过此任务。",
                 "skip": "已跳过未完成的上传任务。请选择继续队列。",
                 "skip_album": "已跳过所选 Album。请继续队列。",
-                "retry_album": "已验证所选 Album 的失败文件。继续队列后将重试这些文件。",
+                "retry_album": retry_msg,
                 "refresh_reviews": "未确认上传记录已更新。请在任务中心查看恢复状态。",
             }[result.action]
             self.task_page.queue_notice.setText(message)
