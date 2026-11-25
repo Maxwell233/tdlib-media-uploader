@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QStackedWidget,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -68,7 +69,6 @@ class TaskPage(QWidget):
         self._target_label_provider: Callable[[Mapping[str, Any]], Mapping[str, str]] | None = None
         self._live_album_key: str | None = None
         self._live_album_rows: list[str] = []
-        self._live_attempt = None
         self._log_entries: list[tuple[str, str]] = []
 
         self._connection_notice = ""
@@ -160,6 +160,8 @@ class TaskPage(QWidget):
         self.albums.setColumnHidden(2, compact)
         self.albums.setColumnWidth(1, 86 if compact else 104)
         self.albums.setColumnWidth(3, 58 if compact else 70)
+        self.albums.setColumnWidth(4, 36 if compact else 62)
+        self.albums.headerItem().setText(4, "" if compact else "详情")
 
     def _build_album_details(self) -> QWidget:
         page = QWidget()
@@ -170,11 +172,11 @@ class TaskPage(QWidget):
         self.albums = QTreeWidget()
         self.albums.setObjectName("taskAlbumList")
         self.albums.setRootIsDecorated(False)
-        self.albums.setHeaderLabels(["Album", "状态", "文件", "进度"])
+        self.albums.setHeaderLabels(["Album", "状态", "文件", "进度", "详情"])
         self.albums.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.albums.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.albums.setMinimumHeight(70)
-        self.albums.setMaximumHeight(145)
+        self.albums.setToolTip("点击 Album 查看文件和处理原因")
+        self.albums.setMinimumHeight(66)
         header = self.albums.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
@@ -182,16 +184,30 @@ class TaskPage(QWidget):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
         self.albums.setColumnWidth(1, 104)
         self.albums.setColumnWidth(3, 70)
+        self.albums.setColumnWidth(4, 62)
         self.albums.itemSelectionChanged.connect(self._on_album_selection_changed)
-        self.albums.hide()
-        layout.addWidget(self.albums)
+        self.albums.itemClicked.connect(self._open_album_details)
+        self.albums.itemActivated.connect(self._open_album_details)
+        self.album_views = QStackedWidget()
+        self.album_views.addWidget(self.albums)
+        layout.addWidget(self.album_views)
 
-        self.album_details_title = QLabel("暂无 Album")
+        self.album_details = QWidget()
+        details = QVBoxLayout(self.album_details)
+        details.setContentsMargins(0, 0, 0, 0)
+        details.setSpacing(4)
+
+        controls = QHBoxLayout()
+        back = QPushButton("返回列表")
+        back.setObjectName("ghostButton")
+        back.clicked.connect(lambda: self.album_views.setCurrentWidget(self.albums))
+        controls.addWidget(back)
+        self.album_details_title = QLabel()
         self.album_details_title.setObjectName("valueLabel")
         self.album_details_title.setTextFormat(Qt.TextFormat.PlainText)
-        self.album_details_title.setWordWrap(True)
         self.album_details_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        layout.addWidget(self.album_details_title)
+        controls.addWidget(self.album_details_title, 1)
+        details.addLayout(controls)
 
         actions = QHBoxLayout()
         actions.addStretch(1)
@@ -216,7 +232,7 @@ class TaskPage(QWidget):
         self.album_reason.setMinimumHeight(44)
         self.album_reason.setMaximumHeight(130)
         self.album_reason.hide()
-        layout.addWidget(self.album_reason, 1)
+        details.addWidget(self.album_reason, 1)
 
         self.album_files = QListWidget()
         self.album_files.setObjectName("albumFilesList")
@@ -225,8 +241,9 @@ class TaskPage(QWidget):
         self.album_files.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.album_files.setMinimumHeight(34)
         self.album_files.itemActivated.connect(self._show_file_details)
-        layout.addWidget(self.album_files, 2)
-        layout.addLayout(actions)
+        details.addWidget(self.album_files, 2)
+        details.addLayout(actions)
+        self.album_views.addWidget(self.album_details)
         return page
 
     def _build_log(self) -> QWidget:
@@ -417,7 +434,7 @@ class TaskPage(QWidget):
 
     def _show_file_details(self, item):
         if item.flags() & Qt.ItemFlag.ItemIsSelectable:
-            path = item.data(Qt.ItemDataRole.UserRole + 1) or ""
+            path = item.toolTip()
             text = f"{item.text()}\n\n{path}" if path else item.text()
             self._show_text_details("文件详情", text, path)
 
@@ -479,6 +496,11 @@ class TaskPage(QWidget):
         self._update_album_controls()
         self._render_album_files()
 
+    def _open_album_details(self, row, _column):
+        if self.albums.currentItem() is row:
+            self.album_views.setCurrentWidget(self.album_details)
+            self.album_files.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def _update_album_controls(self):
         task = self._displayed_task
         row = self.albums.currentItem()
@@ -509,48 +531,34 @@ class TaskPage(QWidget):
         self.album_skip.setEnabled(can_skip and self._queue_actions_allowed)
         self.album_retry.setEnabled(can_retry and self._queue_actions_allowed)
 
-    def _update_album_details(self, live):
+    def _update_album_reason(self):
         row = self.albums.currentItem()
-        if live:
-            name = self.album_label.text()
-            title = f"当前 Album · {name}" if name else "当前 Album"
-        elif row is not None:
-            title = f"{row.text(0)} · {row.text(1)}"
-        elif self._has_transfer and self._selected_task() == self._active_task_id:
-            title = "等待当前 Album"
-        else:
-            title = "暂无 Album"
-        self.album_details_title.setText(title)
-        self.album_details_title.setToolTip(self.album_label.toolTip() if live else title)
-        reason = row.toolTip(3) if row is not None else ""
-        if live and self._live_attempt is not None and self._live_attempt.album_key == self._live_album_key:
-            reason = self._live_attempt.last_error or ""
+        name = row.text(0) if row is not None else ""
+        self.album_details_title.setText(name)
+        self.album_details_title.setToolTip(name)
+        reason = row.toolTip(4) if row is not None else ""
         if reason != self.album_reason.toPlainText():
             self.album_reason.setPlainText(reason)
         self.album_reason.setVisible(bool(reason))
 
-    def _is_live_album(self):
-        if not self._live_album_rows:
-            return False
-        task = self._displayed_task
-        if task is None:
-            return self._has_transfer
-        album_key = self._selected_album()
-        return task.task_id == self._active_task_id and (
-            not album_key or not self._live_album_key or album_key == self._live_album_key
-        )
-
     def _render_album_files(self):
         task = self._displayed_task
         album_key = self._selected_album()
-        live = self._is_live_album()
-        self._update_album_details(live)
+        is_live_view = (
+            bool(self._live_album_rows)
+            and (
+                task is None
+                or (
+                    task.task_id == self._active_task_id
+                    and (not album_key or not self._live_album_key or album_key == self._live_album_key)
+                )
+            )
+        )
+        self._update_album_reason()
         self.album_files.clear()
-        if live:
-            for text in self._live_album_rows:
-                entry = QListWidgetItem(text)
-                entry.setToolTip(text)
-                self.album_files.addItem(entry)
+        if is_live_view:
+            for row in self._live_album_rows:
+                self.album_files.addItem(str(row))
             return
         if task is None:
             return
@@ -580,14 +588,11 @@ class TaskPage(QWidget):
                 f"{kind_label(item.media_kind)} · {state_text} · {self._size_formatter(item.snapshot.size)} · {item.path.name}"
             )
             entry.setData(Qt.ItemDataRole.UserRole, state_text)
-            entry.setData(Qt.ItemDataRole.UserRole + 1, str(item.path))
             entry.setForeground(QColor(status_color(state_text)))
             entry.setToolTip(str(item.path))
             self.album_files.addItem(entry)
 
     def _render_albums(self, task):
-        active = task is not None and task.task_id == self._active_task_id
-        self.albums.setVisible(task is not None and not active and len(task.plans) > 1)
         if task == self._displayed_task:
             self._update_album_controls()
             self._render_album_files()
@@ -596,8 +601,8 @@ class TaskPage(QWidget):
             task is not None and self._displayed_task is not None
             and task.task_id == self._displayed_task.task_id
         ) else None
-        if active:
-            selection = self._live_album_key or selection
+        if not selection:
+            self.album_views.setCurrentWidget(self.albums)
         self._displayed_task = task
         self.albums.blockSignals(True)
         self.albums.clear()
@@ -620,19 +625,18 @@ class TaskPage(QWidget):
                 status_text = labels[outcome.status]
                 row = QTreeWidgetItem([
                     f"{plan.group_label} · {plan.number}", status_text,
-                    summary, f"{done}/{len(names)}",
+                    summary, f"{done}/{len(names)}", "›",
                 ])
                 row.setData(0, Qt.ItemDataRole.UserRole, plan.key)
                 row.setData(1, Qt.ItemDataRole.UserRole, outcome)
                 row.setForeground(1, QColor(status_color(status_text)))
                 row.setToolTip(2, "\n".join(names))
-                row.setToolTip(3, outcome.error or "")
+                row.setToolTip(4, outcome.error or "")
+                row.setTextAlignment(4, Qt.AlignmentFlag.AlignCenter)
                 self.albums.addTopLevelItem(row)
                 self._album_rows[plan.key] = row
                 if plan.key == selection:
                     self.albums.setCurrentItem(row)
-            if not active and self.albums.currentItem() is None:
-                self.albums.setCurrentItem(self.albums.topLevelItem(0))
         self.albums.blockSignals(False)
         self._update_album_controls()
         self._render_album_files()
@@ -719,7 +723,6 @@ class TaskPage(QWidget):
         self._queue_selection_changed()
 
     def show_album_attempt(self, event):
-        self._live_attempt = event
         text = f"Album {event.album_number} · 第 {event.attempt}/{event.max_attempts} 次尝试"
         if event.last_error:
             text += f" · 上次失败 {event.last_error.splitlines()[0][:160]}"
@@ -734,9 +737,9 @@ class TaskPage(QWidget):
                 status = "冷却中" if event.retry_in_seconds is not None else "上传中"
                 row.setText(1, status)
                 row.setForeground(1, QColor(status_color(status)))
-                row.setToolTip(3, event.last_error or "")
+                row.setToolTip(4, event.last_error or "")
                 if row is self.albums.currentItem():
-                    self._update_album_details(self._is_live_album())
+                    self._update_album_reason()
 
     def start_session(self, kind: str, result: dict):
         self._has_transfer = True
@@ -744,7 +747,6 @@ class TaskPage(QWidget):
         self.preliminary_metrics.hide()
         self._live_album_key = None
         self._live_album_rows = []
-        self._live_attempt = None
         name = result.get("task_name") or kind_label(kind)
         self.active_task_label.setText(f"当前任务：{name}" if len(name) <= 72 else f"当前任务：{name[:71]}…")
         self.active_task_label.setToolTip(name)
@@ -816,12 +818,7 @@ class TaskPage(QWidget):
             self.task_status.setText("上传中")
         self._live_album_key = str(payload.get("album_key") or "") or None
         self._live_album_rows = [str(row) for row in payload.get("rows", [])]
-        if self._displayed_task is None or self._displayed_task.task_id == self._active_task_id:
-            self.albums.blockSignals(True)
-            self.albums.setCurrentItem(self._album_rows.get(self._live_album_key))
-            self.albums.blockSignals(False)
-            self._update_album_controls()
-            self._render_album_files()
+        self._render_album_files()
 
     @Slot(object)
     def show_progress(self, payload: dict):
@@ -878,13 +875,10 @@ class TaskPage(QWidget):
         self.preliminary_metrics.show()
 
     def finish_session(self, success: bool, message: str):
-        self._has_transfer = False
-        self._cooldown_seconds = 0
-        self._live_album_key = None
-        self._live_album_rows = []
-        self._live_attempt = None
         if success:
             self.progress.setValue(self.progress.maximum())
+        self._has_transfer = False
+        self._cooldown_seconds = 0
         self._update_transfer_notice()
         self.stop_button.setEnabled(False)
         self.immediate_stop_button.setEnabled(False)
@@ -894,7 +888,6 @@ class TaskPage(QWidget):
         ):
             widget.hide()
         self.task_status.setText("已完成" if success else message)
-        self._render_album_files()
         self._append_log_line("success" if success else "warning", ("✓ " if success else "! ") + message)
 
     def refresh_theme(self):
