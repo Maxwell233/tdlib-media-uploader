@@ -502,6 +502,7 @@ class MainWindow(QMainWindow):
         connected = state == "connectionStateReady"
         self.home.set_connection(label, connected)
         self.nav_sidebar.set_connection_status(connected, label)
+        self.task_page.set_connection_status(label, connected)
         self._update_disconnect_button()
         if state == "disconnected" and self.statusBar().currentMessage() == "正在关闭 Telegram 会话":
             self.statusBar().showMessage("Telegram 会话已关闭")
@@ -688,6 +689,7 @@ class MainWindow(QMainWindow):
         pending = [item for plan in plans for item in plan.pending_items]
         self.task_page.select_task(task.task_id)
         self.task_page.start_session(task.kind, {
+            "task_name": task.source_root.name or str(task.source_root),
             "pending_files": len(pending),
             "pending_bytes": sum(item.snapshot.size for item in pending),
             "album_count": sum(bool(plan.pending_items) for plan in plans),

@@ -1,12 +1,15 @@
+from dataclasses import replace
 import json
 from pathlib import Path
 import shutil
 import threading
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QDialog, QMessageBox
+from PySide6.QtCore import QPoint, QTimer, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QDialog, QMessageBox, QSplitter
 
 from conftest import TARGET, task_for
 from tdlib_media_uploader.config import loader, paths
@@ -18,11 +21,12 @@ from tdlib_media_uploader.gui import main_window, preferences, scanner
 from tdlib_media_uploader.gui.integration import run_v2_upload
 from tdlib_media_uploader.gui.icons import get_svg_icon
 from tdlib_media_uploader.gui.pages import inflight, upload
+from tdlib_media_uploader.gui.pages.task import TaskPage
 from tdlib_media_uploader.gui.preferences import UiPreferences
-from tdlib_media_uploader.gui.theme import DARK_PALETTE, LIGHT_PALETTE, initialize_theme
+from tdlib_media_uploader.gui.theme import DARK_PALETTE, LIGHT_PALETTE, build_stylesheet, initialize_theme
 from tdlib_media_uploader.gui.workers import UploadWorker
 from tdlib_media_uploader.upload import queue_recovery, queue_store, reconciliation
-from tdlib_media_uploader.upload.queue import TaskStatus
+from tdlib_media_uploader.upload.queue import AlbumOutcome, AlbumStatus, TaskStatus
 from tdlib_media_uploader.upload.queue_store import UploadQueue
 
 VIDEO = Path(__file__).parent / "fixtures" / "remux_h264_aac.mp4"
@@ -317,6 +321,70 @@ def test_theme_switch_leaves_unsaved_retry_settings_and_skips_config_refresh(win
     assert values[("upload_retry", "enabled")] is True
     assert values[("upload_retry", "max_retries")] == 4
     assert values[("upload_retry", "retry_delay_seconds")] == 0.5
+
+
+def test_task_center_fits_long_details_and_keeps_live_status_at_narrow_width(qt_app, tmp_path):
+    source = tmp_path / ("long-shared-source-" * 2)
+    source.mkdir()
+    media_path = source / ("long-file-name-" * 5 + ".jpg")
+    media_path.write_bytes(b"snapshot")
+    active = replace(task_for(tmp_path / "active"), status=TaskStatus.RUNNING)
+    reviewed = task_for(source, paths=[media_path])
+    reason = "源文件不可访问\n" + str(media_path) + "\n请检查共享目录是否可读。"
+    reviewed = replace(
+        reviewed, status=TaskStatus.NEEDS_REVIEW,
+        album_outcomes=(AlbumOutcome(reviewed.plans[0].key, AlbumStatus.UNKNOWN, error=reason),),
+    )
+    store = SimpleNamespace(tasks=(active, reviewed), paused=False, error=None, blocked_reason="任务待核对。")
+    page = TaskPage()
+    page.setStyleSheet(build_stylesheet(LIGHT_PALETTE))
+    page.set_target_label_provider(lambda _: {"chat_title": "很长的频道名称" * 12})
+    page.show_queue(store)
+    page.start_session("image", {"task_name": "正在上传的目录", "pending_files": 10, "pending_bytes": 100, "album_count": 2})
+    page.show_album({"title": "组内 Album 1 · 1/2", "rows": [media_path.name]})
+    page.show_progress({"ratio": 0.42, "done_files": 4, "total_files": 10})
+    page.show_rate_limit(35)
+    page.set_connection_status("等待网络恢复", False)
+    page.add_message("warning", reason)
+    page.resize(630, 530)
+    page.show()
+    qt_app.processEvents()
+
+    assert page.width() == 630
+    assert not page.findChildren(QSplitter)
+    queue_origin = page.queue_list.mapTo(page, QPoint())
+    details_origin = page.detail_tabs.mapTo(page, QPoint())
+    assert queue_origin.x() + page.queue_list.width() < details_origin.x()
+    assert page.queue_list.isColumnHidden(4)
+    assert page.albums.isColumnHidden(2)
+    assert page.queue_inflight.isVisible()
+    assert "35 秒" in page.transfer_notice.text() and "等待网络恢复" in page.transfer_notice.text()
+    assert page.queue_list.topLevelItem(0).text(2) == "42%"
+    page.select_task(reviewed.task_id)
+    assert "正在上传的目录" in page.active_task_label.text()
+    for tree in (page.queue_list, page.albums):
+        assert tree.header().length() <= tree.viewport().width()
+        assert not tree.horizontalScrollBar().isVisible()
+
+    album = page.albums.topLevelItem(0)
+    QTest.mouseClick(page.albums.viewport(), Qt.MouseButton.LeftButton, pos=page.albums.visualItemRect(album).center())
+    qt_app.processEvents()
+    assert page.album_reason.isVisible()
+    assert page.album_reason.toPlainText() == reason
+    assert page.album_files.item(0).toolTip() == str(media_path)
+    assert page.album_reason.horizontalScrollBar().maximum() == 0
+    assert not page.album_files.horizontalScrollBar().isVisible()
+
+    page.detail_tabs.setCurrentIndex(1)
+    qt_app.processEvents()
+    assert reason in page.log.toPlainText()
+    assert page.log.horizontalScrollBar().maximum() == 0
+
+    page.resize(1040, 700)
+    page.detail_tabs.setCurrentIndex(0)
+    qt_app.processEvents()
+    assert not page.queue_list.isColumnHidden(4)
+    assert not page.albums.isColumnHidden(2)
 
 
 def test_review_controls_follow_manual_reconciliation_and_skip_history(window, monkeypatch, tmp_path, runtime_paths, pump):

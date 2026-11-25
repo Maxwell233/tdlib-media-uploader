@@ -745,32 +745,37 @@ QTreeView::item:selected, QTreeWidget::item:selected, QTableWidget::item:selecte
     font-weight: 500;
 }}
 
-QListWidget#albumFilesList {{
-    background-color: {palette.bg_input};
-    color: {palette.text_secondary};
-    border: 1px solid {palette.border_subtle};
-    border-radius: 8px;
-    padding: 4px;
-    alternate-background-color: {palette.bg_alt_row};
-    selection-background-color: {palette.bg_selection};
-    selection-color: {palette.text_selection};
-    outline: 0;
+QTreeWidget#taskQueueList, QTreeWidget#taskAlbumList, QListWidget#albumFilesList {{
+    background-color: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
 }}
 
-QListWidget#albumFilesList::item {{
-    padding: 6px 8px;
+QListWidget#albumFilesList {{
+    background-color: {palette.bg_input};
     border-radius: 4px;
 }}
 
-QListWidget#albumFilesList::item:hover {{
-    background-color: {palette.bg_card_hover};
-    color: {palette.text_primary};
+QTreeWidget#taskQueueList::item, QTreeWidget#taskAlbumList::item, QListWidget#albumFilesList::item {{
+    padding: 4px 6px;
+    border-radius: 0;
 }}
 
-QListWidget#albumFilesList::item:selected {{
-    background-color: {palette.bg_selection};
-    color: {palette.text_selection};
-    font-weight: 500;
+QTreeWidget#taskQueueList QHeaderView::section, QTreeWidget#taskAlbumList QHeaderView::section {{
+    background-color: transparent;
+    padding: 5px 6px;
+}}
+
+QPlainTextEdit#taskAlbumReason, QPlainTextEdit#taskLog {{
+    border: 0;
+    border-radius: 4px;
+    padding: 4px 6px;
+}}
+
+QPlainTextEdit#taskAlbumReason {{
+    color: {palette.text_primary};
+    background-color: {palette.bg_card};
 }}
 
 QHeaderView::section {{
@@ -903,6 +908,25 @@ QTabBar::tab:selected {{
 QTabBar::tab:hover:!selected {{
     background-color: {palette.bg_card_hover};
     color: {palette.text_secondary};
+}}
+
+QTabWidget#taskDetailTabs::pane {{
+    background-color: transparent;
+    border: 0;
+    padding: 0;
+}}
+
+QTabWidget#taskDetailTabs QTabBar::tab {{
+    background-color: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 6px 12px;
+}}
+
+QTabWidget#taskDetailTabs QTabBar::tab:selected {{
+    border-bottom-color: {palette.accent};
+    color: {palette.text_primary};
 }}
 
 /* Theme toggle button (Sun / Moon) */
