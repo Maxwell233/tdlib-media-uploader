@@ -498,10 +498,12 @@ class TaskPage(QWidget):
             row.setText(1, status)
             row.setToolTip(1, status)
 
+    @Slot(object)
     def show_preliminary_progress(self, event):
+        size = self._size_formatter
         self.preliminary_metrics.setText(
-            f"预上传 {_fmt_size(event.uploaded_bytes)} / {_fmt_size(event.total_bytes)}"
-            f" · {_fmt_size(event.bytes_per_second)}/s"
+            f"预上传 {size(event.uploaded_bytes)} / {size(event.total_bytes)}"
+            f" · {size(event.bytes_per_second)}/s"
         )
         self.preliminary_metrics.show()
 

@@ -463,7 +463,7 @@ class MainWindow(QMainWindow):
 
     def _update_disconnect_button(self):
         self.task_page.disconnect_button.setEnabled(
-            self.worker is None and self.telegram_session.connection_state != "disconnected"
+            self.worker is None and self.telegram_session.connection_state not in {"disconnected", "closing"}
         )
 
     @Slot(str)
@@ -471,6 +471,8 @@ class MainWindow(QMainWindow):
         state = self.telegram_session.connection_state
         label = {
             "disconnected": "未连接",
+            "closing": "正在关闭 Telegram",
+            "authorization_required": "需要登录 Telegram",
             "connectionStateReady": "已连接",
             "connectionStateWaitingForNetwork": "等待网络恢复",
             "connectionStateConnectingToProxy": "正在连接代理",
@@ -480,6 +482,8 @@ class MainWindow(QMainWindow):
         self.home.set_connection(label, connected)
         self.nav_sidebar.set_connection_status(connected, label)
         self._update_disconnect_button()
+        if state == "disconnected" and self.statusBar().currentMessage() == "正在关闭 Telegram 会话":
+            self.statusBar().showMessage("Telegram 会话已关闭")
 
     @Slot()
     def _disconnect_telegram(self):
@@ -774,13 +778,13 @@ class MainWindow(QMainWindow):
                 if key in record
             }
             try:
-                client.reconcile_inflight(album_key, sent=bool(sent), kind=kind, target=target or None)
+                confirmation = client.reconcile_inflight(album_key, sent=bool(sent), kind=kind, target=target or None)
             except SourceRootRequired:
                 source_root = QFileDialog.getExistingDirectory(
                     self, "旧记录缺少来源目录：请选择当时扫描的根目录")
                 if not source_root or not self._queue_recovery_allowed():
                     return
-                client.reconcile_inflight(
+                confirmation = client.reconcile_inflight(
                     album_key, sent=bool(sent), kind=kind, target=target or None, source_root=source_root,
                 )
         except Exception as exc:
@@ -792,6 +796,8 @@ class MainWindow(QMainWindow):
             return
         self.inflight_page.reload_records()
         self.queue.refresh_reviews(record)
+        if confirmation is not None:
+            self._upload_page(kind).sync_reconciled_album(confirmation)
 
     def _cache_operation_allowed(self) -> bool:
         if self.queue.recovery_busy:
@@ -1074,7 +1080,7 @@ def main() -> int:
     try:
         write_app_log("INFO", f"启动 TDLib Media Uploader V{APP_VERSION}", source="startup")
         from ..media.artifact_cache import prune_media_artifacts
-        prune_media_artifacts(cfg)
+        prune_media_artifacts(cfg, startup=True)
         app.setApplicationName("TDLib Media Uploader")
         app.setApplicationVersion(APP_VERSION)
         app.setWindowIcon(_application_icon())

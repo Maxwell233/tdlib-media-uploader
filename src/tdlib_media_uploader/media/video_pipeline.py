@@ -553,7 +553,7 @@ def read_exif_metadata(
         for path in requested if (snapshot := _snapshot_for_path(path)) is not None
     }
     probe = f"exiftool-date-v1:{stable_path(config.EXIFTOOL_PATH)}:{file_snapshot(config.EXIFTOOL_PATH)}"
-    index = load_media_metadata(probe, snapshots.values())
+    index = load_media_metadata(probe, snapshots.values(), config=config)
     reported_keys.update(index)
 
     def emit_progress(path=None):
@@ -599,7 +599,7 @@ def read_exif_metadata(
                     if key not in reported_keys:
                         reported_keys.add(key)
                         emit_progress(source)
-        store_media_metadata(probe, records)
+        store_media_metadata(probe, records, config=config)
 
         # A warning on a complete batch is useful for the log, but it must not
         # trigger another ExifTool invocation.  Only unresolved SourceFile

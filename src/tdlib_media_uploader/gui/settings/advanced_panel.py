@@ -7,6 +7,7 @@ import os
 
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -104,17 +105,28 @@ class AdvancedPanel(SettingsPanel):
         io_layout.addLayout(io_form)
         layout.addWidget(io_card)
 
-        album_card, album_layout = self.create_card("Album 发送失败自动重试")
+        album_card, album_layout = self.create_card("Album 发送与错误处理")
         album_form = QFormLayout()
         self.album_retry_enabled = QCheckBox("启用整组重试")
         self.album_retry_count = self._int_spin(1, 10, " 次")
         self.album_retry_delay = self._dec_spin(0.0, 3600.0, 2, " 秒")
+        self.queue_error_policy = QComboBox()
+        self.queue_error_policy.addItem("遇错暂停，保持顺序", "pause_on_error")
+        self.queue_error_policy.addItem("继续后续 Album，再重试失败项", "skip_and_retry")
+        self.pause_on_unknown = QCheckBox("遇到待核对的 Album 时暂停")
+        self.min_send_interval = self._dec_spin(0.0, 3600.0, 3, " 秒")
+        self.flood_jitter = self._dec_spin(0.0, 10.0, 3, " 秒")
+        self.flood_max_retries = self._int_spin(0, 10, " 次")
         album_form.addRow(self.album_retry_enabled)
         album_form.addRow("额外重试次数", self.album_retry_count)
         album_form.addRow("重试间隔", self.album_retry_delay)
+        album_form.addRow("队列错误策略", self.queue_error_policy)
+        album_form.addRow(self.pause_on_unknown)
+        album_form.addRow("发送最小间隔", self.min_send_interval)
+        album_form.addRow("限流附加随机等待", self.flood_jitter)
+        album_form.addRow("仅限流重试次数", self.flood_max_retries)
         album_layout.addLayout(album_form)
-        retry_hint = QLabel("额外次数指重新发送完整 Album。TDLib 的单条消息重发另行处理。"
-                            "仅明确全部失败时才重试，并遵守 Telegram 的限流等待。")
+        retry_hint = QLabel("“仅限流重试次数”在关闭整组重试时生效。队列只会重试本次提交中明确全部失败的文件。")
         retry_hint.setWordWrap(True)
         retry_hint.setObjectName("mutedLabel")
         album_layout.addWidget(retry_hint)
@@ -207,8 +219,15 @@ class AdvancedPanel(SettingsPanel):
         self.album_retry_enabled.toggled.connect(self._check_dirty)
         self.album_retry_enabled.toggled.connect(self.album_retry_count.setEnabled)
         self.album_retry_enabled.toggled.connect(self.album_retry_delay.setEnabled)
+        self.album_retry_enabled.toggled.connect(self.flood_max_retries.setDisabled)
         self.album_retry_count.valueChanged.connect(self._check_dirty)
         self.album_retry_delay.valueChanged.connect(self._check_dirty)
+        self.queue_error_policy.currentIndexChanged.connect(self._sync_queue_policy_controls)
+        self.queue_error_policy.currentIndexChanged.connect(self._check_dirty)
+        self.pause_on_unknown.toggled.connect(self._check_dirty)
+        self.min_send_interval.valueChanged.connect(self._check_dirty)
+        self.flood_jitter.valueChanged.connect(self._check_dirty)
+        self.flood_max_retries.valueChanged.connect(self._check_dirty)
         for spin in (
             self.scan_workers_local, self.scan_workers_network,
             self.scan_stability_checks, self.scan_stability_checks_local, self.scan_stability_checks_network,
@@ -280,8 +299,16 @@ class AdvancedPanel(SettingsPanel):
         self.album_retry_enabled.setChecked(bool(_cfg("UPLOAD_RETRY_ENABLED", False)))
         self.album_retry_count.setValue(int(_cfg("UPLOAD_RETRY_MAX_RETRIES", 2)))
         self.album_retry_delay.setValue(float(_cfg("UPLOAD_RETRY_DELAY_SECONDS", 1.0)))
+        queue_policy = self.queue_error_policy.findData(_cfg("UPLOAD_QUEUE_ERROR_POLICY", "pause_on_error"))
+        self.queue_error_policy.setCurrentIndex(max(0, queue_policy))
+        self.pause_on_unknown.setChecked(bool(_cfg("UPLOAD_PAUSE_ON_UNKNOWN", True)))
+        self.min_send_interval.setValue(float(_cfg("UPLOAD_MIN_SEND_INTERVAL", 0)))
+        self.flood_jitter.setValue(float(_cfg("UPLOAD_FLOOD_JITTER", 0.25)))
+        self.flood_max_retries.setValue(int(_cfg("UPLOAD_FLOOD_MAX_RETRIES", 1)))
         self.album_retry_count.setEnabled(self.album_retry_enabled.isChecked())
         self.album_retry_delay.setEnabled(self.album_retry_enabled.isChecked())
+        self.flood_max_retries.setDisabled(self.album_retry_enabled.isChecked())
+        self._sync_queue_policy_controls()
 
         self.blockSignals(False)
         self._initial_values = self._current_values_dict()
@@ -292,6 +319,11 @@ class AdvancedPanel(SettingsPanel):
             "retry_enabled": self.album_retry_enabled.isChecked(),
             "retry_count": self.album_retry_count.value(),
             "retry_delay": self.album_retry_delay.value(),
+            "queue_error_policy": self.queue_error_policy.currentData(),
+            "pause_on_unknown": self.pause_on_unknown.isChecked(),
+            "min_send_interval_seconds": self.min_send_interval.value(),
+            "flood_jitter_seconds": self.flood_jitter.value(),
+            "flood_max_retries": self.flood_max_retries.value(),
             "exiftool_path": self.exiftool_path.text().strip(),
             "scan_workers_local": self.scan_workers_local.value(),
             "scan_workers_network": self.scan_workers_network.value(),
@@ -316,6 +348,9 @@ class AdvancedPanel(SettingsPanel):
     def _check_dirty(self):
         self.set_dirty(self._current_values_dict() != self._initial_values)
 
+    def _sync_queue_policy_controls(self):
+        self.pause_on_unknown.setEnabled(self.queue_error_policy.currentData() == "skip_and_retry")
+
     def validate(self) -> tuple[bool, str]:
         path = self.exiftool_path.text().strip()
         err = tools.validate_exiftool_path(path)
@@ -329,6 +364,11 @@ class AdvancedPanel(SettingsPanel):
             ("upload_retry", "enabled"): c["retry_enabled"],
             ("upload_retry", "max_retries"): c["retry_count"],
             ("upload_retry", "retry_delay_seconds"): c["retry_delay"],
+            ("upload_retry", "queue_error_policy"): c["queue_error_policy"],
+            ("upload_retry", "pause_on_unknown"): c["pause_on_unknown"],
+            ("upload_retry", "min_send_interval_seconds"): c["min_send_interval_seconds"],
+            ("upload_retry", "flood_jitter_seconds"): c["flood_jitter_seconds"],
+            ("upload_retry", "flood_max_retries"): c["flood_max_retries"],
             ("paths", "exiftool_path"): c["exiftool_path"],
             ("scan", "io_workers_local"): c["scan_workers_local"],
             ("scan", "io_workers_network"): c["scan_workers_network"],

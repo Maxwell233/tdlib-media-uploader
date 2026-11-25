@@ -5,12 +5,14 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -21,6 +23,7 @@ from ...config.paths import (
     TDLIB_FILES_DIR,
 )
 from ...core.logging import APP_LOG_PATH, TDLIB_LOG_PATH
+from ..config_service import get_cfg as _cfg
 from ..icons import get_svg_icon
 from .base import SettingsPanel
 
@@ -37,6 +40,7 @@ class StoragePanel(SettingsPanel):
         super().__init__(parent)
         self._cache_worker = None
         self._cleaning = False
+        self._initial_values = {}
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -100,6 +104,22 @@ class StoragePanel(SettingsPanel):
         cache_hint.setWordWrap(True)
         cache_layout.addWidget(cache_hint)
 
+        limits = QFormLayout()
+        self.thumbnail_cache_max = QSpinBox()
+        self.image_cache_max = QSpinBox()
+        self.metadata_cache_max = QSpinBox()
+        for spin in (self.thumbnail_cache_max, self.image_cache_max):
+            spin.setRange(0, 1024 ** 2)
+            spin.setSuffix(" MiB")
+        self.metadata_cache_max.setRange(0, 1_000_000)
+        self.metadata_cache_max.setSuffix(" 条")
+        limits.addRow("缩略图缓存上限", self.thumbnail_cache_max)
+        limits.addRow("压缩图片缓存上限", self.image_cache_max)
+        limits.addRow("媒体元数据缓存上限", self.metadata_cache_max)
+        cache_layout.addLayout(limits)
+        for spin in (self.thumbnail_cache_max, self.image_cache_max, self.metadata_cache_max):
+            spin.valueChanged.connect(self._check_dirty)
+
         cache_buttons = QHBoxLayout()
         calc_cache = QPushButton("重新统计")
         calc_cache.setObjectName("secondaryButton")
@@ -138,6 +158,7 @@ class StoragePanel(SettingsPanel):
 
         scroll.setWidget(container)
         main_layout.addWidget(scroll)
+        self.load()
 
     def set_cleaning(self, active):
         self._cleaning = active
@@ -167,10 +188,23 @@ class StoragePanel(SettingsPanel):
             self.cache_status.setText(text)
 
     def load(self):
+        self.blockSignals(True)
+        self.thumbnail_cache_max.setValue(int(_cfg("THUMBNAIL_CACHE_MAX_BYTES", 512 * 1024 ** 2)) // 1024 ** 2)
+        self.image_cache_max.setValue(int(_cfg("IMAGE_COMPRESSION_CACHE_MAX_BYTES", 2048 * 1024 ** 2)) // 1024 ** 2)
+        self.metadata_cache_max.setValue(int(_cfg("MEDIA_METADATA_CACHE_MAX_ENTRIES", 50_000)))
+        self.blockSignals(False)
+        self._initial_values = self.collect_values()
         self.mark_clean()
 
+    def _check_dirty(self):
+        self.set_dirty(self.collect_values() != self._initial_values)
+
     def collect_values(self) -> dict:
-        return {}
+        return {
+            ("cache", "thumbnail_max_mib"): self.thumbnail_cache_max.value(),
+            ("cache", "image_compression_max_mib"): self.image_cache_max.value(),
+            ("cache", "media_metadata_max_entries"): self.metadata_cache_max.value(),
+        }
 
 
 __all__ = ["StoragePanel"]

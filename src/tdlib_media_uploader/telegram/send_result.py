@@ -27,6 +27,15 @@ def flood_wait_seconds(code: int | None, message: str) -> float | None:
     return seconds if math.isfinite(seconds) else None
 
 
+def is_file_reference_rejection(code: int | None, message: str) -> bool:
+    if code != 400:
+        return False
+    return bool(re.search(
+        r"\b(?:FILE_ID_INVALID|FILE_REFERENCE_(?:\d+_)?(?:EMPTY|EXPIRED|INVALID)|"
+        r"(?:wrong|invalid) (?:remote )?file identifier)\b", message, re.IGNORECASE,
+    ))
+
+
 class SendRequestRejected(RuntimeError):
     """A correlated TDLib error returned before any message was accepted."""
 

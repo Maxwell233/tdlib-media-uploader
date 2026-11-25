@@ -69,6 +69,8 @@ PRAGMA user_version=1;
 """
 
 _transaction = ContextVar("uploader_database_transaction", default=None)
+DEFAULT_MEDIA_METADATA_CACHE_MAX_ENTRIES = 50_000
+_CUSTOM_STAGING_DIR_NAME = ".tdlib-media-uploader-staging"
 
 
 def encode_record(record):
@@ -155,12 +157,74 @@ def database_for(path):
     return UploaderDatabase(path)
 
 
-def load_media_metadata(probe, snapshots):
+def _metadata_cache_roots(config):
+    from ..config.paths import CACHE_DIR
+
+    roots = [Path(stable_path(CACHE_DIR))]
+    staging = getattr(config, "STAGING_DIR", None)
+    if staging is not None:
+        roots.append(Path(stable_path(staging)))
+    return tuple(roots)
+
+
+def _cacheable_metadata_path(path, excluded_roots):
+    key = stable_path(path)
+    candidate = Path(key)
+    if _CUSTOM_STAGING_DIR_NAME in candidate.parts[:-1] or any(
+        candidate.is_relative_to(root) for root in excluded_roots
+    ):
+        return None
+    return key
+
+
+def _metadata_cache_limit(config):
+    return getattr(config, "MEDIA_METADATA_CACHE_MAX_ENTRIES", DEFAULT_MEDIA_METADATA_CACHE_MAX_ENTRIES)
+
+
+def _limit_media_metadata(connection, max_entries):
+    # Row IDs are assigned in insertion order, including on replacement.
+    # Keeping only the latest range bounds rows without counting the table
+    # on every probe write. Deleted IDs can leave room below the limit.
+    connection.execute(
+        "DELETE FROM media_metadata_cache WHERE rowid <= "
+        "(SELECT MAX(rowid) - ? FROM media_metadata_cache)", (max_entries,),
+    )
+
+
+def prune_media_metadata(config):
+    """Remove old artifact entries and apply the configured cache limit."""
+    from ..config.paths import DATA_DIR
+
+    try:
+        database_path = DATA_DIR / "uploader.db"
+        if not database_path.is_file():
+            return
+        with database_for(database_path).write() as connection:
+            for root in _metadata_cache_roots(config):
+                prefix = os.path.join(str(root), "")
+                connection.execute(
+                    "DELETE FROM media_metadata_cache WHERE substr(stable_path, 1, ?) = ?",
+                    (len(prefix), prefix),
+                )
+            connection.execute(
+                "DELETE FROM media_metadata_cache WHERE instr(stable_path, ?) > 0",
+                (os.sep + _CUSTOM_STAGING_DIR_NAME + os.sep,),
+            )
+            _limit_media_metadata(connection, _metadata_cache_limit(config))
+    except (OSError, RuntimeError, ValueError):
+        pass
+
+
+def load_media_metadata(probe, snapshots, *, config=None):
     """Load available probe results for source snapshots, keyed by stable path."""
     from ..config.paths import DATA_DIR
 
     try:
-        keys = [(stable_path(path), size, mtime_ns, probe) for path, size, mtime_ns in snapshots]
+        if _metadata_cache_limit(config) == 0:
+            return {}
+        roots = _metadata_cache_roots(config)
+        keys = [(key, size, mtime_ns, probe) for path, size, mtime_ns in snapshots
+                if (key := _cacheable_metadata_path(path, roots)) is not None]
         if not keys:
             return {}
         with database_for(DATA_DIR / "uploader.db").read() as connection:
@@ -177,13 +241,18 @@ def load_media_metadata(probe, snapshots):
         return {}
 
 
-def store_media_metadata(probe, records):
+def store_media_metadata(probe, records, *, config=None):
     """Cache successful probes, replacing older snapshots of the same file."""
     from ..config.paths import DATA_DIR
 
     try:
-        rows = [(stable_path(path), size, mtime_ns, probe, encode_record(value))
-                for path, size, mtime_ns, value in records]
+        max_entries = _metadata_cache_limit(config)
+        if max_entries == 0:
+            return
+        roots = _metadata_cache_roots(config)
+        rows = [(key, size, mtime_ns, probe, encode_record(value))
+                for path, size, mtime_ns, value in records
+                if (key := _cacheable_metadata_path(path, roots)) is not None]
         if not rows:
             return
         with database_for(DATA_DIR / "uploader.db").write() as connection:
@@ -193,6 +262,7 @@ def store_media_metadata(probe, records):
                 ((path, kind, size, mtime_ns) for path, size, mtime_ns, kind, _ in rows),
             )
             connection.executemany("INSERT OR REPLACE INTO media_metadata_cache VALUES (?, ?, ?, ?, ?)", rows)
+            _limit_media_metadata(connection, max_entries)
     except (OSError, RuntimeError, ValueError):
         # The probe has already succeeded and callers can use its fresh result.
         pass

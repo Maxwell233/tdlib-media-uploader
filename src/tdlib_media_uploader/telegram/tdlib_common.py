@@ -31,11 +31,12 @@ from ..core.upload_journal import (
     UNKNOWN,
     normalize_target,
 )
-from .send_result import SendRequestRejected, flood_wait_seconds
+from .send_result import SendRequestRejected, flood_wait_seconds, is_file_reference_rejection
 from .send_result import _error_text as _send_failure_text
 
 
 REQUIRED_TDJSON_VERSION = "1.8.71"
+_PRELIMINARY_REQUEST_PREFIX = "req:preliminary:"
 
 
 class TDLibError(RuntimeError):
@@ -586,6 +587,12 @@ class TDJsonClient:
             self.preliminary_generation += 1
         self._register_ui_client()
 
+    def release_job(self, idle_ui):
+        """Detach the task while letting late preliminary replies clean up during idle."""
+        with self._upload_work_lock:
+            self._upload_work_cancelled.set()
+            self.ui = idle_ui
+
     @property
     def config(self):
         return getattr(self, "_config", cfg)
@@ -635,18 +642,23 @@ class TDJsonClient:
                 return
         self.cancel()
 
-    def preliminary_upload_file(self, input_file, file_type, *, priority=16, generation=None):
+    def preliminary_upload_file(self, input_file, file_type, *, priority=16, generation=None, cancel_token=None):
+        generation = self.preliminary_generation if generation is None else generation
         response = self._request_once({
             "@type": "preliminaryUploadFile", "file": dict(input_file),
             "file_type": {"@type": file_type}, "priority": priority,
-        }, timeout=2, preliminary_generation=generation)
+        }, preliminary_generation=generation, cancel_token=cancel_token)
         if (response.get("@type") != "file" or type(response.get("id")) is not int
                 or response["id"] <= 0):
             raise RuntimeError("TDLib 未返回有效的预上传文件 ID")
         return response
 
-    def preliminary_file_status(self, file_id):
-        return self.request({"@type": "getFile", "file_id": file_id}, timeout=2, retry_rate_limit=False)
+    def preliminary_file_status(self, file_id, *, timeout=None, generation=None, cancel_token=None):
+        request_timeout = self.config.TDLIB_REQUEST_TIMEOUT
+        if timeout is not None:
+            request_timeout = min(request_timeout, timeout)
+        return self._request_once({"@type": "getFile", "file_id": file_id}, timeout=request_timeout,
+                                  preliminary_generation=generation, cancel_token=cancel_token)
 
     def cancel_preliminary_upload_file(self, file_id, *, generation=None):
         # There is no caller waiting for the result, and sending the command
@@ -711,15 +723,14 @@ class TDJsonClient:
             if callable(show):
                 show(0)
 
-    def _request_once(self, query: dict, timeout: int | float | None = None, *, preliminary_generation=None):
+    def _request_once(self, query: dict, timeout: int | float | None = None, *, preliminary_generation=None,
+                      cancel_token=None):
         task_stop = getattr(self, "_upload_work_cancelled", None)
-        # Read the preliminary start reply even when cancelled so its file ID
-        # can be used to stop the native upload.
-        check_task_stop = task_stop is not None and query.get("@type") != "preliminaryUploadFile"
+        preliminary_start = query.get("@type") == "preliminaryUploadFile" and preliminary_generation is not None
 
         def check_cancelled():
             self._raise_if_cancelled()
-            if check_task_stop and task_stop.is_set():
+            if (task_stop is not None and task_stop.is_set()) or (cancel_token is not None and cancel_token()):
                 raise TDLibCancelled("上传任务已立即停止")
 
         try:
@@ -729,7 +740,12 @@ class TDJsonClient:
             raise
         if timeout is None:
             timeout = self.config.TDLIB_REQUEST_TIMEOUT
-        extra = "req:" + uuid.uuid4().hex
+        prefix = "req:"
+        if preliminary_start:
+            # Encode the lease so a late reply can clean up its own upload
+            # without retaining a separate registry after the waiter leaves.
+            prefix = f"{_PRELIMINARY_REQUEST_PREFIX}{preliminary_generation}:"
+        extra = prefix + uuid.uuid4().hex
         payload = dict(query)
         payload["@extra"] = extra
         waiter: queue.Queue = queue.Queue(maxsize=1)
@@ -740,21 +756,23 @@ class TDJsonClient:
                 self.send_raw(payload)
             else:
                 with self._upload_work_lock:
-                    if preliminary_generation != self.preliminary_generation or task_stop.is_set():
+                    if preliminary_generation != self.preliminary_generation:
                         raise TDLibCancelled("预上传任务已结束")
+                    check_cancelled()
                     self.send_raw(payload)
         except Exception:
             with self.pending_lock:
                 self.pending.pop(extra, None)
             raise
         deadline = time.monotonic() + float(timeout)
+        poll_interval = 0.05 if cancel_token is not None else 0.2
         try:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(f"TDLib 请求超时：{query.get('@type')}")
                 try:
-                    response = waiter.get(timeout=min(0.2, remaining))
+                    response = waiter.get(timeout=min(poll_interval, remaining))
                     if response is None:
                         check_cancelled()
                         continue
@@ -762,8 +780,18 @@ class TDJsonClient:
                 except queue.Empty:
                     check_cancelled()
         except (queue.Empty, TimeoutError, TDLibCancelled) as exc:
+            late_response = None
             with self.pending_lock:
                 self.pending.pop(extra, None)
+                if preliminary_start:
+                    # The receiver may have queued the reply at the timeout
+                    # boundary. Check under the same lock as reply delivery.
+                    try:
+                        late_response = waiter.get_nowait()
+                    except queue.Empty:
+                        pass
+            if late_response is not None:
+                self._cancel_preliminary_reply(extra, late_response)
             if isinstance(exc, TDLibCancelled):
                 raise
             raise TimeoutError(f"TDLib 请求超时：{query.get('@type')}") from exc
@@ -772,6 +800,27 @@ class TDJsonClient:
                 response.get("code", 0), response.get("message", "unknown error"), response_received=True
             )
         return response
+
+    def _cancel_preliminary_reply(self, extra, response):
+        if not isinstance(extra, str) or not extra.startswith(_PRELIMINARY_REQUEST_PREFIX):
+            return
+        file_id = response.get("id")
+        if response.get("@type") != "file" or type(file_id) is not int or file_id <= 0:
+            return
+        generation, _, _ = extra[len(_PRELIMINARY_REQUEST_PREFIX):].partition(":")
+        if generation.isdecimal():
+            self.cancel_preliminary_upload_file(file_id, generation=int(generation))
+
+    def _deliver_request_reply(self, extra, response):
+        with self.pending_lock:
+            waiter = self.pending.pop(extra, None)
+            if waiter is not None:
+                try:
+                    waiter.put_nowait(response)
+                except queue.Full:
+                    pass
+                return
+        self._cancel_preliminary_reply(extra, response)
 
     def add_update_callback(self, callback):
         self.update_callbacks.append(callback)
@@ -797,13 +846,7 @@ class TDJsonClient:
 
                 extra = obj.get("@extra")
                 if extra is not None:
-                    with self.pending_lock:
-                        waiter = self.pending.pop(extra, None)
-                    if waiter is not None:
-                        try:
-                            waiter.put_nowait(obj)
-                        except queue.Full:
-                            pass
+                    self._deliver_request_reply(extra, obj)
 
                 kind = obj.get("@type")
                 if kind == "updateAuthorizationState":
@@ -1096,7 +1139,7 @@ class TDJsonClient:
                 pass
 
     def wait_for_send_results(self, messages, timeout: int | None = None, *, on_result=None,
-                              chat_id=None, on_messages=None):
+                              chat_id=None, on_messages=None, resend_file_references=True):
         from .send_result import map_send_result
 
         self._raise_if_cancelled()
@@ -1135,6 +1178,8 @@ class TDJsonClient:
 
             retryable = [row for row in result.item_results
                          if row["status"] == "failed" and row["can_retry"]
+                         and (resend_file_references or not is_file_reference_rejection(
+                             row.get("error_code"), row.get("error") or ""))
                          and not row["requires_action"] and row["index"] not in retried]
             can_resend = False
             if result.status.value == FAILED and retryable and chat_id is not None and not self._safe_stop_before_retry():
@@ -1574,6 +1619,9 @@ class TDJsonClient:
         except Exception as exc:
             self._safe_diagnose_upload_failure(contents, items, exc)
             raise
+        main_files = (content["photo"]["photo"] if content["@type"] == "inputMessagePhoto"
+                      else content["video"]["video"] for content in contents)
+        has_file_ids = any(file["@type"] == "inputFileId" for file in main_files)
         if journal_active:
             journal.prepare(
                 selected_kind,
@@ -1653,11 +1701,12 @@ class TDJsonClient:
                 if on_delivery is not None:
                     on_delivery(value)
 
-            result = self.wait_for_send_results(
-                messages, on_result=persist_delivery,
+            result = call_supported(
+                self.wait_for_send_results, (messages,), on_result=persist_delivery,
                 chat_id=send_target["chat_id"],
                 on_messages=(lambda values: progress.register_messages(values, items))
                             if progress is not None and items is not None else None,
+                resend_file_references=not has_file_ids,
             )
             if not isinstance(result, dict):
                 result = {"succeeded": list(result or []), "failed": [], "pending": []}

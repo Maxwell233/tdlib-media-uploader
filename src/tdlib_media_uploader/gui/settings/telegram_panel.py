@@ -151,6 +151,20 @@ class TelegramPanel(SettingsPanel):
         proxy_layout.addWidget(proxy_hint)
         layout.addWidget(proxy_card)
 
+        upload_card, upload_layout = self.create_card("TDLib 预上传")
+        upload_form = QFormLayout()
+        self.preliminary_enabled = QCheckBox("启用实验性预上传")
+        self.preliminary_workers = QSpinBox()
+        self.preliminary_workers.setRange(1, 16)
+        self.preliminary_timeout = QSpinBox()
+        self.preliminary_timeout.setRange(1, 600)
+        self.preliminary_timeout.setSuffix(" 秒")
+        upload_form.addRow(self.preliminary_enabled)
+        upload_form.addRow("文件并发上限", self.preliminary_workers)
+        upload_form.addRow("无字节进展超时", self.preliminary_timeout)
+        upload_layout.addLayout(upload_form)
+        layout.addWidget(upload_card)
+
         layout.addStretch(1)
         scroll.setWidget(container)
         main_layout.addWidget(scroll)
@@ -171,6 +185,11 @@ class TelegramPanel(SettingsPanel):
         self.proxy_password.textChanged.connect(self._check_dirty)
         self.proxy_secret.textChanged.connect(self._check_dirty)
         self.proxy_http_only.toggled.connect(self._check_dirty)
+        self.preliminary_enabled.toggled.connect(self.preliminary_workers.setEnabled)
+        self.preliminary_enabled.toggled.connect(self.preliminary_timeout.setEnabled)
+        self.preliminary_enabled.toggled.connect(self._check_dirty)
+        self.preliminary_workers.valueChanged.connect(self._check_dirty)
+        self.preliminary_timeout.valueChanged.connect(self._check_dirty)
 
         self.load()
 
@@ -240,6 +259,11 @@ class TelegramPanel(SettingsPanel):
         self.proxy_password.setText(str(_cfg("PROXY_PASSWORD", "")))
         self.proxy_secret.setText(str(_cfg("PROXY_SECRET", "")))
         self.proxy_http_only.setChecked(bool(_cfg("PROXY_HTTP_ONLY", False)))
+        self.preliminary_enabled.setChecked(bool(_cfg("TDLIB_ENABLE_PRELIMINARY_UPLOAD", False)))
+        self.preliminary_workers.setValue(int(_cfg("TDLIB_MAX_CONCURRENT_FILE_UPLOADS", 4)))
+        self.preliminary_timeout.setValue(int(_cfg("TDLIB_PRELIMINARY_WAIT_SECONDS", 30)))
+        self.preliminary_workers.setEnabled(self.preliminary_enabled.isChecked())
+        self.preliminary_timeout.setEnabled(self.preliminary_enabled.isChecked())
 
         # Reset password visibility buttons
         for btn, edit in (
@@ -270,6 +294,9 @@ class TelegramPanel(SettingsPanel):
             "proxy_password": self.proxy_password.text(),
             "proxy_secret": self.proxy_secret.text().strip(),
             "proxy_http_only": self.proxy_http_only.isChecked(),
+            "enable_preliminary_upload": self.preliminary_enabled.isChecked(),
+            "max_concurrent_file_uploads": self.preliminary_workers.value(),
+            "preliminary_wait_seconds": self.preliminary_timeout.value(),
         }
 
     def _check_dirty(self):
@@ -312,6 +339,9 @@ class TelegramPanel(SettingsPanel):
             ("proxy", "password"): curr["proxy_password"],
             ("proxy", "secret"): curr["proxy_secret"],
             ("proxy", "http_only"): curr["proxy_http_only"],
+            ("tdlib", "enable_preliminary_upload"): curr["enable_preliminary_upload"],
+            ("tdlib", "max_concurrent_file_uploads"): curr["max_concurrent_file_uploads"],
+            ("tdlib", "preliminary_wait_seconds"): curr["preliminary_wait_seconds"],
         }
 
 

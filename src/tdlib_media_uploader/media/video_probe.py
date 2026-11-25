@@ -20,6 +20,7 @@ from ..config.paths import APP_DATA_DIR, RESOURCE_DIR
 from ..core.filesystem import display_path, file_snapshot, stable_path
 from ..core.uploader_database import load_media_metadata, store_media_metadata
 from ..processes.runner import run_cancellable_process
+from .runtime import pipeline_config
 
 PROJECT_DIR = RESOURCE_DIR
 
@@ -565,13 +566,14 @@ def probe_video(
     from ..core.source_snapshot import capture_snapshot, validate_snapshots
     snapshot = capture_snapshot(file_path)
     ffprobe = _find_ffprobe()
+    config = pipeline_config(None)
     if not ffprobe:
         result = _fallback_probe_without_ffprobe(
             file_path, cancel_event=cancel_event, timeout=timeout
         )
     else:
         cache_probe = f"ffprobe-video-v1:{stable_path(ffprobe)}:{file_snapshot(ffprobe)}"
-        cached = load_media_metadata(cache_probe, (snapshot,)).get(stable_path(file_path))
+        cached = load_media_metadata(cache_probe, (snapshot,), config=config).get(stable_path(file_path))
         if isinstance(cached, dict):
             try:
                 result = VideoMediaInfo(**cached, source_snapshot=snapshot[1:])
@@ -587,5 +589,5 @@ def probe_video(
         )
     validate_snapshots((snapshot,))
     if ffprobe and result.compatibility != "invalid":
-        store_media_metadata(cache_probe, ((*snapshot, dict(result)),))
+        store_media_metadata(cache_probe, ((*snapshot, dict(result)),), config=config)
     return replace(result, source_snapshot=snapshot[1:])

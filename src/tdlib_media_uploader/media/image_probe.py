@@ -16,6 +16,7 @@ from PIL import Image, __version__ as PILLOW_VERSION
 from ..core.filesystem import stable_path
 from ..core.source_snapshot import validate_snapshots
 from ..core.uploader_database import load_media_metadata, store_media_metadata
+from .runtime import pipeline_config
 
 TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024**2
 TELEGRAM_PHOTO_TARGET_BYTES = int(9.5 * 1024**2)
@@ -88,7 +89,8 @@ def probe_image(path: Path | str) -> ImageMediaInfo:
     if file_size <= 0:
         raise RuntimeError(f"图片文件为空：{file_path.name}")
     snapshot = (file_path, file_size, stat.st_mtime_ns)
-    cached = load_media_metadata(_CACHE_PROBE, (snapshot,)).get(stable_path(file_path))
+    config = pipeline_config(None)
+    cached = load_media_metadata(_CACHE_PROBE, (snapshot,), config=config).get(stable_path(file_path))
     if isinstance(cached, dict):
         try:
             result = ImageMediaInfo(**cached, source_snapshot=snapshot[1:])
@@ -163,5 +165,5 @@ def probe_image(path: Path | str) -> ImageMediaInfo:
         telegram_compatible=telegram_compatible,
         source_snapshot=(stat.st_size, stat.st_mtime_ns),
     )
-    store_media_metadata(_CACHE_PROBE, ((*snapshot, dict(result)),))
+    store_media_metadata(_CACHE_PROBE, ((*snapshot, dict(result)),), config=config)
     return result

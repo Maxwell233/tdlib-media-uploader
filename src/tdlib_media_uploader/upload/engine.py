@@ -1035,7 +1035,6 @@ class UploadEngine:
         """Keep one prepared payload and close each failed attempt before retrying."""
         plan = prep.plan
         items = prep.ready_items
-        contents = prep.remote_album.contents if prep.remote_album is not None else prep.contents
         token, sink, journal, target = (
             context.cancel_token, context.event_sink, context.journal, context.target
         )
@@ -1051,8 +1050,10 @@ class UploadEngine:
 
         last_error = previous.error if previous is not None else None
         observed = previous
+        journal_attempt = previous.journal_attempt_number if previous is not None else 0
         last_attempt = max_attempts if last_attempt is None else last_attempt
-        for attempt in range(first_attempt, last_attempt + 1):
+        attempt = first_attempt
+        while attempt <= last_attempt:
             if stopped():
                 return observed, True
             if gate is not None:
@@ -1062,7 +1063,7 @@ class UploadEngine:
                     ))
                     if not cancelable_sleep(min(1.0, remaining), cancel_token=stopped):
                         return observed, True
-            if attempt > 1:
+            if observed is not None:
                 try:
                     validate_snapshots((item.path, item.snapshot.size, item.snapshot.mtime_ns)
                                        for item in items)
@@ -1090,10 +1091,11 @@ class UploadEngine:
             # The stable key still protects the same Album; each try gets a
             # separate identifier for diagnostics in its durable journal.
             attempt_id = str(uuid4())
+            journal_attempt += 1
             try:
                 self._journal_call(
                     journal, "prepare", plan.kind, plan.key, [_item_payload(item) for item in items],
-                    target=target, attempt_id=attempt_id, attempt_number=attempt,
+                    target=target, attempt_id=attempt_id, attempt_number=journal_attempt,
                 )
             except Exception as exc:
                 message = f"Album {ordinal} 无法写入 PREPARED 日志：{exc}"
@@ -1115,6 +1117,7 @@ class UploadEngine:
                     return observed, True
                 if gate is not None:
                     gate.mark_send()
+                contents = prep.remote_album.contents if prep.remote_album is not None else prep.contents
                 raw = self._send(context.sender, contents, prep.send_plan, context, prep.prepared_media)
                 observed = _normalize_send_result(raw, len(items))
             except _JournalProtectionError:
@@ -1133,6 +1136,7 @@ class UploadEngine:
                     status = BatchStatus.FAILED if getattr(exc, "submitted", None) is False else BatchStatus.UNKNOWN
                     observed = _ObservedSend(status, error=str(exc) or status.value)
 
+            observed = replace(observed, journal_attempt_number=journal_attempt)
             cancelled = _is_cancel_requested(token)
             rate_limit = observed.flood_wait()
             if gate is not None:
@@ -1156,11 +1160,15 @@ class UploadEngine:
                 return replace(observed, status=BatchStatus.UNKNOWN,
                                error=f"Album {ordinal} 无法保存 FAILED 日志：{exc}", preserve_journal=True), cancelled
 
+            if not stopped() and prep.remote_album is not None and observed.rejected_file_reference(len(items)):
+                prep.remote_album.close()
+                prep.remote_album = None
+                self._log(sink, "WARNING", f"Album {ordinal} 的预上传文件引用被拒绝，改用本地文件发送")
+                continue
+
             eligible_delay = observed.album_retry_delay(
-                len(items), complete_album=len(items) == len(plan.items)
+                len(items), complete_album=len(items) == len(plan.items), flood_only=not policy.enabled,
             )
-            if not policy.enabled and rate_limit is None:
-                eligible_delay = None
             if cancelled or _stop_after_current_requested(token) or eligible_delay is None:
                 return observed, stopped()
             if attempt == last_attempt:
@@ -1181,6 +1189,7 @@ class UploadEngine:
                 if not cancelable_sleep(min(1.0, remaining), cancel_token=stopped):
                     return observed, True
                 remaining = deadline - time.monotonic()
+            attempt += 1
         return observed, stopped()
 
     def _discard_unsent(self, journal, plan, target):
@@ -1362,7 +1371,7 @@ class UploadEngine:
         reserved_bytes = 0
         next_index = 0
         consumed_index: int | None = None
-        active_remote = None
+        active_prep = None
 
         def schedule(index, plan, amount, *, show_progress):
             prefetch_token = _PrefetchCancelToken(token)
@@ -1394,9 +1403,9 @@ class UploadEngine:
             primary = ((index, plan, False) for index, plan in enumerate(plans))
             for plan_index, initial_plan, tail_retry in chain(primary, tail):
                 plan = initial_plan
-                if active_remote is not None:
-                    active_remote.close()
-                    active_remote = None
+                if active_prep is not None and active_prep.remote_album is not None:
+                    active_prep.remote_album.close()
+                active_prep = None
                 if consumed_index is not None:
                     reserved_bytes -= prefetched.pop(consumed_index)[2]
                     consumed_index = None
@@ -1450,7 +1459,7 @@ class UploadEngine:
                     continue
 
                 plan = prep.plan
-                active_remote = prep.remote_album
+                active_prep = prep
                 errors.extend(prep.errors)
                 failed_items.extend(prep.extra_failed_items)
                 failed_items.extend(prep.preflight_failed)
@@ -1765,8 +1774,8 @@ class UploadEngine:
                 if cancelled:
                     break
         finally:
-            if active_remote is not None:
-                active_remote.close()
+            if active_prep is not None and active_prep.remote_album is not None:
+                active_prep.remote_album.close()
             for index, (future, prefetch_token, _) in prefetched.items():
                 if index != consumed_index:
                     self._cancel_prefetch(future, prefetch_token, run_context)

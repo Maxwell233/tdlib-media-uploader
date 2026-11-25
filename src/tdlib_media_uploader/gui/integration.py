@@ -37,6 +37,7 @@ from ..core.models import (
     UploadRunResult,
 )
 from ..media import ImageStrategy, MixedStrategy, VideoStrategy
+from ..media.artifact_cache import prune_media_artifacts
 from ..media.runtime import media_scope, pipeline_value
 from ..core.source_snapshot import validate_snapshots
 from ..telegram.send_result import SendResult
@@ -763,7 +764,17 @@ def run_v2_upload(kind: str, **kwargs) -> UploadRunResult:
     frozen = snapshot_config(config, kind, kwargs.get("target"), immutable=True,
         overrides={_ROOT_NAMES[name]: Path(kwargs["source_root"]) for name in _ROOT_NAMES})
     with media_scope(frozen):
-        return _run_v2_upload(kind, **{**kwargs, "config": frozen})
+        result = _run_v2_upload(kind, **{**kwargs, "config": frozen})
+    if result.status in {"COMPLETED", "PARTIAL", "FAILED"} and not result.cancelled:
+        try:
+            from ..core.upload_journal import InflightJournal
+
+            journal_root = getattr(kwargs.get("runtime_paths"), "UPLOAD_INFLIGHT_DIR", None)
+            if not InflightJournal(journal_root).list_unresolved():
+                prune_media_artifacts(frozen)
+        except (OSError, RuntimeError):
+            pass
+    return result
 
 
 def _confirmed_preview(preview, strategy, root, target, state):

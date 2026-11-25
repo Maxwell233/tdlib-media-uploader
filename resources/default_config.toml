@@ -192,9 +192,11 @@ cleanup_after_success = true
 
 [cache]
 
-# 启动时在任务开始前按最近使用时间清理受管缓存。单位 MiB，0 代表清空该缓存。
+# 启动时和上传任务安全结束后清理生成的媒体缓存。单位 MiB，0 代表清空该缓存。
 thumbnail_max_mib = 512
 image_compression_max_mib = 2048
+# 媒体探测缓存最多保留的近期记录数，0 代表停用。
+media_metadata_max_entries = 50000
 
 
 [scan]
@@ -281,6 +283,7 @@ use_chat_info_database = true
 use_message_database = false
 enable_preliminary_upload = false
 max_concurrent_file_uploads = 4
+# 主媒体预上传持续没有新增字节达到该秒数时回退直传。
 preliminary_wait_seconds = 30
 
 

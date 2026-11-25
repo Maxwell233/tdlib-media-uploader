@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
 from typing import Any
 from ..core.models import BatchStatus, UploadBatchResult
-from ..telegram.send_result import SendRequestRejected
+from ..telegram.send_result import SendRequestRejected, is_file_reference_rejection
 
 def _as_ids(values: Any) -> tuple[int, ...]:
     if values is None:
@@ -33,6 +33,7 @@ class _ObservedSend:
     item_results: tuple[Mapping[str, Any], ...] = ()
     preserve_journal: bool = False
     request_rejection: SendRequestRejected | None = None
+    journal_attempt_number: int = 0
 
     def flood_wait(self) -> float | None:
         delays = [row["retry_after"] for row in self.item_results
@@ -43,36 +44,52 @@ class _ObservedSend:
             delays.append(self.request_rejection.retry_after)
         return max(delays, default=None)
 
-    def album_retry_delay(self, expected_count: int, *, complete_album=True) -> float | None:
-        """Require a distinct, terminal and transient failure for every item."""
-        if self.status is not BatchStatus.FAILED or self.succeeded_ids or self.pending_ids:
-            return None
-        rejection = self.request_rejection
-        if rejection is not None:
-            if rejection.retryable and not (self.message_ids or self.failed_ids or self.item_results):
-                return rejection.retry_after_seconds
-            return None
-        if (not complete_album or not expected_count
+    def _terminal_failures(self, expected_count: int):
+        if (self.status is not BatchStatus.FAILED or self.succeeded_ids or self.pending_ids or not expected_count
                 or len(self.failed_ids) != expected_count or len(self.item_results) != expected_count
-                or not all(self.failed_ids) or len(set(self.failed_ids)) != expected_count):
-            return None
-        ids = []
-        delays = []
-        for index, row in enumerate(self.item_results):
+                or not all(self.failed_ids) or len(set(self.failed_ids)) != expected_count
+                or (self.message_ids and set(self.message_ids) != set(self.failed_ids))):
+            return ()
+        for index, (row, message_id) in enumerate(zip(self.item_results, self.failed_ids, strict=True)):
             if (not isinstance(row, Mapping) or row.get("index") != index
-                    or row.get("status") != "failed" or row.get("requires_action") is not False):
-                return None
+                    or row.get("status") != "failed" or row.get("requires_action") is not False
+                    or (row.get("message_id") or row.get("old_message_id")) != message_id):
+                return ()
+        return self.item_results
+
+    def _unsubmitted_rejection(self) -> SendRequestRejected | None:
+        if (self.status is BatchStatus.FAILED and self.request_rejection is not None
+                and not (self.message_ids or self.succeeded_ids or self.failed_ids or self.pending_ids or self.item_results)):
+            return self.request_rejection
+        return None
+
+    def album_retry_delay(self, expected_count: int, *, complete_album=True, flood_only=False) -> float | None:
+        """Require a definite rejection or one terminal transient failure per submitted item."""
+        rejection = self._unsubmitted_rejection()
+        if rejection is not None:
+            return rejection.retry_after_seconds if rejection.rate_limited or not flood_only else None
+        rows = self._terminal_failures(expected_count)
+        allow_other_transient = complete_album and not flood_only
+        delays = []
+        for row in rows:
             code = row.get("error_code")
-            if type(code) is not int or not (
-                code in {420, 429} or 500 <= code <= 599 or (code == 0 and row.get("can_retry") is True)
-            ):
+            if type(code) is not int or not (code in {420, 429} or (allow_other_transient and (
+                500 <= code <= 599 or (code == 0 and row.get("can_retry") is True)
+            ))):
                 return None
             delay = row.get("retry_after")
             if type(delay) not in {int, float} or not math.isfinite(delay) or delay < 0:
                 return None
-            ids.append(row.get("message_id") or row.get("old_message_id"))
             delays.append(delay)
-        return max(delays) if tuple(ids) == self.failed_ids else None
+        return max(delays, default=None)
+
+    def rejected_file_reference(self, expected_count: int) -> bool:
+        rejection = self._unsubmitted_rejection()
+        if rejection is not None:
+            return is_file_reference_rejection(rejection.error_code, str(rejection))
+        rows = self._terminal_failures(expected_count)
+        return bool(rows) and any(is_file_reference_rejection(row.get("error_code"), str(row.get("error", "")))
+                                  for row in rows)
 
 
 def _normalize_status(value: Any) -> BatchStatus | None:

@@ -1,13 +1,14 @@
 """Warm local Telegram media before ordered message submission."""
 
-from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from threading import Event, Lock
 from time import monotonic
 
+from ..core.compat import call_supported
 from ..core.concurrency import (
     CancellationRequested,
+    UploadPreparationExecutor,
     cancelable_sleep,
     is_cancelled,
     ordered_bounded_map,
@@ -73,8 +74,8 @@ class PreliminaryUploader:
     def __init__(self, client, max_workers, timeout):
         self.client = client
         self.max_workers = max_workers
-        self.timeout = timeout
-        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="tdlib-preliminary")
+        self.stall_timeout = timeout
+        self.executor = UploadPreparationExecutor(max_workers, thread_name_prefix="tdlib-preliminary")
         self.stopped = Event()
         self.lock = Lock()
         self.batches = set()
@@ -139,28 +140,40 @@ class PreliminaryUploader:
             self.total += sum(totals)
             if self.started_at is None:
                 self.started_at = monotonic()
+
         def upload(work):
             index, (_, _, source, file_type, size) = work
             cancelled = lambda: stopped() or uploads.closed.is_set()
             raise_if_cancelled(cancelled)
-            state = self.client.preliminary_upload_file(source, file_type, **self.generation_args)
+            state = call_supported(self.client.preliminary_upload_file, (source, file_type),
+                                   cancel_token=cancelled, **self.generation_args)
             file_id = state["id"]
             uploads.register(file_id)
-            deadline = monotonic() + self.timeout
+            deadline = monotonic() + self.stall_timeout
+            last_uploaded = 0
             while not cancelled():
                 remote = state.get("remote") or {}
-                uploaded = int(remote.get("uploaded_size", 0))
+                uploaded = int(remote.get("uploaded_size") or 0)
                 if remote.get("is_uploading_completed"):
                     uploaded = size
-                uploads.update(index, uploaded)
+                if uploaded > last_uploaded:
+                    deadline = monotonic() + self.stall_timeout
+                    last_uploaded = uploaded
+                    uploads.update(index, uploaded)
                 if uploaded >= size:
                     return file_id
                 remaining = deadline - monotonic()
-                if remaining <= 0 or not cancelable_sleep(min(0.25, remaining), cancel_token=cancelled):
+                if remaining <= 0 or not cancelable_sleep(
+                    min(0.25, self.stall_timeout / 2, remaining), cancel_token=cancelled,
+                ):
                     break
-                state = self.client.preliminary_file_status(file_id)
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    break
+                state = call_supported(self.client.preliminary_file_status, (file_id,), timeout=remaining,
+                                       cancel_token=cancelled, **self.generation_args)
             raise_if_cancelled(cancelled)
-            raise TimeoutError("TDLib 未在限时内报告预上传字节已就绪")
+            raise TimeoutError("TDLib 预上传在设定时限内没有新增已上传字节")
 
         try:
             report(0)

@@ -506,11 +506,21 @@ class UploadPage(QWidget):
 
         self._update_scan_summary_chips_and_labels(result)
 
-    def sync_task_outcomes(self, task):
+    def _matches_preview(self, source_root, target):
         result = self.result
-        if (not result or result.get("cancelled") or not result.get("target")
-                or self._stable(result["source_dir"]) != self._stable(task.source_root)
-                or canonical_target(result["target"]) != canonical_target(dict(task.target))):
+        return (result and not result.get("cancelled") and result.get("target")
+                and self._stable(result["source_dir"]) == self._stable(source_root)
+                and canonical_target(result["target"]) == canonical_target(dict(target)))
+
+    def sync_reconciled_album(self, confirmation):
+        if not self._matches_preview(confirmation.source_root, confirmation.target):
+            return
+        snapshots = {self._stable(snapshot.path): (snapshot, "已完成", None)
+                     for snapshot in confirmation.snapshots}
+        self._sync_file_outcomes(snapshots, {})
+
+    def sync_task_outcomes(self, task):
+        if not self._matches_preview(task.source_root, task.target):
             return
         outcomes = task.album_statuses()
         known_confirmed = task.known_confirmed
@@ -535,6 +545,10 @@ class UploadPage(QWidget):
                     continue
                 snapshots[path] = (item.snapshot, status, outcome.error)
 
+        self._sync_file_outcomes(snapshots, outcomes, task_skipped=task.status is TaskStatus.SKIPPED)
+
+    def _sync_file_outcomes(self, snapshots, outcomes, *, task_skipped=False):
+        result = self.result
         completed = set(result["completed_paths"])
         skipped = set(result.get("skipped_album_keys", ()))
         labels = {
@@ -566,7 +580,7 @@ class UploadPage(QWidget):
                             completed.add(path)
                         changes.append(status)
                     if changes and outcome is not None and set(changes) <= {"已完成", "已跳过"} and (
-                        outcome.status is AlbumStatus.SKIPPED or task.status is TaskStatus.SKIPPED
+                        outcome.status is AlbumStatus.SKIPPED or task_skipped
                     ):
                         skipped.add(key)
                     pending = [
@@ -576,14 +590,13 @@ class UploadPage(QWidget):
                     plan["pending_items"] = pending
                     done = sum(self._stable(_item_path(item)) in completed for item in items)
                     count = 0 if key in skipped else len(pending)
-                    label = "已完成" if done == len(items) else "待上传"
+                    row_text = {3: f"{len(items)} 个文件 · 已完成 {done} · 待上传 {count}"}
                     if key in skipped:
-                        label = "已跳过"
-                    elif outcome is not None and changes:
-                        label = labels.get(outcome.status, label)
-                    self._preview_model.update_row(row, text={
-                        0: label, 3: f"{len(items)} 个文件 · 已完成 {done} · 待上传 {count}",
-                    })
+                        row_text[0] = "已跳过"
+                    elif changes:
+                        label = "已完成" if done == len(items) else "部分完成" if done else "待上传"
+                        row_text[0] = labels.get(outcome.status, label) if outcome is not None else label
+                    self._preview_model.update_row(row, text=row_text)
                     group_pending += count
                     group_completed += done
                     group_albums += bool(count)

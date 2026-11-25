@@ -10,6 +10,7 @@ import tomllib
 from pathlib import Path
 
 from ..core.persistence import atomic_write_text
+from ..core.uploader_database import DEFAULT_MEDIA_METADATA_CACHE_MAX_ENTRIES
 
 from .paths import (
     APP_DATA_DIR,
@@ -777,6 +778,9 @@ STAGING_CLEANUP_AFTER_SUCCESS = bool(staging.get("cleanup_after_success", True))
 cache = _optional_section("cache")
 THUMBNAIL_CACHE_MAX_BYTES = _bounded_int(cache, "thumbnail_max_mib", 512, 0, 1024 * 1024) * 1024**2
 IMAGE_COMPRESSION_CACHE_MAX_BYTES = _bounded_int(cache, "image_compression_max_mib", 2048, 0, 1024 * 1024) * 1024**2
+MEDIA_METADATA_CACHE_MAX_ENTRIES = _bounded_int(
+    cache, "media_metadata_max_entries", DEFAULT_MEDIA_METADATA_CACHE_MAX_ENTRIES, 0, 1_000_000,
+)
 
 
 def _path_contains(parent: Path, child: Path) -> bool:
